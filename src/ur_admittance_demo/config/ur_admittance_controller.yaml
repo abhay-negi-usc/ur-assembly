@@ -16,14 +16,12 @@
 # NOTE: verify the names marked "VERIFY" against your driver:
 #   ros2 control list_hardware_interfaces | grep -E 'tcp_fts_sensor|position|velocity'
 
-# Registers the controller type with the controller_manager (needed by the spawner).
-controller_manager:
-  ros__parameters:
-    admittance_controller:
-      type: admittance_controller/AdmittanceController
-
 admittance_controller:
   ros__parameters:
+    # The Jazzy spawner reads the controller type from the controller's own namespace
+    # (here) and sets it on the controller_manager before loading.
+    type: admittance_controller/AdmittanceController
+
     joints:
       - shoulder_pan_joint
       - shoulder_lift_joint

@@ -4,10 +4,14 @@ A simple demonstration of **cartesian position control** for a UR10e on **ROS2 J
 
 Starting from the robot's current ("initial") TCP pose, the node steps the TCP by:
 
-- **±10 mm** along **X**, **Y**, **Z**
-- **±10°** about **roll**, **pitch**, **yaw**
+- **±30 mm** along **X**, **Y**, **Z**
+- **±30°** about **roll**, **pitch**, **yaw**
 
-returning to the initial pose **between every move** (12 moves total).
+returning to the initial pose **between every move**. The full 12-move sequence is run **once
+per motion frame** — by default in the **world** frame and then the **flange** frame — so you
+can compare cartesian motion expressed in a fixed world frame vs. the moving tool/flange frame
+(24 moves total). The motion frame defines the axes for both the translations and the
+rotations; recentering is identical regardless of frame.
 
 ## How it works
 
@@ -15,7 +19,8 @@ returning to the initial pose **between every move** (12 moves total).
 the Cartesian→joint mapping itself:
 
 1. Read the current TCP pose from **tf2** (`reference_frame` → `tip_frame`).
-2. For each ±step, build the target pose and solve it with **MoveIt's `/compute_ik`** service.
+2. For each ±step (expressed in the current motion frame's axes), build the target pose and
+   solve it with **MoveIt's `/compute_ik`** service.
    IK uses the driver's **calibrated** URDF and is seeded with the initial joint state for
    solution continuity.
 3. Execute the joint goal on the already-active **`scaled_joint_trajectory_controller`** via
@@ -46,11 +51,11 @@ Simulation (recommended first):
 ```bash
 ros2 launch ur_simulation_gz ur_sim_control.launch.py ur_type:=ur10e
 # or the real driver against fake hardware:
-ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur10e robot_ip:=yyy.yyy.yyy.yyy use_fake_hardware:=true
+ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur10e robot_ip:=192.168.125.2 use_fake_hardware:=true
 ```
 Real UR10e:
 ```bash
-ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur10e robot_ip:=<ROBOT_IP>
+ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur10e robot_ip:=192.168.125.2
 # then start the External Control program on the teach pendant
 ```
 
@@ -96,18 +101,24 @@ ros2 launch ur_cartesian_demo cartesian_pose_demo.launch.py \
 | Parameter | Default | Description |
 |---|---|---|
 | `planning_group` | `ur_manipulator` | MoveIt group used for IK. |
-| `reference_frame` | `base_link` | Frame target poses are expressed in. |
+| `reference_frame` | `base_link` | Frame the IK target poses are sent in (must be in tf). |
 | `tip_frame` | `tool0` | Controlled TCP / IK tip link. |
+| `motion_frames` | `['world', 'flange']` | Frames whose axes define the deltas; sequence runs once per frame. |
 | `joint_names` | UR 6 joints | Joint order for the trajectory goal. |
 | `controller_action` | `/scaled_joint_trajectory_controller/follow_joint_trajectory` | Active joint controller's action. |
-| `linear_step_m` | `0.010` | Linear step (m) → ±10 mm. |
-| `angular_step_deg` | `10.0` | Angular step (deg) → ±10°. |
+| `linear_step_m` | `0.030` | Linear step (m) → ±30 mm. |
+| `angular_step_deg` | `30.0` | Angular step (deg) → ±30°. |
 | `move_duration_s` | `4.0` | Time per move (s). Lower for sim. |
 | `settle_s` | `0.5` | Pause after each return-to-center. |
 | `ik_timeout_s` | `2.0` | Per-call IK timeout. |
 | `avoid_collisions` | `true` | Reject self-colliding IK solutions. |
-| `rotate_in_tool_frame` | `true` | RPY about the tool axes (`true`) or base axes (`false`). |
 | `confirm_each_move` | `true` | Prompt on the console before each move. |
+
+> **Motion frames:** each name in `motion_frames` is looked up in tf relative to
+> `reference_frame` to get its axes. `world` and `flange` are standard in the UR + MoveIt tf
+> tree. If a frame isn't found, the demo warns and falls back to `reference_frame` axes
+> (identity) so the sequence still runs. To test a single frame, e.g.:
+> `-p motion_frames:="['flange']"`.
 
 ## Verify it works
 

@@ -3,7 +3,8 @@
 
 From the robot's current ("initial") TCP pose, this node steps the TCP by +/- a fixed
 linear amount along X/Y/Z and +/- a fixed angular amount about roll/pitch/yaw, returning
-to the initial pose between every move.
+to the initial pose between every move. The whole sequence is run once per *motion frame*
+so you can compare cartesian motion expressed in the world frame vs. the flange frame.
 
 Because ur_controllers 3.8.0 no longer ships a Cartesian trajectory controller, this demo
 does the Cartesian -> joint mapping itself:
@@ -25,6 +26,8 @@ Requires ``move_group`` to be running, e.g.:
 import math
 import sys
 
+import numpy as np
+
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -35,7 +38,12 @@ from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 import tf2_ros
-from tf_transformations import quaternion_from_euler, quaternion_multiply
+from tf_transformations import (
+    quaternion_conjugate,
+    quaternion_from_euler,
+    quaternion_matrix,
+    quaternion_multiply,
+)
 
 from control_msgs.action import FollowJointTrajectory
 from moveit_msgs.srv import GetPositionIK
@@ -59,13 +67,19 @@ def _normalize(q):
     return [c / n for c in q]
 
 
+def _rotate_vec(q, v):
+    """Rotate vector v by quaternion q ([x, y, z, w])."""
+    rot = quaternion_matrix(q)[:3, :3]
+    return rot.dot(np.array(v, dtype=float))
+
+
 def _duration(seconds):
     secs = int(seconds)
     return Duration(sec=secs, nanosec=int((seconds - secs) * 1e9))
 
 
 class CartesianPoseDemo(Node):
-    """Drives the +/- X/Y/Z/R/P/Y cartesian demo sequence via MoveIt IK + JTC."""
+    """Drives the +/- X/Y/Z/R/P/Y cartesian demo, once per motion frame."""
 
     def __init__(self):
         super().__init__('cartesian_pose_demo')
@@ -76,18 +90,19 @@ class CartesianPoseDemo(Node):
         self.reference_frame = self.declare_parameter(
             'reference_frame', 'base_link').value
         self.tip_frame = self.declare_parameter('tip_frame', 'tool0').value
+        # Frames whose axes define the +/- X/Y/Z/R/P/Y deltas. The sequence runs once each.
+        self.motion_frames = self.declare_parameter(
+            'motion_frames', ['world', 'flange']).value
         self.joint_names = self.declare_parameter('joint_names', UR_JOINTS).value
         self.controller_action = self.declare_parameter(
             'controller_action',
             '/scaled_joint_trajectory_controller/follow_joint_trajectory').value
-        self.linear_step_m = self.declare_parameter('linear_step_m', 0.010).value
-        self.angular_step_deg = self.declare_parameter('angular_step_deg', 10.0).value
+        self.linear_step_m = self.declare_parameter('linear_step_m', 0.030).value
+        self.angular_step_deg = self.declare_parameter('angular_step_deg', 30.0).value
         self.move_duration_s = self.declare_parameter('move_duration_s', 4.0).value
         self.settle_s = self.declare_parameter('settle_s', 0.5).value
         self.ik_timeout_s = self.declare_parameter('ik_timeout_s', 2.0).value
         self.avoid_collisions = self.declare_parameter('avoid_collisions', True).value
-        self.rotate_in_tool_frame = self.declare_parameter(
-            'rotate_in_tool_frame', True).value
         self.confirm_each_move = self.declare_parameter('confirm_each_move', True).value
 
         # --- tf2 ----------------------------------------------------------
@@ -166,27 +181,50 @@ class CartesianPoseDemo(Node):
         self.get_logger().error('Timed out waiting for TF. Is the driver publishing?')
         return None
 
+    def get_frame_rotation(self, frame, timeout_s=3.0):
+        """Return quaternion [x,y,z,w] of `frame` relative to reference_frame, or None."""
+        deadline = self.get_clock().now().nanoseconds + int(timeout_s * 1e9)
+        while rclpy.ok() and self.get_clock().now().nanoseconds < deadline:
+            try:
+                tf = self.tf_buffer.lookup_transform(
+                    self.reference_frame, frame, rclpy.time.Time())
+                r = tf.transform.rotation
+                return [r.x, r.y, r.z, r.w]
+            except (tf2_ros.LookupException,
+                    tf2_ros.ConnectivityException,
+                    tf2_ros.ExtrapolationException):
+                rclpy.spin_once(self, timeout_sec=0.1)
+        return None
+
     # ----------------------------------------------------------- pose offset
-    def offset_pose(self, base_pose, dx, dy, dz, droll, dpitch, dyaw):
-        """Return base_pose translated by (dx,dy,dz) and rotated by (droll,dpitch,dyaw)."""
+    def offset_pose(self, base_pose, delta, frame_quat):
+        """Apply a 6-DOF delta (expressed in frame_quat's axes) to base_pose.
+
+        frame_quat is the orientation of the motion frame relative to reference_frame.
+        """
+        dx, dy, dz, droll, dpitch, dyaw = delta
+
         target = Pose()
-        target.position.x = base_pose.position.x + dx
-        target.position.y = base_pose.position.y + dy
-        target.position.z = base_pose.position.z + dz
+        # Translation: express the linear step in the motion frame, then in reference frame.
+        t = _rotate_vec(frame_quat, [dx, dy, dz])
+        target.position.x = base_pose.position.x + t[0]
+        target.position.y = base_pose.position.y + t[1]
+        target.position.z = base_pose.position.z + t[2]
 
-        q_init = [base_pose.orientation.x, base_pose.orientation.y,
-                  base_pose.orientation.z, base_pose.orientation.w]
+        # Rotation: rotate about an axis expressed in the motion frame.
+        #   R_new = (R_frame * R_delta * R_frame^-1) * R_current
+        q_current = [base_pose.orientation.x, base_pose.orientation.y,
+                     base_pose.orientation.z, base_pose.orientation.w]
         q_delta = quaternion_from_euler(droll, dpitch, dyaw)
-        if self.rotate_in_tool_frame:
-            q_target = quaternion_multiply(q_init, q_delta)   # body-frame
-        else:
-            q_target = quaternion_multiply(q_delta, q_init)   # base-frame
-        q_target = _normalize(q_target)
+        q_axis = quaternion_multiply(
+            quaternion_multiply(frame_quat, q_delta),
+            quaternion_conjugate(frame_quat))
+        q_new = _normalize(quaternion_multiply(q_axis, q_current))
 
-        target.orientation.x = q_target[0]
-        target.orientation.y = q_target[1]
-        target.orientation.z = q_target[2]
-        target.orientation.w = q_target[3]
+        target.orientation.x = q_new[0]
+        target.orientation.y = q_new[1]
+        target.orientation.z = q_new[2]
+        target.orientation.w = q_new[3]
         return target
 
     # --------------------------------------------------------------- solve IK
@@ -266,22 +304,12 @@ class CartesianPoseDemo(Node):
         while rclpy.ok() and self.get_clock().now().nanoseconds < deadline:
             rclpy.spin_once(self, timeout_sec=0.05)
 
-    # ----------------------------------------------------------------- run
-    def run(self):
-        initial_pose = self.get_initial_pose()
-        if initial_pose is None:
-            return False
-        initial_joints = self._current_joint_positions()
-
-        p = initial_pose.position
-        self.get_logger().info(
-            f'Initial TCP position: x={p.x:.3f} y={p.y:.3f} z={p.z:.3f} (m)')
-
+    # ------------------------------------------------------------- sequence
+    def _build_moves(self):
         lin = self.linear_step_m
         ang = math.radians(self.angular_step_deg)
-
         # (label, dx, dy, dz, droll, dpitch, dyaw)
-        moves = [
+        return [
             ('X +', +lin, 0, 0, 0, 0, 0),
             ('X -', -lin, 0, 0, 0, 0, 0),
             ('Y +', 0, +lin, 0, 0, 0, 0),
@@ -296,15 +324,21 @@ class CartesianPoseDemo(Node):
             ('Yaw -', 0, 0, 0, 0, 0, -ang),
         ]
 
-        for label, dx, dy, dz, dr, dp, dyaw in moves:
+    def run_sequence(self, frame_name, frame_quat, initial_pose, initial_joints):
+        """Run the full +/- sequence with deltas expressed in the given motion frame."""
+        self.get_logger().info(
+            f'==== Motion frame: {frame_name} '
+            f'({self.linear_step_m * 1000:.0f} mm / {self.angular_step_deg:.0f} deg) ====')
+        for label, dx, dy, dz, dr, dp, dyaw in self._build_moves():
             if self.confirm_each_move:
-                ans = input(f'\n[{label}] Press Enter to move (or q + Enter to quit): ')
+                ans = input(
+                    f'\n[{frame_name} | {label}] Press Enter to move (q + Enter to quit): ')
                 if ans.strip().lower() == 'q':
                     self.get_logger().info('Quit requested.')
-                    break
+                    return False
 
-            self.get_logger().info(f'--> {label}')
-            target = self.offset_pose(initial_pose, dx, dy, dz, dr, dp, dyaw)
+            self.get_logger().info(f'--> [{frame_name}] {label}')
+            target = self.offset_pose(initial_pose, (dx, dy, dz, dr, dp, dyaw), frame_quat)
             joints = self.solve_ik(target, seed_positions=initial_joints)
             if joints is None:
                 self.get_logger().warn(f'Skipping {label} (no IK solution).')
@@ -319,6 +353,28 @@ class CartesianPoseDemo(Node):
                 return False
 
             self._sleep(self.settle_s)
+        return True
+
+    # ----------------------------------------------------------------- run
+    def run(self):
+        initial_pose = self.get_initial_pose()
+        if initial_pose is None:
+            return False
+        initial_joints = self._current_joint_positions()
+
+        p = initial_pose.position
+        self.get_logger().info(
+            f'Initial TCP position: x={p.x:.3f} y={p.y:.3f} z={p.z:.3f} (m)')
+
+        for frame_name in self.motion_frames:
+            frame_quat = self.get_frame_rotation(frame_name)
+            if frame_quat is None:
+                self.get_logger().warn(
+                    f"Frame '{frame_name}' not found in tf; expressing its motion in "
+                    f"'{self.reference_frame}' (identity) instead.")
+                frame_quat = [0.0, 0.0, 0.0, 1.0]
+            if not self.run_sequence(frame_name, frame_quat, initial_pose, initial_joints):
+                return False
 
         self.get_logger().info('Demo complete.')
         return True

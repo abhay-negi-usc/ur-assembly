@@ -18,14 +18,17 @@ def generate_launch_description():
             'tip_frame', default_value='tool0',
             description='Controlled TCP / IK tip link.'),
         DeclareLaunchArgument(
+            'motion_frames', default_value="['world', 'flange']",
+            description='Frames whose axes define the deltas; sequence runs once per frame.'),
+        DeclareLaunchArgument(
             'controller_action',
             default_value='/scaled_joint_trajectory_controller/follow_joint_trajectory',
             description='FollowJointTrajectory action of the active joint controller.'),
         DeclareLaunchArgument(
-            'linear_step_m', default_value='0.010',
+            'linear_step_m', default_value='0.030',
             description='Linear step for X/Y/Z moves (meters).'),
         DeclareLaunchArgument(
-            'angular_step_deg', default_value='10.0',
+            'angular_step_deg', default_value='30.0',
             description='Angular step for roll/pitch/yaw moves (degrees).'),
         DeclareLaunchArgument(
             'move_duration_s', default_value='4.0',
@@ -34,17 +37,14 @@ def generate_launch_description():
             'avoid_collisions', default_value='true',
             description='Ask MoveIt IK to reject self-colliding solutions.'),
         DeclareLaunchArgument(
-            'rotate_in_tool_frame', default_value='true',
-            description='Apply roll/pitch/yaw about the tool axes (true) or base axes (false).'),
-        DeclareLaunchArgument(
             'confirm_each_move', default_value='true',
             description='Prompt on the console before each move (safety on real HW).'),
     ]
 
     param_names = [
-        'planning_group', 'reference_frame', 'tip_frame', 'controller_action',
-        'linear_step_m', 'angular_step_deg', 'move_duration_s', 'avoid_collisions',
-        'rotate_in_tool_frame', 'confirm_each_move',
+        'planning_group', 'reference_frame', 'tip_frame', 'motion_frames',
+        'controller_action', 'linear_step_m', 'angular_step_deg', 'move_duration_s',
+        'avoid_collisions', 'confirm_each_move',
     ]
 
     demo_node = Node(

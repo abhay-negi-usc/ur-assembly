@@ -8,8 +8,8 @@ Starting from the robot's current ("initial") TCP pose, the node steps the TCP b
 - **±30°** about **roll**, **pitch**, **yaw**
 
 returning to the initial pose **between every move**. The full 12-move sequence is run **once
-per motion frame** — by default in the **world** frame and then the **flange** frame — so you
-can compare cartesian motion expressed in a fixed world frame vs. the moving tool/flange frame
+per motion frame** — by default in the **world** frame and then the **tool0** frame — so you
+can compare cartesian motion expressed in a fixed world frame vs. the moving tool frame
 (24 moves total). The motion frame defines the axes for both the translations and the
 rotations; recentering is identical regardless of frame.
 
@@ -103,7 +103,7 @@ ros2 launch ur_cartesian_demo cartesian_pose_demo.launch.py \
 | `planning_group` | `ur_manipulator` | MoveIt group used for IK. |
 | `reference_frame` | `base_link` | Frame the IK target poses are sent in (must be in tf). |
 | `tip_frame` | `tool0` | Controlled TCP / IK tip link. |
-| `motion_frames` | `['world', 'flange']` | Frames whose axes define the deltas; sequence runs once per frame. |
+| `motion_frames` | `['world', 'tool0']` | Frames whose axes define the deltas; sequence runs once per frame. |
 | `joint_names` | UR 6 joints | Joint order for the trajectory goal. |
 | `controller_action` | `/scaled_joint_trajectory_controller/follow_joint_trajectory` | Active joint controller's action. |
 | `linear_step_m` | `0.030` | Linear step (m) → ±30 mm. |
@@ -115,15 +115,18 @@ ros2 launch ur_cartesian_demo cartesian_pose_demo.launch.py \
 | `confirm_each_move` | `true` | Prompt on the console before each move. |
 
 > **Motion frames:** each name in `motion_frames` is looked up in tf relative to
-> `reference_frame` to get its axes. `world` and `flange` are standard in the UR + MoveIt tf
-> tree. If a frame isn't found, the demo warns and falls back to `reference_frame` axes
-> (identity) so the sequence still runs. To test a single frame, e.g.:
-> `-p motion_frames:="['flange']"`.
+> `reference_frame` to get its axes, then both the linear and angular deltas are expressed in
+> those axes. `world` gives fixed base-axis motion; `tool0` gives motion about the controlled
+> tool frame (Z out the tool). Prefer `tool0` over `flange` — `flange` shares tool0's origin
+> and Z, but its X/Y are rotated 90° about the tool axis, so flange X/Y moves won't match the
+> TCP. If a frame isn't found in tf, the demo warns and falls back to `reference_frame` axes.
+> Test a single frame with e.g. `-p motion_frames:="['tool0']"`.
 
 ## Verify it works
 
 1. **Sim:** open RViz, run with `confirm_each_move:=false move_duration_s:=2.0`, and watch the
-   TCP step ±10 mm / ±10° on each axis and return to start between moves.
+   TCP step ±30 mm / ±30° on each axis and return to start between moves, in both the world and
+   tool0 frames.
 2. **Real UR10e:** rerun with defaults (prompts, 4 s/move), e-stop ready, stepping through each
    move and confirming the teach-pendant pose readout returns to the start each time.
 3. If a move logs `IK failed`, that axis target was unreachable from the start pose (e.g. wrist

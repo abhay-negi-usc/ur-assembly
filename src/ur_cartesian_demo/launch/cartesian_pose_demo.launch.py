@@ -18,7 +18,7 @@ def generate_launch_description():
             'tip_frame', default_value='tool0',
             description='Controlled TCP / IK tip link.'),
         DeclareLaunchArgument(
-            'motion_frames', default_value="['world', 'flange']",
+            'motion_frames', default_value="['world', 'tool0']",
             description='Frames whose axes define the deltas; sequence runs once per frame.'),
         DeclareLaunchArgument(
             'controller_action',

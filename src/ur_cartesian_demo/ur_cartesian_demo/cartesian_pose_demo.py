@@ -4,7 +4,7 @@
 From the robot's current ("initial") TCP pose, this node steps the TCP by +/- a fixed
 linear amount along X/Y/Z and +/- a fixed angular amount about roll/pitch/yaw, returning
 to the initial pose between every move. The whole sequence is run once per *motion frame*
-so you can compare cartesian motion expressed in the world frame vs. the flange frame.
+so you can compare cartesian motion expressed in the world frame vs. the tool0 frame.
 
 Because ur_controllers 3.8.0 no longer ships a Cartesian trajectory controller, this demo
 does the Cartesian -> joint mapping itself:
@@ -91,8 +91,10 @@ class CartesianPoseDemo(Node):
             'reference_frame', 'base_link').value
         self.tip_frame = self.declare_parameter('tip_frame', 'tool0').value
         # Frames whose axes define the +/- X/Y/Z/R/P/Y deltas. The sequence runs once each.
+        # 'tool0' is the controlled tool-zero frame (Z out the tool); prefer it over 'flange',
+        # whose X/Y are rotated 90 deg about the tool axis relative to tool0.
         self.motion_frames = self.declare_parameter(
-            'motion_frames', ['world', 'flange']).value
+            'motion_frames', ['world', 'tool0']).value
         self.joint_names = self.declare_parameter('joint_names', UR_JOINTS).value
         self.controller_action = self.declare_parameter(
             'controller_action',

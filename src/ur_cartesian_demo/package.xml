@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ur_cartesian_demo</name>
+  <version>0.1.0</version>
+  <description>
+    Simple demo of cartesian position control for a UR10e via the UR ROS2 driver's
+    pose_based_cartesian_traj_controller. Steps the TCP +/- along X/Y/Z and roll/pitch/yaw,
+    recentering at the initial pose between every move.
+  </description>
+  <maintainer email="negiabhay98@gmail.com">abhay</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>builtin_interfaces</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>tf_transformations</exec_depend>
+  <exec_depend>cartesian_control_msgs</exec_depend>
+  <exec_depend>controller_manager_msgs</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

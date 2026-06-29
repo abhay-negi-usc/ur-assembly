@@ -9,14 +9,18 @@ from launch_ros.actions import Node
 def generate_launch_description():
     args = [
         DeclareLaunchArgument(
-            'controller_name', default_value='pose_based_cartesian_traj_controller',
-            description='Cartesian trajectory controller to command.'),
+            'planning_group', default_value='ur_manipulator',
+            description='MoveIt planning group used for IK.'),
         DeclareLaunchArgument(
-            'base_frame', default_value='base',
-            description='Reference frame the target poses are expressed in.'),
+            'reference_frame', default_value='base_link',
+            description='Frame the target poses are expressed in.'),
         DeclareLaunchArgument(
             'tip_frame', default_value='tool0',
-            description='Controlled TCP frame.'),
+            description='Controlled TCP / IK tip link.'),
+        DeclareLaunchArgument(
+            'controller_action',
+            default_value='/scaled_joint_trajectory_controller/follow_joint_trajectory',
+            description='FollowJointTrajectory action of the active joint controller.'),
         DeclareLaunchArgument(
             'linear_step_m', default_value='0.010',
             description='Linear step for X/Y/Z moves (meters).'),
@@ -27,20 +31,20 @@ def generate_launch_description():
             'move_duration_s', default_value='4.0',
             description='Time per move (seconds). Lower for sim, keep conservative on HW.'),
         DeclareLaunchArgument(
-            'confirm_each_move', default_value='true',
-            description='Prompt on the console before each move (safety on real HW).'),
+            'avoid_collisions', default_value='true',
+            description='Ask MoveIt IK to reject self-colliding solutions.'),
         DeclareLaunchArgument(
             'rotate_in_tool_frame', default_value='true',
             description='Apply roll/pitch/yaw about the tool axes (true) or base axes (false).'),
         DeclareLaunchArgument(
-            'auto_switch_controllers', default_value='false',
-            description='Deactivate scaled JTC and activate the cartesian controller on start.'),
+            'confirm_each_move', default_value='true',
+            description='Prompt on the console before each move (safety on real HW).'),
     ]
 
     param_names = [
-        'controller_name', 'base_frame', 'tip_frame', 'linear_step_m',
-        'angular_step_deg', 'move_duration_s', 'confirm_each_move',
-        'rotate_in_tool_frame', 'auto_switch_controllers',
+        'planning_group', 'reference_frame', 'tip_frame', 'controller_action',
+        'linear_step_m', 'angular_step_deg', 'move_duration_s', 'avoid_collisions',
+        'rotate_in_tool_frame', 'confirm_each_move',
     ]
 
     demo_node = Node(

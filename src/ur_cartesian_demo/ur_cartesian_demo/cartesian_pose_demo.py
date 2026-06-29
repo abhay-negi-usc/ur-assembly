@@ -5,12 +5,21 @@ From the robot's current ("initial") TCP pose, this node steps the TCP by +/- a 
 linear amount along X/Y/Z and +/- a fixed angular amount about roll/pitch/yaw, returning
 to the initial pose between every move.
 
-Commands are sent to the UR driver's ``pose_based_cartesian_traj_controller`` via the
-``cartesian_control_msgs/action/FollowCartesianTrajectory`` action. The controller/robot
-performs the inverse kinematics -- this script never computes joint angles.
+Because ur_controllers 3.8.0 no longer ships a Cartesian trajectory controller, this demo
+does the Cartesian -> joint mapping itself:
 
-The current TCP pose is read from tf2 (``base`` -> ``tool0``), which works on both the real
-robot and in simulation (unlike ``tcp_pose_broadcaster``, which is non-functional in sim).
+  * the current TCP pose is read from tf2 (``reference_frame`` -> ``tip_frame``),
+  * each target pose is solved with MoveIt's ``/compute_ik`` service (uses the driver's
+    *calibrated* URDF, seeded with the initial joint state for solution continuity),
+  * the resulting joint goal is sent to the already-active
+    ``scaled_joint_trajectory_controller`` via ``FollowJointTrajectory`` (smooth, time
+    parameterized, speed-scaled -- much safer than the streaming forward controllers).
+
+Recentering commands the *recorded initial joint configuration* directly (no IK), so the
+robot returns exactly to where it started.
+
+Requires ``move_group`` to be running, e.g.:
+    ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur10e
 """
 
 import math
@@ -21,28 +30,25 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 
 from builtin_interfaces.msg import Duration
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, PoseStamped
+from sensor_msgs.msg import JointState
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 import tf2_ros
-from tf_transformations import (
-    quaternion_from_euler,
-    quaternion_multiply,
-)
+from tf_transformations import quaternion_from_euler, quaternion_multiply
 
-from cartesian_control_msgs.action import FollowCartesianTrajectory
-from cartesian_control_msgs.msg import (
-    CartesianTrajectory,
-    CartesianTrajectoryPoint,
-)
+from control_msgs.action import FollowJointTrajectory
+from moveit_msgs.srv import GetPositionIK
+from moveit_msgs.msg import MoveItErrorCodes
 
-try:
-    from controller_manager_msgs.srv import SwitchController
-    _HAVE_SWITCH = True
-except ImportError:  # pragma: no cover - only needed for auto_switch_controllers
-    _HAVE_SWITCH = False
-
-
-SCALED_JTC = 'scaled_joint_trajectory_controller'
+UR_JOINTS = [
+    'shoulder_pan_joint',
+    'shoulder_lift_joint',
+    'elbow_joint',
+    'wrist_1_joint',
+    'wrist_2_joint',
+    'wrist_3_joint',
+]
 
 
 def _normalize(q):
@@ -53,95 +59,100 @@ def _normalize(q):
     return [c / n for c in q]
 
 
+def _duration(seconds):
+    secs = int(seconds)
+    return Duration(sec=secs, nanosec=int((seconds - secs) * 1e9))
+
+
 class CartesianPoseDemo(Node):
-    """Drives the +/- X/Y/Z/R/P/Y cartesian demo sequence."""
+    """Drives the +/- X/Y/Z/R/P/Y cartesian demo sequence via MoveIt IK + JTC."""
 
     def __init__(self):
         super().__init__('cartesian_pose_demo')
 
         # --- Parameters ---------------------------------------------------
-        self.controller_name = self.declare_parameter(
-            'controller_name', 'pose_based_cartesian_traj_controller'
-        ).value
-        self.base_frame = self.declare_parameter('base_frame', 'base').value
+        self.planning_group = self.declare_parameter(
+            'planning_group', 'ur_manipulator').value
+        self.reference_frame = self.declare_parameter(
+            'reference_frame', 'base_link').value
         self.tip_frame = self.declare_parameter('tip_frame', 'tool0').value
+        self.joint_names = self.declare_parameter('joint_names', UR_JOINTS).value
+        self.controller_action = self.declare_parameter(
+            'controller_action',
+            '/scaled_joint_trajectory_controller/follow_joint_trajectory').value
         self.linear_step_m = self.declare_parameter('linear_step_m', 0.010).value
         self.angular_step_deg = self.declare_parameter('angular_step_deg', 10.0).value
         self.move_duration_s = self.declare_parameter('move_duration_s', 4.0).value
         self.settle_s = self.declare_parameter('settle_s', 0.5).value
+        self.ik_timeout_s = self.declare_parameter('ik_timeout_s', 2.0).value
+        self.avoid_collisions = self.declare_parameter('avoid_collisions', True).value
         self.rotate_in_tool_frame = self.declare_parameter(
-            'rotate_in_tool_frame', True
-        ).value
+            'rotate_in_tool_frame', True).value
         self.confirm_each_move = self.declare_parameter('confirm_each_move', True).value
-        self.auto_switch_controllers = self.declare_parameter(
-            'auto_switch_controllers', False
-        ).value
 
         # --- tf2 ----------------------------------------------------------
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
-        # --- Action client ------------------------------------------------
-        action_ns = f'{self.controller_name}/follow_cartesian_trajectory'
-        self.action_client = ActionClient(self, FollowCartesianTrajectory, action_ns)
-        self._action_ns = action_ns
+        # --- joint state cache -------------------------------------------
+        self._joint_positions = {}
+        self.create_subscription(JointState, '/joint_states', self._joint_cb, 10)
 
-        self._switched = False  # whether we activated the cartesian controller ourselves
+        # --- IK service + trajectory action ------------------------------
+        self.ik_client = self.create_client(GetPositionIK, '/compute_ik')
+        self.traj_client = ActionClient(
+            self, FollowJointTrajectory, self.controller_action)
+
+    # ------------------------------------------------------------- callbacks
+    def _joint_cb(self, msg):
+        for name, pos in zip(msg.name, msg.position):
+            self._joint_positions[name] = pos
 
     # ------------------------------------------------------------------ setup
     def setup(self):
-        """Switch controllers (optional) and wait for the action server. Returns bool."""
-        if self.auto_switch_controllers:
-            if not self._switch_controllers(activate=[self.controller_name],
-                                            deactivate=[SCALED_JTC]):
-                return False
-            self._switched = True
-
-        self.get_logger().info(f"Waiting for action server '{self._action_ns}'...")
-        if not self.action_client.wait_for_server(timeout_sec=10.0):
+        self.get_logger().info("Waiting for /compute_ik service (is move_group running?)...")
+        if not self.ik_client.wait_for_service(timeout_sec=15.0):
             self.get_logger().error(
-                f"Action server '{self._action_ns}' not available.\n"
-                "Is the cartesian controller active? Activate it with:\n"
-                f"  ros2 control switch_controllers "
-                f"--deactivate {SCALED_JTC} --activate {self.controller_name}\n"
-                "or re-run this node with -p auto_switch_controllers:=true"
-            )
+                "/compute_ik unavailable. Start MoveIt, e.g.:\n"
+                "  ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur10e")
+            return False
+
+        self.get_logger().info(
+            f"Waiting for trajectory action '{self.controller_action}'...")
+        if not self.traj_client.wait_for_server(timeout_sec=15.0):
+            self.get_logger().error(
+                f"Action '{self.controller_action}' unavailable. Is "
+                "scaled_joint_trajectory_controller active? Check with "
+                "'ros2 control list_controllers'.")
+            return False
+
+        self.get_logger().info('Waiting for /joint_states...')
+        if not self._wait_for_joints(timeout_s=10.0):
+            self.get_logger().error('No /joint_states received.')
             return False
         return True
 
-    def _switch_controllers(self, activate, deactivate):
-        if not _HAVE_SWITCH:
-            self.get_logger().error('controller_manager_msgs not available; '
-                                    'cannot auto-switch controllers.')
-            return False
-        client = self.create_client(SwitchController, '/controller_manager/switch_controller')
-        if not client.wait_for_service(timeout_sec=10.0):
-            self.get_logger().error('/controller_manager/switch_controller unavailable.')
-            return False
-        req = SwitchController.Request()
-        req.activate_controllers = activate
-        req.deactivate_controllers = deactivate
-        req.strictness = SwitchController.Request.STRICT
-        self.get_logger().info(
-            f'Switching controllers: activate={activate} deactivate={deactivate}')
-        future = client.call_async(req)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
-        result = future.result()
-        if result is None or not result.ok:
-            self.get_logger().error('Controller switch failed.')
-            return False
-        return True
+    def _wait_for_joints(self, timeout_s):
+        deadline = self.get_clock().now().nanoseconds + int(timeout_s * 1e9)
+        while rclpy.ok() and self.get_clock().now().nanoseconds < deadline:
+            if all(j in self._joint_positions for j in self.joint_names):
+                return True
+            rclpy.spin_once(self, timeout_sec=0.1)
+        return False
+
+    def _current_joint_positions(self):
+        return [self._joint_positions[j] for j in self.joint_names]
 
     # --------------------------------------------------------------- get pose
     def get_initial_pose(self, timeout_s=10.0):
-        """Look up base->tip and return a geometry_msgs/Pose, or None on failure."""
+        """Look up reference_frame->tip and return a geometry_msgs/Pose, or None."""
         self.get_logger().info(
-            f"Looking up current TCP pose ({self.base_frame} -> {self.tip_frame})...")
+            f"Looking up current TCP pose ({self.reference_frame} -> {self.tip_frame})...")
         deadline = self.get_clock().now().nanoseconds + int(timeout_s * 1e9)
         while rclpy.ok() and self.get_clock().now().nanoseconds < deadline:
             try:
                 tf = self.tf_buffer.lookup_transform(
-                    self.base_frame, self.tip_frame, rclpy.time.Time())
+                    self.reference_frame, self.tip_frame, rclpy.time.Time())
                 pose = Pose()
                 pose.position.x = tf.transform.translation.x
                 pose.position.y = tf.transform.translation.y
@@ -167,11 +178,9 @@ class CartesianPoseDemo(Node):
                   base_pose.orientation.z, base_pose.orientation.w]
         q_delta = quaternion_from_euler(droll, dpitch, dyaw)
         if self.rotate_in_tool_frame:
-            # Body-frame rotation: rotate about the tool's own axes.
-            q_target = quaternion_multiply(q_init, q_delta)
+            q_target = quaternion_multiply(q_init, q_delta)   # body-frame
         else:
-            # Base-frame rotation: rotate about the fixed base axes.
-            q_target = quaternion_multiply(q_delta, q_init)
+            q_target = quaternion_multiply(q_delta, q_init)   # base-frame
         q_target = _normalize(q_target)
 
         target.orientation.x = q_target[0]
@@ -180,40 +189,72 @@ class CartesianPoseDemo(Node):
         target.orientation.w = q_target[3]
         return target
 
-    # ------------------------------------------------------------- send goal
-    def send_pose(self, pose, duration_s):
-        """Send a single-point cartesian trajectory and block until done. Returns bool."""
-        goal = FollowCartesianTrajectory.Goal()
-        traj = CartesianTrajectory()
-        traj.header.frame_id = self.base_frame
-        traj.header.stamp = self.get_clock().now().to_msg()
+    # --------------------------------------------------------------- solve IK
+    def solve_ik(self, pose, seed_positions):
+        """Return joint positions (ordered like self.joint_names) for pose, or None."""
+        req = GetPositionIK.Request()
+        req.ik_request.group_name = self.planning_group
+        req.ik_request.ik_link_name = self.tip_frame
+        req.ik_request.avoid_collisions = self.avoid_collisions
+        req.ik_request.timeout = _duration(self.ik_timeout_s)
 
-        point = CartesianTrajectoryPoint()
-        point.pose = pose
-        secs = int(duration_s)
-        point.time_from_start = Duration(sec=secs,
-                                         nanosec=int((duration_s - secs) * 1e9))
+        # Seed the solver with the given joint state for solution continuity.
+        req.ik_request.robot_state.joint_state.name = list(self.joint_names)
+        req.ik_request.robot_state.joint_state.position = list(seed_positions)
+
+        ps = PoseStamped()
+        ps.header.frame_id = self.reference_frame
+        ps.header.stamp = self.get_clock().now().to_msg()
+        ps.pose = pose
+        req.ik_request.pose_stamped = ps
+
+        future = self.ik_client.call_async(req)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=self.ik_timeout_s + 2.0)
+        resp = future.result()
+        if resp is None:
+            self.get_logger().error('IK service call failed (no response).')
+            return None
+        if resp.error_code.val != MoveItErrorCodes.SUCCESS:
+            self.get_logger().error(
+                f'IK failed (error_code={resp.error_code.val}) -- target unreachable?')
+            return None
+
+        sol = dict(zip(resp.solution.joint_state.name,
+                       resp.solution.joint_state.position))
+        try:
+            return [sol[j] for j in self.joint_names]
+        except KeyError as exc:
+            self.get_logger().error(f'IK solution missing joint {exc}.')
+            return None
+
+    # ------------------------------------------------------------- send goal
+    def send_joint_goal(self, positions, duration_s):
+        """Send a single-point joint trajectory and block until done. Returns bool."""
+        goal = FollowJointTrajectory.Goal()
+        traj = JointTrajectory()
+        traj.joint_names = list(self.joint_names)
+        point = JointTrajectoryPoint()
+        point.positions = list(positions)
+        point.time_from_start = _duration(duration_s)
         traj.points.append(point)
         goal.trajectory = traj
 
-        send_future = self.action_client.send_goal_async(goal)
+        send_future = self.traj_client.send_goal_async(goal)
         rclpy.spin_until_future_complete(self, send_future)
         goal_handle = send_future.result()
         if goal_handle is None or not goal_handle.accepted:
-            self.get_logger().error('Goal rejected by controller.')
+            self.get_logger().error('Trajectory goal rejected by controller.')
             return False
 
         result_future = goal_handle.get_result_async()
         rclpy.spin_until_future_complete(self, result_future)
         result = result_future.result()
         if result is None:
-            self.get_logger().error('No result returned for goal.')
+            self.get_logger().error('No result returned for trajectory goal.')
             return False
-
-        error_code = result.result.error_code
-        if error_code != 0:
+        if result.result.error_code != FollowJointTrajectory.Result.SUCCESSFUL:
             self.get_logger().error(
-                f'Move failed: error_code={error_code} '
+                f'Move failed: error_code={result.result.error_code} '
                 f'{result.result.error_string}')
             return False
         return True
@@ -230,6 +271,7 @@ class CartesianPoseDemo(Node):
         initial_pose = self.get_initial_pose()
         if initial_pose is None:
             return False
+        initial_joints = self._current_joint_positions()
 
         p = initial_pose.position
         self.get_logger().info(
@@ -263,12 +305,16 @@ class CartesianPoseDemo(Node):
 
             self.get_logger().info(f'--> {label}')
             target = self.offset_pose(initial_pose, dx, dy, dz, dr, dp, dyaw)
-            if not self.send_pose(target, self.move_duration_s):
+            joints = self.solve_ik(target, seed_positions=initial_joints)
+            if joints is None:
+                self.get_logger().warn(f'Skipping {label} (no IK solution).')
+                continue
+            if not self.send_joint_goal(joints, self.move_duration_s):
                 self.get_logger().error('Stopping demo due to move failure.')
                 return False
 
             self.get_logger().info('--> recentering to initial pose')
-            if not self.send_pose(initial_pose, self.move_duration_s):
+            if not self.send_joint_goal(initial_joints, self.move_duration_s):
                 self.get_logger().error('Stopping demo due to recenter failure.')
                 return False
 
@@ -276,13 +322,6 @@ class CartesianPoseDemo(Node):
 
         self.get_logger().info('Demo complete.')
         return True
-
-    # ------------------------------------------------------------- shutdown
-    def teardown(self):
-        if self._switched:
-            self.get_logger().info('Restoring scaled_joint_trajectory_controller...')
-            self._switch_controllers(activate=[SCALED_JTC],
-                                     deactivate=[self.controller_name])
 
 
 def main(args=None):
@@ -295,7 +334,6 @@ def main(args=None):
     except KeyboardInterrupt:
         node.get_logger().info('Interrupted.')
     finally:
-        node.teardown()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

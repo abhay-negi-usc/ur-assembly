@@ -4,13 +4,16 @@
 Gripper only -- this node never commands the arm.
 
 Drives the gripper through a sweep of open -> partial -> closed -> open positions using the
-ros2_control ``robotiq_gripper_controller`` and its ``control_msgs/action/GripperCommand``
-action server (default ``/robotiq_gripper_controller/gripper_cmd``).
+ros2_control ``robotiq_gripper_controller``. That controller is a
+``parallel_gripper_action_controller/GripperActionController``, whose action server
+(default ``/robotiq_gripper_controller/gripper_cmd``) speaks
+``control_msgs/action/ParallelGripperCommand`` -- NOT the older ``GripperCommand``.
 
-For the 2F-85 the GripperCommand ``position`` runs 0.0 (open) -> 0.8 (closed); ``max_effort``
-sets the grip force. Positions here are interpolated from ``open_position`` to
-``closed_position`` by a "closedness" fraction, so the mapping is easy to flip if your
-controller is configured the other way.
+A ParallelGripperCommand goal carries a ``sensor_msgs/JointState`` whose ``position[0]`` is
+the target joint angle. For the 2F-85 that runs 0.0 (open) -> ~0.8 (closed). Positions here
+are interpolated from ``open_position`` to ``closed_position`` by a "closedness" fraction.
+``effort``/``velocity`` are sent too, but are only honored if the hardware exposes those
+command interfaces (the stock Robotiq config commands position only).
 """
 
 import sys
@@ -19,21 +22,25 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
 
-from control_msgs.action import GripperCommand
+from control_msgs.action import ParallelGripperCommand
+from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
 
 
 class GripperDemo(Node):
-    """Cycles a Robotiq gripper through a set of positions via GripperCommand."""
+    """Cycles a Robotiq gripper through a set of positions via ParallelGripperCommand."""
 
     def __init__(self):
         super().__init__('gripper_demo')
 
         self.action_name = self.declare_parameter(
             'action_name', '/robotiq_gripper_controller/gripper_cmd').value
+        self.joint_name = self.declare_parameter(
+            'joint_name', 'robotiq_85_left_knuckle_joint').value
         self.open_position = self.declare_parameter('open_position', 0.0).value
         self.closed_position = self.declare_parameter('closed_position', 0.8).value
         self.max_effort = self.declare_parameter('max_effort', 50.0).value
+        self.max_velocity = self.declare_parameter('max_velocity', 0.5).value
         self.dwell_s = self.declare_parameter('dwell_s', 1.5).value
         self.cycles = self.declare_parameter('cycles', 1).value
         # "Closedness" fractions to step through each cycle (0 = open, 1 = closed).
@@ -45,7 +52,7 @@ class GripperDemo(Node):
             'activation_service',
             '/robotiq_activation_controller/reactivate_gripper').value
 
-        self.client = ActionClient(self, GripperCommand, self.action_name)
+        self.client = ActionClient(self, ParallelGripperCommand, self.action_name)
 
     # ------------------------------------------------------------------ setup
     def setup(self):
@@ -55,10 +62,10 @@ class GripperDemo(Node):
         self.get_logger().info(f"Waiting for gripper action server '{self.action_name}'...")
         if not self.client.wait_for_server(timeout_sec=10.0):
             self.get_logger().error(
-                f"Action server '{self.action_name}' not available. Is "
-                "robotiq_gripper_controller active? Check:\n"
-                "  ros2 control list_controllers | grep -i grip\n"
-                "  ros2 action list | grep -i grip")
+                f"Action server '{self.action_name}' not available (or wrong type). "
+                "This node expects control_msgs/action/ParallelGripperCommand. Check:\n"
+                "  ros2 control list_controllers | grep -i grip   (-> active)\n"
+                "  ros2 action info /robotiq_gripper_controller/gripper_cmd -t")
             return False
         return True
 
@@ -80,12 +87,15 @@ class GripperDemo(Node):
 
     # ------------------------------------------------------------- send goal
     def send_position(self, position, label):
-        goal = GripperCommand.Goal()
-        goal.command.position = float(position)
-        goal.command.max_effort = float(self.max_effort)
+        goal = ParallelGripperCommand.Goal()
+        cmd = JointState()
+        cmd.name = [self.joint_name]
+        cmd.position = [float(position)]
+        cmd.velocity = [float(self.max_velocity)]
+        cmd.effort = [float(self.max_effort)]
+        goal.command = cmd
 
-        self.get_logger().info(
-            f'--> {label}: position={position:.3f}, max_effort={self.max_effort:.1f}')
+        self.get_logger().info(f'--> {label}: position={position:.3f}')
         send_future = self.client.send_goal_async(goal)
         rclpy.spin_until_future_complete(self, send_future)
         goal_handle = send_future.result()
@@ -101,9 +111,9 @@ class GripperDemo(Node):
             return False
 
         r = wrapped.result
+        pos = r.state.position[0] if r.state.position else float('nan')
         self.get_logger().info(
-            f'    reached_goal={r.reached_goal} stalled={r.stalled} '
-            f'position={r.position:.3f} effort={r.effort:.1f}')
+            f'    reached_goal={r.reached_goal} stalled={r.stalled} position={pos:.3f}')
         # A stall (object grasped) is a normal, successful outcome -- not a failure.
         return True
 

@@ -6,15 +6,11 @@
 # their parameters. No joint_state_broadcaster -- the UR driver's JSB already covers the gripper
 # joint (single combined URDF/CM).
 
-controller_manager:
-  ros__parameters:
-    robotiq_gripper_controller:
-      type: parallel_gripper_action_controller/GripperActionController
-    robotiq_activation_controller:
-      type: robotiq_controllers/RobotiqActivationController
-
 robotiq_gripper_controller:
   ros__parameters:
+    # Jazzy spawner reads 'type' from the controller's OWN namespace (not a controller_manager
+    # block) when loading via --param-file into an already-running controller_manager.
+    type: parallel_gripper_action_controller/GripperActionController
     joint: robotiq_85_left_knuckle_joint
     # The real Robotiq hardware exports a POSITION command interface only. The stock config
     # also claims effort/velocity command interfaces, which blocks activation
@@ -31,4 +27,5 @@ robotiq_gripper_controller:
 
 robotiq_activation_controller:
   ros__parameters:
+    type: robotiq_controllers/RobotiqActivationController
     default: true

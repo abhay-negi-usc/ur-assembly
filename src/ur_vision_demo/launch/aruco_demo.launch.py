@@ -50,6 +50,10 @@ def launch_setup(context, *args, **kwargs):
     for cam in cameras:
         name = cam['name']
         serial = str(cam.get('serial_no', '') or '')
+        # RealSense wants serial_no as a STRING; an all-digit serial gets misread as an int
+        # ("invalid type ... setting it to {integer} is not allowed"). Prefixing with '_'
+        # forces string interpretation; the node strips the leading underscore.
+        serial_arg = f'_{serial}' if serial else ''
 
         if launch_cameras:
             # Wrap in a non-forwarding group so this launch's own args (config_file,
@@ -63,7 +67,7 @@ def launch_setup(context, *args, **kwargs):
                         'camera_namespace': name,
                         'camera_name': 'camera',
                         'tf_prefix': name,           # frames -> <name>_color_optical_frame
-                        'serial_no': serial,
+                        'serial_no': serial_arg,
                         'enable_depth': 'false',
                         'enable_color': 'true',
                         'pointcloud.enable': 'false',

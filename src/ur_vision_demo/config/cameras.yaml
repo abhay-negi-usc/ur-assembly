@@ -7,9 +7,9 @@
 
 cameras:
   - name: camera1
-    serial_no: ""        # e.g. "230322270123"
-  - name: camera2
-    serial_no: ""        # remove this entry if you only have one camera
+    serial_no: "218622272137"   # Intel RealSense D405
+  # - name: camera2
+  #   serial_no: "<second camera serial>"   # uncomment + fill for a 2nd camera
 
 # Fiducial marker settings shared by all cameras.
 aruco:

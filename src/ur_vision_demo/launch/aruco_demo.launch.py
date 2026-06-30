@@ -66,7 +66,6 @@ def launch_setup(context, *args, **kwargs):
                     launch_arguments={
                         'camera_namespace': name,
                         'camera_name': 'camera',
-                        'tf_prefix': name,           # frames -> <name>_color_optical_frame
                         'serial_no': serial_arg,
                         'enable_depth': 'false',
                         'enable_color': 'true',
@@ -87,6 +86,9 @@ def launch_setup(context, *args, **kwargs):
                 'aruco_dictionary': dictionary,
                 'marker_size_m': marker_size,
                 'marker_frame_prefix': f'{name}_marker_',
+                # Force a clean, predictable parent frame (RealSense's own optical frame
+                # name is messy); the hand-eye transform connects base -> this name.
+                'camera_frame': f'{name}_color_optical_frame',
                 'publish_debug_image': True,
             }]))
 

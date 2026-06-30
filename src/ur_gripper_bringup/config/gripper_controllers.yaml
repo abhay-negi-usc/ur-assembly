@@ -1,0 +1,34 @@
+# Gripper controllers, spawned into the UR driver's controller_manager by
+# ur_gripper_control.launch.py (the gripper hardware is loaded from the combined URDF, so it
+# lives in the SAME controller_manager as the arm controllers).
+#
+# The 'type' keys here let the spawner register the controllers; the per-controller blocks hold
+# their parameters. No joint_state_broadcaster -- the UR driver's JSB already covers the gripper
+# joint (single combined URDF/CM).
+
+controller_manager:
+  ros__parameters:
+    robotiq_gripper_controller:
+      type: parallel_gripper_action_controller/GripperActionController
+    robotiq_activation_controller:
+      type: robotiq_controllers/RobotiqActivationController
+
+robotiq_gripper_controller:
+  ros__parameters:
+    joint: robotiq_85_left_knuckle_joint
+    # The real Robotiq hardware exports a POSITION command interface only. The stock config
+    # also claims effort/velocity command interfaces, which blocks activation
+    # ("'robotiq_85_left_knuckle_joint/effort' is not available"). Leave these blank so the
+    # controller commands position only.
+    max_effort_interface: ""
+    max_velocity_interface: ""
+    max_effort: 50.0
+    max_velocity: 0.5
+    state_interfaces: ["position"]
+    allow_stalling: true
+    stall_timeout: 0.05
+    goal_tolerance: 0.02
+
+robotiq_activation_controller:
+  ros__parameters:
+    default: true

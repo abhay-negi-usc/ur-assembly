@@ -1,0 +1,22 @@
+# ur_tf_demo configuration.
+#
+# Frames and the per-camera hand-eye extrinsics (base -> camera optical frame). The static
+# transforms published from this file are what connect the camera(s) to the robot, so that
+# tf2 can compose base -> camera -> marker.
+
+base_frame: base_link          # UR base (robot_state_publisher root). 'base' is the rotated variant.
+tool_frame: tool0              # controlled TCP
+publish_rate_hz: 10.0
+
+# Marker tf frames are matched by these prefixes (must match ur_vision_demo's
+# marker_frame_prefix, i.e. '<camera>_marker_').
+marker_frame_prefixes:
+  - camera1_marker_
+
+# Hand-eye extrinsics: base_frame -> camera optical frame, ONE entry per camera. Fill xyz (m)
+# and rpy (radians) from your hand-eye calibration. The placeholder below is identity (camera
+# at the robot base) -- replace it, or base->marker poses will be wrong.
+cameras:
+  - camera_frame: camera1_color_optical_frame
+    xyz: [0.0, 0.0, 0.0]
+    rpy: [0.0, 0.0, 0.0]

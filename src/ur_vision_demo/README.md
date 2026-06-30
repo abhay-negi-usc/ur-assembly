@@ -73,6 +73,11 @@ ros2 run rqt_image_view rqt_image_view /camera1/debug_image
 In RViz, set Fixed Frame to a camera optical frame and add **TF** + a **PoseArray** display on
 `/camera1/aruco_poses`.
 
+> Frame name: the detector labels its parent frame `<camera>_color_optical_frame` via the
+> `camera_frame` param (RealSense's own optical-frame name is messy and version-dependent), so
+> marker poses always report in `camera1_color_optical_frame`. The hand-eye transform in
+> `ur_tf_demo` connects `base_link → camera1_color_optical_frame`.
+>
 > Topic check: this assumes RealSense publishes at `/<camera>/camera/color/image_raw` (the
 > modern `camera_namespace`/`camera_name` layout). If `ros2 topic list | grep image_raw` shows
 > a different path, set `image_topic`/`camera_info_topic` on the detector to match.

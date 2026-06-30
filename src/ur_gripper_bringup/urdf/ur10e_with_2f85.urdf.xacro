@@ -1,0 +1,98 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="ur10e_with_2f85">
+  <!--
+    Combined UR10e + Robotiq 2F-85 description with BOTH ros2_control blocks, so a single
+    controller_manager (the UR driver's) manages arm and gripper together. Fed to
+    ur_control.launch.py via description_launchfile (see rsp.launch.py).
+
+    Modeled on the UR my_robot_cell tutorial (ur_robot + ur_ros2_control) and the
+    automaticaddison/ur_robotiq gripper-mount pattern.
+  -->
+
+  <!-- ===================== Arguments ===================== -->
+  <xacro:arg name="ur_type" default="ur10e"/>
+  <xacro:arg name="tf_prefix" default=""/>
+  <xacro:arg name="robot_ip" default="0.0.0.0"/>
+  <xacro:arg name="joint_limits_parameters_file"
+             default="$(find ur_description)/config/$(arg ur_type)/joint_limits.yaml"/>
+  <xacro:arg name="kinematics_parameters_file"
+             default="$(find ur_description)/config/$(arg ur_type)/default_kinematics.yaml"/>
+  <xacro:arg name="physical_parameters_file"
+             default="$(find ur_description)/config/$(arg ur_type)/physical_parameters.yaml"/>
+  <xacro:arg name="visual_parameters_file"
+             default="$(find ur_description)/config/$(arg ur_type)/visual_parameters.yaml"/>
+  <xacro:arg name="use_mock_hardware" default="false"/>
+  <xacro:arg name="mock_sensor_commands" default="false"/>
+  <xacro:arg name="headless_mode" default="false"/>
+
+  <!-- Gripper -->
+  <xacro:arg name="gripper_enabled" default="true"/>
+  <xacro:arg name="com_port" default="/dev/ttyUSB1"/>
+
+  <!-- Coupler: tool0 -> coupler_link. Passed as components to avoid spaces in xacro args.
+       TODO: replace the identity placeholder with the measured tool0 -> gripper-mount
+       transform (supplied via config/coupler.yaml). -->
+  <xacro:arg name="coupler_x" default="0.0"/>
+  <xacro:arg name="coupler_y" default="0.0"/>
+  <xacro:arg name="coupler_z" default="0.0"/>
+  <xacro:arg name="coupler_roll" default="0.0"/>
+  <xacro:arg name="coupler_pitch" default="0.0"/>
+  <xacro:arg name="coupler_yaw" default="0.0"/>
+
+  <!-- ===================== Includes ===================== -->
+  <xacro:include filename="$(find ur_description)/urdf/ur_macro.xacro"/>
+  <xacro:include filename="$(find ur_robot_driver)/urdf/ur.ros2_control.xacro"/>
+  <xacro:include filename="$(find robotiq_description)/urdf/robotiq_2f_85_macro.urdf.xacro"/>
+
+  <!-- ===================== World ===================== -->
+  <link name="world"/>
+
+  <!-- ===================== UR10e arm (geometry) ===================== -->
+  <xacro:ur_robot
+    name="$(arg ur_type)"
+    tf_prefix="$(arg tf_prefix)"
+    parent="world"
+    joint_limits_parameters_file="$(arg joint_limits_parameters_file)"
+    kinematics_parameters_file="$(arg kinematics_parameters_file)"
+    physical_parameters_file="$(arg physical_parameters_file)"
+    visual_parameters_file="$(arg visual_parameters_file)">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </xacro:ur_robot>
+
+  <!-- ===================== UR10e ros2_control ===================== -->
+  <xacro:ur_ros2_control
+    name="$(arg ur_type)"
+    tf_prefix="$(arg tf_prefix)"
+    kinematics_parameters_file="$(arg kinematics_parameters_file)"
+    robot_ip="$(arg robot_ip)"
+    script_filename="$(find ur_client_library)/resources/external_control.urscript"
+    output_recipe_filename="$(find ur_robot_driver)/resources/rtde_output_recipe.txt"
+    input_recipe_filename="$(find ur_robot_driver)/resources/rtde_input_recipe.txt"
+    ur_type="$(arg ur_type)"
+    use_mock_hardware="$(arg use_mock_hardware)"
+    mock_sensor_commands="$(arg mock_sensor_commands)"
+    headless_mode="$(arg headless_mode)"/>
+
+  <!-- ===================== Coupler + Gripper ===================== -->
+  <xacro:if value="$(arg gripper_enabled)">
+    <!-- TODO: identity coupler placeholder; replace via config/coupler.yaml. -->
+    <link name="coupler_link"/>
+    <joint name="tool0_to_coupler" type="fixed">
+      <parent link="$(arg tf_prefix)tool0"/>
+      <child link="coupler_link"/>
+      <origin xyz="$(arg coupler_x) $(arg coupler_y) $(arg coupler_z)"
+              rpy="$(arg coupler_roll) $(arg coupler_pitch) $(arg coupler_yaw)"/>
+    </joint>
+
+    <!-- Robotiq 2F-85 + its own ros2_control block (RobotiqGripperHardwareInterface). -->
+    <xacro:robotiq_gripper
+      name="RobotiqGripperHardwareInterface"
+      prefix=""
+      parent="coupler_link"
+      use_fake_hardware="$(arg use_mock_hardware)"
+      com_port="$(arg com_port)">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+    </xacro:robotiq_gripper>
+  </xacro:if>
+
+</robot>

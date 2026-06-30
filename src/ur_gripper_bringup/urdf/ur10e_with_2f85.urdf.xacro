@@ -60,6 +60,8 @@
   </xacro:ur_robot>
 
   <!-- ===================== UR10e ros2_control ===================== -->
+  <!-- NOTE: this installed ur_robot_driver's ur_ros2_control macro has NO 'ur_type' param
+       (older than the jazzy branch tip); 'name' carries the model. Do not add ur_type here. -->
   <xacro:ur_ros2_control
     name="$(arg ur_type)"
     tf_prefix="$(arg tf_prefix)"
@@ -68,7 +70,6 @@
     script_filename="$(find ur_client_library)/resources/external_control.urscript"
     output_recipe_filename="$(find ur_robot_driver)/resources/rtde_output_recipe.txt"
     input_recipe_filename="$(find ur_robot_driver)/resources/rtde_input_recipe.txt"
-    ur_type="$(arg ur_type)"
     use_mock_hardware="$(arg use_mock_hardware)"
     mock_sensor_commands="$(arg mock_sensor_commands)"
     headless_mode="$(arg headless_mode)"/>

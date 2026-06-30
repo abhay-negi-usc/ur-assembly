@@ -4,9 +4,9 @@ A computer-vision demo for **ROS2 Jazzy**: connects to one or more **Intel RealS
 and streams **ArUco fiducial marker poses with respect to each camera**.
 
 Per camera it publishes:
-- **tf2 transforms** `<camera_optical_frame> → <camera>_marker_<id>`
-- a **`geometry_msgs/PoseArray`** on `/<camera>/camera/aruco_poses`
-- an annotated **debug image** on `/<camera>/camera/debug_image`
+- **tf2 transforms** `<camera>_color_optical_frame → <camera>_marker_<id>`
+- a **`geometry_msgs/PoseArray`** on `/<camera>/aruco_poses`
+- an annotated **debug image** on `/<camera>/debug_image`
 
 Multiple cameras run side-by-side (one RealSense node + one detector per camera). The marker
 **dictionary** and **size** are set in [`config/cameras.yaml`](config/cameras.yaml).
@@ -62,16 +62,20 @@ ros2 launch ur_vision_demo aruco_demo.launch.py
 Watch the poses:
 ```bash
 # per-camera pose array
-ros2 topic echo /camera1/camera/aruco_poses
+ros2 topic echo /camera1/aruco_poses
 
 # tf: distance/orientation of a marker w.r.t. the camera
 ros2 run tf2_ros tf2_echo camera1_color_optical_frame camera1_marker_0
 
 # annotated image
-ros2 run rqt_image_view rqt_image_view /camera1/camera/debug_image
+ros2 run rqt_image_view rqt_image_view /camera1/debug_image
 ```
 In RViz, set Fixed Frame to a camera optical frame and add **TF** + a **PoseArray** display on
-`/camera1/camera/aruco_poses`.
+`/camera1/aruco_poses`.
+
+> Topic check: this assumes RealSense publishes at `/<camera>/camera/color/image_raw` (the
+> modern `camera_namespace`/`camera_name` layout). If `ros2 topic list | grep image_raw` shows
+> a different path, set `image_topic`/`camera_info_topic` on the detector to match.
 
 ## Running modes
 
@@ -82,8 +86,8 @@ In RViz, set Fixed Frame to a camera optical frame and add **TF** + a **PoseArra
 - **One detector by hand** against any image topic:
   ```bash
   ros2 run ur_vision_demo aruco_pose_node --ros-args \
-    -r color/image_raw:=/camera1/camera/color/image_raw \
-    -r color/camera_info:=/camera1/camera/color/camera_info \
+    -p image_topic:=/camera1/camera/color/image_raw \
+    -p camera_info_topic:=/camera1/camera/color/camera_info \
     -p aruco_dictionary:=DICT_5X5_100 -p marker_size_m:=0.04 \
     -p marker_frame_prefix:=cam1_marker_
   ```

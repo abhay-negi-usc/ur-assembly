@@ -4,8 +4,8 @@ Reads a config file listing cameras and the ArUco settings, then for each camera
   * a RealSense node (via realsense2_camera/rs_launch.py), namespaced by the camera name, and
   * an aruco_pose_node subscribed to that camera's color stream.
 
-Each camera's markers are published as tf frames '<camera>_marker_<id>' and a PoseArray on
-'/<camera>/camera/aruco_poses', so multiple cameras don't collide.
+Per camera the markers are published as tf frames '<camera>_marker_<id>' and a PoseArray on
+'/<camera>/aruco_poses', so multiple cameras don't collide.
 
 Args:
   config_file      path to the cameras/aruco yaml (default: this package's config/cameras.yaml)
@@ -20,6 +20,7 @@ import yaml
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    GroupAction,
     IncludeLaunchDescription,
     OpaqueFunction,
 )
@@ -51,28 +52,34 @@ def launch_setup(context, *args, **kwargs):
         serial = str(cam.get('serial_no', '') or '')
 
         if launch_cameras:
-            actions.append(IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(rs_launch),
-                launch_arguments={
-                    'camera_namespace': name,
-                    'camera_name': 'camera',
-                    'serial_no': serial,
-                    'enable_depth': 'false',
-                    'enable_color': 'true',
-                    'pointcloud.enable': 'false',
-                }.items()))
+            # Wrap in a non-forwarding group so this launch's own args (config_file,
+            # launch_cameras) do NOT leak into rs_launch.py as RealSense parameters.
+            actions.append(GroupAction(
+                scoped=True,
+                forwarding=False,
+                actions=[IncludeLaunchDescription(
+                    PythonLaunchDescriptionSource(rs_launch),
+                    launch_arguments={
+                        'camera_namespace': name,
+                        'camera_name': 'camera',
+                        'tf_prefix': name,           # frames -> <name>_color_optical_frame
+                        'serial_no': serial,
+                        'enable_depth': 'false',
+                        'enable_color': 'true',
+                        'pointcloud.enable': 'false',
+                    }.items())]))
 
-        # Detector runs in the camera's namespace, so 'color/image_raw' etc. resolve to
-        # /<name>/camera/color/...; tf frames are global, hence the per-camera prefix.
+        # Detector takes ABSOLUTE input topics (independent of its namespace) and publishes
+        # its outputs under /<name>/ ; tf marker frames get a per-camera prefix.
         actions.append(Node(
             package='ur_vision_demo',
             executable='aruco_pose_node',
-            namespace=f'{name}/camera',
+            namespace=name,
             name='aruco_pose_node',
             output='screen',
             parameters=[{
-                'image_topic': 'color/image_raw',
-                'camera_info_topic': 'color/camera_info',
+                'image_topic': f'/{name}/camera/color/image_raw',
+                'camera_info_topic': f'/{name}/camera/color/camera_info',
                 'aruco_dictionary': dictionary,
                 'marker_size_m': marker_size,
                 'marker_frame_prefix': f'{name}_marker_',

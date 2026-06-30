@@ -12,6 +12,10 @@ robotiq_gripper_controller:
     # block) when loading via --param-file into an already-running controller_manager.
     type: parallel_gripper_action_controller/GripperActionController
     joint: robotiq_85_left_knuckle_joint
+    # The RobotiqGripperHardwareInterface exports force/speed under THESE names (not /effort,
+    # /velocity). Point the controller at them so max_effort/max_velocity are actually applied.
+    max_effort_interface: robotiq_85_left_knuckle_joint/set_gripper_max_effort
+    max_velocity_interface: robotiq_85_left_knuckle_joint/set_gripper_max_velocity
     # The real Robotiq hardware exports a POSITION command interface only. The stock config
     # also claims effort/velocity command interfaces, which blocks activation
     # ("'robotiq_85_left_knuckle_joint/effort' is not available"). Leave these blank so the

@@ -37,6 +37,9 @@ def launch_setup(context, *args, **kwargs):
     if publish_static:
         for cam in cameras:
             cam_frame = cam['camera_frame']
+            # Frame the camera is mounted to: tool frame for eye-in-hand (camera moves with the
+            # arm), or base_frame for a fixed/world camera. Defaults to tool_frame.
+            parent = cam.get('parent_frame', tool_frame)
             xyz = cam.get('xyz', [0.0, 0.0, 0.0])
             rpy = cam.get('rpy', [0.0, 0.0, 0.0])
             actions.append(Node(
@@ -46,7 +49,7 @@ def launch_setup(context, *args, **kwargs):
                 arguments=[
                     '--x', str(xyz[0]), '--y', str(xyz[1]), '--z', str(xyz[2]),
                     '--roll', str(rpy[0]), '--pitch', str(rpy[1]), '--yaw', str(rpy[2]),
-                    '--frame-id', base_frame, '--child-frame-id', cam_frame,
+                    '--frame-id', parent, '--child-frame-id', cam_frame,
                 ]))
 
     actions.append(Node(

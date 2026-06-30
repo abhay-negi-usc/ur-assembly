@@ -13,10 +13,19 @@ publish_rate_hz: 10.0
 marker_frame_prefixes:
   - camera1_marker_
 
-# Hand-eye extrinsics: base_frame -> camera optical frame, ONE entry per camera. Fill xyz (m)
-# and rpy (radians) from your hand-eye calibration. The placeholder below is identity (camera
-# at the robot base) -- replace it, or base->marker poses will be wrong.
+# Hand-eye extrinsics, ONE entry per camera.
+#   parent_frame: the frame the camera is rigidly mounted to.
+#     - EYE-IN-HAND (camera on the tool): use the tool frame (tool0). The camera moves with the
+#       arm, and tf composes base -> tool0 -> camera automatically.
+#     - EYE-TO-HAND (fixed/world camera): use base_link instead.
+#   xyz (m) / rpy (rad): the parent_frame -> camera_frame transform from calibration.
+#
+# Values below are from the hand-eye result T_TCP_TO_CAMERA0 (tool0 -> camera): pure
+# translation y=-0.080, z=0.031, identity rotation.
+# NOTE: calibration named it CAMERA0; our detector publishes 'camera1_color_optical_frame'
+# (ur_vision_demo's camera name is 'camera1'). Keep these names consistent.
 cameras:
-  - camera_frame: camera1_color_optical_frame
-    xyz: [0.0, 0.0, 0.0]
+  - parent_frame: tool0
+    camera_frame: camera1_color_optical_frame
+    xyz: [0.0, -0.080, 0.031]
     rpy: [0.0, 0.0, 0.0]

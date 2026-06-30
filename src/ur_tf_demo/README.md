@@ -16,9 +16,11 @@ published by the existing nodes:
 
 ```
 base_link ──(UR driver / robot_state_publisher)──▶ tool0
-base_link ──(hand-eye static transform, here)────▶ camera1_color_optical_frame
+tool0 ──(hand-eye static transform, here)────────▶ camera1_color_optical_frame   # eye-in-hand
 camera1_color_optical_frame ──(ur_vision_demo)───▶ camera1_marker_<id>
 ```
+(For a fixed/world camera — eye-to-hand — the hand-eye static transform hangs off `base_link`
+instead; set `parent_frame: base_link` in the config.)
 
 So `base_link → tool0` and `base_link → camera1_marker_<id>` both resolve through one tf tree —
 no manual matrix math, and any consumer can also just use tf directly. This node simply
@@ -43,8 +45,9 @@ These must be running so the tf chain is complete:
 
 Edit [`config/hand_eye.yaml`](config/hand_eye.yaml): set `base_frame`/`tool_frame`, the
 `marker_frame_prefixes` (must match `ur_vision_demo`'s `<camera>_marker_`), and one `cameras:`
-entry per camera with the `base_frame → camera_frame` extrinsics (`xyz` in meters, `rpy` in
-radians) from your hand-eye calibration. The placeholder is identity — replace it.
+entry per camera with `parent_frame` (`tool0` for eye-in-hand, `base_link` for a fixed camera),
+`camera_frame`, and the `parent_frame → camera_frame` extrinsics (`xyz` in meters, `rpy` in
+radians) from your hand-eye calibration.
 
 > Don't have a calibration yet? You can eyeball/measure a rough `xyz`+`rpy` to sanity-check the
 > pipeline, then swap in the calibrated values (e.g. from `easy_handeye2`).

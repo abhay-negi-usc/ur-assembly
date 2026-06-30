@@ -1,0 +1,67 @@
+# Fiducial-guided pick-and-place configuration.
+#
+# Transform chain:
+#   T_base_marker   from tf (base_frame -> marker_frame; needs ur_vision_demo + ur_tf_demo hand-eye)
+#   T_base_object = T_base_marker * inv(object_marker)        # object pose in base
+#   T_base_grasp  = T_base_object * object_grasp              # grasp-TCP pose in base
+#   tool0 target  = T_base_grasp * inv(grasp_tcp_offset)      # IK solves for tool0
+#
+# All transforms are xyz (meters) + rpy (radians).
+
+# ---- Frames / motion infra ----
+base_frame: base_link
+tip_frame: tool0                 # IK link (the arm controls this)
+planning_group: ur_manipulator
+controller_action: /scaled_joint_trajectory_controller/follow_joint_trajectory
+ik_timeout_s: 2.0
+
+# ---- Marker / object ----
+marker:
+  id: 0
+  dictionary: DICT_4X4_50        # informational here; detection is done by ur_vision_demo
+  size_m: 0.05
+  frame: ""                      # default: camera1_marker_<id>; set to override
+
+# Pose of the MARKER with respect to the OBJECT frame (T_object_marker).
+# Default: marker sits 25 cm from the object origin along the object +Z (e.g. on top of it).
+object_marker:
+  xyz: [0.0, 0.0, 0.25]
+  rpy: [0.0, 0.0, 0.0]
+
+# Grasp pose: the grasp-TCP with respect to the OBJECT frame (T_object_grasp). Default identity
+# (grasp the object origin, gripper aligned with the object frame).
+object_grasp:
+  xyz: [0.0, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
+
+# ---- Gripper TCP ----
+# The grasp point between the fingers, relative to tool0 (T_tool0_grasp). +Z is along the
+# gripper approach (out of the flange). SET THIS to your hardware: ~coupler (0.016) + the 2F-85
+# length from its base to the fingertip contact (~0.15). Approximate default below.
+grasp_tcp_offset:
+  xyz: [0.0, 0.0, 0.16]
+  rpy: [0.0, 0.0, 0.0]
+
+# ---- Pick approach / retreat ----
+approach_distance_m: 0.10        # pre-grasp stand-off
+approach_axis: [0.0, 0.0, -1.0]  # in the GRASP frame (-Z = back off along the approach)
+lift_distance_m: 0.10            # lift after grasping
+lift_axis: [0.0, 0.0, 1.0]       # in the BASE frame (+Z = straight up)
+
+# ---- Place = pick pose shifted by this offset (in the BASE frame) ----
+place_offset_xyz: [0.0, 0.20, 0.0]   # e.g. move 20 cm in +Y
+place_offset_rpy: [0.0, 0.0, 0.0]
+
+# ---- Gripper ----
+gripper:
+  action: /robotiq_gripper_controller/gripper_cmd
+  joint: robotiq_85_left_knuckle_joint
+  open_position: 0.0
+  closed_position: 0.8           # tune to the object width
+  max_effort: 50.0
+  max_velocity: 0.5
+
+# ---- Timing / safety ----
+move_duration_s: 4.0             # per arm move (conservative)
+settle_s: 0.5
+confirm_each_step: true          # prompt before each motion (recommended on real HW)

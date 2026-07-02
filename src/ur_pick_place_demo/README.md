@@ -26,8 +26,15 @@ Sequence: `open → pre-grasp → grasp → close → lift → pre-place → pla
 
 1. **Integrated bringup** (arm + gripper, one controller_manager):
    `ros2 launch ur_gripper_bringup ur_gripper_control.launch.py`
-2. **move_group** for `/compute_ik` (arm-only MoveIt config is fine — IK targets `tool0`):
-   `ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur10e`
+   The bringup defaults to this robot's calibration
+   (`ur_gripper_bringup/config/ur10e_calibration.yaml`); see that package's README to extract it.
+2. **move_group** for `/compute_ik` (arm-only MoveIt config is fine — IK targets `flange`).
+   ⚠️ It **must** use the **same** calibration as the bringup, or the driver's FK and MoveIt's
+   IK disagree and grasps land off:
+   ```
+   ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur10e \
+     kinematics_params_file:=$(ros2 pkg prefix ur_gripper_bringup)/share/ur_gripper_bringup/config/ur10e_calibration.yaml
+   ```
 3. **Vision + hand-eye tf** so the marker resolves in `base_link`:
    `ros2 launch ur_vision_demo aruco_demo.launch.py`
    `ros2 launch ur_tf_demo tf_streaming.launch.py`

@@ -34,8 +34,13 @@ marker→base poses will be wrong (but `base→tool0` is always correct).
 ## Prerequisites
 
 These must be running so the tf chain is complete:
-- **UR driver** — provides `base_link → … → tool0`:
-  `ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur10e robot_ip:=192.168.125.2`
+- **UR driver** — provides `base_link → … → flange`. Pass this robot's calibration so the tool
+  poses match the pendant (extract it once — see `ur_gripper_bringup/README.md`); or just use the
+  integrated bringup, which already defaults to it:
+  ```
+  ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur10e robot_ip:=192.168.125.2 \
+    kinematics_params_file:=$(ros2 pkg prefix ur_gripper_bringup)/share/ur_gripper_bringup/config/ur10e_calibration.yaml
+  ```
 - **Vision demo** — provides `camera → marker`:
   `ros2 launch ur_vision_demo aruco_demo.launch.py`
 

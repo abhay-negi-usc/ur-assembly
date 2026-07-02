@@ -93,6 +93,24 @@ def launch_setup(context, *args, **kwargs):
     cfg = _read_config()
     gripper_enabled = bool(cfg.get('gripper_enabled', True))
 
+    # Always use this robot's extracted calibration (ur_calibration) for accurate TCP poses.
+    # Falls back to the generic ur10e kinematics with a loud warning if the file is missing.
+    logger = launch.logging.get_logger('ur_gripper_bringup')
+    kinematics_file = LaunchConfiguration('kinematics_params_file').perform(context)
+    if not os.path.isfile(kinematics_file):
+        default_kin = os.path.join(
+            get_package_share_directory('ur_description'),
+            'config', 'ur10e', 'default_kinematics.yaml')
+        logger.warning(
+            f'Calibration file not found at {kinematics_file}. Using GENERIC ur10e kinematics '
+            '-- TCP poses will be off by mm-cm. Extract your robot calibration with:\n'
+            '  ros2 launch ur_calibration calibration_correction.launch.py '
+            f'robot_ip:=<ip> target_filename:={kinematics_file}\n'
+            'then relaunch.')
+        kinematics_file = default_kin
+    else:
+        logger.info(f'Using robot calibration: {kinematics_file}')
+
     ur_control = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             get_package_share_directory('ur_robot_driver'), 'launch', 'ur_control.launch.py')),
@@ -101,6 +119,7 @@ def launch_setup(context, *args, **kwargs):
             'robot_ip': LaunchConfiguration('robot_ip'),
             'use_mock_hardware': LaunchConfiguration('use_mock_hardware'),
             'launch_rviz': LaunchConfiguration('launch_rviz'),
+            'kinematics_params_file': kinematics_file,
             'description_launchfile': os.path.join(pkg, 'launch', 'rsp.launch.py'),
         }.items())
 
@@ -133,6 +152,13 @@ def generate_launch_description():
                               description='Mock both arm and gripper hardware (no robot/serial).'),
         DeclareLaunchArgument('launch_rviz', default_value='false',
                               description='Start RViz with the driver.'),
+        DeclareLaunchArgument(
+            'kinematics_params_file',
+            default_value=os.path.join(
+                get_package_share_directory('ur_gripper_bringup'),
+                'config', 'ur10e_calibration.yaml'),
+            description='This robot\'s ur_calibration file. Defaults to '
+                        'config/ur10e_calibration.yaml; falls back to generic if missing.'),
     ]
     return LaunchDescription(args + [
         OpaqueFunction(function=preflight),

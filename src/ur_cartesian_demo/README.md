@@ -53,15 +53,19 @@ ros2 launch ur_simulation_gz ur_sim_control.launch.py ur_type:=ur10e
 # or the real driver against fake hardware:
 ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur10e robot_ip:=192.168.125.2 use_fake_hardware:=true
 ```
-Real UR10e:
+Real UR10e (use this robot's calibration, or FK/IK will be off by mm–cm):
 ```bash
-ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur10e robot_ip:=192.168.125.2
+ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur10e robot_ip:=192.168.125.2 \
+  kinematics_params_file:=$(ros2 pkg prefix ur_gripper_bringup)/share/ur_gripper_bringup/config/ur10e_calibration.yaml
 # then start the External Control program on the teach pendant
 ```
+(See `ur_gripper_bringup/README.md` to extract the calibration file once.)
 
-**2) MoveIt** (provides `/compute_ik`) —
+**2) MoveIt** (provides `/compute_ik`) — ⚠️ pass the **same** calibration as the driver so IK
+and FK agree:
 ```bash
-ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur10e
+ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur10e \
+  kinematics_params_file:=$(ros2 pkg prefix ur_gripper_bringup)/share/ur_gripper_bringup/config/ur10e_calibration.yaml
 ```
 
 Sanity checks:

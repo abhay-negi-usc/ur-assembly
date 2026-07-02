@@ -39,10 +39,12 @@ sudo apt update
 sudo apt install ros-jazzy-admittance-controller ros-jazzy-kinematics-interface-kdl
 ```
 
-Start the **real** driver (FT sensor must be live):
+Start the **real** driver (FT sensor must be live). Pass this robot's calibration so FK matches
+the hardware (extract it once — see `ur_gripper_bringup/README.md`):
 
 ```bash
-ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur10e robot_ip:=192.168.125.2
+ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur10e robot_ip:=192.168.125.2 \
+  kinematics_params_file:=$(ros2 pkg prefix ur_gripper_bringup)/share/ur_gripper_bringup/config/ur10e_calibration.yaml
 # then start the External Control program on the teach pendant
 ```
 

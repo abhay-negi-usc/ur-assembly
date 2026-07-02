@@ -25,7 +25,11 @@ marker_frame_prefixes:
 # NOTE: calibration named it CAMERA0; our detector publishes 'camera1_color_optical_frame'
 # (ur_vision_demo's camera name is 'camera1'). Keep these names consistent.
 cameras:
-  - parent_frame: tool0
+  # Calibration T_TCP_TO_CAMERA0 is expressed w.r.t. the FLANGE frame (the camera's optical axes
+  # align with the flange triad the user sees on the pendant), so parent_frame is 'flange' and
+  # the calibration values are used as-is (identity rotation). tool0 remains the arm IK/control
+  # frame; this only affects the camera branch of the tf tree.
+  - parent_frame: flange
     camera_frame: camera1_color_optical_frame
     xyz: [0.0, -0.080, 0.031]
     rpy: [0.0, 0.0, 0.0]

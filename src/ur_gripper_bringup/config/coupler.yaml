@@ -11,18 +11,20 @@ com_port: /dev/ttyUSB1
 # controllers) -- useful if the gripper isn't connected.
 gripper_enabled: true
 
-# Coupler: transform from tool0 to the gripper mount face (coupler_link == robotiq_85_base_link).
+# Coupler: transform from the FLANGE to the gripper mount face (coupler_link ==
+# robotiq_85_base_link). The gripper is now mounted on 'flange' (see the xacro).
 #
 # The 2F-85 URDF does NOT include the spacer or the coupling -- robotiq_85_base_link attaches
 # directly to the parent with zero offset, so robotiq_85_base_link is the gripper's *mounting
-# face*. So this z offset spans the FULL stack along the flange normal (tool0 +Z):
+# face*. So this z offset spans the FULL stack along the flange normal (flange +Z, same as
+# tool0 +Z -- flange and tool0 share the tool axis):
 #       z = 0.008 (8 mm spacer)  +  0.008 (Robotiq 2F-85 coupling)  =  0.016 m
 #
 #   The 8 mm coupling figure is the standard Robotiq 2F-85 coupler height, cross-checked against
 #   cambel/ur3's URDF ("Height added by the coupler: 8mm"). If your specific coupling differs,
 #   set z to the measured flange-face -> gripper-mounting-face distance.
-#   rpy stays identity unless the coupling indexes the gripper to a specific yaw about tool0 Z
-#   (adjust rpy[2] if the fingers don't open where you expect -- easy to eyeball in RViz).
+#   rpy stays identity unless the coupling indexes the gripper to a specific yaw about the tool
+#   axis (adjust rpy[2] if the fingers don't open where you expect -- easy to eyeball in RViz).
 coupler:
   xyz: [0.0, 0.0, 0.016]
   rpy: [0.0, 0.0, 0.0]

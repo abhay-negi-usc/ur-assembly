@@ -75,15 +75,15 @@
     headless_mode="$(arg headless_mode)"/>
 
   <!-- ===================== Coupler + Gripper ===================== -->
-  <!-- Gripper is mounted on the FLANGE frame (not tool0). flange and tool0 are coincident in
-       position and share the same Z (tool axis), but differ by a ~90deg twist about Z; mounting
-       on flange keeps the gripper's frame consistent with the flange-referenced calibration.
-       tool0 remains the arm IK/control frame. -->
+  <!-- Gripper is mounted on the TOOL0 frame. tool0 is the controller's all-zeros TCP (the frame
+       that matches the pendant readout). ROS 'flange' shares tool0's origin and Z (tool axis) but
+       is twisted ~90deg about Z, so mounting on tool0 keeps the gripper frames aligned with the
+       pendant and the hand-eye calibration (which is also tool0-referenced). -->
   <xacro:if value="$(arg gripper_enabled)">
-    <!-- TODO: coupler transform placeholder; set via config/coupler.yaml (flange -> coupler). -->
+    <!-- TODO: coupler transform placeholder; set via config/coupler.yaml (tool0 to coupler). -->
     <link name="coupler_link"/>
-    <joint name="flange_to_coupler" type="fixed">
-      <parent link="$(arg tf_prefix)flange"/>
+    <joint name="tool0_to_coupler" type="fixed">
+      <parent link="$(arg tf_prefix)tool0"/>
       <child link="coupler_link"/>
       <origin xyz="$(arg coupler_x) $(arg coupler_y) $(arg coupler_z)"
               rpy="$(arg coupler_roll) $(arg coupler_pitch) $(arg coupler_yaw)"/>

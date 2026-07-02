@@ -13,7 +13,7 @@ both ros2_control blocks — that's what this package provides, using the UR dri
 `description_launchfile` hook (the "my_robot_cell" pattern).
 
 ```
-world → ur10e arm (ur_robot) → flange → coupler_link → robotiq 2f-85
+world → ur10e arm (ur_robot) → tool0 → coupler_link → robotiq 2f-85
         └ ur_ros2_control (URPositionHardwareInterface)
                                           └ robotiq ros2_control (RobotiqGripperHardwareInterface)
 ```
@@ -25,7 +25,7 @@ world → ur10e arm (ur_robot) → flange → coupler_link → robotiq 2f-85
 | [urdf/ur10e_with_2f85.urdf.xacro](urdf/ur10e_with_2f85.urdf.xacro) | Combined description: UR arm + UR ros2_control + coupler + 2F‑85 + gripper ros2_control. |
 | [launch/rsp.launch.py](launch/rsp.launch.py) | robot_state_publisher for the combined URDF (fed to the driver via `description_launchfile`). |
 | [launch/ur_gripper_control.launch.py](launch/ur_gripper_control.launch.py) | Top-level: starts the driver + spawns gripper controllers + preflight warnings. |
-| [config/coupler.yaml](config/coupler.yaml) | `com_port`, `gripper_enabled`, and the flange→gripper **coupler** transform. |
+| [config/coupler.yaml](config/coupler.yaml) | `com_port`, `gripper_enabled`, and the tool0→gripper **coupler** transform. |
 | [config/gripper_controllers.yaml](config/gripper_controllers.yaml) | Gripper controllers (with the position-only interface fix). |
 | `config/ur10e_calibration.yaml` | This robot's `ur_calibration` kinematics (you extract it — see below). |
 
@@ -41,7 +41,7 @@ world → ur10e arm (ur_robot) → flange → coupler_link → robotiq 2f-85
 
 Edit [config/coupler.yaml](config/coupler.yaml):
 - `com_port` — defaults to `/dev/ttyUSB1`.
-- `coupler.xyz` / `coupler.rpy` — the **flange → gripper-mount** transform.
+- `coupler.xyz` / `coupler.rpy` — the **tool0 → gripper-mount** transform.
 - `gripper_enabled` — set `false` to bring up the **arm only** (omits the gripper from the URDF
   and skips its controllers).
 
@@ -50,7 +50,7 @@ Edit [config/coupler.yaml](config/coupler.yaml):
 Every UR arm ships from the factory with a **unique kinematic calibration** (small per-joint DH
 corrections). Without it, `robot_state_publisher`'s FK — and therefore every `base_link → tool`
 pose and MoveIt IK — is off from the real robot by **mm–cm** (this is exactly why
-`ros2 run tf2_ros tf2_echo base flange` disagrees with the pendant's TCP readout).
+`ros2 run tf2_ros tf2_echo base tool0` disagrees with the pendant's TCP readout by mm-cm).
 
 This launch **defaults to using it**: it looks for
 [`config/ur10e_calibration.yaml`](config/) and forwards it into the description. If the file is

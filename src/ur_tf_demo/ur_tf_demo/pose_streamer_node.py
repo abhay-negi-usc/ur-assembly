@@ -48,7 +48,7 @@ class PoseStreamer(Node):
         super().__init__('pose_streamer')
 
         self.base_frame = self.declare_parameter('base_frame', 'base_link').value
-        self.tool_frame = self.declare_parameter('tool_frame', 'flange').value
+        self.tool_frame = self.declare_parameter('tool_frame', 'tool0').value
         # Marker tf frames are matched by these prefixes (one per camera).
         self.marker_prefixes = self.declare_parameter(
             'marker_frame_prefixes', ['camera1_marker_']).value

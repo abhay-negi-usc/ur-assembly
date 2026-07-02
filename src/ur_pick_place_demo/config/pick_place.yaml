@@ -30,7 +30,7 @@ marker:
 # Default: marker sits 25 cm from the object origin along the object +Z (e.g. on top of it).
 object_marker:
   xyz: [0.0, 0.0, 0.0]
-  rpy: [3.14159, 0.0, 3.14159]
+  rpy: [0.0, 0.0, 0.0]
 
 # Grasp pose: the grasp-TCP with respect to the OBJECT frame (T_object_grasp).
 # rpy [pi, 0, 0] = 180 deg roll about the object X (flips the grasp frame's Z/Y to approach
@@ -49,9 +49,19 @@ grasp_tcp_offset:
 
 # ---- Pick approach / retreat ----
 approach_distance_m: 0.10        # pre-grasp stand-off
-approach_axis: [0.0, 0.0, 1.0]   # in the GRASP frame (+Z = stand off along grasp +Z)
+approach_axis: [0.0, 0.0, -1.0]   # in the GRASP frame (+Z = stand off along grasp +Z)
 lift_distance_m: 0.10            # lift after grasping
 lift_axis: [0.0, 0.0, 1.0]       # in the BASE frame (+Z = straight up)
+
+# ---- Refine grasp at the standoff (visual re-servo) ----
+# At the pre-grasp standoff, re-read the marker and UPDATE the grasp target (and the derived
+# grasp/lift/place moves). If the marker is not in view, retract tool0 along its -Z by
+# refine_retry_step_m and retry, up to refine_max_retries times, then abort.
+refine_at_standoff: true
+marker_max_age_s: 0.5            # a marker tf older than this = "not in view" (tf2 caches the last one)
+refine_lookup_timeout_s: 2.0    # wait this long for a fresh marker before retracting
+refine_retry_step_m: 0.01       # retract tool0 by this along -Z when the marker isn't visible
+refine_max_retries: 5           # give up (abort) after this many retract-and-retry attempts
 
 # ---- Place = pick pose shifted by this offset (in the BASE frame) ----
 place_offset_xyz: [0.0, 0.0, 0.0]    # zero = place at the pick location

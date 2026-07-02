@@ -19,8 +19,16 @@ Each arm move is MoveIt `/compute_ik` for `tool0` + a `FollowJointTrajectory` go
 grasp pose is expressed for a **grasp‑TCP between the fingers**; since IK solves for `tool0`,
 each grasp‑TCP target is converted to a `tool0` target via `inv(grasp_tcp_offset)`.
 
-Sequence: `open → pre-grasp → grasp → close → lift → pre-place → place → open → retreat → home`
+Sequence: `open → pre-grasp → refine → grasp → close → lift → pre-place → place → open → retreat → home`
 (home = the joint configuration captured at start).
+
+**Refine at the standoff:** once the arm reaches the pre-grasp standoff, it re-reads the marker
+and updates the grasp target (and the derived grasp/lift/place moves) from that closer, less
+oblique view. If the marker isn't in view there, it retracts `tool0` along its own **−Z** by
+`refine_retry_step_m` (default 1 cm) and retries, up to `refine_max_retries` times, then aborts.
+A marker tf older than `marker_max_age_s` counts as "not in view" (tf2 keeps the last one cached
+after the marker leaves the frame). Set `refine_at_standoff: false` to skip this and grasp off the
+initial estimate.
 
 ## Prerequisites (all running)
 

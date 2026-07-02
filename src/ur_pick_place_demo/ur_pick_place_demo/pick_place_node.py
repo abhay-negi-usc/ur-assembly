@@ -118,6 +118,15 @@ class PickPlace(Node):
             c.get('place_offset_xyz', [0.0, 0.20, 0.0]),
             c.get('place_offset_rpy', [0.0, 0.0, 0.0]))
 
+        # Re-servo at the standoff: re-read the marker and update the grasp target; if the marker
+        # isn't in view, retract tool0 along -Z and retry.
+        self.refine_at_standoff = bool(c.get('refine_at_standoff', True))
+        self.marker_max_age = float(c.get('marker_max_age_s', 0.5))
+        self.refine_lookup_timeout = float(c.get('refine_lookup_timeout_s', 2.0))
+        self.refine_retry_step = float(c.get('refine_retry_step_m', 0.01))
+        self.refine_max_retries = int(c.get('refine_max_retries', 5))
+        self.T_base_grasp = np.eye(4)   # updated from the marker (initial + standoff refine)
+
         g = c.get('gripper', {})
         self.gripper_action_name = g.get('action', '/robotiq_gripper_controller/gripper_cmd')
         self.gripper_joint = g.get('joint', 'robotiq_85_left_knuckle_joint')
@@ -185,8 +194,14 @@ class PickPlace(Node):
         return [self._joints[j] for j in self.joint_names]
 
     # ------------------------------------------------------------ marker lookup
-    def lookup_marker(self, timeout_s=15.0):
-        """Return T_base_marker (4x4) once the marker is visible, else None."""
+    def lookup_marker(self, timeout_s=15.0, max_age_s=None):
+        """Return T_base_marker (4x4) once the marker is visible, else None.
+
+        If max_age_s is set, a transform older than that is treated as "not in view": the aruco
+        node stops publishing when the marker leaves the frame, but tf2 keeps the last transform
+        cached, so a plain latest-lookup would return a stale pose. We check the stamp's age and
+        keep waiting for a fresh one until the timeout.
+        """
         self.get_logger().info(
             f"Looking up object marker '{self.marker_frame}' in '{self.base_frame}'...")
         deadline = self.get_clock().now().nanoseconds + int(timeout_s * 1e9)
@@ -194,12 +209,18 @@ class PickPlace(Node):
             try:
                 tf = self.tf_buffer.lookup_transform(
                     self.base_frame, self.marker_frame, Time())
+                if max_age_s is not None:
+                    age = (self.get_clock().now()
+                           - Time.from_msg(tf.header.stamp)).nanoseconds / 1e9
+                    if age > max_age_s:
+                        rclpy.spin_once(self, timeout_sec=0.1)   # stale; wait for a fresh one
+                        continue
                 return transform_to_matrix(tf.transform)
             except tf2_ros.TransformException:
                 rclpy.spin_once(self, timeout_sec=0.2)
         self.get_logger().error(
-            f"Marker '{self.marker_frame}' not in tf. Is it in view and is the hand-eye "
-            'transform published (ur_vision_demo + ur_tf_demo)?')
+            f"Marker '{self.marker_frame}' not in view (no fresh tf). Is it visible and is the "
+            'hand-eye transform published (ur_vision_demo + ur_tf_demo)?')
         return None
 
     # ------------------------------------------------------------- arm motion
@@ -371,38 +392,91 @@ class PickPlace(Node):
         ans = input(f'\n[{label}] Enter to proceed (q to abort): ')
         return ans.strip().lower() != 'q'
 
+    # ------------------------------------------------------ grasp pose helpers
+    def _update_grasp_from_marker(self, T_base_marker, label='marker'):
+        """Recompute the grasp-TCP target in base from an observed marker pose."""
+        T_base_object = T_base_marker @ np.linalg.inv(self.T_object_marker)
+        self.T_base_grasp = T_base_object @ self.T_object_grasp
+        p = self.T_base_grasp[:3, 3]
+        self.get_logger().info(
+            f'Grasp target (base) [{label}]: x={p[0]:.3f} y={p[1]:.3f} z={p[2]:.3f}')
+
+    # Grasp/lift/place are derived from self.T_base_grasp on demand, so a standoff refine that
+    # updates self.T_base_grasp automatically feeds the grasp, lift and place moves.
+    def _pre_grasp_pose(self):
+        return self.T_base_grasp @ translation_matrix(self.approach_axis * self.approach_distance)
+
+    def _lift_pose(self):
+        return translation_matrix(self.lift_axis * self.lift_distance) @ self.T_base_grasp
+
+    def _place_pose(self):
+        return self.place_offset @ self.T_base_grasp
+
+    def _pre_place_pose(self):
+        return translation_matrix(self.lift_axis * self.lift_distance) @ self._place_pose()
+
+    def _refine_at_standoff(self):
+        """Re-observe the marker at the standoff and update the grasp target. If the marker isn't
+        in view, retract tool0 by refine_retry_step along its own -Z and retry, up to
+        refine_max_retries. Returns True when the grasp is updated (or refinement is disabled)."""
+        if not self.refine_at_standoff:
+            return True
+        for attempt in range(self.refine_max_retries + 1):
+            T_base_marker = self.lookup_marker(
+                timeout_s=self.refine_lookup_timeout, max_age_s=self.marker_max_age)
+            if T_base_marker is not None:
+                self._update_grasp_from_marker(T_base_marker, label=f'refined@{attempt}')
+                return True
+            if attempt < self.refine_max_retries:
+                self.get_logger().warn(
+                    f'Marker not in view at standoff; retracting '
+                    f'{self.refine_retry_step * 100:.1f} cm along tool0 -Z and retrying '
+                    f'({attempt + 1}/{self.refine_max_retries}).')
+                if not self._retract_tool0_z(-self.refine_retry_step):
+                    self.get_logger().error('Retract move failed; aborting refine.')
+                    return False
+        self.get_logger().error(
+            f'Marker still not in view after {self.refine_max_retries} retract-and-retry '
+            'attempts; aborting.')
+        return False
+
+    def _retract_tool0_z(self, delta_z):
+        """Translate tool0 by delta_z along its OWN Z (negative = back away). IK + execute."""
+        try:
+            tf = self.tf_buffer.lookup_transform(self.base_frame, self.tip_frame, Time())
+        except tf2_ros.TransformException as exc:
+            self.get_logger().error(f"Can't look up '{self.tip_frame}' to retract: {exc}")
+            return False
+        T_base_tool0 = transform_to_matrix(tf.transform)
+        T_new = T_base_tool0 @ translation_matrix([0.0, 0.0, delta_z])
+        return self.move_tool0_to(matrix_to_pose(T_new), 'refine-retract')
+
     # ----------------------------------------------------------------- run
     def run(self):
         home_joints = self._current_joints()
 
+        # Initial marker observation -> grasp target (sets self.T_base_grasp).
         T_base_marker = self.lookup_marker()
         if T_base_marker is None:
             return False
+        self._update_grasp_from_marker(T_base_marker, label='initial')
 
-        # Compose object + grasp poses.
-        T_base_object = T_base_marker @ np.linalg.inv(self.T_object_marker)
-        T_base_grasp = T_base_object @ self.T_object_grasp
-        p = T_base_grasp[:3, 3]
-        self.get_logger().info(f'Grasp target (base): x={p[0]:.3f} y={p[1]:.3f} z={p[2]:.3f}')
+        # Pre-grasp standoff from the initial estimate. grasp/lift/place read self.T_base_grasp at
+        # execution time, so the standoff refine (which updates it) flows into them.
+        pre_grasp = self._pre_grasp_pose()
 
-        # Grasp-TCP key poses.
-        pre_grasp = T_base_grasp @ translation_matrix(self.approach_axis * self.approach_distance)
-        lift = translation_matrix(self.lift_axis * self.lift_distance) @ T_base_grasp
-        place = self.place_offset @ T_base_grasp
-        pre_place = translation_matrix(self.lift_axis * self.lift_distance) @ place
-
-        # Sequence: (label, action)
         steps = [
             ('close gripper (grasp)', lambda: self.gripper_to(self.gripper_closed, 'close')),
             ('open gripper', lambda: self.gripper_to(self.gripper_open, 'open')),
             ('move to pre-grasp', lambda: self.move_grasp_tcp_to(pre_grasp, 'pre-grasp')),
-            ('move to grasp', lambda: self.move_grasp_tcp_to(T_base_grasp, 'grasp')),
+            ('refine grasp at standoff', self._refine_at_standoff),
+            ('move to grasp', lambda: self.move_grasp_tcp_to(self.T_base_grasp, 'grasp')),
             ('close gripper (grasp)', lambda: self.gripper_to(self.gripper_closed, 'close')),
-            ('lift', lambda: self.move_grasp_tcp_to(lift, 'lift')),
-            ('move to pre-place', lambda: self.move_grasp_tcp_to(pre_place, 'pre-place')),
-            ('move to place', lambda: self.move_grasp_tcp_to(place, 'place')),
+            ('lift', lambda: self.move_grasp_tcp_to(self._lift_pose(), 'lift')),
+            ('move to pre-place', lambda: self.move_grasp_tcp_to(self._pre_place_pose(), 'pre-place')),
+            ('move to place', lambda: self.move_grasp_tcp_to(self._place_pose(), 'place')),
             ('open gripper (release)', lambda: self.gripper_to(self.gripper_open, 'open')),
-            ('retreat', lambda: self.move_grasp_tcp_to(pre_place, 'retreat')),
+            ('retreat', lambda: self.move_grasp_tcp_to(self._pre_place_pose(), 'retreat')),
             ('return home', lambda: self.send_joints(home_joints)),
         ]
 

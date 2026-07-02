@@ -4,20 +4,24 @@
 #   T_base_marker   from tf (base_frame -> marker_frame; needs ur_vision_demo + ur_tf_demo hand-eye)
 #   T_base_object = T_base_marker * inv(object_marker)        # object pose in base
 #   T_base_grasp  = T_base_object * object_grasp              # grasp-TCP pose in base
-#   flange target = T_base_grasp * inv(grasp_tcp_offset)      # IK solves for tip_frame (flange)
+#   tool0 target  = T_base_grasp * inv(grasp_tcp_offset)      # IK solves for tip_frame (tool0)
 #
 # All transforms are xyz (meters) + rpy (radians).
 
 # ---- Frames / motion infra ----
 base_frame: base_link
-tip_frame: flange                # IK link (the arm controls this) -- flange, to match the pendant
+tip_frame: tool0                 # IK link (the arm controls this) -- tool0 matches the pendant TCP
 planning_group: ur_manipulator
 controller_action: /scaled_joint_trajectory_controller/follow_joint_trajectory
 ik_timeout_s: 2.0
+ik_attempts: 12                  # retry /compute_ik with random seeds (KDL is a local solver; a
+                                 # reachable pose can need a different IK branch than the seed)
+avoid_collisions: false          # this demo sets up no planning scene; collision checks here only
+                                 # cause spurious -31 failures. Set true only with a real scene.
 
 # ---- Marker / object ----
 marker:
-  id: 0
+  id: 5
   dictionary: DICT_4X4_50        # informational here; detection is done by ur_vision_demo
   size_m: 0.0203                 # informational; the detector uses ur_vision_demo/cameras.yaml
   frame: ""                      # default: camera1_marker_<id>; set to override
@@ -25,22 +29,20 @@ marker:
 # Pose of the MARKER with respect to the OBJECT frame (T_object_marker).
 # Default: marker sits 25 cm from the object origin along the object +Z (e.g. on top of it).
 object_marker:
-  xyz: [0.0, 0.0, 0.25]
-  rpy: [0.0, 0.0, 0.0]
+  xyz: [0.0, 0.0, 0.0]
+  rpy: [3.14159, 0.0, 3.14159]
 
 # Grasp pose: the grasp-TCP with respect to the OBJECT frame (T_object_grasp).
 # rpy [pi, 0, 0] = 180 deg roll about the object X (flips the grasp frame's Z/Y to approach
 # from the opposite side).
 object_grasp:
   xyz: [0.0, 0.0, 0.0]
-  rpy: [3.14159265, 0.0, 0.0]
+  rpy: [3.14159, 0.0, 3.14159]
 
 # ---- Gripper TCP ----
-# The grasp point between the fingers, relative to the tip_frame (flange). +Z is along the
-# gripper approach (out of the flange). SET THIS to your hardware: ~coupler (0.016) + the 2F-85
-# length from its base to the fingertip contact (~0.15). Approximate default below. Note: since
-# flange and tool0 share Z, the z value is unchanged from a tool0-referenced offset; only the
-# rpy convention differs (flange is 90 deg twisted from tool0 about the tool axis).
+# The grasp point between the fingers, relative to the tip_frame (tool0). +Z is along the
+# gripper approach (out of tool0). SET THIS to your hardware: ~coupler (0.016) + the 2F-85
+# length from its base to the fingertip contact (~0.15). Approximate default below.
 grasp_tcp_offset:
   xyz: [0.0, 0.0, 0.16]
   rpy: [0.0, 0.0, 0.0]
@@ -66,5 +68,7 @@ gripper:
 
 # ---- Timing / safety ----
 move_duration_s: 4.0             # per arm move (conservative)
+move_timeout_s: 60.0             # give up waiting on a trajectory result after this (a goal is
+                                 # accepted even if External Control isn't playing / speed=0)
 settle_s: 0.5
 confirm_each_step: true          # prompt before each motion (recommended on real HW)

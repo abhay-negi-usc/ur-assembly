@@ -94,11 +94,13 @@ class PickPlace(Node):
 
         c = self.cfg
         self.base_frame = c.get('base_frame', 'base_link')
-        self.tip_frame = c.get('tip_frame', 'flange')
+        self.tip_frame = c.get('tip_frame', 'tool0')
         self.planning_group = c.get('planning_group', 'ur_manipulator')
         self.controller_action = c.get(
             'controller_action', '/scaled_joint_trajectory_controller/follow_joint_trajectory')
         self.ik_timeout = float(c.get('ik_timeout_s', 2.0))
+        self.ik_attempts = int(c.get('ik_attempts', 12))
+        self.ik_avoid_collisions = bool(c.get('avoid_collisions', False))
         self.joint_names = list(UR_JOINTS)
 
         m = c.get('marker', {})
@@ -125,6 +127,7 @@ class PickPlace(Node):
         self.gripper_velocity = float(g.get('max_velocity', 0.5))
 
         self.move_duration = float(c.get('move_duration_s', 4.0))
+        self.move_timeout = float(c.get('move_timeout_s', 60.0))
         self.settle_s = float(c.get('settle_s', 0.5))
         self.confirm = bool(c.get('confirm_each_step', True))
 
@@ -201,31 +204,45 @@ class PickPlace(Node):
 
     # ------------------------------------------------------------- arm motion
     def solve_ik(self, tool0_pose, seed):
-        req = GetPositionIK.Request()
-        req.ik_request.group_name = self.planning_group
-        req.ik_request.ik_link_name = self.tip_frame
-        req.ik_request.avoid_collisions = True
-        req.ik_request.timeout = _duration(self.ik_timeout)
-        req.ik_request.robot_state.joint_state.name = list(self.joint_names)
-        req.ik_request.robot_state.joint_state.position = list(seed)
         ps = PoseStamped()
         ps.header.frame_id = self.base_frame
         ps.header.stamp = self.get_clock().now().to_msg()
         ps.pose = tool0_pose
-        req.ik_request.pose_stamped = ps
 
-        future = self.ik_client.call_async(req)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=self.ik_timeout + 2.0)
-        resp = future.result()
-        if resp is None or resp.error_code.val != MoveItErrorCodes.SUCCESS:
-            code = None if resp is None else resp.error_code.val
-            self.get_logger().error(f'IK failed (error_code={code}) -- target unreachable?')
-            return None
-        sol = dict(zip(resp.solution.joint_state.name, resp.solution.joint_state.position))
-        try:
-            return [sol[j] for j in self.joint_names]
-        except KeyError:
-            return None
+        # MoveIt's default KDL solver is a LOCAL search seeded from one joint state: for a
+        # reachable pose whose solution lives in a different IK branch it returns -31. So we retry
+        # with random seeds -- attempt 0 uses the given seed (usually the current state, keeps the
+        # move small when possible), the rest are random so the solver can reach other branches.
+        last_code = None
+        for attempt in range(max(1, self.ik_attempts)):
+            seed_positions = (list(seed) if attempt == 0
+                              else list(np.random.uniform(-np.pi, np.pi, len(self.joint_names))))
+
+            req = GetPositionIK.Request()
+            req.ik_request.group_name = self.planning_group
+            req.ik_request.ik_link_name = self.tip_frame
+            req.ik_request.avoid_collisions = self.ik_avoid_collisions
+            req.ik_request.timeout = _duration(self.ik_timeout)
+            req.ik_request.robot_state.joint_state.name = list(self.joint_names)
+            req.ik_request.robot_state.joint_state.position = seed_positions
+            req.ik_request.pose_stamped = ps
+
+            future = self.ik_client.call_async(req)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=self.ik_timeout + 2.0)
+            resp = future.result()
+            if resp is not None and resp.error_code.val == MoveItErrorCodes.SUCCESS:
+                sol = dict(zip(resp.solution.joint_state.name,
+                               resp.solution.joint_state.position))
+                try:
+                    return [sol[j] for j in self.joint_names]
+                except KeyError:
+                    return None
+            last_code = None if resp is None else resp.error_code.val
+
+        self.get_logger().error(
+            f'IK failed after {self.ik_attempts} attempts (last error_code={last_code}) -- '
+            'target unreachable, in self-collision, or at a singularity.')
+        return None
 
     def send_joints(self, positions):
         goal = FollowJointTrajectory.Goal()
@@ -237,16 +254,36 @@ class PickPlace(Node):
         goal.trajectory.points.append(point)
 
         sf = self.traj_client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, sf)
+        rclpy.spin_until_future_complete(self, sf, timeout_sec=10.0)
         gh = sf.result()
-        if gh is None or not gh.accepted:
-            self.get_logger().error('Trajectory goal rejected.')
+        if gh is None:
+            self.get_logger().error('No response to trajectory goal (controller not running?).')
             return False
+        if not gh.accepted:
+            self.get_logger().error('Trajectory goal rejected by the controller.')
+            return False
+
+        # Don't block forever on the result. The scaled_joint_trajectory_controller ACCEPTS a goal
+        # even when the robot can't move (External Control not playing, a protective/e-stop, or the
+        # speed slider at 0) -- then time-scaling is 0 and the action never completes. Poll with a
+        # deadline + liveness log so a stall is visible instead of a silent hang.
         rf = gh.get_result_async()
-        rclpy.spin_until_future_complete(self, rf)
+        deadline = self.get_clock().now().nanoseconds + int(self.move_timeout * 1e9)
+        while rclpy.ok() and not rf.done():
+            rclpy.spin_once(self, timeout_sec=0.1)
+            self.get_logger().info('executing trajectory...', throttle_duration_sec=5.0)
+            if self.get_clock().now().nanoseconds > deadline:
+                self.get_logger().error(
+                    f'Trajectory not finished after {self.move_timeout:.0f}s -- goal was accepted '
+                    'but not executing. On the pendant: is the External Control program PLAYING, '
+                    'the speed slider up, and no protective/e-stop? Canceling.')
+                gh.cancel_goal_async()
+                return False
+
         res = rf.result()
         if res is None or res.result.error_code != FollowJointTrajectory.Result.SUCCESSFUL:
-            self.get_logger().error('Move failed.')
+            code = None if res is None else res.result.error_code
+            self.get_logger().error(f'Move failed (error_code={code}).')
             return False
         return True
 
@@ -356,6 +393,7 @@ class PickPlace(Node):
 
         # Sequence: (label, action)
         steps = [
+            ('close gripper (grasp)', lambda: self.gripper_to(self.gripper_closed, 'close')),
             ('open gripper', lambda: self.gripper_to(self.gripper_open, 'open')),
             ('move to pre-grasp', lambda: self.move_grasp_tcp_to(pre_grasp, 'pre-grasp')),
             ('move to grasp', lambda: self.move_grasp_tcp_to(T_base_grasp, 'grasp')),

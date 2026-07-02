@@ -27,7 +27,7 @@ from cv_bridge import CvBridge
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import PoseArray, Pose, TransformStamped
 from tf2_ros import TransformBroadcaster
-from tf_transformations import quaternion_from_matrix
+from tf_transformations import euler_from_matrix, quaternion_from_matrix
 
 
 def get_aruco_dictionary(name):
@@ -144,8 +144,10 @@ class ArucoPoseNode(Node):
                 tf.transform.rotation = pose.orientation
                 self.tf_broadcaster.sendTransform(tf)
 
+                rpy = np.degrees(euler_from_matrix(rot))
                 self.get_logger().info(
-                    f'id {int(marker_id)}: x={t[0]:.3f} y={t[1]:.3f} z={t[2]:.3f} m',
+                    f'id {int(marker_id)}: xyz=[{t[0]:.3f}, {t[1]:.3f}, {t[2]:.3f}] m  '
+                    f'rpy=[{rpy[0]:.1f}, {rpy[1]:.1f}, {rpy[2]:.1f}] deg',
                     throttle_duration_sec=1.0)
 
                 if self.debug_pub is not None:

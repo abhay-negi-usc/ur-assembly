@@ -18,6 +18,8 @@ So a hand-eye calibration must connect each camera to the base for the marker lo
 resolve; until then base->tool0 still streams.
 """
 
+import math
+
 import yaml
 
 import rclpy
@@ -25,6 +27,7 @@ from rclpy.node import Node
 from rclpy.time import Time, Duration
 
 import tf2_ros
+from tf_transformations import euler_from_quaternion
 from geometry_msgs.msg import PoseStamped, PoseArray, Pose
 
 
@@ -124,8 +127,11 @@ class PoseStreamer(Node):
             pub.publish(ps)
 
             p = pose.position
+            o = pose.orientation
+            rpy = [math.degrees(a) for a in euler_from_quaternion([o.x, o.y, o.z, o.w])]
             self.get_logger().info(
-                f'{frame}: x={p.x:.3f} y={p.y:.3f} z={p.z:.3f} (in {self.base_frame})',
+                f'{frame}: xyz=[{p.x:.3f}, {p.y:.3f}, {p.z:.3f}] m  '
+                f'rpy=[{rpy[0]:.1f}, {rpy[1]:.1f}, {rpy[2]:.1f}] deg (in {self.base_frame})',
                 throttle_duration_sec=2.0)
 
         self.markers_pub.publish(pose_array)

@@ -34,7 +34,8 @@ from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 import tf2_ros
-from tf_transformations import euler_matrix, quaternion_from_matrix, quaternion_matrix
+from tf_transformations import (
+    euler_from_quaternion, euler_matrix, quaternion_from_matrix, quaternion_matrix)
 
 from control_msgs.action import FollowJointTrajectory, ParallelGripperCommand
 from moveit_msgs.srv import GetPositionIK
@@ -249,10 +250,43 @@ class PickPlace(Node):
             return False
         return True
 
+    @staticmethod
+    def _fmt(xyz, rpy_deg):
+        return (f'xyz=[{xyz[0]:.3f}, {xyz[1]:.3f}, {xyz[2]:.3f}] m  '
+                f'rpy=[{rpy_deg[0]:.1f}, {rpy_deg[1]:.1f}, {rpy_deg[2]:.1f}] deg')
+
+    def _log_ik_failure(self, label, target_pose):
+        """On IK failure, log the controlled frame's current vs target pose (in base) + delta."""
+        # Current controlled frame (tip_frame, e.g. tool0) in the base frame, from tf.
+        cur_xyz, cur_rpy = [float('nan')] * 3, [float('nan')] * 3
+        try:
+            tf = self.tf_buffer.lookup_transform(self.base_frame, self.tip_frame, Time())
+            tr, rot = tf.transform.translation, tf.transform.rotation
+            cur_xyz = [tr.x, tr.y, tr.z]
+            cur_rpy = [np.degrees(a)
+                       for a in euler_from_quaternion([rot.x, rot.y, rot.z, rot.w])]
+        except tf2_ros.TransformException:
+            pass
+        t = target_pose.position
+        q = target_pose.orientation
+        tgt_xyz = [t.x, t.y, t.z]
+        tgt_rpy = [np.degrees(a) for a in euler_from_quaternion([q.x, q.y, q.z, q.w])]
+        dxyz = [tgt_xyz[i] - cur_xyz[i] for i in range(3)]
+        drpy = [tgt_rpy[i] - cur_rpy[i] for i in range(3)]
+        dist = (dxyz[0] ** 2 + dxyz[1] ** 2 + dxyz[2] ** 2) ** 0.5
+
+        log = self.get_logger()
+        log.error(f'[{label}] IK unreachable. Controlled frame '
+                  f"'{self.tip_frame}' vs '{self.base_frame}':")
+        log.error(f'  initial: {self._fmt(cur_xyz, cur_rpy)}')
+        log.error(f'  target:  {self._fmt(tgt_xyz, tgt_rpy)}')
+        log.error(f'  delta:   {self._fmt(dxyz, drpy)}  (translation dist={dist:.3f} m)')
+
     def move_tool0_to(self, tool0_pose, label):
         """IK + execute a tool0 pose. Returns bool."""
         joints = self.solve_ik(tool0_pose, self._current_joints())
         if joints is None:
+            self._log_ik_failure(label, tool0_pose)
             self.get_logger().error(f'[{label}] no IK solution; aborting.')
             return False
         if not self.send_joints(joints):

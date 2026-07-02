@@ -5,7 +5,7 @@
 # tf2 can compose base -> camera -> marker.
 
 base_frame: base_link          # UR base (robot_state_publisher root). 'base' is the rotated variant.
-tool_frame: tool0              # controlled TCP
+tool_frame: flange            # controlled frame (matches the pendant); tool0 also available in tf
 publish_rate_hz: 10.0
 
 # Marker tf frames are matched by these prefixes (must match ur_vision_demo's

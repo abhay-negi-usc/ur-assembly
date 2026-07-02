@@ -4,13 +4,13 @@
 #   T_base_marker   from tf (base_frame -> marker_frame; needs ur_vision_demo + ur_tf_demo hand-eye)
 #   T_base_object = T_base_marker * inv(object_marker)        # object pose in base
 #   T_base_grasp  = T_base_object * object_grasp              # grasp-TCP pose in base
-#   tool0 target  = T_base_grasp * inv(grasp_tcp_offset)      # IK solves for tool0
+#   flange target = T_base_grasp * inv(grasp_tcp_offset)      # IK solves for tip_frame (flange)
 #
 # All transforms are xyz (meters) + rpy (radians).
 
 # ---- Frames / motion infra ----
 base_frame: base_link
-tip_frame: tool0                 # IK link (the arm controls this)
+tip_frame: flange                # IK link (the arm controls this) -- flange, to match the pendant
 planning_group: ur_manipulator
 controller_action: /scaled_joint_trajectory_controller/follow_joint_trajectory
 ik_timeout_s: 2.0
@@ -19,7 +19,7 @@ ik_timeout_s: 2.0
 marker:
   id: 0
   dictionary: DICT_4X4_50        # informational here; detection is done by ur_vision_demo
-  size_m: 0.05
+  size_m: 0.0203                 # informational; the detector uses ur_vision_demo/cameras.yaml
   frame: ""                      # default: camera1_marker_<id>; set to override
 
 # Pose of the MARKER with respect to the OBJECT frame (T_object_marker).
@@ -28,28 +28,31 @@ object_marker:
   xyz: [0.0, 0.0, 0.25]
   rpy: [0.0, 0.0, 0.0]
 
-# Grasp pose: the grasp-TCP with respect to the OBJECT frame (T_object_grasp). Default identity
-# (grasp the object origin, gripper aligned with the object frame).
+# Grasp pose: the grasp-TCP with respect to the OBJECT frame (T_object_grasp).
+# rpy [pi, 0, 0] = 180 deg roll about the object X (flips the grasp frame's Z/Y to approach
+# from the opposite side).
 object_grasp:
   xyz: [0.0, 0.0, 0.0]
-  rpy: [0.0, 0.0, 0.0]
+  rpy: [3.14159265, 0.0, 0.0]
 
 # ---- Gripper TCP ----
-# The grasp point between the fingers, relative to tool0 (T_tool0_grasp). +Z is along the
+# The grasp point between the fingers, relative to the tip_frame (flange). +Z is along the
 # gripper approach (out of the flange). SET THIS to your hardware: ~coupler (0.016) + the 2F-85
-# length from its base to the fingertip contact (~0.15). Approximate default below.
+# length from its base to the fingertip contact (~0.15). Approximate default below. Note: since
+# flange and tool0 share Z, the z value is unchanged from a tool0-referenced offset; only the
+# rpy convention differs (flange is 90 deg twisted from tool0 about the tool axis).
 grasp_tcp_offset:
   xyz: [0.0, 0.0, 0.16]
   rpy: [0.0, 0.0, 0.0]
 
 # ---- Pick approach / retreat ----
 approach_distance_m: 0.10        # pre-grasp stand-off
-approach_axis: [0.0, 0.0, -1.0]  # in the GRASP frame (-Z = back off along the approach)
+approach_axis: [0.0, 0.0, 1.0]   # in the GRASP frame (+Z = stand off along grasp +Z)
 lift_distance_m: 0.10            # lift after grasping
 lift_axis: [0.0, 0.0, 1.0]       # in the BASE frame (+Z = straight up)
 
 # ---- Place = pick pose shifted by this offset (in the BASE frame) ----
-place_offset_xyz: [0.0, 0.20, 0.0]   # e.g. move 20 cm in +Y
+place_offset_xyz: [0.0, 0.0, 0.0]    # zero = place at the pick location
 place_offset_rpy: [0.0, 0.0, 0.0]
 
 # ---- Gripper ----

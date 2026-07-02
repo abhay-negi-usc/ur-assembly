@@ -55,7 +55,7 @@ class ArucoPoseNode(Node):
             'camera_info_topic', 'color/camera_info').value
         self.dictionary_name = self.declare_parameter(
             'aruco_dictionary', 'DICT_4X4_50').value
-        self.marker_size = self.declare_parameter('marker_size_m', 0.05).value
+        self.marker_size = self.declare_parameter('marker_size_m', 0.0203).value
         self.marker_frame_prefix = self.declare_parameter(
             'marker_frame_prefix', 'marker_').value
         # If empty, use the frame_id from camera_info (the camera optical frame).

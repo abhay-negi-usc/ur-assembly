@@ -94,7 +94,7 @@ class PickPlace(Node):
 
         c = self.cfg
         self.base_frame = c.get('base_frame', 'base_link')
-        self.tip_frame = c.get('tip_frame', 'tool0')
+        self.tip_frame = c.get('tip_frame', 'flange')
         self.planning_group = c.get('planning_group', 'ur_manipulator')
         self.controller_action = c.get(
             'controller_action', '/scaled_joint_trajectory_controller/follow_joint_trajectory')

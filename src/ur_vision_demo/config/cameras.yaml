@@ -18,4 +18,4 @@ aruco:
   #   DICT_APRILTAG_36h11 (AprilTag families are also exposed through cv2.aruco)
   dictionary: DICT_4X4_50
   # Physical side length of the printed marker's black square, in METERS. Measure your print.
-  marker_size_m: 0.05
+  marker_size_m: 0.0203

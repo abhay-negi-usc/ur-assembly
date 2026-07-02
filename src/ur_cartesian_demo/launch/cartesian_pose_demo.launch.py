@@ -15,10 +15,10 @@ def generate_launch_description():
             'reference_frame', default_value='base_link',
             description='Frame the target poses are expressed in.'),
         DeclareLaunchArgument(
-            'tip_frame', default_value='tool0',
+            'tip_frame', default_value='flange',
             description='Controlled TCP / IK tip link.'),
         DeclareLaunchArgument(
-            'motion_frames', default_value="['world', 'tool0']",
+            'motion_frames', default_value="['world', 'flange']",
             description='Frames whose axes define the deltas; sequence runs once per frame.'),
         DeclareLaunchArgument(
             'controller_action',

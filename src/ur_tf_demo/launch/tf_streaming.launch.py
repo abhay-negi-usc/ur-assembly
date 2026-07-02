@@ -27,7 +27,7 @@ def launch_setup(context, *args, **kwargs):
         cfg = yaml.safe_load(f) or {}
 
     base_frame = cfg.get('base_frame', 'base_link')
-    tool_frame = cfg.get('tool_frame', 'tool0')
+    tool_frame = cfg.get('tool_frame', 'flange')
     rate = float(cfg.get('publish_rate_hz', 10.0))
     prefixes = cfg.get('marker_frame_prefixes', ['camera1_marker_'])
     cameras = cfg.get('cameras', []) or []

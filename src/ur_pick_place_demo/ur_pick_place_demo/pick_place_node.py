@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Fiducial-guided pick-and-place demo for the UR10e + Robotiq 2F-85 (ROS2 Jazzy).
 
-Pipeline:
-  1. Look up the object's marker in the base frame via tf2 (needs ur_vision_demo detecting the
+Pipeline (each arm move = MoveIt /compute_ik for tool0 + a FollowJointTrajectory goal to
+scaled_joint_trajectory_controller; gripper via the ParallelGripperCommand action):
+  1. Detect the object's marker in the base frame via tf2 (needs ur_vision_demo detecting the
      marker and ur_tf_demo's hand-eye transform connecting camera -> tool0 -> base).
-  2. Compose:  T_base_object = T_base_marker * inv(T_object_marker)
-               T_base_grasp  = T_base_object * T_object_grasp     (grasp-TCP target in base)
-  3. Run the sequence (each arm move = MoveIt /compute_ik for tool0 + a FollowJointTrajectory
-     goal to scaled_joint_trajectory_controller; gripper via the ParallelGripperCommand action):
-       open -> pre-grasp -> grasp -> close -> lift -> pre-place -> place -> open -> retreat -> home
+  2. Visual approach: align + center the camera on the marker, then take discrete steps toward it
+     -- re-detecting and re-centering each step -- until a standoff distance. If the marker leaves
+     view, back off along tool0 -Z and retry.
+  3. At the standoff, recompute the grasp from the close (accurate) view:
+       T_base_object = T_base_marker * inv(T_object_marker)
+       T_base_grasp  = T_base_object * T_object_grasp     (grasp-TCP target in base)
+     then run: grasp-align -> grasp -> close -> lift -> pre-place -> place -> open -> retreat -> home
 
 The grasp pose is expressed for a grasp-TCP between the fingers; since IK solves for tool0, each
 grasp-TCP target is converted to a tool0 target via inv(grasp_tcp_offset).
@@ -118,14 +121,18 @@ class PickPlace(Node):
             c.get('place_offset_xyz', [0.0, 0.20, 0.0]),
             c.get('place_offset_rpy', [0.0, 0.0, 0.0]))
 
-        # Re-servo at the standoff: re-read the marker and update the grasp target; if the marker
-        # isn't in view, retract tool0 along -Z and retry.
-        self.refine_at_standoff = bool(c.get('refine_at_standoff', True))
+        # Visual approach (detect -> align/center -> discrete steps to standoff).
+        self.camera_frame = c.get('camera_frame', 'camera1_color_optical_frame')
+        self.servo_standoff = float(c.get('servo_standoff_m', 0.15))
+        self.servo_step = float(c.get('servo_step_m', 0.05))
+        self.servo_cam_rpy_in_marker = c.get('servo_cam_rpy_in_marker', [3.14159, 0.0, 0.0])
+        self.servo_max_iterations = int(c.get('servo_max_iterations', 20))
+        # Marker not in view -> back off along tool0 -Z and retry.
         self.marker_max_age = float(c.get('marker_max_age_s', 0.5))
-        self.refine_lookup_timeout = float(c.get('refine_lookup_timeout_s', 2.0))
-        self.refine_retry_step = float(c.get('refine_retry_step_m', 0.01))
-        self.refine_max_retries = int(c.get('refine_max_retries', 5))
-        self.T_base_grasp = np.eye(4)   # updated from the marker (initial + standoff refine)
+        self.reacquire_timeout = float(c.get('reacquire_timeout_s', 2.0))
+        self.reacquire_retract = float(c.get('reacquire_retract_m', 0.01))
+        self.reacquire_max_retries = int(c.get('reacquire_max_retries', 5))
+        self.T_base_grasp = np.eye(4)   # updated from the marker each observation
 
         g = c.get('gripper', {})
         self.gripper_action_name = g.get('action', '/robotiq_gripper_controller/gripper_cmd')
@@ -415,81 +422,168 @@ class PickPlace(Node):
     def _pre_place_pose(self):
         return translation_matrix(self.lift_axis * self.lift_distance) @ self._place_pose()
 
-    def _refine_at_standoff(self):
-        """Re-observe the marker at the standoff and update the grasp target. If the marker isn't
-        in view, retract tool0 by refine_retry_step along its own -Z and retry, up to
-        refine_max_retries. Returns True when the grasp is updated (or refinement is disabled)."""
-        if not self.refine_at_standoff:
-            return True
-        for attempt in range(self.refine_max_retries + 1):
-            T_base_marker = self.lookup_marker(
-                timeout_s=self.refine_lookup_timeout, max_age_s=self.marker_max_age)
-            if T_base_marker is not None:
-                self._update_grasp_from_marker(T_base_marker, label=f'refined@{attempt}')
-                return True
-            if attempt < self.refine_max_retries:
+    def _tf_matrix(self, target, source, max_age_s=None, timeout_s=1.0):
+        """Latest target<-source transform as a 4x4, or None. If max_age_s is set, a transform
+        older than that counts as unavailable (see lookup_marker for the stale-cache reason)."""
+        deadline = self.get_clock().now().nanoseconds + int(timeout_s * 1e9)
+        while rclpy.ok() and self.get_clock().now().nanoseconds < deadline:
+            try:
+                tf = self.tf_buffer.lookup_transform(target, source, Time())
+                if max_age_s is not None:
+                    age = (self.get_clock().now()
+                           - Time.from_msg(tf.header.stamp)).nanoseconds / 1e9
+                    if age > max_age_s:
+                        rclpy.spin_once(self, timeout_sec=0.1)
+                        continue
+                return transform_to_matrix(tf.transform)
+            except tf2_ros.TransformException:
+                rclpy.spin_once(self, timeout_sec=0.1)
+        return None
+
+    def _acquire_marker(self):
+        """Return a FRESH T_base_marker. If the marker isn't in view, retract tool0 along -Z by
+        reacquire_retract and retry, up to reacquire_max_retries (widens the view)."""
+        for attempt in range(self.reacquire_max_retries + 1):
+            T = self.lookup_marker(timeout_s=self.reacquire_timeout, max_age_s=self.marker_max_age)
+            if T is not None:
+                return T
+            if attempt < self.reacquire_max_retries:
                 self.get_logger().warn(
-                    f'Marker not in view at standoff; retracting '
-                    f'{self.refine_retry_step * 100:.1f} cm along tool0 -Z and retrying '
-                    f'({attempt + 1}/{self.refine_max_retries}).')
-                if not self._retract_tool0_z(-self.refine_retry_step):
-                    self.get_logger().error('Retract move failed; aborting refine.')
-                    return False
+                    f'Marker not in view; retracting {self.reacquire_retract * 100:.1f} cm along '
+                    f'tool0 -Z and retrying ({attempt + 1}/{self.reacquire_max_retries}).')
+                if not self._retract_tool0_z(-self.reacquire_retract):
+                    return None
         self.get_logger().error(
-            f'Marker still not in view after {self.refine_max_retries} retract-and-retry '
-            'attempts; aborting.')
-        return False
+            f'Marker not re-acquired after {self.reacquire_max_retries} retries.')
+        return None
 
     def _retract_tool0_z(self, delta_z):
         """Translate tool0 by delta_z along its OWN Z (negative = back away). IK + execute."""
-        try:
-            tf = self.tf_buffer.lookup_transform(self.base_frame, self.tip_frame, Time())
-        except tf2_ros.TransformException as exc:
-            self.get_logger().error(f"Can't look up '{self.tip_frame}' to retract: {exc}")
+        T_base_tool0 = self._tf_matrix(self.base_frame, self.tip_frame)
+        if T_base_tool0 is None:
+            self.get_logger().error(f"Can't look up '{self.tip_frame}' to retract.")
             return False
-        T_base_tool0 = transform_to_matrix(tf.transform)
         T_new = T_base_tool0 @ translation_matrix([0.0, 0.0, delta_z])
-        return self.move_tool0_to(matrix_to_pose(T_new), 'refine-retract')
+        return self.move_tool0_to(matrix_to_pose(T_new), 'reacquire-retract')
+
+    # ---------------------------------------- visual servo (align / center / approach)
+    def _camera_marker_distance(self, T_base_marker):
+        """Current camera->marker distance (m), or None if the camera frame isn't in tf."""
+        T_base_cam = self._tf_matrix(self.base_frame, self.camera_frame)
+        if T_base_cam is None:
+            return None
+        return float(np.linalg.norm(T_base_cam[:3, 3] - T_base_marker[:3, 3]))
+
+    def _servo_to(self, T_base_marker, target_distance, label):
+        """Move so the CAMERA is centered on + squared to the marker at target_distance (m) along
+        the marker normal, facing it (servo_cam_rpy_in_marker). Back-solves tool0 via the hand-eye
+        tf, so it always re-centers and re-aligns from the latest marker observation."""
+        T_tool0_cam = self._tf_matrix(self.tip_frame, self.camera_frame)
+        if T_tool0_cam is None:
+            self.get_logger().error(
+                f'No {self.tip_frame} -> {self.camera_frame} tf (is the hand-eye tf published?).')
+            return False
+        # Desired camera pose in the marker frame: on the marker normal at target_distance, facing
+        # the marker. Then camera -> tool0 via inv(hand-eye), and IK.
+        T_marker_cam_des = xyzrpy_to_matrix([0.0, 0.0, target_distance],
+                                            self.servo_cam_rpy_in_marker)
+        T_base_cam_des = T_base_marker @ T_marker_cam_des
+        T_base_tool0_des = T_base_cam_des @ np.linalg.inv(T_tool0_cam)
+        self.get_logger().info(f'--> {label}')
+        return self.move_tool0_to(matrix_to_pose(T_base_tool0_des), label)
+
+    def _align_and_center(self):
+        """Step 2: face + center the marker in the camera view, WITHOUT changing distance."""
+        T_base_marker = self._acquire_marker()
+        if T_base_marker is None:
+            return False
+        d = self._camera_marker_distance(T_base_marker)
+        if d is None:
+            self.get_logger().error(f'Camera frame {self.camera_frame} not in tf.')
+            return False
+        self.get_logger().info(f'Aligning + centering at current distance {d:.3f} m.')
+        return self._servo_to(T_base_marker, d, 'align+center')
+
+    def _approach_to_standoff(self):
+        """Step 3: discrete steps toward the marker, re-centering/re-aligning and updating the
+        marker estimate each iteration, until the camera is within servo_standoff of the marker."""
+        self.get_logger().info(
+            f'Approaching in {self.servo_step * 100:.0f} cm steps to a '
+            f'{self.servo_standoff * 100:.0f} cm standoff...')
+        for i in range(self.servo_max_iterations):
+            T_base_marker = self._acquire_marker()
+            if T_base_marker is None:
+                return False
+            d = self._camera_marker_distance(T_base_marker)
+            if d is None:
+                self.get_logger().error(f'Camera frame {self.camera_frame} not in tf.')
+                return False
+            self.get_logger().info(f'  iter {i}: camera-marker distance = {d:.3f} m')
+            if d <= self.servo_standoff + 1e-3:
+                self.get_logger().info(f'Reached standoff ({self.servo_standoff:.3f} m).')
+                return True
+            d_next = max(self.servo_standoff, d - self.servo_step)
+            if not self._confirm(f'approach step -> {d_next:.3f} m'):
+                self.get_logger().info('Aborted by user.')
+                return False
+            if not self._servo_to(T_base_marker, d_next, f'approach->{d_next:.2f}m'):
+                return False
+        self.get_logger().warn(
+            f'Hit max approach iterations ({self.servo_max_iterations}); proceeding.')
+        return True
+
+    def _update_grasp_at_standoff(self):
+        """Step 4a: with the close-range (accurate) marker view, recompute the grasp target."""
+        T_base_marker = self._acquire_marker()
+        if T_base_marker is None:
+            return False
+        self._update_grasp_from_marker(T_base_marker, label='standoff')
+        return True
 
     # ----------------------------------------------------------------- run
+    def _do(self, label, fn):
+        """Confirm (if enabled), run fn, report. Returns fn's success (False also on abort)."""
+        if not self._confirm(label):
+            self.get_logger().info('Aborted by user.')
+            return False
+        if not fn():
+            self.get_logger().error(f'Step failed: {label}. Stopping.')
+            return False
+        return True
+
     def run(self):
         home_joints = self._current_joints()
 
-        # Initial marker observation -> grasp target (sets self.T_base_grasp).
-        T_base_marker = self.lookup_marker()
-        if T_base_marker is None:
-            return False
-        self._update_grasp_from_marker(T_base_marker, label='initial')
-
-        # Pre-grasp standoff from the initial estimate. grasp/lift/place read self.T_base_grasp at
-        # execution time, so the standoff refine (which updates it) flows into them.
-        pre_grasp = self._pre_grasp_pose()
-
-        steps = [
-            ('close gripper (grasp)', lambda: self.gripper_to(self.gripper_closed, 'close')),
-            ('open gripper', lambda: self.gripper_to(self.gripper_open, 'open')),
-            ('move to pre-grasp', lambda: self.move_grasp_tcp_to(pre_grasp, 'pre-grasp')),
-            ('refine grasp at standoff', self._refine_at_standoff),
-            ('move to grasp', lambda: self.move_grasp_tcp_to(self.T_base_grasp, 'grasp')),
-            ('close gripper (grasp)', lambda: self.gripper_to(self.gripper_closed, 'close')),
-            ('lift', lambda: self.move_grasp_tcp_to(self._lift_pose(), 'lift')),
-            ('move to pre-place', lambda: self.move_grasp_tcp_to(self._pre_place_pose(), 'pre-place')),
-            ('move to place', lambda: self.move_grasp_tcp_to(self._place_pose(), 'place')),
-            ('open gripper (release)', lambda: self.gripper_to(self.gripper_open, 'open')),
-            ('retreat', lambda: self.move_grasp_tcp_to(self._pre_place_pose(), 'retreat')),
-            ('return home', lambda: self.send_joints(home_joints)),
-        ]
-
-        for label, action in steps:
-            if not self._confirm(label):
-                self.get_logger().info('Aborted by user.')
-                return False
-            if not action():
-                self.get_logger().error(f'Step failed: {label}. Stopping.')
-                return False
-
-        self.get_logger().info('Pick-and-place complete.')
-        return True
+        ok = (
+            # 1-3: detect, align/center, then step in to the visual standoff.
+            self._do('open gripper', lambda: self.gripper_to(self.gripper_open, 'open'))
+            and self._do('detect + align/center marker', self._align_and_center)
+            and self._approach_to_standoff()
+            # 4: recompute the grasp from the close view, then go to the grasp-align pose.
+            and self._do('update grasp @ standoff', self._update_grasp_at_standoff)
+            and self._do('move to grasp-align (pre-grasp)',
+                         lambda: self.move_grasp_tcp_to(self._pre_grasp_pose(), 'grasp-align'))
+            # 5: grasp.
+            and self._do('move to grasp',
+                         lambda: self.move_grasp_tcp_to(self.T_base_grasp, 'grasp'))
+            # 6: pick up and place down.
+            and self._do('close gripper (grasp)',
+                         lambda: self.gripper_to(self.gripper_closed, 'close'))
+            and self._do('lift', lambda: self.move_grasp_tcp_to(self._lift_pose(), 'lift'))
+            and self._do('move to pre-place',
+                         lambda: self.move_grasp_tcp_to(self._pre_place_pose(), 'pre-place'))
+            and self._do('move to place',
+                         lambda: self.move_grasp_tcp_to(self._place_pose(), 'place'))
+            and self._do('open gripper (release)',
+                         lambda: self.gripper_to(self.gripper_open, 'open'))
+            and self._do('retreat',
+                         lambda: self.move_grasp_tcp_to(self._pre_place_pose(), 'retreat'))
+            # 7: home.
+            and self._do('return home', lambda: self.send_joints(home_joints))
+        )
+        if ok:
+            self.get_logger().info('Pick-and-place complete.')
+        return ok
 
 
 def main(args=None):

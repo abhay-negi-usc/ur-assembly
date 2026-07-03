@@ -53,15 +53,28 @@ approach_axis: [0.0, 0.0, -1.0]   # in the GRASP frame (+Z = stand off along gra
 lift_distance_m: 0.10            # lift after grasping
 lift_axis: [0.0, 0.0, 1.0]       # in the BASE frame (+Z = straight up)
 
-# ---- Refine grasp at the standoff (visual re-servo) ----
-# At the pre-grasp standoff, re-read the marker and UPDATE the grasp target (and the derived
-# grasp/lift/place moves). If the marker is not in view, retract tool0 along its -Z by
-# refine_retry_step_m and retry, up to refine_max_retries times, then abort.
-refine_at_standoff: true
-marker_max_age_s: 0.5            # a marker tf older than this = "not in view" (tf2 caches the last one)
-refine_lookup_timeout_s: 2.0    # wait this long for a fresh marker before retracting
-refine_retry_step_m: 0.01       # retract tool0 by this along -Z when the marker isn't visible
-refine_max_retries: 5           # give up (abort) after this many retract-and-retry attempts
+# ---- Visual approach (steps 1-3): center + square the camera on the marker, then step in ----
+# Flow: 1) detect the marker, 2) align+center it in the camera view (face it head-on, no depth
+# change), 3) take discrete servo_step_m steps toward it -- re-detecting and re-centering each
+# step -- until the camera is servo_standoff_m from the marker. Then the grasp is recomputed from
+# that close, accurate view and steps 4-7 (grasp-align -> grasp -> pick/place -> home) run.
+#
+# NOTE: servo_standoff_m is the CAMERA-to-marker distance at which the visual approach stops.
+# approach_distance_m (below) is a separate thing: the grasp-align stand-off from the grasp pose.
+camera_frame: camera1_color_optical_frame   # optical frame the marker is detected in
+servo_standoff_m: 0.15          # stop the visual approach at this camera->marker distance
+servo_step_m: 0.05              # discrete step size toward the marker
+# Desired camera orientation expressed in the MARKER frame. [pi, 0, 0] = optical axis facing the
+# marker head-on with matching left/right (marker X->cam X, Y->cam -Y, Z->cam -Z). Assumes the
+# marker's +Z faces the camera (standard for a marker facing the robot).
+servo_cam_rpy_in_marker: [3.14159, 0.0, 0.0]
+servo_max_iterations: 20        # safety cap on approach steps
+
+# If the marker leaves the camera view, back off along tool0 -Z and retry:
+marker_max_age_s: 0.5           # a marker tf older than this = "not in view" (tf2 caches the last one)
+reacquire_timeout_s: 2.0        # wait this long for a fresh marker before retracting
+reacquire_retract_m: 0.01       # retract tool0 by this along -Z when the marker isn't visible
+reacquire_max_retries: 5        # give up (abort) after this many retract-and-retry attempts
 
 # ---- Place = pick pose shifted by this offset (in the BASE frame) ----
 place_offset_xyz: [0.0, 0.0, 0.0]    # zero = place at the pick location

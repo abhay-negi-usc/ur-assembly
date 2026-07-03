@@ -19,16 +19,30 @@ Each arm move is MoveIt `/compute_ik` for `tool0` + a `FollowJointTrajectory` go
 grasp pose is expressed for a **grasp‑TCP between the fingers**; since IK solves for `tool0`,
 each grasp‑TCP target is converted to a `tool0` target via `inv(grasp_tcp_offset)`.
 
-Sequence: `open → pre-grasp → refine → grasp → close → lift → pre-place → place → open → retreat → home`
-(home = the joint configuration captured at start).
+Sequence:
+1. **detect** the marker
+2. **align + center** the camera on the marker (face it head-on, no depth change)
+3. **approach**: discrete `servo_step_m` steps toward the marker — re-detecting and re-centering
+   each step — until the camera is within `servo_standoff_m`
+4. **grasp-align**: recompute the grasp from the close view, move to the grasp stand-off
+   (`approach_distance_m` from the grasp)
+5. **grasp**
+6. **pick & place**: `close → lift → pre-place → place → open`
+7. **home** (`retreat → return home`, the joint configuration captured at start)
 
-**Refine at the standoff:** once the arm reaches the pre-grasp standoff, it re-reads the marker
-and updates the grasp target (and the derived grasp/lift/place moves) from that closer, less
-oblique view. If the marker isn't in view there, it retracts `tool0` along its own **−Z** by
-`refine_retry_step_m` (default 1 cm) and retries, up to `refine_max_retries` times, then aborts.
-A marker tf older than `marker_max_age_s` counts as "not in view" (tf2 keeps the last one cached
-after the marker leaves the frame). Set `refine_at_standoff: false` to skip this and grasp off the
-initial estimate.
+**Visual approach (steps 2–3):** at each iteration the camera is placed directly in front of the
+marker, facing it head‑on, at a target distance along the marker normal (that pose is back‑solved
+to a `tool0` target through the hand‑eye tf, then IK). Decreasing the target distance each step is
+the "step in while staying centered." **If the marker isn't in view**, the arm retracts `tool0`
+along its own **−Z** by `reacquire_retract_m` (default 1 cm) and retries up to `reacquire_max_retries`
+times (widening the view) before aborting. A marker tf older than `marker_max_age_s` counts as "not
+in view" — tf2 keeps the last transform cached after the marker leaves the frame, so a naive lookup
+would silently return a stale pose.
+
+> `servo_standoff_m` (camera↔marker) and `approach_distance_m` (grasp stand-off) are **different
+> distances** — see the config comments.
+
+With `confirm_each_step: true`, each discrete approach step prompts before moving.
 
 ## Prerequisites (all running)
 

@@ -78,7 +78,11 @@ Everything is in [config/pick_place.yaml](config/pick_place.yaml):
 | `lift_distance_m` / `lift_axis` | Lift after grasp (base frame) | 0.10 m / +Z |
 | `place_offset_xyz` / `place_offset_rpy` | Place = pick shifted by this (base frame) | +0.20 m Y |
 | `gripper.*` | action, joint, open/closed positions, effort, velocity | 0.0 / 0.8 / 50 / 0.5 |
+| `servo_standoff_m` / `servo_step_m` | visual approach: stop distance / step size (camera↔marker) | 0.15 / 0.05 m |
+| `servo_cam_rpy_in_marker` / `servo_max_iterations` | desired camera orientation in marker frame / step cap | [π,0,0] / 20 |
+| `marker_max_age_s` / `reacquire_*` | staleness threshold / retract-and-retry on marker lost | 0.5 s / 1 cm / 5 |
 | `move_duration_s`, `settle_s`, `confirm_each_step` | timing + safety | 4 s, 0.5 s, true |
+| `debug` | print per-move current/target/delta poses + marker centering error | false |
 
 ⚠️ **`grasp_tcp_offset` is the one you must set** — it's the distance from `tool0` to the
 fingertip contact point (≈ coupler 0.016 + the 2F‑85 base-to-fingertip length). The default
@@ -98,6 +102,14 @@ ros2 launch ur_pick_place_demo pick_place_demo.launch.py
 With `confirm_each_step: true` (default) it prompts before every motion — **use `ros2 run`**
 in an interactive terminal so the prompts render (or set it false for the launch file). Keep
 the **e‑stop in hand**.
+
+**Debugging:** add `-p debug:=true` (or set `debug: true` in the yaml) to print, for every arm
+move, the controlled frame's **current / target / delta** pose in `base_link`, and during the
+visual approach the **marker pose in the camera frame** (x/y = centering error in mm, z = depth):
+
+```bash
+ros2 run ur_pick_place_demo pick_place --ros-args -p debug:=true
+```
 
 ## Notes / safety
 

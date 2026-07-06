@@ -38,7 +38,8 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 import tf2_ros
 from tf_transformations import (
-    euler_from_quaternion, euler_matrix, quaternion_from_matrix, quaternion_matrix)
+    euler_from_matrix, euler_from_quaternion, euler_matrix, quaternion_from_matrix,
+    quaternion_matrix)
 
 from control_msgs.action import FollowJointTrajectory, ParallelGripperCommand
 from moveit_msgs.srv import GetPositionIK
@@ -146,6 +147,10 @@ class PickPlace(Node):
         self.move_timeout = float(c.get('move_timeout_s', 60.0))
         self.settle_s = float(c.get('settle_s', 0.5))
         self.confirm = bool(c.get('confirm_each_step', True))
+        # Debug printouts (current/target/delta poses per move + marker centering error). Enable
+        # via the yaml or on the command line: --ros-args -p debug:=true
+        self.debug = (bool(c.get('debug', False))
+                      or bool(self.declare_parameter('debug', False).value))
 
         # Interfaces
         self.tf_buffer = tf2_ros.Buffer()
@@ -320,8 +325,10 @@ class PickPlace(Node):
         return (f'xyz=[{xyz[0]:.3f}, {xyz[1]:.3f}, {xyz[2]:.3f}] m  '
                 f'rpy=[{rpy_deg[0]:.1f}, {rpy_deg[1]:.1f}, {rpy_deg[2]:.1f}] deg')
 
-    def _log_ik_failure(self, label, target_pose):
-        """On IK failure, log the controlled frame's current vs target pose (in base) + delta."""
+    def _log_pose_delta(self, label, target_pose, error=False):
+        """Log the controlled frame's current pose (from tf), the target, and the delta -- all in
+        the base frame. Used for --debug printouts and on IK failure."""
+        log = self.get_logger().error if error else self.get_logger().info
         # Current controlled frame (tip_frame, e.g. tool0) in the base frame, from tf.
         cur_xyz, cur_rpy = [float('nan')] * 3, [float('nan')] * 3
         try:
@@ -340,15 +347,33 @@ class PickPlace(Node):
         drpy = [tgt_rpy[i] - cur_rpy[i] for i in range(3)]
         dist = (dxyz[0] ** 2 + dxyz[1] ** 2 + dxyz[2] ** 2) ** 0.5
 
-        log = self.get_logger()
-        log.error(f'[{label}] IK unreachable. Controlled frame '
-                  f"'{self.tip_frame}' vs '{self.base_frame}':")
-        log.error(f'  initial: {self._fmt(cur_xyz, cur_rpy)}')
-        log.error(f'  target:  {self._fmt(tgt_xyz, tgt_rpy)}')
-        log.error(f'  delta:   {self._fmt(dxyz, drpy)}  (translation dist={dist:.3f} m)')
+        log(f"[{label}] controlled '{self.tip_frame}' vs '{self.base_frame}':")
+        log(f'  current: {self._fmt(cur_xyz, cur_rpy)}')
+        log(f'  target:  {self._fmt(tgt_xyz, tgt_rpy)}')
+        log(f'  delta:   {self._fmt(dxyz, drpy)}  (translation dist={dist:.3f} m)')
+
+    def _log_ik_failure(self, label, target_pose):
+        """On IK failure, log current/target/delta (in base) at error level."""
+        self._log_pose_delta(f'{label} IK-UNREACHABLE', target_pose, error=True)
+
+    def _log_marker_in_camera(self, label):
+        """Debug: log the marker pose in the camera optical frame -- x/y are the centering error
+        (0 = centered), z the depth. Only meaningful during the visual approach."""
+        T = self._tf_matrix(self.camera_frame, self.marker_frame, max_age_s=self.marker_max_age)
+        if T is None:
+            self.get_logger().info(f'[{label}] marker not in camera view')
+            return
+        p = T[:3, 3]
+        rpy = [np.degrees(a) for a in euler_from_matrix(T)]
+        self.get_logger().info(
+            f"[{label}] marker in '{self.camera_frame}': "
+            f'centering err x={p[0] * 1000:+.1f} y={p[1] * 1000:+.1f} mm, depth z={p[2]:.3f} m, '
+            f'rpy=[{rpy[0]:.1f}, {rpy[1]:.1f}, {rpy[2]:.1f}] deg')
 
     def move_tool0_to(self, tool0_pose, label):
         """IK + execute a tool0 pose. Returns bool."""
+        if self.debug:
+            self._log_pose_delta(label, tool0_pose)
         joints = self.solve_ik(tool0_pose, self._current_joints())
         if joints is None:
             self._log_ik_failure(label, tool0_pose)
@@ -497,6 +522,8 @@ class PickPlace(Node):
         T_base_marker = self._acquire_marker()
         if T_base_marker is None:
             return False
+        if self.debug:
+            self._log_marker_in_camera('align+center')
         d = self._camera_marker_distance(T_base_marker)
         if d is None:
             self.get_logger().error(f'Camera frame {self.camera_frame} not in tf.')
@@ -519,6 +546,8 @@ class PickPlace(Node):
                 self.get_logger().error(f'Camera frame {self.camera_frame} not in tf.')
                 return False
             self.get_logger().info(f'  iter {i}: camera-marker distance = {d:.3f} m')
+            if self.debug:
+                self._log_marker_in_camera(f'approach iter {i}')
             if d <= self.servo_standoff + 1e-3:
                 self.get_logger().info(f'Reached standoff ({self.servo_standoff:.3f} m).')
                 return True

@@ -95,3 +95,9 @@ move_timeout_s: 60.0             # give up waiting on a trajectory result after 
                                  # accepted even if External Control isn't playing / speed=0)
 settle_s: 0.5
 confirm_each_step: true          # prompt before each motion (recommended on real HW)
+
+# ---- Debug ----
+# Print, per arm move, the controlled frame's current/target/delta pose (in base), and during the
+# visual approach the marker's pose in the camera frame (x/y = centering error, z = depth).
+# Also overridable on the command line: --ros-args -p debug:=true
+debug: false

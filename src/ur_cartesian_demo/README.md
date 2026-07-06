@@ -120,11 +120,12 @@ ros2 launch ur_cartesian_demo cartesian_pose_demo.launch.py \
 
 > **Motion frames:** each name in `motion_frames` is looked up in tf relative to
 > `reference_frame` to get its axes, then both the linear and angular deltas are expressed in
-> those axes. `world` gives fixed base-axis motion; `tool0` gives motion about the controlled
-> tool frame (Z out the tool). Prefer `tool0` over `flange` — `flange` shares tool0's origin
-> and Z, but its X/Y are rotated 90° about the tool axis, so flange X/Y moves won't match the
-> TCP. If a frame isn't found in tf, the demo warns and falls back to `reference_frame` axes.
-> Test a single frame with e.g. `-p motion_frames:="['tool0']"`.
+> those axes. `world` gives fixed base-axis motion; `tool0` (the default controlled frame, and
+> the controller's all-zeros TCP that matches the pendant) gives motion about the tool frame
+> (Z out the tool). Avoid `flange` as the tip/motion frame — it shares tool0's origin and Z but
+> its X/Y are rotated 90° about the tool axis, so flange X/Y moves won't match the pendant TCP.
+> If a frame isn't found in tf, the demo warns and falls back to `reference_frame` axes. Test a
+> single frame with e.g. `-p motion_frames:="['tool0']"`.
 
 ## Verify it works
 

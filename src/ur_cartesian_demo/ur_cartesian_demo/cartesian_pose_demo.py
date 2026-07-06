@@ -89,11 +89,12 @@ class CartesianPoseDemo(Node):
             'planning_group', 'ur_manipulator').value
         self.reference_frame = self.declare_parameter(
             'reference_frame', 'base_link').value
-        self.tip_frame = self.declare_parameter('tip_frame', 'flange').value
+        self.tip_frame = self.declare_parameter('tip_frame', 'tool0').value
         # Frames whose axes define the +/- X/Y/Z/R/P/Y deltas. The sequence runs once each.
-        # 'flange' is the controlled frame (matches the pendant). 'world' is the fixed base ref.
+        # 'tool0' is the controlled frame (the controller's all-zeros TCP, matches the pendant).
+        # 'world' is the fixed base ref.
         self.motion_frames = self.declare_parameter(
-            'motion_frames', ['world', 'flange']).value
+            'motion_frames', ['world', 'tool0']).value
         self.joint_names = self.declare_parameter('joint_names', UR_JOINTS).value
         self.controller_action = self.declare_parameter(
             'controller_action',

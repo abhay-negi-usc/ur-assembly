@@ -76,6 +76,26 @@ reacquire_timeout_s: 2.0        # wait this long for a fresh marker before retra
 reacquire_retract_m: 0.01       # retract tool0 by this along -Z when the marker isn't visible
 reacquire_max_retries: 5        # give up (abort) after this many retract-and-retry attempts
 
+# ---- Reaching the grasp: blind pick vs. closed-loop visual servo ----
+# After the visual approach estimates the grasp at the standoff, EITHER:
+#   blind_pick: true  -> return to the initial (home) pose, then execute the grasp OPEN-LOOP from
+#                        the memorized estimate. The object is assumed static and the marker is NOT
+#                        observed again (it's typically occluded by the gripper during the final
+#                        approach). Goes to the grasp stand-off (approach_distance_m along
+#                        approach_axis) first, then the grasp.
+#   blind_pick: false -> closed-loop visual servo: step tool0 toward the grasp-align, then the
+#                        grasp, re-reading the marker and correcting each iteration. The final
+#                        grasp finishes open-loop if the marker is lost near contact.
+blind_pick: false
+
+# Closed-loop visual servo control law (used only when blind_pick is false):
+servo_gain: 0.5                  # fraction of the remaining pose error to close each iteration
+servo_max_linear_step_m: 0.03   # per-iteration translation clamp (safety)
+servo_max_angular_step_deg: 20.0  # per-iteration rotation clamp (safety)
+servo_pos_deadband_m: 0.003     # within this position error -> converged (stop servoing)
+servo_ang_deadband_deg: 1.0     # within this orientation error -> converged
+# (servo_max_iterations above also caps the servo convergence loop.)
+
 # ---- Place = pick pose shifted by this offset (in the BASE frame) ----
 place_offset_xyz: [0.0, 0.0, 0.0]    # zero = place at the pick location
 place_offset_rpy: [0.0, 0.0, 0.0]

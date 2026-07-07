@@ -24,11 +24,26 @@ Sequence:
 2. **align + center** the camera on the marker (face it head-on, no depth change)
 3. **approach**: discrete `servo_step_m` steps toward the marker — re-detecting and re-centering
    each step — until the camera is within `servo_standoff_m`
-4. **grasp-align**: recompute the grasp from the close view, move to the grasp stand-off
-   (`approach_distance_m` from the grasp)
-5. **grasp**
+4. **estimate** the grasp from the close, accurate view
+5. **reach the grasp** — one of two modes (`blind_pick`):
+   - **closed-loop servo** (`blind_pick: false`, default): step `tool0` toward the grasp-align
+     then the grasp, re-reading the marker and correcting each iteration; the final grasp finishes
+     open-loop if the marker is lost near contact.
+   - **blind pick** (`blind_pick: true`): return to the initial pose, then grasp **open-loop** from
+     the memorized estimate (object assumed static; the marker is *not* looked at again, since the
+     gripper usually occludes it during the final approach). Goes to the grasp stand-off
+     (`approach_distance_m` along `approach_axis`) first, then the grasp.
 6. **pick & place**: `close → lift → pre-place → place → open`
 7. **home** (`retreat → return home`, the joint configuration captured at start)
+
+### Blind pick vs. closed-loop servo
+
+- **Closed-loop** is most accurate when the marker stays visible all the way in — it corrects for
+  calibration/detection error continuously. Tuned by `servo_gain`, `servo_max_linear_step_m`,
+  `servo_max_angular_step_deg`, and the `servo_*_deadband` convergence thresholds.
+- **Blind pick** is the robust choice when the marker gets occluded during the final approach (e.g.
+  a top grasp where the gripper covers the marker): it gathers a good estimate up close, backs off
+  to a known-safe home, and executes the pre-planned grasp without needing to see the marker again.
 
 **Visual approach (steps 2–3):** at each iteration the camera is placed directly in front of the
 marker, facing it head‑on, at a target distance along the marker normal (that pose is back‑solved
@@ -81,6 +96,9 @@ Everything is in [config/pick_place.yaml](config/pick_place.yaml):
 | `servo_standoff_m` / `servo_step_m` | visual approach: stop distance / step size (camera↔marker) | 0.15 / 0.05 m |
 | `servo_cam_rpy_in_marker` / `servo_max_iterations` | desired camera orientation in marker frame / step cap | [π,0,0] / 20 |
 | `marker_max_age_s` / `reacquire_*` | staleness threshold / retract-and-retry on marker lost | 0.5 s / 1 cm / 5 |
+| `blind_pick` | estimate up close → home → grasp open-loop (vs. closed-loop servo) | false |
+| `servo_gain` / `servo_max_linear_step_m` / `servo_max_angular_step_deg` | closed-loop servo law + per-step clamps | 0.5 / 0.03 m / 20° |
+| `servo_pos_deadband_m` / `servo_ang_deadband_deg` | closed-loop convergence thresholds | 3 mm / 1° |
 | `move_duration_s`, `settle_s`, `confirm_each_step` | timing + safety | 4 s, 0.5 s, true |
 | `debug` | print per-move current/target/delta poses + marker centering error | false |
 

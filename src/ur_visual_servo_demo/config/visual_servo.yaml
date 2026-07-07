@@ -1,0 +1,53 @@
+# Eye-in-hand position-based visual servoing (PBVS) configuration.
+#
+# The control loop repeatedly:
+#   1. reads the marker pose in base (needs ur_vision_demo + ur_tf_demo),
+#   2. computes the DESIRED camera pose = directly in front of the marker, facing it, at
+#      standoff_m along the marker normal,
+#   3. steps the camera a clamped fraction (gain) of the way there (IK for tool0 + a short
+#      trajectory), so the arm converges on -- and then tracks -- that desired pose.
+#
+# Move the marker and the arm follows. When the marker leaves view, the arm HOLDS (stops moving).
+
+# ---- Frames ----
+base_frame: base_link
+tip_frame: tool0                 # IK/control frame (controller all-zeros TCP, matches the pendant)
+camera_frame: camera1_color_optical_frame   # optical frame the marker is detected in
+
+# ---- Marker ----
+marker:
+  id: 0                          # SET to your marker id (ur_vision_demo publishes camera1_marker_<id>)
+  frame: ""                      # default: camera1_marker_<id>; set to override
+
+# ---- Desired camera pose relative to the marker ----
+standoff_m: 0.20                 # desired camera->marker distance (hold point)
+# Desired camera orientation expressed in the MARKER frame. [pi, 0, 0] = optical axis facing the
+# marker head-on (marker X->cam X, Y->cam -Y, Z->cam -Z). Assumes marker +Z faces the camera.
+cam_rpy_in_marker: [3.14159, 0.0, 0.0]
+
+# ---- Control law (proportional, clamped) ----
+gain: 0.4                        # fraction of the remaining pose error to close each iteration
+max_linear_step_m: 0.02          # clamp the per-iteration translation (safety)
+max_angular_step_deg: 15.0       # clamp the per-iteration rotation (safety)
+pos_deadband_m: 0.005            # within this, consider centered -> HOLD (no move), avoids jitter
+ang_deadband_deg: 1.5            # within this, consider squared -> HOLD
+
+# ---- Loop / motion ----
+rate_hz: 2.0                     # servo loop rate
+move_duration_s: 0.8             # time per corrective trajectory (short = responsive)
+move_timeout_s: 10.0             # give up waiting on a trajectory result after this
+settle_s: 0.0                    # optional pause after each corrective move
+
+# ---- Marker freshness ----
+marker_max_age_s: 0.5            # a marker tf older than this = "not in view" (tf2 caches the last one)
+
+# ---- IK ----
+ik_timeout_s: 2.0
+ik_attempts: 12                  # retry /compute_ik with random seeds (KDL is a local solver)
+avoid_collisions: false          # no planning scene here; collision checks only cause spurious fails
+
+# ---- Safety ----
+controller_action: /scaled_joint_trajectory_controller/follow_joint_trajectory
+confirm_start: true              # prompt once before the loop begins (recommended on real HW)
+confirm_each_move: false         # prompt before EVERY corrective move (cautious first run; not true servoing)
+max_iterations: 0                # 0 = run until Ctrl-C; >0 = stop after this many loop iterations

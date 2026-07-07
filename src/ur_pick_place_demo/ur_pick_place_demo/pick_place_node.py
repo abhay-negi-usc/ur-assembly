@@ -8,10 +8,17 @@ scaled_joint_trajectory_controller; gripper via the ParallelGripperCommand actio
   2. Visual approach: align + center the camera on the marker, then take discrete steps toward it
      -- re-detecting and re-centering each step -- until a standoff distance. If the marker leaves
      view, back off along tool0 -Z and retry.
-  3. At the standoff, recompute the grasp from the close (accurate) view:
+  3. At the standoff, estimate the grasp from the close (accurate) view:
        T_base_object = T_base_marker * inv(T_object_marker)
        T_base_grasp  = T_base_object * T_object_grasp     (grasp-TCP target in base)
-     then run: grasp-align -> grasp -> close -> lift -> pre-place -> place -> open -> retreat -> home
+  4. Reach the grasp, one of two modes (blind_pick):
+       false -> CLOSED-LOOP visual servo: step tool0 toward the grasp-align then the grasp,
+                re-reading the marker and correcting each iteration (finishes open-loop if the
+                marker is lost near contact).
+       true  -> BLIND PICK: return to the initial pose, then grasp OPEN-LOOP from the memorized
+                estimate (object assumed static; marker not observed again -- it's usually
+                occluded during the final approach). Stand-off before grasp along approach_axis.
+  5. Then: close -> lift -> pre-place -> place -> open -> retreat -> home.
 
 The grasp pose is expressed for a grasp-TCP between the fingers; since IK solves for tool0, each
 grasp-TCP target is converted to a tool0 target via inv(grasp_tcp_offset).
@@ -39,7 +46,7 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 import tf2_ros
 from tf_transformations import (
     euler_from_matrix, euler_from_quaternion, euler_matrix, quaternion_from_matrix,
-    quaternion_matrix)
+    quaternion_matrix, quaternion_slerp)
 
 from control_msgs.action import FollowJointTrajectory, ParallelGripperCommand
 from moveit_msgs.srv import GetPositionIK
@@ -133,6 +140,16 @@ class PickPlace(Node):
         self.reacquire_timeout = float(c.get('reacquire_timeout_s', 2.0))
         self.reacquire_retract = float(c.get('reacquire_retract_m', 0.01))
         self.reacquire_max_retries = int(c.get('reacquire_max_retries', 5))
+
+        # Blind pick: servo in only to ESTIMATE the grasp, return home, then grasp open-loop.
+        self.blind_pick = bool(c.get('blind_pick', False))
+        # Closed-loop visual servo to the grasp (used when blind_pick is false).
+        self.servo_gain = float(c.get('servo_gain', 0.5))
+        self.servo_max_lin = float(c.get('servo_max_linear_step_m', 0.03))
+        self.servo_max_ang = np.radians(float(c.get('servo_max_angular_step_deg', 20.0)))
+        self.servo_pos_deadband = float(c.get('servo_pos_deadband_m', 0.003))
+        self.servo_ang_deadband = np.radians(float(c.get('servo_ang_deadband_deg', 1.0)))
+
         self.T_base_grasp = np.eye(4)   # updated from the marker each observation
 
         g = c.get('gripper', {})
@@ -425,13 +442,14 @@ class PickPlace(Node):
         return ans.strip().lower() != 'q'
 
     # ------------------------------------------------------ grasp pose helpers
-    def _update_grasp_from_marker(self, T_base_marker, label='marker'):
+    def _update_grasp_from_marker(self, T_base_marker, label='marker', quiet=False):
         """Recompute the grasp-TCP target in base from an observed marker pose."""
         T_base_object = T_base_marker @ np.linalg.inv(self.T_object_marker)
         self.T_base_grasp = T_base_object @ self.T_object_grasp
-        p = self.T_base_grasp[:3, 3]
-        self.get_logger().info(
-            f'Grasp target (base) [{label}]: x={p[0]:.3f} y={p[1]:.3f} z={p[2]:.3f}')
+        if not quiet:
+            p = self.T_base_grasp[:3, 3]
+            self.get_logger().info(
+                f'Grasp target (base) [{label}]: x={p[0]:.3f} y={p[1]:.3f} z={p[2]:.3f}')
 
     # Grasp/lift/place are derived from self.T_base_grasp on demand, so a standoff refine that
     # updates self.T_base_grasp automatically feeds the grasp, lift and place moves.
@@ -569,6 +587,91 @@ class PickPlace(Node):
         self._update_grasp_from_marker(T_base_marker, label='standoff')
         return True
 
+    # ------------------------- closed-loop visual servo to the grasp (blind_pick = false)
+    @staticmethod
+    def _pose_error(T_cur, T_des):
+        """(linear error [m], angular error [rad]) between two 4x4 poses."""
+        lin = float(np.linalg.norm(T_des[:3, 3] - T_cur[:3, 3]))
+        q_cur = quaternion_from_matrix(T_cur)
+        q_des = quaternion_from_matrix(T_des)
+        dot = min(1.0, abs(float(np.dot(q_cur, q_des))))
+        return lin, float(2.0 * np.arccos(dot))
+
+    def _interpolate_pose(self, T_cur, T_des):
+        """Step a clamped `servo_gain` fraction from T_cur toward T_des (translation + slerp)."""
+        p_cur, p_des = T_cur[:3, 3], T_des[:3, 3]
+        step = (p_des - p_cur) * self.servo_gain
+        n = np.linalg.norm(step)
+        if n > self.servo_max_lin:
+            step = step / n * self.servo_max_lin
+        q_cur = quaternion_from_matrix(T_cur)
+        q_des = quaternion_from_matrix(T_des)
+        dot = min(1.0, abs(float(np.dot(q_cur, q_des))))
+        ang = 2.0 * np.arccos(dot)
+        frac = 0.0 if ang < 1e-6 else min(self.servo_gain, self.servo_max_ang / ang)
+        T_new = quaternion_matrix(quaternion_slerp(q_cur, q_des, frac))
+        T_new[:3, 3] = p_cur + step
+        return T_new
+
+    def _grasp_align_target(self, T_base_marker):
+        """tool0 target (4x4) for the grasp stand-off, recomputed from a fresh marker."""
+        self._update_grasp_from_marker(T_base_marker, quiet=True)
+        return self._pre_grasp_pose() @ np.linalg.inv(self.T_tool0_grasp)
+
+    def _grasp_target(self, T_base_marker):
+        """tool0 target (4x4) for the grasp, recomputed from a fresh marker."""
+        self._update_grasp_from_marker(T_base_marker, quiet=True)
+        return self.T_base_grasp @ np.linalg.inv(self.T_tool0_grasp)
+
+    def _visual_servo_to_tool0(self, target_fn, label, finish_on_loss=False):
+        """Closed-loop PBVS: step tool0 toward the target (recomputed from a fresh marker each
+        iteration) until within the pose deadband. target_fn(T_base_marker) -> 4x4 tool0 target.
+        If the marker is lost: retract+retry, or (finish_on_loss) finish open-loop to the last
+        target -- used for the final grasp where the gripper may occlude the marker."""
+        last_target = None
+        for i in range(self.servo_max_iterations):
+            T_base_marker = self.lookup_marker(
+                timeout_s=self.reacquire_timeout, max_age_s=self.marker_max_age)
+            if T_base_marker is None:
+                if finish_on_loss and last_target is not None:
+                    self.get_logger().warn(
+                        f'[{label}] marker lost; finishing OPEN-LOOP to the last target.')
+                    return self.move_tool0_to(matrix_to_pose(last_target), f'{label} open-loop')
+                self.get_logger().warn(
+                    f'[{label}] marker not in view; retracting '
+                    f'{self.reacquire_retract * 100:.1f} cm along tool0 -Z.')
+                if not self._retract_tool0_z(-self.reacquire_retract):
+                    return False
+                continue
+            T_target = target_fn(T_base_marker)
+            last_target = T_target
+            T_cur = self._tf_matrix(self.base_frame, self.tip_frame)
+            if T_cur is None:
+                self.get_logger().error(f'No {self.base_frame} -> {self.tip_frame} tf.')
+                return False
+            lin, ang = self._pose_error(T_cur, T_target)
+            self.get_logger().info(
+                f'[{label}] iter {i}: err lin={lin * 1000:.1f} mm ang={np.degrees(ang):.1f} deg')
+            if self.debug:
+                self._log_pose_delta(f'{label} iter {i}', matrix_to_pose(T_target))
+            if lin <= self.servo_pos_deadband and ang <= self.servo_ang_deadband:
+                self.get_logger().info(f'[{label}] converged.')
+                return True
+            if not self._confirm(f'{label} servo step (err {lin * 1000:.0f} mm)'):
+                self.get_logger().info('Aborted by user.')
+                return False
+            T_cmd = self._interpolate_pose(T_cur, T_target)
+            joints = self.solve_ik(matrix_to_pose(T_cmd), self._current_joints())
+            if joints is None:
+                self._log_ik_failure(f'{label} servo', matrix_to_pose(T_cmd))
+                return False
+            if not self.send_joints(joints):
+                return False
+            self._sleep(self.settle_s)
+        self.get_logger().warn(
+            f'[{label}] hit max servo iterations ({self.servo_max_iterations}); proceeding.')
+        return True
+
     # ----------------------------------------------------------------- run
     def _do(self, label, fn):
         """Confirm (if enabled), run fn, report. Returns fn's success (False also on abort)."""
@@ -583,21 +686,44 @@ class PickPlace(Node):
     def run(self):
         home_joints = self._current_joints()
 
-        ok = (
-            # 1-3: detect, align/center, then step in to the visual standoff.
+        # Common approach: detect -> align/center -> visually servo the camera in to the standoff
+        # -> estimate the grasp from that close view (memorized in self.T_base_grasp).
+        if not (
             self._do('open gripper', lambda: self.gripper_to(self.gripper_open, 'open'))
             and self._do('detect + align/center marker', self._align_and_center)
             and self._approach_to_standoff()
-            # 4: recompute the grasp from the close view, then go to the grasp-align pose.
-            and self._do('update grasp @ standoff', self._update_grasp_at_standoff)
-            and self._do('move to grasp-align (pre-grasp)',
-                         lambda: self.move_grasp_tcp_to(self._pre_grasp_pose(), 'grasp-align'))
-            # 5: grasp.
-            and self._do('move to grasp',
-                         lambda: self.move_grasp_tcp_to(self.T_base_grasp, 'grasp'))
-            # 6: pick up and place down.
-            and self._do('close gripper (grasp)',
-                         lambda: self.gripper_to(self.gripper_closed, 'close'))
+            and self._do('estimate grasp @ standoff', self._update_grasp_at_standoff)
+        ):
+            return False
+
+        # Reach the grasp. BLIND PICK: return to the initial pose, then execute the grasp
+        # OPEN-LOOP from the memorized estimate (the marker may be occluded during final approach,
+        # so we don't look again). Otherwise: closed-loop visual servo all the way in.
+        if self.blind_pick:
+            grasp_ok = (
+                self._do('return to initial pose (blind)',
+                         lambda: self.send_joints(home_joints))
+                and self._do('move to grasp-align (blind, open-loop)',
+                             lambda: self.move_grasp_tcp_to(self._pre_grasp_pose(), 'grasp-align'))
+                and self._do('move to grasp (blind, open-loop)',
+                             lambda: self.move_grasp_tcp_to(self.T_base_grasp, 'grasp'))
+            )
+        else:
+            grasp_ok = (
+                self._do('visual-servo to grasp-align',
+                         lambda: self._visual_servo_to_tool0(
+                             self._grasp_align_target, 'grasp-align'))
+                and self._do('visual-servo to grasp',
+                             lambda: self._visual_servo_to_tool0(
+                                 self._grasp_target, 'grasp', finish_on_loss=True))
+            )
+        if not grasp_ok:
+            return False
+
+        # Pick up and place down, then home.
+        ok = (
+            self._do('close gripper (grasp)',
+                     lambda: self.gripper_to(self.gripper_closed, 'close'))
             and self._do('lift', lambda: self.move_grasp_tcp_to(self._lift_pose(), 'lift'))
             and self._do('move to pre-place',
                          lambda: self.move_grasp_tcp_to(self._pre_place_pose(), 'pre-place'))
@@ -607,7 +733,6 @@ class PickPlace(Node):
                          lambda: self.gripper_to(self.gripper_open, 'open'))
             and self._do('retreat',
                          lambda: self.move_grasp_tcp_to(self._pre_place_pose(), 'retreat'))
-            # 7: home.
             and self._do('return home', lambda: self.send_joints(home_joints))
         )
         if ok:

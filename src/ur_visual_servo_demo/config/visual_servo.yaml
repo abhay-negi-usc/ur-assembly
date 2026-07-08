@@ -16,11 +16,11 @@ camera_frame: camera1_color_optical_frame   # optical frame the marker is detect
 
 # ---- Marker ----
 marker:
-  id: 0                          # SET to your marker id (ur_vision_demo publishes camera1_marker_<id>)
+  id: 11                          # SET to your marker id (ur_vision_demo publishes camera1_marker_<id>)
   frame: ""                      # default: camera1_marker_<id>; set to override
 
 # ---- Desired camera pose relative to the marker ----
-standoff_m: 0.20                 # desired camera->marker distance (hold point)
+standoff_m: 0.10                 # desired camera->marker distance (hold point)
 # Desired camera orientation expressed in the MARKER frame. [pi, 0, 0] = optical axis facing the
 # marker head-on (marker X->cam X, Y->cam -Y, Z->cam -Z). Assumes marker +Z faces the camera.
 cam_rpy_in_marker: [3.14159, 0.0, 0.0]

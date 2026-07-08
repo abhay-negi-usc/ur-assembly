@@ -32,4 +32,4 @@ cameras:
   - parent_frame: tool0
     camera_frame: camera1_color_optical_frame
     xyz: [0.0, -0.080, 0.031]
-    rpy: [0.0, 0.0, 3.14159]
+    rpy: [0.0, 0.0, 0.0]

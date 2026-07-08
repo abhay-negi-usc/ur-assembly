@@ -21,7 +21,7 @@ avoid_collisions: false          # this demo sets up no planning scene; collisio
 
 # ---- Marker / object ----
 marker:
-  id: 5
+  id: 11
   dictionary: DICT_4X4_50        # informational here; detection is done by ur_vision_demo
   size_m: 0.0203                 # informational; the detector uses ur_vision_demo/cameras.yaml
   frame: ""                      # default: camera1_marker_<id>; set to override
@@ -36,8 +36,8 @@ object_marker:
 # rpy [pi, 0, 0] = 180 deg roll about the object X (flips the grasp frame's Z/Y to approach
 # from the opposite side).
 object_grasp:
-  xyz: [0.0, 0.0, 0.0]
-  rpy: [3.14159, 0.0, 3.14159]
+  xyz: [0.0, 0.0, -0.0225]
+  rpy: [-1.5708, 0.0, 0.0]
 
 # ---- Gripper TCP ----
 # The grasp point between the fingers, relative to the tip_frame (tool0). +Z is along the
@@ -48,7 +48,7 @@ grasp_tcp_offset:
   rpy: [0.0, 0.0, 0.0]
 
 # ---- Pick approach / retreat ----
-approach_distance_m: 0.10        # pre-grasp stand-off
+approach_distance_m: 0.200        # pre-grasp stand-off
 approach_axis: [0.0, 0.0, -1.0]   # in the GRASP frame (+Z = stand off along grasp +Z)
 lift_distance_m: 0.10            # lift after grasping
 lift_axis: [0.0, 0.0, 1.0]       # in the BASE frame (+Z = straight up)
@@ -62,7 +62,7 @@ lift_axis: [0.0, 0.0, 1.0]       # in the BASE frame (+Z = straight up)
 # NOTE: servo_standoff_m is the CAMERA-to-marker distance at which the visual approach stops.
 # approach_distance_m (below) is a separate thing: the grasp-align stand-off from the grasp pose.
 camera_frame: camera1_color_optical_frame   # optical frame the marker is detected in
-servo_standoff_m: 0.15          # stop the visual approach at this camera->marker distance
+servo_standoff_m: 0.060          # stop the visual approach at this camera->marker distance
 servo_step_m: 0.05              # discrete step size toward the marker
 # Desired camera orientation expressed in the MARKER frame. [pi, 0, 0] = optical axis facing the
 # marker head-on with matching left/right (marker X->cam X, Y->cam -Y, Z->cam -Z). Assumes the
@@ -71,7 +71,7 @@ servo_cam_rpy_in_marker: [3.14159, 0.0, 0.0]
 servo_max_iterations: 20        # safety cap on approach steps
 
 # If the marker leaves the camera view, back off along tool0 -Z and retry:
-marker_max_age_s: 0.5           # a marker tf older than this = "not in view" (tf2 caches the last one)
+marker_max_age_s: 60.0           # a marker tf older than this = "not in view" (tf2 caches the last one)
 reacquire_timeout_s: 2.0        # wait this long for a fresh marker before retracting
 reacquire_retract_m: 0.01       # retract tool0 by this along -Z when the marker isn't visible
 reacquire_max_retries: 5        # give up (abort) after this many retract-and-retry attempts
@@ -86,14 +86,14 @@ reacquire_max_retries: 5        # give up (abort) after this many retract-and-re
 #   blind_pick: false -> closed-loop visual servo: step tool0 toward the grasp-align, then the
 #                        grasp, re-reading the marker and correcting each iteration. The final
 #                        grasp finishes open-loop if the marker is lost near contact.
-blind_pick: false
+blind_pick: true
 
 # Closed-loop visual servo control law (used only when blind_pick is false):
-servo_gain: 0.5                  # fraction of the remaining pose error to close each iteration
+servo_gain: 1.0                  # fraction of the remaining pose error to close each iteration
 servo_max_linear_step_m: 0.03   # per-iteration translation clamp (safety)
 servo_max_angular_step_deg: 20.0  # per-iteration rotation clamp (safety)
-servo_pos_deadband_m: 0.003     # within this position error -> converged (stop servoing)
-servo_ang_deadband_deg: 1.0     # within this orientation error -> converged
+servo_pos_deadband_m: 0.010     # within this position error -> converged (stop servoing)
+servo_ang_deadband_deg: 5.0     # within this orientation error -> converged
 # (servo_max_iterations above also caps the servo convergence loop.)
 
 # ---- Place = pick pose shifted by this offset (in the BASE frame) ----

@@ -81,10 +81,10 @@ class VisualServo(Node):
     def __init__(self):
         super().__init__('visual_servo')
 
-        default_cfg = os.path.join(self._share_dir(), 'config', 'visual_servo.yaml')
-        cfg_path = self.declare_parameter('config_file', default_cfg).value
+        cfg_path = self.declare_parameter('config_file', self._default_config()).value
         with open(cfg_path, 'r') as f:
             c = yaml.safe_load(f) or {}
+        self.get_logger().info(f'Config: {cfg_path}')
 
         self.base_frame = c.get('base_frame', 'base_link')
         self.tip_frame = c.get('tip_frame', 'tool0')
@@ -130,9 +130,17 @@ class VisualServo(Node):
         self.traj_client = ActionClient(self, FollowJointTrajectory, self.controller_action)
 
     @staticmethod
-    def _share_dir():
+    def _default_config():
+        """Config path. Prefer the SOURCE yaml when running from a --symlink-install build, so
+        editing the yaml takes effect WITHOUT rebuilding (realpath resolves the symlinked module
+        back into src/). Fall back to the installed copy (plain build / no source present)."""
+        src = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.realpath(__file__)), '..', 'config', 'visual_servo.yaml'))
+        if os.path.isfile(src):
+            return src
         from ament_index_python.packages import get_package_share_directory
-        return get_package_share_directory('ur_visual_servo_demo')
+        return os.path.join(
+            get_package_share_directory('ur_visual_servo_demo'), 'config', 'visual_servo.yaml')
 
     def _joint_cb(self, msg):
         for name, pos in zip(msg.name, msg.position):
@@ -140,21 +148,37 @@ class VisualServo(Node):
 
     # --------------------------------------------------------------------- setup
     def setup(self):
-        self.get_logger().info('Waiting for /compute_ik, controller, joint_states...')
+        # Wait for each dependency separately and log which one, so a stall points at the culprit
+        # (the old single 'waiting for...' line couldn't say which check was blocking).
+        self.get_logger().info('[1/4] Waiting for /compute_ik service (move_group)...')
         if not self.ik_client.wait_for_service(timeout_sec=15.0):
             self.get_logger().error('/compute_ik unavailable (start move_group).')
             return False
+
+        self.get_logger().info(
+            f"[2/4] Waiting for controller action '{self.controller_action}'...")
         if not self.traj_client.wait_for_server(timeout_sec=15.0):
-            self.get_logger().error(f"'{self.controller_action}' unavailable.")
+            self.get_logger().error(
+                f"'{self.controller_action}' unavailable -- is scaled_joint_trajectory_controller "
+                'ACTIVE? Check: ros2 control list_controllers')
             return False
+
+        self.get_logger().info('[3/4] Waiting for /joint_states (all 6 UR joints)...')
         if not self._wait_joints(10.0):
-            self.get_logger().error('No /joint_states.')
+            have = sorted(self._joints)
+            self.get_logger().error(
+                f'No /joint_states with all 6 UR joints (have: {have}). Is the driver up?')
             return False
+
+        self.get_logger().info(
+            f'[4/4] Waiting for hand-eye tf {self.tip_frame} -> {self.camera_frame}...')
         if self._tf_matrix(self.tip_frame, self.camera_frame, timeout_s=5.0) is None:
             self.get_logger().error(
-                f'No {self.tip_frame} -> {self.camera_frame} tf. Is the hand-eye transform '
-                'published (ur_tf_demo)?')
+                f'No {self.tip_frame} -> {self.camera_frame} tf. Start ur_tf_demo '
+                '(publishes the hand-eye static transform).')
             return False
+
+        self.get_logger().info('All dependencies ready.')
         return True
 
     def _wait_joints(self, timeout_s):

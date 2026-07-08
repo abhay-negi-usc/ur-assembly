@@ -97,11 +97,10 @@ class PickPlace(Node):
     def __init__(self):
         super().__init__('pick_place')
 
-        default_cfg = os.path.join(
-            self._share_dir(), 'config', 'pick_place.yaml')
-        cfg_path = self.declare_parameter('config_file', default_cfg).value
+        cfg_path = self.declare_parameter('config_file', self._default_config()).value
         with open(cfg_path, 'r') as f:
             self.cfg = yaml.safe_load(f) or {}
+        self.get_logger().info(f'Config: {cfg_path}')
 
         c = self.cfg
         self.base_frame = c.get('base_frame', 'base_link')
@@ -180,9 +179,17 @@ class PickPlace(Node):
             self, ParallelGripperCommand, self.gripper_action_name)
 
     @staticmethod
-    def _share_dir():
+    def _default_config():
+        """Config path. Prefer the SOURCE yaml when running from a --symlink-install build, so
+        editing the yaml takes effect WITHOUT rebuilding (realpath resolves the symlinked module
+        back into src/). Fall back to the installed copy (plain build / no source present)."""
+        src = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.realpath(__file__)), '..', 'config', 'pick_place.yaml'))
+        if os.path.isfile(src):
+            return src
         from ament_index_python.packages import get_package_share_directory
-        return get_package_share_directory('ur_pick_place_demo')
+        return os.path.join(
+            get_package_share_directory('ur_pick_place_demo'), 'config', 'pick_place.yaml')
 
     @staticmethod
     def _xyzrpy(d):

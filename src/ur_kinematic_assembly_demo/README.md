@@ -7,8 +7,8 @@ or **admittance** control.
 
 ## What it does
 
-1. **Stand-off** — move so the held object is at the assembled pose backed off `standoff_distance_m`
-   along `standoff_axis` (in the assembled-object frame). Position-controlled.
+1. **Stand-off** — move so `tool0` is at the assembled pose backed off `standoff_distance_m`
+   along `standoff_axis` (in the assembled tool0 frame). Position-controlled.
 2. **Execute the assembly trajectory** — IK each CSV waypoint (chained seeds → continuous joint
    path) and run it, in the selected `control_mode`:
    - **position** — one multi-point `JointTrajectory` to `scaled_joint_trajectory_controller`.
@@ -17,19 +17,21 @@ or **admittance** control.
      arm yields to contact — with a **force-guarded stop** (`max_force_n` / `max_torque_nm`).
 3. **Wind-down** (optional, `return_home_after`) — retract to the stand-off, return home.
 
-### Frames
+### Frames — everything is TOOL0
 
-Config gives `held_object_pose` = held object w.r.t. `tool0`, and `assembled_pose` = held object in
-`base` when assembled. The CSV rows are held-object poses **relative to the assembled pose**
-(`T_assembled_held`). Each is commanded as `tool0 = T_base_assembled · T_assembled_held ·
-inv(held_object_pose)`.
+There is **no object frame to define**. `assembled_pose` is the **tool0** pose in base when
+assembled — the value you can poll directly. The CSV rows are **tool0** poses **relative to that
+assembled pose** (`T_assembled_tool0`), and each is commanded as
+`tool0 = assembled_pose · T_assembled_tool0`. (The part is still rigidly on the flange and rides
+along; you just author the path in tool0 terms, which is what you can measure.)
 
 ## Trajectory CSV
 
 [config/assembly_trajectory.csv](config/assembly_trajectory.csv) — columns `x,y,z,roll,pitch,yaw`
 (meters, radians unless `trajectory_angles_deg: true`), one waypoint per row, in order. Lines
-starting with `#` and a header row are ignored. Start near the stand-off; end at the assembled pose
-(last row ≈ all zeros). The bundled example is a 5 cm straight insertion along the assembled +Z.
+starting with `#` and a header row are ignored. Each row is a **tool0** pose relative to the
+assembled pose. Start near the stand-off; end at the assembled pose (last row ≈ all zeros). The
+bundled example is a 5 cm straight insertion along the assembled tool0 +Z.
 
 ## Control mode
 
@@ -54,8 +56,8 @@ they apply reliably — this isn't the pre‑Humble "params on /controller_manag
 
 This demo uses **no vision and no gripper** — don't launch `ur_vision_demo`, `ur_tf_demo`, or the
 gripper bringup. With the gripper and camera physically removed, bring up the **bare arm**. `tool0`
-is the flange TCP, which is exactly what `held_object_pose` is referenced to (the attached part
-never enters the kinematic chain — it lives only in config).
+is the flange TCP — the frame the whole demo is authored in (`assembled_pose` and the trajectory are
+all tool0 poses), so the attached part never enters the kinematic chain.
 
 ### One command (recommended)
 
@@ -122,9 +124,8 @@ ros2 run ur_kinematic_assembly_demo kinematic_assembly     # prompts render unde
 
 | Param | Meaning |
 |---|---|
-| `held_object_pose` (xyz/rpy) | Held object w.r.t. `tool0` (ground truth) |
-| `assembled_pose` (xyz/rpy) | Held object in `base` when assembled (ground truth; trajectory end) |
-| `standoff_distance_m` / `standoff_axis` | Stand-off = assembled backed off along this (assembled frame) |
+| `assembled_pose` (xyz/rpy) | **tool0** pose in `base` when assembled (poll `base_link → tool0`; trajectory end) |
+| `standoff_distance_m` / `standoff_axis` | Stand-off = assembled backed off along this (assembled tool0 frame) |
 | `trajectory_csv` / `trajectory_angles_deg` | The waypoint CSV / whether its angles are degrees |
 | `control_mode` | `position` or `admittance` |
 | `waypoint_dt_s` | Time per trajectory segment |
@@ -155,10 +156,12 @@ ros2 run tf2_ros tf2_echo base_link tool0           # tool0 pose in base, ~1 Hz 
 ```
 Use `base` instead of `base_link` to match the pendant convention (they differ by 180° about Z).
 
-**From `tool0` to the assembled (held-object) pose:** `assembled_pose` in the yaml is the *held
-object* in base, not `tool0`. So the value to capture is
-`T_base_assembled = T_base_tool0 · held_object_pose`. When you poll a successful mate, compose the
-`tf2_echo` reading with your `held_object_pose` to get the number to paste into `assembled_pose`.
+**Paste it directly.** `assembled_pose` in the yaml **is** the `tool0` pose in base — the same thing
+`tf2_echo base_link tool0` prints — so at a successful mate just copy the reading straight into
+`assembled_pose` (xyz + the RPY). No object-to-tool0 conversion, nothing else to know.
+
+**Poll `base_link`, not `base`** — the yaml's `base_frame` is `base_link`, and `base` is rotated
+180° about Z from it; pasting a `base` reading would flip the assembled pose 180° about Z.
 
 **As a topic instead of a terminal read:** with the driver up, `ur_tf_demo` streams `base → tool` as
 a `PoseStamped`:

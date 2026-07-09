@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """Kinematic assembly demo for the UR10e (ROS2 Jazzy) -- no vision, no gripper.
 
-The object is rigidly attached to the flange; its pose w.r.t. tool0 is GROUND TRUTH from config
-(`held_object_pose`). The config also gives the ground-truth ASSEMBLED pose of the held object in
-base (`assembled_pose`) and an assembly TRAJECTORY (a CSV of held-object poses relative to the
-assembled pose). The robot:
+The object is rigidly attached to the flange, but the demo is expressed entirely in terms of
+TOOL0 -- you never need to define the object w.r.t. tool0. The config gives the ground-truth
+ASSEMBLED TOOL0 pose in base (`assembled_pose` -- just poll base_link->tool0 at a good mate and
+paste it) and an assembly TRAJECTORY (a CSV of tool0 poses relative to that assembled pose). The
+robot:
 
   1. moves to an assembly STAND-OFF (assembled pose backed off `standoff_distance_m` along
-     `standoff_axis`, in the assembled-object frame),
+     `standoff_axis`, in the assembled tool0 frame),
   2. executes the assembly trajectory (CSV waypoints -> IK -> joint motion), under either
      POSITION control (scaled_joint_trajectory_controller) or ADMITTANCE control (ros2_control
      admittance_controller, tunable, with an optional force-guarded stop),
   3. optionally retracts to the stand-off and returns home.
 
-Poses are commanded for the HELD OBJECT and converted to tool0 via inv(held_object_pose). IK is
-chained (each waypoint seeded from the previous) so the joint path is continuous.
+Each waypoint is  tool0 = assembled_pose * T_assembled_tool0(row). IK is chained (each waypoint
+seeded from the previous) so the joint path is continuous.
 """
 
 import csv
@@ -96,7 +97,8 @@ class KinematicAssembly(Node):
         self.ik_avoid_collisions = bool(c.get('avoid_collisions', False))
         self.joint_names = list(UR_JOINTS)
 
-        self.T_tool0_held = xyzrpy_to_matrix(**self._xyzrpy(c.get('held_object_pose', {})))
+        # assembled_pose is the TOOL0 pose in base at assembly -- poll base_link->tool0 at a good
+        # mate and paste it here (no need to know the object w.r.t. tool0).
         self.T_base_assembled = xyzrpy_to_matrix(**self._xyzrpy(c.get('assembled_pose', {})))
         self.standoff_dist = float(c.get('standoff_distance_m', 0.05))
         self.standoff_axis = np.array(c.get('standoff_axis', [0.0, 0.0, 1.0]), dtype=float)
@@ -220,7 +222,7 @@ class KinematicAssembly(Node):
 
     # ------------------------------------------------------------ trajectory / geometry
     def _load_trajectory(self):
-        """Read the CSV into a list of T_assembled_held 4x4 matrices, or None on error."""
+        """Read the CSV into a list of T_assembled_tool0 4x4 matrices, or None on error."""
         path = self.trajectory_csv
         if not os.path.isabs(path):
             cand = os.path.join(self._cfg_dir, path)
@@ -249,13 +251,12 @@ class KinematicAssembly(Node):
         self.get_logger().info(f'Loaded {len(mats)} trajectory waypoint(s) from {path}.')
         return mats
 
-    def _held_tool0_pose(self, T_assembled_held):
-        """tool0 Pose placing the held object at T_assembled_held (w.r.t. the assembled frame)."""
-        T_base_held = self.T_base_assembled @ T_assembled_held
-        return matrix_to_pose(T_base_held @ np.linalg.inv(self.T_tool0_held))
+    def _traj_tool0_pose(self, T_assembled_tool0):
+        """tool0 Pose for a waypoint expressed w.r.t. the assembled tool0 pose (assembled_pose)."""
+        return matrix_to_pose(self.T_base_assembled @ T_assembled_tool0)
 
     def _standoff_pose(self):
-        return self._held_tool0_pose(translation_matrix(self.standoff_axis * self.standoff_dist))
+        return self._traj_tool0_pose(translation_matrix(self.standoff_axis * self.standoff_dist))
 
     # --------------------------------------------------------------------- IK
     def solve_ik(self, tool0_pose, seed):
@@ -480,7 +481,7 @@ class KinematicAssembly(Node):
         traj_mats = self._load_trajectory()
         if traj_mats is None:
             return False
-        traj_poses = [self._held_tool0_pose(m) for m in traj_mats]
+        traj_poses = [self._traj_tool0_pose(m) for m in traj_mats]
 
         # IK the stand-off + trajectory (chained seeds for a continuous joint path).
         standoff_pose = self._standoff_pose()

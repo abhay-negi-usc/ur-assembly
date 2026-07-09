@@ -1,14 +1,13 @@
 # Kinematic assembly demo configuration (no vision, no gripper).
 #
-# The object is rigidly attached to the flange. Everything is GROUND TRUTH from this file (poses)
-# plus a CSV trajectory -- there is no marker detection.
+# The object is rigidly attached to the flange, but EVERYTHING here is expressed in terms of TOOL0
+# -- you never define the object w.r.t. tool0. Ground truth from this file (poses) + a CSV
+# trajectory; there is no marker detection.
 #
 # Transform chain (xyz meters, rpy radians):
-#   T_tool0_held     = held_object_pose            # held object w.r.t. tool0 (ground truth)
-#   T_base_assembled = assembled_pose              # held object in base when assembled (ground truth)
-#   For a held-object pose H expressed w.r.t. the assembled frame (a CSV row, T_assembled_held):
-#       T_base_held  = T_base_assembled * H
-#       tool0 target = T_base_held * inv(T_tool0_held)
+#   T_base_assembled = assembled_pose      # TOOL0 pose in base when assembled (poll base_link->tool0)
+#   For a CSV row T_assembled_tool0 (tool0 w.r.t. the assembled tool0 pose):
+#       tool0 target = T_base_assembled * T_assembled_tool0
 
 # ---- Frames / IK / controller ----
 base_frame: base_link
@@ -19,24 +18,21 @@ ik_timeout_s: 2.0
 ik_attempts: 12
 avoid_collisions: false
 
-# ---- Ground-truth poses ----
-# Held object w.r.t. tool0 (how the part sits on the flange).
-held_object_pose:
-  xyz: [0.0, 0.0, 0.15]
-  rpy: [0.0, 0.0, 0.0]
-# Assembled pose: the held object's frame in base when fully assembled (trajectory END).
+# ---- Ground-truth assembled pose ----
+# TOOL0 pose in base when fully assembled (the trajectory END). Poll it directly: jog/drive the arm
+# to a good mate, then `ros2 run tf2_ros tf2_echo base_link tool0` and paste the reading here.
 assembled_pose:
   xyz: [0.5, 0.0, 0.2]
   rpy: [3.14159, 0.0, 0.0]
 
 # ---- Stand-off (pre-position before the trajectory) ----
-# The assembled pose backed off standoff_distance_m along standoff_axis (in the ASSEMBLED frame).
+# The assembled pose backed off standoff_distance_m along standoff_axis (in the assembled TOOL0 frame).
 standoff_distance_m: 0.05
 standoff_axis: [0.0, 0.0, 1.0]
 
 # ---- Assembly trajectory ----
-# CSV of held-object poses relative to the ASSEMBLED pose (T_assembled_held), one waypoint per row,
-# in execution order (start near the stand-off -> end at the assembled pose, i.e. last row ~all 0).
+# CSV of TOOL0 poses relative to the assembled pose (T_assembled_tool0), one waypoint per row, in
+# execution order (start near the stand-off -> end at the assembled pose, i.e. last row ~all 0).
 # Columns: x,y,z,roll,pitch,yaw. Lines starting with # and a header row are ignored.
 trajectory_csv: assembly_trajectory.csv
 trajectory_angles_deg: false     # true if the CSV roll/pitch/yaw are in degrees

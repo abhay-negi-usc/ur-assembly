@@ -50,12 +50,63 @@ The demo switches to it and back itself. The **tunable control parameters** live
 dynamic (not `read_only`) and `enable_parameter_update_without_reactivation` defaults to `true`, so
 they apply reliably — this isn't the pre‑Humble "params on /controller_manager" layout.
 
-## Prerequisites
+## Bring up the robot (no gripper, no camera)
 
-- Arm driver / bringup with `scaled_joint_trajectory_controller` **active** (pass this robot's
-  calibration — see `ur_gripper_bringup`).
-- `move_group` for `/compute_ik`.
-- (admittance only) `admittance_controller` loaded inactive; a live wrist F/T sensor.
+This demo uses **no vision and no gripper** — don't launch `ur_vision_demo`, `ur_tf_demo`, or the
+gripper bringup. With the gripper and camera physically removed, bring up the **bare arm**. `tool0`
+is the flange TCP, which is exactly what `held_object_pose` is referenced to (the attached part
+never enters the kinematic chain — it lives only in config).
+
+### One command (recommended)
+
+This package ships an arm-only bring-up that starts the driver **and** move_group (**and**,
+optionally, the admittance controller) with this robot's calibration wired in:
+
+```bash
+# position mode:
+ros2 launch ur_kinematic_assembly_demo arm_bringup.launch.py
+
+# admittance mode (also loads admittance_controller, inactive):
+ros2 launch ur_kinematic_assembly_demo arm_bringup.launch.py load_admittance:=true
+```
+Then **Play the External Control program on the pendant**.
+
+Args: `robot_ip` (192.168.125.2), `ur_type` (ur10e), `kinematics_params_file` (defaults to
+`ur_gripper_bringup`'s `ur10e_calibration.yaml`; **falls back to generic kinematics with a warning**
+if missing), `launch_moveit` (true), `load_admittance` (false), `launch_rviz` (false → MoveIt RViz).
+
+### Or step by step
+
+Let `CAL=$(ros2 pkg prefix ur_gripper_bringup)/share/ur_gripper_bringup/config/ur10e_calibration.yaml`
+(your extracted calibration — see `ur_gripper_bringup/README.md`).
+
+**1. Arm driver — arm only, with calibration** (brings up `scaled_joint_trajectory_controller` +
+`force_torque_sensor_broadcaster`):
+```bash
+ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur10e robot_ip:=192.168.125.2 \
+  kinematics_params_file:=$CAL
+# then Play the External Control program on the pendant
+```
+
+**2. move_group** (same calibration), for `/compute_ik`:
+```bash
+ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur10e kinematics_params_file:=$CAL
+```
+
+**3. (admittance mode only)** load the admittance controller inactive — see the section above.
+
+> Alternative one-shot for the arm: `ur_gripper_bringup` already defaults to the calibration — set
+> `gripper_enabled: false` in its `config/coupler.yaml` and launch it; it brings up **arm-only**
+> (omits the gripper from the URDF and its controllers).
+
+Sanity checks:
+```bash
+ros2 control list_controllers | grep scaled_joint_trajectory   # ...] active
+ros2 service list | grep compute_ik                            # present
+# admittance mode:
+ros2 control list_controllers | grep admittance                # loaded (inactive)
+ros2 topic echo /force_torque_sensor_broadcaster/wrench --once  # nonzero when you push the tool
+```
 
 ## Build & run
 

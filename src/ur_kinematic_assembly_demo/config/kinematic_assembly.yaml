@@ -30,7 +30,7 @@ assembled_pose:
 # held_object_pose: the held part w.r.t. tool0 (how it sits on the flange). Used to convert the
 # held-object-w.r.t-target trajectory into tool0 commands.
 held_object_pose:
-  xyz: [0.0, -0.060, 0.010]
+  xyz: [0.0, -0.089, 0.010]
   rpy: [-1.5708, 0.0, 0.0]
 
 # ---- Stand-off (pre-position before the trajectory) ----

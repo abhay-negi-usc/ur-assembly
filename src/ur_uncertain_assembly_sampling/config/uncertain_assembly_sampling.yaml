@@ -1,0 +1,101 @@
+# Uncertain assembly sampling configuration.
+#
+# Self-contained: holds the FULL kinematic-assembly config (same schema as
+# ur_kinematic_assembly_demo/config/kinematic_assembly.yaml -- this node subclasses that one) PLUS a
+# `sampling:` section. All trajectory is HELD OBJECT w.r.t. TARGET OBJECT.
+
+# ======================================================================================
+# Kinematic-assembly configuration (see ur_kinematic_assembly_demo for the transform chain)
+# ======================================================================================
+base_frame: base_link
+tip_frame: tool0
+planning_group: ur_manipulator
+controller_action: /scaled_joint_trajectory_controller/follow_joint_trajectory
+ik_timeout_s: 2.0
+ik_attempts: 12
+avoid_collisions: false
+
+# Ground truth: assembled_pose = TOOL0 in base at assembly (poll base_link->tool0); held_object_pose
+# = held part w.r.t. tool0 (converts the held-obj-vs-target trajectory into tool0 commands).
+assembled_pose:
+  xyz: [-0.103, -1.048, -0.068]
+  rpy: [-3.129, -0.011, -3.139]
+held_object_pose:
+  xyz: [0.0, -0.089, 0.010]
+  rpy: [-1.5708, 0.0, 0.0]
+
+# Stand-off = assembled held pose backed off along standoff_axis in the TARGET OBJECT frame.
+standoff_distance_m: 0.200
+standoff_axis: [0.0, 0.0, 1.0]
+
+# Ideal assembly trajectory: HELD-OBJECT poses w.r.t. the TARGET object; last row = assembled state.
+trajectory_csv: assembly_trajectory.csv
+trajectory_angles_deg: false
+
+# Sampling deliberately drives the perturbed part into contact -- ADMITTANCE is strongly recommended
+# (position control would rigidly jam a misaligned part). Requires admittance_controller loaded.
+control_mode: admittance
+
+# ---- Motion timing ----
+standoff_move_duration_s: 4.0
+waypoint_dt_s: 0.5               # time per (dense) waypoint segment
+settle_s: 0.2
+move_timeout_s: 120.0
+
+# ---- Admittance control (used only when control_mode == 'admittance') ----
+admittance:
+  controller: admittance_controller
+  position_controller: scaled_joint_trajectory_controller
+  switch_service: /controller_manager/switch_controller
+  reference_topic: /admittance_controller/joint_references
+  reference_rate_hz: 20.0
+  ft_zero_service: /io_and_status_controller/zero_ftsensor
+  tare_before: true             # re-tare F/T at each trial's disengaged start
+  apply_params: true
+  mass: [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+  damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  stiffness: [200.0, 200.0, 200.0, 15.0, 15.0, 15.0]
+  selected_axes: [true, true, true, true, true, true]
+  # The UR force_torque_sensor_broadcaster (Jazzy) publishes on the hardcoded ~/wrench in the
+  # 'tool0_controller' frame (its config's topic_name: ft_data is ignored -- the broadcaster has no
+  # such param). 'wrench_filtered' also exists (smoother). The sampling node reads the message's
+  # frame_id and transforms the wrench to tool0 (tool0_controller ~= tool0), then to the held frame.
+  wrench_topic: /force_torque_sensor_broadcaster/wrench
+  max_force_n: 10.0             # force-guarded stop of the chunk (0 disables)
+  max_torque_nm: 1.0            # torque-guarded stop (0 disables)
+
+confirm_each_step: false          # prompts at trial boundaries (set false for an unattended run)
+debug: false
+
+# ======================================================================================
+# Sampling configuration
+# ======================================================================================
+sampling:
+  num_trials: 20                 # repeat the perturbed-assembly + disassembly this many times
+  chunk_fraction: 0.2            # fraction of the assembly trajectory to execute (1 = full insert)
+
+  # Resample the ideal trajectory so consecutive waypoints are within these bounds (0 disables that
+  # axis of the check). Densifies the sparse CSV into fine steps for execution + logging.
+  translational_resolution_m: 0.001
+  rotational_resolution_deg: 1.0
+
+  # Perturbation of the held-obj-vs-target waypoints, applied in the TARGET-OBJECT frame
+  # (perturbed = bias @ noise @ ideal).
+  #   bias  = ONE uniform draw per trial (constant across the chunk) -- a systematic offset.
+  #   noise = a fresh uniform draw per waypoint -- jitter.
+  # Each is a per-dimension half-width [x, y, z, roll, pitch, yaw] of the uniform interval [-b, +b]
+  # (x/y/z in METERS, roll/pitch/yaw in DEGREES).
+  bias:  [0.001, 0.001, 0.000, 1.0, 1.0, 1.0]
+  noise: [0.0,   0.0,   0.0,   0.0, 0.0, 0.0]
+
+  # Disassembly snaps to the closest pose on the ideal trajectory, by a weighted translation +
+  # rotation metric:  cost = |Δtranslation|_mm + weight * |Δrotation|_deg. weight = mm per degree
+  # (1.0 -> 1 mm is worth 1 deg).
+  closest_pose_rot_weight_mm_per_deg: 1.0
+
+  random_seed: 0                 # 0 = nondeterministic; >0 seeds numpy for reproducible trials
+
+  # Data log STEM (flushed after each trial). Relative -> resolved from the current working
+  # directory. A _YYYYmmdd_HHMMSS timestamp is appended so each run gets a UNIQUE file, e.g.
+  # uncertain_assembly_log_20260709_143022.csv. Records ASSEMBLY only (not disassembly).
+  csv_path: uncertain_assembly_log.csv

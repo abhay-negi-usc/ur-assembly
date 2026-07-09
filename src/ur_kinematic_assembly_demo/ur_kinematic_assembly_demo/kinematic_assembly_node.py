@@ -84,10 +84,11 @@ def _duration(seconds):
 class KinematicAssembly(Node):
     """Ground-truth, trajectory-driven assembly under position or admittance control."""
 
-    def __init__(self):
-        super().__init__('kinematic_assembly')
+    def __init__(self, node_name='kinematic_assembly', default_config=None):
+        super().__init__(node_name)
 
-        cfg_path = self.declare_parameter('config_file', self._default_config()).value
+        cfg_path = self.declare_parameter(
+            'config_file', default_config or self._default_config()).value
         with open(cfg_path, 'r') as f:
             c = yaml.safe_load(f) or {}
         self.get_logger().info(f'Config: {cfg_path}')

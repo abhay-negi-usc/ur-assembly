@@ -15,7 +15,11 @@ or **admittance** control.
    - **admittance** — switch to the ros2_control `admittance_controller`, apply the tunable
      mass/damping/stiffness, tare the F/T, and stream the waypoints as joint references while the
      arm yields to contact — with a **force-guarded stop** (`max_force_n` / `max_torque_nm`).
-3. **Wind-down** (optional, `return_home_after`) — retract to the stand-off, return home.
+3. **Wind-down** — one of:
+   - **Disassembly** (`disassemble_after: true`) — run the trajectory in **reverse** (extraction, in
+     the same `control_mode`), then go to the stand-off, then the initial pose.
+   - **Simple retract** (`return_home_after: true`, if not disassembling) — straight to the stand-off,
+     then home.
 
 ### Frames — everything is TOOL0
 
@@ -129,7 +133,8 @@ ros2 run ur_kinematic_assembly_demo kinematic_assembly     # prompts render unde
 | `trajectory_csv` / `trajectory_angles_deg` | The waypoint CSV / whether its angles are degrees |
 | `control_mode` | `position` or `admittance` |
 | `waypoint_dt_s` | Time per trajectory segment |
-| `return_home_after` | Retract to stand-off + home when done |
+| `disassemble_after` | After assembling, run the trajectory in reverse (extraction) → stand-off → home |
+| `return_home_after` | If not disassembling, retract to stand-off + home when done |
 | `admittance.mass/damping_ratio/stiffness/selected_axes` | Tunable compliance (6-vectors) |
 | `admittance.apply_params` | Push those to the controller at runtime |
 | `admittance.max_force_n` / `max_torque_nm` | Force-guarded stop (0 disables) |

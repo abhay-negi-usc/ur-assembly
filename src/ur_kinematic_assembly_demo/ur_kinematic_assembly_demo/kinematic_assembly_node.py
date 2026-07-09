@@ -112,6 +112,9 @@ class KinematicAssembly(Node):
         self.settle_s = float(c.get('settle_s', 0.5))
         self.move_timeout = float(c.get('move_timeout_s', 120.0))
         self.return_home_after = bool(c.get('return_home_after', True))
+        # Disassembly: after assembling, run the trajectory in REVERSE (extraction), then stand-off,
+        # then the initial pose. Takes precedence over return_home_after (it also ends at home).
+        self.disassemble_after = bool(c.get('disassemble_after', False))
         self.confirm = bool(c.get('confirm_each_step', True))
         self.debug = (bool(c.get('debug', False))
                       or bool(self.declare_parameter('debug', False).value))
@@ -507,22 +510,30 @@ class KinematicAssembly(Node):
         if not self._confirm(f'execute assembly trajectory ({mode})'):
             self.get_logger().info('Aborted by user.')
             return False
-        try:
-            if self.control_mode == 'admittance':
-                ok = self.run_admittance(standoff_joints, waypoint_joints)
-            else:
-                ok = self.send_joint_trajectory(waypoint_joints, self.waypoint_dt, 'assembly')
-        finally:
-            if self._in_compliance:
-                self.get_logger().warn('Restoring position control (was left compliant).')
-                self._switch_to_position()
-        if not ok:
+        if not self._execute_trajectory(standoff_joints, waypoint_joints, 'assembly'):
             return False
         self._sleep(self.settle_s)
         self.get_logger().info('Assembly trajectory done.')
 
-        # 3. Wind-down.
-        if self.return_home_after:
+        # 3a. Optional DISASSEMBLY: reverse the trajectory (extraction) -> stand-off -> initial pose.
+        if self.disassemble_after:
+            reverse_targets = list(reversed(waypoint_joints))[1:]   # from assembled back to start
+            if not self._confirm(f'DISASSEMBLE: reverse trajectory ({mode})'):
+                self.get_logger().info('Aborted by user.')
+                return False
+            if not self._execute_trajectory(waypoint_joints[-1], reverse_targets, 'disassembly'):
+                return False
+            self._sleep(self.settle_s)
+            self.get_logger().info('Disassembly trajectory done.')
+            if not (self._confirm('retract to assembly stand-off')
+                    and self.send_joint_trajectory([standoff_joints], self.standoff_move_duration,
+                                                    'stand-off')
+                    and self._confirm('return to initial pose')
+                    and self.send_joint_trajectory([home_joints], self.standoff_move_duration,
+                                                    'home')):
+                return False
+        # 3b. Otherwise, optional simple wind-down: retract to stand-off -> home.
+        elif self.return_home_after:
             if not (self._confirm('retract to stand-off')
                     and self.send_joint_trajectory([standoff_joints], self.standoff_move_duration,
                                                     'retract')
@@ -530,8 +541,27 @@ class KinematicAssembly(Node):
                     and self.send_joint_trajectory([home_joints], self.standoff_move_duration,
                                                     'home')):
                 return False
+
         self.get_logger().info('Kinematic assembly complete.')
         return True
+
+    def _execute_trajectory(self, start_joints, target_joints, label):
+        """Run target_joints in the selected control mode. start_joints = the current config (the
+        admittance ramp start). Restores position control afterwards so the arm is never left
+        compliant. Returns bool; a no-op (True) if there are no targets."""
+        if not target_joints:
+            return True
+        ok = False
+        try:
+            if self.control_mode == 'admittance':
+                ok = self.run_admittance(start_joints, target_joints)
+            else:
+                ok = self.send_joint_trajectory(target_joints, self.waypoint_dt, label)
+        finally:
+            if self._in_compliance:
+                self.get_logger().warn('Restoring position control (was left compliant).')
+                self._switch_to_position()
+        return ok
 
 
 def main(args=None):

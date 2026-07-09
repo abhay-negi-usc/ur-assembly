@@ -47,7 +47,11 @@ settle_s: 0.5
 move_timeout_s: 120.0            # give up waiting on a trajectory result after this
 
 # ---- Wind-down ----
-return_home_after: true          # after the trajectory, retract to the stand-off and return home
+# After assembling, if disassemble_after is true: run the trajectory in REVERSE (extraction, in the
+# same control_mode), then go to the stand-off, then the initial pose. This takes precedence over
+# return_home_after. If disassemble_after is false, return_home_after just retracts stand-off -> home.
+disassemble_after: false
+return_home_after: true
 
 # ---- Admittance control (used only when control_mode == 'admittance') ----
 # Requires the ros2_control admittance_controller LOADED (inactive) -- see ur_admittance_demo.

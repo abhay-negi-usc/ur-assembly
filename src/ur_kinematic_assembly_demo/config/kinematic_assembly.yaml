@@ -1,0 +1,86 @@
+# Kinematic assembly demo configuration (no vision, no gripper).
+#
+# The object is rigidly attached to the flange. Everything is GROUND TRUTH from this file (poses)
+# plus a CSV trajectory -- there is no marker detection.
+#
+# Transform chain (xyz meters, rpy radians):
+#   T_tool0_held     = held_object_pose            # held object w.r.t. tool0 (ground truth)
+#   T_base_assembled = assembled_pose              # held object in base when assembled (ground truth)
+#   For a held-object pose H expressed w.r.t. the assembled frame (a CSV row, T_assembled_held):
+#       T_base_held  = T_base_assembled * H
+#       tool0 target = T_base_held * inv(T_tool0_held)
+
+# ---- Frames / IK / controller ----
+base_frame: base_link
+tip_frame: tool0                 # IK/control frame (matches the pendant; flange origin coincides)
+planning_group: ur_manipulator
+controller_action: /scaled_joint_trajectory_controller/follow_joint_trajectory
+ik_timeout_s: 2.0
+ik_attempts: 12
+avoid_collisions: false
+
+# ---- Ground-truth poses ----
+# Held object w.r.t. tool0 (how the part sits on the flange).
+held_object_pose:
+  xyz: [0.0, 0.0, 0.15]
+  rpy: [0.0, 0.0, 0.0]
+# Assembled pose: the held object's frame in base when fully assembled (trajectory END).
+assembled_pose:
+  xyz: [0.5, 0.0, 0.2]
+  rpy: [3.14159, 0.0, 0.0]
+
+# ---- Stand-off (pre-position before the trajectory) ----
+# The assembled pose backed off standoff_distance_m along standoff_axis (in the ASSEMBLED frame).
+standoff_distance_m: 0.05
+standoff_axis: [0.0, 0.0, 1.0]
+
+# ---- Assembly trajectory ----
+# CSV of held-object poses relative to the ASSEMBLED pose (T_assembled_held), one waypoint per row,
+# in execution order (start near the stand-off -> end at the assembled pose, i.e. last row ~all 0).
+# Columns: x,y,z,roll,pitch,yaw. Lines starting with # and a header row are ignored.
+trajectory_csv: assembly_trajectory.csv
+trajectory_angles_deg: false     # true if the CSV roll/pitch/yaw are in degrees
+
+# ---- Control mode ----
+control_mode: position           # 'position' or 'admittance'
+
+# ---- Motion timing ----
+standoff_move_duration_s: 4.0    # time for the free-space move to the stand-off
+waypoint_dt_s: 1.0               # time allotted per trajectory segment
+settle_s: 0.5
+move_timeout_s: 120.0            # give up waiting on a trajectory result after this
+
+# ---- Wind-down ----
+return_home_after: true          # after the trajectory, retract to the stand-off and return home
+
+# ---- Admittance control (used only when control_mode == 'admittance') ----
+# Requires the ros2_control admittance_controller LOADED (inactive) -- see ur_admittance_demo.
+# The trajectory is streamed as joint references while the arm yields to contact forces.
+admittance:
+  controller: admittance_controller
+  position_controller: scaled_joint_trajectory_controller
+  switch_service: /controller_manager/switch_controller
+  reference_topic: /admittance_controller/joint_references
+  reference_rate_hz: 20.0
+  ft_zero_service: /io_and_status_controller/zero_ftsensor
+  tare_before: true              # zero the wrist F/T just before switching to compliance
+
+  # Tunable control parameters (6-vectors [x, y, z, rx, ry, rz]). When apply_params is true these
+  # are set on the controller's node (/<controller>/set_parameters, param names admittance.*)
+  # BEFORE activating it. All four are dynamic (not read_only) and the admittance_controller has
+  # enable_parameter_update_without_reactivation=true by default, so they take effect reliably.
+  # (The controller's loaded yaml in ur_admittance_demo is the fallback if apply_params is false.)
+  apply_params: true
+  mass: [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]           # kg, kg*m^2
+  damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]  # ~1 = critically damped
+  stiffness: [200.0, 200.0, 200.0, 15.0, 15.0, 15.0]  # N/m, Nm/rad (0 = free-floating on that axis)
+  selected_axes: [true, true, true, true, true, true]  # false = rigid (no compliance) on that axis
+
+  # Force-guarded stop: halt the trajectory when the tared contact wrench reaches these.
+  wrench_topic: /force_torque_sensor_broadcaster/wrench
+  max_force_n: 30.0              # stop when |force|  >= this (N).  0 disables
+  max_torque_nm: 8.0            # stop when |torque| >= this (Nm). 0 disables
+
+# ---- Safety ----
+confirm_each_step: true          # prompt before each motion (recommended on real HW)
+debug: false

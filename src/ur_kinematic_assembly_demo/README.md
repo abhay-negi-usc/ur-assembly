@@ -133,6 +133,42 @@ ros2 run ur_kinematic_assembly_demo kinematic_assembly     # prompts render unde
 | `admittance.apply_params` | Push those to the controller at runtime |
 | `admittance.max_force_n` / `max_torque_nm` | Force-guarded stop (0 disables) |
 
+## Polling the tool / assembled pose
+
+Useful for **capturing or verifying the assembled pose** — e.g. jog the arm (or run an assembly) to
+a known-good mate, then read where `tool0` ended up. `tf2_echo` only *reads* the tf tree, so
+something must be **publishing** it first: that's `robot_state_publisher`, started by the driver,
+which turns the robot's live joint angles into the `base_link → … → tool0` transforms. Two terminals:
+
+**Terminal 1 — bring up the arm** (publishes the tf; you do NOT need to Play External Control just to
+*read* the pose — the driver streams joint states over RTDE as soon as it connects):
+```bash
+cd /abhay_ws/ur-assembly && source install/setup.bash
+ros2 launch ur_kinematic_assembly_demo arm_bringup.launch.py launch_moveit:=false
+```
+
+**Terminal 2 — poll:**
+```bash
+cd /abhay_ws/ur-assembly && source install/setup.bash
+ros2 topic hz /tf                                   # confirm the tree is ticking
+ros2 run tf2_ros tf2_echo base_link tool0           # tool0 pose in base, ~1 Hz (add a number for Hz)
+```
+Use `base` instead of `base_link` to match the pendant convention (they differ by 180° about Z).
+
+**From `tool0` to the assembled (held-object) pose:** `assembled_pose` in the yaml is the *held
+object* in base, not `tool0`. So the value to capture is
+`T_base_assembled = T_base_tool0 · held_object_pose`. When you poll a successful mate, compose the
+`tf2_echo` reading with your `held_object_pose` to get the number to paste into `assembled_pose`.
+
+**As a topic instead of a terminal read:** with the driver up, `ur_tf_demo` streams `base → tool` as
+a `PoseStamped`:
+```bash
+ros2 launch ur_tf_demo tf_streaming.launch.py publish_static_tf:=false   # skips the (absent) camera tf
+```
+
+> For accurate readings the driver must run with this robot's **calibration** (the `arm_bringup`
+> launch wires it in) — otherwise `tool0` is off from the real TCP by mm–cm.
+
 ## Safety
 
 - Moves the arm autonomously; **e-stop in hand**. `confirm_each_step: true` prompts before each move.

@@ -7,8 +7,8 @@ or **admittance** control.
 
 ## What it does
 
-1. **Stand-off** — move so `tool0` is at the assembled pose backed off `standoff_distance_m`
-   along `standoff_axis` (in the assembled tool0 frame). Position-controlled.
+1. **Stand-off** — move so the held object is at its assembled pose backed off `standoff_distance_m`
+   along `standoff_axis` **in the target-object frame** (the assembly's mating axis). Position-controlled.
 2. **Execute the assembly trajectory** — IK each CSV waypoint (chained seeds → continuous joint
    path) and run it, in the selected `control_mode`:
    - **position** — one multi-point `JointTrajectory` to `scaled_joint_trajectory_controller`.
@@ -21,21 +21,26 @@ or **admittance** control.
    - **Simple retract** (`return_home_after: true`, if not disassembling) — straight to the stand-off,
      then home.
 
-### Frames — everything is TOOL0
+### Frames
 
-There is **no object frame to define**. `assembled_pose` is the **tool0** pose in base when
-assembled — the value you can poll directly. The CSV rows are **tool0** poses **relative to that
-assembled pose** (`T_assembled_tool0`), and each is commanded as
-`tool0 = assembled_pose · T_assembled_tool0`. (The part is still rigidly on the flange and rides
-along; you just author the path in tool0 terms, which is what you can measure.)
+Config gives:
+- `assembled_pose` — the **tool0** pose in base when assembled (the value you poll directly).
+- `held_object_pose` — the held part w.r.t. `tool0`.
+
+The CSV rows are **held-object poses w.r.t. the target object**. The **last row is the assembled
+state**, which anchors the target frame in base:
+`T_base_targetobj = assembled_pose · held_object_pose · inv(traj[-1])`. Each waypoint is then
+`tool0(row) = T_base_targetobj · traj_row · inv(held_object_pose)` — and the last row collapses back
+to `assembled_pose`, so it stays consistent with what you poll. (This lets you author the path
+about the *part / target* while still defining the anchor as the directly‑measurable `tool0` pose.)
 
 ## Trajectory CSV
 
 [config/assembly_trajectory.csv](config/assembly_trajectory.csv) — columns `x,y,z,roll,pitch,yaw`
 (meters, radians unless `trajectory_angles_deg: true`), one waypoint per row, in order. Lines
-starting with `#` and a header row are ignored. Each row is a **tool0** pose relative to the
-assembled pose. Start near the stand-off; end at the assembled pose (last row ≈ all zeros). The
-bundled example is a 5 cm straight insertion along the assembled tool0 +Z.
+starting with `#` and a header row are ignored. Each row is a **held-object pose w.r.t. the target
+object**; the **last row is the assembled state** (it anchors the target frame to the polled
+`assembled_pose`). The bundled example approaches the target along its +Z, 5 cm → 0.
 
 ## Control mode
 
@@ -129,7 +134,8 @@ ros2 run ur_kinematic_assembly_demo kinematic_assembly     # prompts render unde
 | Param | Meaning |
 |---|---|
 | `assembled_pose` (xyz/rpy) | **tool0** pose in `base` when assembled (poll `base_link → tool0`; trajectory end) |
-| `standoff_distance_m` / `standoff_axis` | Stand-off = assembled backed off along this (assembled tool0 frame) |
+| `held_object_pose` (xyz/rpy) | Held part w.r.t. `tool0` (converts the held-obj‑vs‑target trajectory to tool0) |
+| `standoff_distance_m` / `standoff_axis` | Stand-off = assembled backed off along this, **in the target-object frame** |
 | `trajectory_csv` / `trajectory_angles_deg` | The waypoint CSV / whether its angles are degrees |
 | `control_mode` | `position` or `admittance` |
 | `waypoint_dt_s` | Time per trajectory segment |

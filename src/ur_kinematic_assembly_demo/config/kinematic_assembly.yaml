@@ -1,13 +1,16 @@
 # Kinematic assembly demo configuration (no vision, no gripper).
 #
-# The object is rigidly attached to the flange, but EVERYTHING here is expressed in terms of TOOL0
-# -- you never define the object w.r.t. tool0. Ground truth from this file (poses) + a CSV
+# The object is rigidly attached to the flange. Ground truth from this file (poses) + a CSV
 # trajectory; there is no marker detection.
 #
 # Transform chain (xyz meters, rpy radians):
-#   T_base_assembled = assembled_pose      # TOOL0 pose in base when assembled (poll base_link->tool0)
-#   For a CSV row T_assembled_tool0 (tool0 w.r.t. the assembled tool0 pose):
-#       tool0 target = T_base_assembled * T_assembled_tool0
+#   T_base_assembled = assembled_pose        # TOOL0 pose in base when assembled (poll base_link->tool0)
+#   T_tool0_held     = held_object_pose      # held object w.r.t. tool0
+#   The CSV rows are held-object poses w.r.t. the TARGET object; the LAST row is the assembled
+#   state, which anchors the target frame in base:
+#       T_base_targetobj = assembled_pose * held_object_pose * inv(traj[-1])
+#   and each waypoint is:
+#       tool0(row) = T_base_targetobj * traj_row * inv(held_object_pose)   # traj[-1] -> assembled_pose
 
 # ---- Frames / IK / controller ----
 base_frame: base_link
@@ -18,22 +21,28 @@ ik_timeout_s: 2.0
 ik_attempts: 12
 avoid_collisions: false
 
-# ---- Ground-truth assembled pose ----
-# TOOL0 pose in base when fully assembled (the trajectory END). Poll it directly: jog/drive the arm
-# to a good mate, then `ros2 run tf2_ros tf2_echo base_link tool0` and paste the reading here.
+# ---- Ground-truth poses ----
+# assembled_pose: TOOL0 pose in base when fully assembled (the trajectory END). Poll it directly:
+# jog/drive the arm to a good mate, then `ros2 run tf2_ros tf2_echo base_link tool0` and paste here.
 assembled_pose:
-  xyz: [0.5, 0.0, 0.2]
-  rpy: [3.14159, 0.0, 0.0]
+  xyz: [-0.103, -1.048, -0.068]
+  rpy: [-3.129, -0.011, -3.139]
+# held_object_pose: the held part w.r.t. tool0 (how it sits on the flange). Used to convert the
+# held-object-w.r.t-target trajectory into tool0 commands.
+held_object_pose:
+  xyz: [0.0, -0.060, 0.010]
+  rpy: [-1.5708, 0.0, 0.0]
 
 # ---- Stand-off (pre-position before the trajectory) ----
-# The assembled pose backed off standoff_distance_m along standoff_axis (in the assembled TOOL0 frame).
-standoff_distance_m: 0.05
+# The assembled held-object pose backed off standoff_distance_m along standoff_axis, expressed in
+# the TARGET OBJECT frame (i.e. along the mating axis of the fixed assembly).
+standoff_distance_m: 0.200
 standoff_axis: [0.0, 0.0, 1.0]
 
 # ---- Assembly trajectory ----
-# CSV of TOOL0 poses relative to the assembled pose (T_assembled_tool0), one waypoint per row, in
-# execution order (start near the stand-off -> end at the assembled pose, i.e. last row ~all 0).
-# Columns: x,y,z,roll,pitch,yaw. Lines starting with # and a header row are ignored.
+# CSV of HELD-OBJECT poses w.r.t. the TARGET object, one waypoint per row, in execution order. The
+# LAST row is the assembled state (it anchors the target frame to the polled assembled_pose). Start
+# near the stand-off. Columns: x,y,z,roll,pitch,yaw. Lines starting with # and a header row ignored.
 trajectory_csv: assembly_trajectory.csv
 trajectory_angles_deg: false     # true if the CSV roll/pitch/yaw are in degrees
 
@@ -50,7 +59,7 @@ move_timeout_s: 120.0            # give up waiting on a trajectory result after 
 # After assembling, if disassemble_after is true: run the trajectory in REVERSE (extraction, in the
 # same control_mode), then go to the stand-off, then the initial pose. This takes precedence over
 # return_home_after. If disassemble_after is false, return_home_after just retracts stand-off -> home.
-disassemble_after: false
+disassemble_after: true
 return_home_after: true
 
 # ---- Admittance control (used only when control_mode == 'admittance') ----

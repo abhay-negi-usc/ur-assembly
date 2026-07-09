@@ -1,7 +1,8 @@
-# Assembly trajectory: TOOL0 poses relative to the assembled pose (T_assembled_tool0).
+# Assembly trajectory: HELD-OBJECT poses w.r.t. the TARGET object (T_targetobj_held).
 # Columns: x,y,z,roll,pitch,yaw   (meters, radians unless trajectory_angles_deg: true)
-# Execution order top -> bottom. Start near the stand-off; end at the assembled pose (all zeros).
-# This example is a straight insertion along the assembled tool0 +Z (5 cm -> 0).
+# Execution order top -> bottom. The LAST row is the assembled state (it anchors the target frame
+# to the polled assembled_pose). This example: the held object approaches the target along the
+# target +Z, 5 cm -> 0 (assembled = held-object frame coincides with the target-object frame).
 x,y,z,roll,pitch,yaw
 0.0,0.0,0.050,0.0,0.0,0.0
 0.0,0.0,0.035,0.0,0.0,0.0

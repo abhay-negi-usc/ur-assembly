@@ -94,10 +94,11 @@ def _duration(seconds):
 class PickPlace(Node):
     """Orchestrates the fiducial-guided pick-and-place."""
 
-    def __init__(self):
-        super().__init__('pick_place')
+    def __init__(self, node_name='pick_place', default_config=None):
+        super().__init__(node_name)
 
-        cfg_path = self.declare_parameter('config_file', self._default_config()).value
+        cfg_path = self.declare_parameter(
+            'config_file', default_config or self._default_config()).value
         with open(cfg_path, 'r') as f:
             self.cfg = yaml.safe_load(f) or {}
         self.get_logger().info(f'Config: {cfg_path}')
@@ -690,11 +691,12 @@ class PickPlace(Node):
             return False
         return True
 
-    def run(self):
-        home_joints = self._current_joints()
+    def _pick(self, home_joints):
+        """Pick the object: detect -> visual approach -> estimate -> grasp -> close -> lift.
+        Factored out so the assembly demo (a subclass) can reuse the exact pick. Returns bool.
 
-        # Common approach: detect -> align/center -> visually servo the camera in to the standoff
-        # -> estimate the grasp from that close view (memorized in self.T_base_grasp).
+        Reaches the grasp either BLIND (return home, then open-loop from the memorized estimate --
+        the marker is usually occluded on final approach) or via closed-loop visual servo."""
         if not (
             self._do('open gripper', lambda: self.gripper_to(self.gripper_open, 'open'))
             and self._do('detect + align/center marker', self._align_and_center)
@@ -703,9 +705,6 @@ class PickPlace(Node):
         ):
             return False
 
-        # Reach the grasp. BLIND PICK: return to the initial pose, then execute the grasp
-        # OPEN-LOOP from the memorized estimate (the marker may be occluded during final approach,
-        # so we don't look again). Otherwise: closed-loop visual servo all the way in.
         if self.blind_pick:
             grasp_ok = (
                 self._do('return to initial pose (blind)',
@@ -727,13 +726,21 @@ class PickPlace(Node):
         if not grasp_ok:
             return False
 
-        # Pick up and place down, then home.
-        ok = (
+        return (
             self._do('close gripper (grasp)',
                      lambda: self.gripper_to(self.gripper_closed, 'close'))
             and self._do('lift', lambda: self.move_grasp_tcp_to(self._lift_pose(), 'lift'))
-            and self._do('move to pre-place',
-                         lambda: self.move_grasp_tcp_to(self._pre_place_pose(), 'pre-place'))
+        )
+
+    def run(self):
+        home_joints = self._current_joints()
+        if not self._pick(home_joints):
+            return False
+
+        # Place down, then home.
+        ok = (
+            self._do('move to pre-place',
+                     lambda: self.move_grasp_tcp_to(self._pre_place_pose(), 'pre-place'))
             and self._do('move to place',
                          lambda: self.move_grasp_tcp_to(self._place_pose(), 'place'))
             and self._do('open gripper (release)',

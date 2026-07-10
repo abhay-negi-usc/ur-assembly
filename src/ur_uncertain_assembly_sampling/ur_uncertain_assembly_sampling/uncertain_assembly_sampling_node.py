@@ -83,6 +83,9 @@ class UncertainAssemblySampling(KinematicAssembly):
         self.noise_bounds = [float(v) for v
                              in s.get('noise', [0.0005, 0.0005, 0.0005, 0.25, 0.25, 0.25])]
         self.rot_weight = float(s.get('closest_pose_rot_weight_mm_per_deg', 1.0))
+        # Cap the admittance reference ramp speed so a move is never commanded faster than the
+        # joints allow (rad/s per joint). Large free-space moves are done in POSITION control anyway.
+        self.max_joint_speed = float(s.get('max_joint_speed_rad_s', 0.5))
         seed = int(s.get('random_seed', 0))
         if seed:
             np.random.seed(seed)
@@ -315,8 +318,14 @@ class UncertainAssemblySampling(KinematicAssembly):
         return False
 
     def _stream_reference(self, start_joints, target_joints):
-        """Ramp a joint reference start->target under admittance, honoring the force/torque guard."""
-        steps = max(1, int(self.waypoint_dt * self.reference_rate))
+        """Ramp a joint reference start->target under admittance, honoring the force/torque guard.
+        The ramp duration respects both waypoint_dt AND max_joint_speed, so a large joint move is
+        never commanded faster than the joint velocity limits allow."""
+        max_delta = max((abs(t - s) for s, t in zip(start_joints, target_joints)), default=0.0)
+        duration = self.waypoint_dt
+        if self.max_joint_speed > 0.0:
+            duration = max(duration, max_delta / self.max_joint_speed)
+        steps = max(1, int(duration * self.reference_rate))
         period = 1.0 / self.reference_rate
         for k in range(1, steps + 1):
             if not rclpy.ok():
@@ -350,6 +359,27 @@ class UncertainAssemblySampling(KinematicAssembly):
         if not self._open_csv():
             return False
 
+        # 1. Approach the stand-off + trajectory start in POSITION control. These are large
+        #    free-space moves; streaming them as admittance references over waypoint_dt exceeds the
+        #    joint velocity limits (and faults the controller/driver).
+        if not self._confirm('move to stand-off + trajectory start'):
+            self.get_logger().info('Aborted by user.')
+            self._close_csv()
+            return False
+        seed = list(home_joints)
+        for pose, label in ((self._standoff_pose(), 'stand-off'),
+                            (self._tool0_at(self._dense[0]), 'trajectory start')):
+            j = self.solve_ik(pose, seed)
+            if j is None:
+                self.get_logger().error(f'IK failed for {label}.')
+                self._close_csv()
+                return False
+            if not self.send_joint_trajectory([j], self.standoff_move_duration, label):
+                self._close_csv()
+                return False
+            seed = j
+
+        # 2. Switch to admittance for the (small) contact moves of the trials.
         if self.control_mode == 'admittance':
             self._apply_admittance_params()
             if not self._switch_controllers([self.adm_controller], [self.position_controller]):
@@ -359,7 +389,7 @@ class UncertainAssemblySampling(KinematicAssembly):
 
         ok = False
         try:
-            ok = self._run_trials(home_joints, k)
+            ok = self._run_trials(seed, k)
         finally:
             self._recording = False
             if self._in_compliance:
@@ -372,21 +402,9 @@ class UncertainAssemblySampling(KinematicAssembly):
             self.get_logger().info('Sampling complete.')
         return ok
 
-    def _run_trials(self, home_joints, k):
+    def _run_trials(self, start_seed, k):
         dense = self._dense
-        seed = list(home_joints)
-
-        # Move to the stand-off, then the ideal trajectory start (not recorded).
-        if not self._confirm('move to stand-off + trajectory start'):
-            self.get_logger().info('Aborted by user.')
-            return False
-        for pose in (self._standoff_pose(), self._tool0_at(dense[0])):
-            j = self.solve_ik(pose, seed)
-            if j is None:
-                self.get_logger().error('IK failed for stand-off / start.')
-                return False
-            self._goto(j, seed)
-            seed = j
+        seed = list(start_seed)   # already at the trajectory start (dense[0]) in the right mode
 
         for trial in range(self.num_trials):
             if not self._confirm(f'trial {trial + 1}/{self.num_trials}'):

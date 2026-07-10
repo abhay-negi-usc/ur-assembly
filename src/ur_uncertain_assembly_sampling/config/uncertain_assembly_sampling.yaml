@@ -93,6 +93,11 @@ sampling:
   # (1.0 -> 1 mm is worth 1 deg).
   closest_pose_rot_weight_mm_per_deg: 1.0
 
+  # Cap the admittance reference ramp speed (rad/s per joint) so no move is commanded faster than
+  # the joints allow. Large free-space moves (home->stand-off->start, and home) run in POSITION
+  # control instead; only the small in-contact trial moves stream as admittance references.
+  max_joint_speed_rad_s: 0.5
+
   random_seed: 0                 # 0 = nondeterministic; >0 seeds numpy for reproducible trials
 
   # Data log STEM (flushed after each trial). Relative -> resolved from the current working

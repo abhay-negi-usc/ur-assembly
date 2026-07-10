@@ -75,6 +75,7 @@ admittance) **plus** a `sampling:` block:
 | `bias` | Per‑trial uniform bias half‑widths `[x,y,z,roll,pitch,yaw]` (m, deg), target frame (systematic) |
 | `noise` | Per‑waypoint uniform noise half‑widths `[x,y,z,roll,pitch,yaw]` (m, deg), target frame (jitter) |
 | `closest_pose_rot_weight_mm_per_deg` | Disassembly closest‑pose metric weight (mm per degree; 1.0 = 1 mm ≡ 1°) |
+| `max_joint_speed_rad_s` | Caps the admittance reference ramp speed (rad/s per joint) so moves stay within joint limits |
 | `random_seed` | 0 = nondeterministic; >0 seeds numpy for reproducible trials |
 | `csv_path` | Output CSV stem (relative → cwd); a `_YYYYmmdd_HHMMSS` timestamp is appended per run |
 
@@ -107,6 +108,11 @@ ros2 run ur_uncertain_assembly_sampling uncertain_assembly_sampling   # prompts 
 - Repeatedly drives a **misaligned part into contact** — **e‑stop in hand**, `control_mode:
   admittance`, conservative `max_force_n`, and small `bias_*` / `noise_*` to start.
 - On any abort/Ctrl‑C the node **switches back to position control** and closes the CSV.
+- **Motion:** the large free‑space moves (home → stand‑off → trajectory start, and the return home)
+  run in **position control** (time‑parameterized, `standoff_move_duration_s`); only the small
+  in‑contact trial moves stream as admittance references, capped by `max_joint_speed_rad_s`. If you
+  hit a **joint‑velocity error / protective stop** anyway, clear it on the pendant, then increase
+  `standoff_move_duration_s` (slower approach) and/or lower `max_joint_speed_rad_s`.
 - No collision avoidance (`avoid_collisions: false`) — keep the workspace clear.
 - The wrench frame is handled from the message `frame_id` (UR publishes `tool0_controller`), so the
   logged F/T is correct without assuming a frame — see the F/T‑frame note above.

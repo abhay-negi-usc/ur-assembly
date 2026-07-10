@@ -101,6 +101,7 @@ sampling:
   random_seed: 0                 # 0 = nondeterministic; >0 seeds numpy for reproducible trials
 
   # Data log STEM (flushed after each trial). Relative -> resolved from the current working
-  # directory. A _YYYYmmdd_HHMMSS timestamp is appended so each run gets a UNIQUE file, e.g.
-  # uncertain_assembly_log_20260709_143022.csv. Records ASSEMBLY only (not disassembly).
-  csv_path: uncertain_assembly_log.csv
+  # directory (run from the workspace root so it lands in ./data). The parent folder is created if
+  # missing, and a _YYYYmmdd_HHMMSS timestamp is appended so each run gets a UNIQUE file, e.g.
+  # data/uncertain_assembly_sampling/uncertain_assembly_log_20260709_143022.csv. ASSEMBLY only.
+  csv_path: data/uncertain_assembly_sampling/uncertain_assembly_log.csv

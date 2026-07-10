@@ -1,0 +1,99 @@
+# Cable pick-and-place configuration.
+#
+# Like pick_place.yaml, but instead of detecting one fiducial the robot SCANS the cable from several
+# views and reads the fused 3D connector pose that the external SAM3 nodes publish over TF
+# (base_frame -> connector_frame). See the sam3-abhay repo for those nodes.
+#
+# Connector frame convention (this demo builds it from the SAM3 axis + the up assumption):
+#   x = the cable-connector AXIS (measured by SAM3; it lives in that TF's z-column),
+#   z = robot base +Z (connector_up_axis; the "z coincident with base z" assumption), re-orthogonalized,
+#   y = z x x  (completes the right-handed frame; horizontal).
+# The grasp is defined relative to THIS frame.
+
+# ---- Frames / IK / controller ----
+base_frame: base_link
+tip_frame: tool0
+camera_frame: camera1_color_optical_frame   # optical frame the SAM3 detector uses
+planning_group: ur_manipulator
+controller_action: /scaled_joint_trajectory_controller/follow_joint_trajectory
+ik_timeout_s: 2.0
+ik_attempts: 12
+avoid_collisions: false
+
+# ---- Cable connector (the "object"), from the SAM3 pose estimator (Node 2) ----
+connector_frame: connector       # the TF Node 2 broadcasts (run it with world_frame:=base_link)
+connector_max_age_s: 3.0         # a connector TF older than this = not yet estimated / stale
+connector_wait_s: 8.0            # after the scan, wait up to this for a fresh connector estimate
+connector_up_axis: [0.0, 0.0, 1.0]   # base-frame axis the connector z aligns to (assume base +Z)
+
+# Optional offset of the FINGERTIP target from the connector frame (x=axis, z=up, y=side).
+# Default identity -> the fingertip lands exactly on the connector frame at grasp.
+connector_grasp:
+  xyz: [0.0, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
+
+# Grasp point between the fingers ("gripper" frame), relative to tip_frame (tool0). Same as pick_place.
+grasp_tcp_offset:
+  xyz: [0.0, 0.0, 0.16]
+  rpy: [0.0, 0.0, 0.0]
+
+# ---- Fingertip frame ----
+# A frame AT the fingertip, defined w.r.t. the GRIPPER (grasp_tcp_offset) frame. The cable grasp is
+# commanded so this fingertip frame coincides with the connector frame -- so the fingertip IS the
+# grasp reference. Axes:  fingertip +x = gripper -y,  +y = gripper -x  (=> +z = gripper -z).
+# NOTE on rpy: this is EXTRINSIC XYZ (sxyz). The above axes = [180, 0, 90] deg in INTRINSIC XYZ
+# (the moving-frame convention CAD tools report) == [180, 0, -90] deg here = [pi, 0, -pi/2] rad.
+# Translation is [0, 12.54, 181.65] mm w.r.t. the gripper.
+fingertip_grasp:
+  xyz: [0.0, 0.01254, 0.18165]
+  rpy: [3.14159, 0.0, -1.5708]
+publish_fingertip_tf: true       # broadcast tool0 -> fingertip so you can verify it coincides in RViz
+
+# ---- Scan phase (multi-view for the SAM3 fusion) ----
+# The robot moves the CAMERA to each of these poses (camera w.r.t. base), holding still so the SAM3
+# detector processes a clean frame, and the pose estimator accumulates the view. Give it enough
+# DISTINCT views with PARALLAX (the camera must translate/rotate between them) while keeping the
+# cable in frame. SET THESE for your cell -- the examples below look down at ~[0.4, 0, *] in base.
+scan:
+  dwell_s: 3.0                   # hold at each view (>= SAM3 inference time, ~1-2 s, for a clean frame)
+  camera_poses:                  # SET for your cell (camera w.r.t. base; must view the cable w/ parallax)
+    - {xyz: [0.40, 0.00, 0.50], rpy: [3.14159, 0.0, 0.0]}
+    - {xyz: [0.35, 0.00, 0.48], rpy: [3.14159, 0.0, 0.0]}
+    - {xyz: [0.45, 0.00, 0.48], rpy: [3.14159, 0.0, 0.0]}
+    - {xyz: [0.40, -0.06, 0.50], rpy: [3.14159, 0.0, 0.0]}
+    - {xyz: [0.40, 0.06, 0.50], rpy: [3.14159, 0.0, 0.0]}
+
+# ---- Scan overlay output ----
+# Save the SAM3 detector's overlay (masks + neck dot + orientation arrow) at each scan view -- the
+# same annotated frame the sam3-abhay CLI produces -- so you can inspect the predictions. Images go
+# to <data_dir>/<scan_images_subdir>/<run timestamp>/view_NN.png.
+save_scan_images: true
+debug_image_topic: /cable_neck_detector/debug_image   # Node 1's ~/debug_image (run it with publish_debug:=true)
+data_dir: data                   # relative -> resolved from cwd (run from the workspace root)
+scan_images_subdir: cable_pick_place
+
+# ---- Pick approach / lift (same as pick_place) ----
+approach_distance_m: 0.10        # grasp stand-off
+approach_axis: [0.0, 0.0, -1.0]  # in the GRASP frame
+lift_distance_m: 0.10
+lift_axis: [0.0, 0.0, 1.0]       # in the BASE frame (+Z = up)
+
+# ---- Place = pick pose shifted by this offset (BASE frame) ----
+place_offset_xyz: [0.0, 0.20, 0.0]
+place_offset_rpy: [0.0, 0.0, 0.0]
+
+# ---- Gripper ----
+gripper:
+  action: /robotiq_gripper_controller/gripper_cmd
+  joint: robotiq_85_left_knuckle_joint
+  open_position: 0.0
+  closed_position: 0.6           # tune to the cable/connector width
+  max_effort: 50.0
+  max_velocity: 0.5
+
+# ---- Timing / safety / debug ----
+move_duration_s: 4.0
+move_timeout_s: 60.0
+settle_s: 0.5
+confirm_each_step: true          # prompt before each motion (recommended on real HW)
+debug: false

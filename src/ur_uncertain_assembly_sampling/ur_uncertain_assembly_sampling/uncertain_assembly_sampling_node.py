@@ -253,6 +253,7 @@ class UncertainAssemblySampling(KinematicAssembly):
 
     def _open_csv(self):
         try:
+            os.makedirs(os.path.dirname(self.csv_path) or '.', exist_ok=True)
             new = (not os.path.exists(self.csv_path)) or os.path.getsize(self.csv_path) == 0
             self._csv_file = open(self.csv_path, 'a', newline='')
         except OSError as exc:

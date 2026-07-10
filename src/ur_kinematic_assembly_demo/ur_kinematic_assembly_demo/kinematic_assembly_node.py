@@ -122,6 +122,12 @@ class KinematicAssembly(Node):
         self.control_mode = str(c.get('control_mode', 'position')).lower()
         self.standoff_move_duration = float(c.get('standoff_move_duration_s', 4.0))
         self.waypoint_dt = float(c.get('waypoint_dt_s', 1.0))
+        # Speed cap: a joint-velocity CEILING that only ever SLOWS an authored segment (never speeds
+        # up the deliberate standoff_move_duration / waypoint_dt pacing). 0 = off. If a segment's
+        # largest joint move would exceed this rad/s at the authored dt, that segment's dt is
+        # stretched -- this is what avoids joint-velocity-limit faults on large free-space moves.
+        speed = c.get('speed', {}) or {}
+        self.max_joint_vel = float(speed.get('max_joint_velocity_rad_s', 0.0))
         self.settle_s = float(c.get('settle_s', 0.5))
         self.move_timeout = float(c.get('move_timeout_s', 120.0))
         self.return_home_after = bool(c.get('return_home_after', True))
@@ -324,16 +330,31 @@ class KinematicAssembly(Node):
         return joints
 
     # ------------------------------------------------------------ position control
+    def _segment_duration(self, from_joints, to_joints, default_dt):
+        """Segment time honoring the joint-velocity cap: returns default_dt, stretched so the largest
+        single joint moves no faster than max_joint_velocity_rad_s. A velocity CEILING -- it only
+        slows a segment, never speeds up the authored pacing. No cap set -> default_dt unchanged."""
+        if self.max_joint_vel <= 0.0:
+            return default_dt
+        dj = max((abs(a - b) for a, b in zip(to_joints, from_joints)), default=0.0)
+        return max(default_dt, dj / self.max_joint_vel)
+
     def send_joint_trajectory(self, joint_points, dt, label):
-        """Send one multi-point JointTrajectory (times = cumulative dt) and wait for the result."""
+        """Send one multi-point JointTrajectory and wait for the result. Point times are cumulative
+        per-segment durations (`dt` each, stretched where needed to honor the joint-velocity cap --
+        see _segment_duration), starting from the current joint state."""
         goal = FollowJointTrajectory.Goal()
         goal.trajectory = JointTrajectory()
         goal.trajectory.joint_names = list(self.joint_names)
-        for i, jp in enumerate(joint_points):
+        prev = self._current_joints()
+        t = 0.0
+        for jp in joint_points:
+            t += self._segment_duration(prev, jp, dt)
             pt = JointTrajectoryPoint()
             pt.positions = list(jp)
-            pt.time_from_start = _duration(dt * (i + 1))
+            pt.time_from_start = _duration(t)
             goal.trajectory.points.append(pt)
+            prev = jp
 
         sf = self.traj_client.send_goal_async(goal)
         rclpy.spin_until_future_complete(self, sf, timeout_sec=10.0)
@@ -468,7 +489,8 @@ class KinematicAssembly(Node):
         last_ref = list(standoff_joints)
         seated = False
         for i, target in enumerate(waypoint_joints):
-            steps = max(1, int(self.waypoint_dt * self.reference_rate))
+            steps = max(1, int(self._segment_duration(prev, target, self.waypoint_dt)
+                               * self.reference_rate))
             for k in range(1, steps + 1):
                 if not rclpy.ok():
                     break

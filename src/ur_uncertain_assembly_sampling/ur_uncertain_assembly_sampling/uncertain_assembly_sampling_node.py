@@ -83,9 +83,13 @@ class UncertainAssemblySampling(KinematicAssembly):
         self.noise_bounds = [float(v) for v
                              in s.get('noise', [0.0005, 0.0005, 0.0005, 0.25, 0.25, 0.25])]
         self.rot_weight = float(s.get('closest_pose_rot_weight_mm_per_deg', 1.0))
-        # Cap the admittance reference ramp speed so a move is never commanded faster than the
-        # joints allow (rad/s per joint). Large free-space moves are done in POSITION control anyway.
-        self.max_joint_speed = float(s.get('max_joint_speed_rad_s', 0.5))
+        # Cap the reference/trajectory ramp speed so a move is never commanded faster than the joints
+        # allow. This is KinematicAssembly's shared joint-velocity cap (speed.max_joint_velocity_rad_s
+        # in yaml -> self.max_joint_vel); the old sampling.max_joint_speed_rad_s still works as a
+        # fallback for back-compat.
+        legacy = float(s.get('max_joint_speed_rad_s', 0.0))
+        if self.max_joint_vel <= 0.0 and legacy > 0.0:
+            self.max_joint_vel = legacy
         seed = int(s.get('random_seed', 0))
         if seed:
             np.random.seed(seed)
@@ -320,12 +324,12 @@ class UncertainAssemblySampling(KinematicAssembly):
 
     def _stream_reference(self, start_joints, target_joints):
         """Ramp a joint reference start->target under admittance, honoring the force/torque guard.
-        The ramp duration respects both waypoint_dt AND max_joint_speed, so a large joint move is
-        never commanded faster than the joint velocity limits allow."""
+        The ramp duration respects both waypoint_dt AND the joint-velocity cap (max_joint_vel), so a
+        large joint move is never commanded faster than the joint velocity limits allow."""
         max_delta = max((abs(t - s) for s, t in zip(start_joints, target_joints)), default=0.0)
         duration = self.waypoint_dt
-        if self.max_joint_speed > 0.0:
-            duration = max(duration, max_delta / self.max_joint_speed)
+        if self.max_joint_vel > 0.0:
+            duration = max(duration, max_delta / self.max_joint_vel)
         steps = max(1, int(duration * self.reference_rate))
         period = 1.0 / self.reference_rate
         for k in range(1, steps + 1):

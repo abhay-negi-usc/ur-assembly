@@ -50,18 +50,22 @@ fingertip_grasp:
 publish_fingertip_tf: true       # broadcast tool0 -> fingertip so you can verify it coincides in RViz
 
 # ---- Scan phase (multi-view for the SAM3 fusion) ----
-# The robot moves the CAMERA to each of these poses (camera w.r.t. base), holding still so the SAM3
-# detector processes a clean frame, and the pose estimator accumulates the view. Give it enough
-# DISTINCT views with PARALLAX (the camera must translate/rotate between them) while keeping the
-# cable in frame. SET THESE for your cell -- the examples below look down at ~[0.4, 0, *] in base.
+# The camera scans RELATIVE to its pose at the START of the scan (jog the robot so the cable is in
+# view first) -- NOT absolute base poses. Each view offsets the camera by offsets[i], expressed in
+# the CAMERA frame (xyz in m, rpy in rad), CLAMPED to relative_bounds so the camera stays in a safe
+# Cartesian box around the start. Give enough spread (translation) for PARALLAX while keeping the
+# cable in frame. The default offsets sweep +/-4 cm along the camera's image axes.
 scan:
-  dwell_s: 3.0                   # hold at each view (>= SAM3 inference time, ~1-2 s, for a clean frame)
-  camera_poses:                  # SET for your cell (camera w.r.t. base; must view the cable w/ parallax)
-    - {xyz: [0.40, 0.00, 0.50], rpy: [3.14159, 0.0, 0.0]}
-    - {xyz: [0.35, 0.00, 0.48], rpy: [3.14159, 0.0, 0.0]}
-    - {xyz: [0.45, 0.00, 0.48], rpy: [3.14159, 0.0, 0.0]}
-    - {xyz: [0.40, -0.06, 0.50], rpy: [3.14159, 0.0, 0.0]}
-    - {xyz: [0.40, 0.06, 0.50], rpy: [3.14159, 0.0, 0.0]}
+  dwell_s: 3.0                     # hold at each view (>= SAM3 inference time, ~1-2 s, for a clean frame)
+  relative_bounds:                 # max |offset| from the start pose, in the CAMERA frame (safety clamp)
+    xyz: [0.06, 0.06, 0.05]        # +/- m along camera x (right), y (down), z (forward/depth)
+    rpy: [0.0, 0.15, 0.15]         # +/- rad about camera x, y, z
+  offsets:                         # per-view offset from the start pose (camera frame); clamped above
+    - {xyz: [0.00, 0.00, 0.00], rpy: [0.0, 0.0, 0.0]}   # start view
+    - {xyz: [0.04, 0.00, 0.00], rpy: [0.0, 0.0, 0.0]}   # right
+    - {xyz: [-0.04, 0.00, 0.00], rpy: [0.0, 0.0, 0.0]}  # left
+    - {xyz: [0.00, 0.04, 0.00], rpy: [0.0, 0.0, 0.0]}   # down
+    - {xyz: [0.00, -0.04, 0.00], rpy: [0.0, 0.0, 0.0]}  # up
 
 # ---- Scan overlay output ----
 # Save the SAM3 detector's overlay (masks + neck dot + orientation arrow) at each scan view -- the
@@ -79,7 +83,7 @@ lift_distance_m: 0.10
 lift_axis: [0.0, 0.0, 1.0]       # in the BASE frame (+Z = up)
 
 # ---- Place = pick pose shifted by this offset (BASE frame) ----
-place_offset_xyz: [0.0, 0.20, 0.0]
+place_offset_xyz: [0.050, 0.0, 0.0]
 place_offset_rpy: [0.0, 0.0, 0.0]
 
 # ---- Gripper ----
@@ -90,6 +94,37 @@ gripper:
   closed_position: 0.6           # tune to the cable/connector width
   max_effort: 50.0
   max_velocity: 0.5
+
+# ---- Pick-up failure detection & recovery ----
+# Detects the "cable not seated in the fingertip groove" failure from the gripper position in COUNTS
+# (0-255, Robotiq). The grasp COMMANDS a full close; the fingers then stall at ~closed_counts when the
+# cable is seated in the groove (or the fingers are empty), but SHORT of it (< closed_counts -
+# tolerance_counts) when the cable is caught OUTSIDE the groove -> FAILED grasp. On failure: open
+# (drop), return to the initial pose, and retry the whole scan->grasp sequence.
+# NOTE: empty vs seated is NOT distinguished yet (both reach closed_counts) -- future work.
+grasp_check:
+  enabled: true
+  closed_counts: 228             # counts at FULL closure (cable seated in the groove, or empty)
+  tolerance_counts: 1            # reading >= closed_counts - tolerance_counts = "fully closed" (OK)
+  # Counts are converted from the joint (radians) in /joint_states: counts = round(pos/full_close_rad*255).
+  # full_close_rad = the knuckle joint value at 255 counts (its upper limit; ~0.8 for the 2F-85).
+  # VERIFY: fully close the gripper, `ros2 topic echo /joint_states`, read robotiq_85_left_knuckle_joint;
+  # that value should map to ~255. Adjust full_close_rad (or closed_counts) so the printed counts match.
+  full_close_rad: 0.8
+  settle_s: 1.0                  # wait after closing before reading the position (let it stall/seat)
+  max_retries: 2                 # extra attempts after the first (total attempts = max_retries + 1)
+
+# ---- Speed (max velocity caps) ----
+# Bound the arm's velocity so each move's duration scales with its size (larger move -> more time),
+# which also avoids the joint-velocity-limit protective stops a fixed duration can trigger. Set
+# either or both caps; the more restrictive one wins. 0 disables that cap. If BOTH are 0, moves use
+# the fixed move_duration_s below. Caps bound the AVERAGE speed of a move (peak ~1.5x for a smooth
+# profile) -- set conservatively. Override at launch:
+#   --ros-args -p max_joint_velocity:=0.6 -p max_cartesian_velocity:=0.10
+speed:
+  max_joint_velocity_rad_s: 0.5     # cap on any single joint's speed (rad/s); 0 = off
+  max_cartesian_velocity_m_s: 0.10  # cap on tool0 straight-line speed (m/s); 0 = off
+  min_move_duration_s: 0.5          # floor so small moves aren't near-instantaneous
 
 # ---- Timing / safety / debug ----
 move_duration_s: 4.0

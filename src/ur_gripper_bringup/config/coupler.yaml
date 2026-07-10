@@ -4,8 +4,11 @@
 # ur_control.launch.py only forwards a fixed set of args to the description_launchfile (it does
 # NOT forward com_port / coupler / gripper_enabled).
 
-# Serial port the Robotiq gripper is on (host /dev/ttyUSB1 must be passed into the container).
-com_port: /dev/ttyUSB1
+# Serial port the Robotiq gripper is on. /dev/ttyUSBn numbering is NOT stable (it depends on USB
+# enumeration order), so it can flip between runs -- if the gripper fails to open, check `ls /dev/ttyUSB*`.
+# For a stable path use the FTDI by-id link instead, e.g.
+#   com_port: /dev/serial/by-id/usb-FTDI_...-if00-port0   (find yours: `ls -l /dev/serial/by-id/`)
+com_port: /dev/ttyUSB0
 
 # Set false to bring up the ARM ONLY (omits the gripper from the URDF and skips its
 # controllers) -- useful if the gripper isn't connected.

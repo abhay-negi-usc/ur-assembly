@@ -109,8 +109,19 @@ gripper:
   max_effort: 50.0
   max_velocity: 0.5
 
+# ---- Speed (max velocity caps) ----
+# Bound the arm's velocity so each move's duration scales with its size (larger move -> more time),
+# which also avoids the joint-velocity-limit protective stops a fixed duration can trigger. Set
+# either or both caps; the more restrictive one wins. 0 disables that cap. If BOTH are 0, moves use
+# the fixed move_duration_s below. Caps bound the AVERAGE speed of a move (peak ~1.5x) -- set
+# conservatively. Override at launch: -p max_joint_velocity:=0.6 -p max_cartesian_velocity:=0.10
+speed:
+  max_joint_velocity_rad_s: 0.5     # cap on any single joint's speed (rad/s); 0 = off
+  max_cartesian_velocity_m_s: 0.10  # cap on tool0 straight-line speed (m/s); 0 = off
+  min_move_duration_s: 0.5          # floor so small moves aren't near-instantaneous
+
 # ---- Timing / safety ----
-move_duration_s: 4.0             # per arm move (conservative)
+move_duration_s: 4.0             # per arm move (used only if BOTH speed caps above are 0)
 move_timeout_s: 60.0             # give up waiting on a trajectory result after this (a goal is
                                  # accepted even if External Control isn't playing / speed=0)
 settle_s: 0.5

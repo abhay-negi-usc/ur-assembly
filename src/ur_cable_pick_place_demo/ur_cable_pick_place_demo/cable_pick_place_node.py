@@ -71,8 +71,13 @@ class CablePickPlace(PickPlace):
 
         scan = c.get('scan', {}) or {}
         self.scan_dwell_s = float(scan.get('dwell_s', 3.0))
-        self.scan_poses = [xyzrpy_to_matrix(**self._xyzrpy(p))
-                           for p in (scan.get('camera_poses', []) or [])]
+        # Scan views are RELATIVE to the camera's pose at the START of the scan (not absolute base
+        # poses). Each offset is applied in the CAMERA frame (xyz m, rpy rad) and CLAMPED to
+        # relative_bounds so the camera stays in a safe Cartesian box around where it started.
+        rb = scan.get('relative_bounds', {}) or {}
+        self.scan_bounds_xyz = np.abs(np.asarray(rb.get('xyz', [0.06, 0.06, 0.05]), dtype=float))
+        self.scan_bounds_rpy = np.abs(np.asarray(rb.get('rpy', [0.0, 0.15, 0.15]), dtype=float))
+        self.scan_offsets = [self._xyzrpy(o) for o in (scan.get('offsets', []) or [])]
 
         # Save the SAM3 overlay (Node 1's ~/debug_image) at each scan view.
         self.save_scan_images = bool(c.get('save_scan_images', True))
@@ -84,6 +89,25 @@ class CablePickPlace(PickPlace):
         self._latest_debug = None
         if self.save_scan_images:
             self.create_subscription(Image, self.debug_image_topic, self._debug_cb, 1)
+
+        # ---- Pick-up failure detection & recovery ----
+        # Detects the "cable not seated in the fingertip groove" failure from the gripper position in
+        # COUNTS (0-255, Robotiq). A FULL close reaches ~closed_counts when the cable is seated in the
+        # groove (or the fingers are empty); if the cable is caught OUTSIDE the groove the fingers
+        # stall SHORT (< closed_counts - tolerance) -> FAILED grasp. (Empty vs seated is NOT
+        # distinguished yet -- future work.) On failure: open (drop), return to the initial pose, and
+        # retry the whole scan->grasp sequence.
+        gc = c.get('grasp_check', {}) or {}
+        self.grasp_check_enabled = bool(gc.get('enabled', True))
+        self.grasp_closed_counts = int(gc.get('closed_counts', 228))
+        self.grasp_tol_counts = int(gc.get('tolerance_counts', 1))
+        self.grasp_full_close_rad = float(gc.get('full_close_rad', 0.8))
+        self.grasp_check_settle_s = float(gc.get('settle_s', 1.0))
+        self.grasp_max_retries = int(gc.get('max_retries', 2))
+        # With the check on, COMMAND a full close so the fingers stall at the cable-determined
+        # position (needed to tell "seated" from "short"); otherwise use the configured closed_position.
+        self.grasp_close = (self.grasp_full_close_rad if self.grasp_check_enabled
+                            else self.gripper_closed)
 
     def _publish_fingertip_tf(self):
         """Broadcast the static tool0 -> fingertip transform (for RViz verification)."""
@@ -150,7 +174,7 @@ class CablePickPlace(PickPlace):
             self.get_logger().error(
                 f"No fresh '{self.base_frame} -> {self.connector_frame}' tf. Is connector_pose_node "
                 f"running (world_frame:={self.base_frame})? Did the scan give it enough views + "
-                'parallax? Add more scan.camera_poses or spread them out.')
+                'parallax? Add more scan.offsets or widen them (within scan.relative_bounds).')
         return T
 
     def _estimate_connector(self):
@@ -200,14 +224,26 @@ class CablePickPlace(PickPlace):
             self.get_logger().warn(f'Could not save scan overlay: {exc}')
 
     def _scan(self):
-        if not self.scan_poses:
-            self.get_logger().error('No scan.camera_poses configured.')
+        if not self.scan_offsets:
+            self.get_logger().error('No scan.offsets configured.')
             return False
+        # Anchor the scan on the camera's CURRENT pose; every view is an offset from it.
+        T_base_cam0 = self._tf_matrix(self.base_frame, self.camera_frame)
+        if T_base_cam0 is None:
+            self.get_logger().error(
+                f'No {self.base_frame} -> {self.camera_frame} tf to anchor the relative scan.')
+            return False
+        n = len(self.scan_offsets)
         self.get_logger().info(
-            f'Scanning the cable from {len(self.scan_poses)} views '
-            '(the camera must move between views for parallax)...')
-        for i, cam in enumerate(self.scan_poses):
-            if not self._go_to_camera_pose(cam, f'scan view {i + 1}/{len(self.scan_poses)}'):
+            f'Scanning the cable from {n} views relative to the current camera pose '
+            '(offsets in the camera frame, clamped to relative_bounds; must give parallax)...')
+        for i, off in enumerate(self.scan_offsets):
+            xyz = np.clip(np.asarray(off['xyz'], dtype=float),
+                          -self.scan_bounds_xyz, self.scan_bounds_xyz)
+            rpy = np.clip(np.asarray(off['rpy'], dtype=float),
+                          -self.scan_bounds_rpy, self.scan_bounds_rpy)
+            T_cam_target = T_base_cam0 @ xyzrpy_to_matrix(xyz, rpy)   # offset in the camera frame
+            if not self._go_to_camera_pose(T_cam_target, f'scan view {i + 1}/{n}'):
                 return False
             self._latest_debug = None            # discard any stale overlay before this view
             self._sleep(self.scan_dwell_s)       # hold still so SAM3 processes a clean frame here
@@ -215,14 +251,49 @@ class CablePickPlace(PickPlace):
             got = self._tf_matrix(self.base_frame, self.connector_frame,
                                   max_age_s=self.connector_max_age, timeout_s=0.2) is not None
             self.get_logger().info(
-                f'  view {i + 1}/{len(self.scan_poses)}: connector estimate '
+                f'  view {i + 1}/{n}: connector estimate '
                 f'{"available" if got else "not yet (need more views/parallax)"}.')
         return True
 
-    # --------------------------------------------------------------------- run
-    def run(self):
-        home_joints = self._current_joints()
-        ok = (
+    # ------------------------------------------------------ grasp check & recovery
+    def _gripper_counts(self):
+        """Actual gripper position in COUNTS (0-255, Robotiq), converted from the joint (radians) in
+        /joint_states via full_close_rad. None if the joint isn't published yet."""
+        pos = self._joints.get(self.gripper_joint)
+        if pos is None or self.grasp_full_close_rad <= 0.0:
+            return None if pos is None else 0
+        return max(0, min(255, int(round(pos / self.grasp_full_close_rad * 255.0))))
+
+    def _grasp_succeeded(self):
+        """Detect the "cable not in the fingertip groove" failure. After a FULL close, the fingers
+        reach ~closed_counts when the cable is seated in the groove (or the fingers are empty); if the
+        cable is caught OUTSIDE the groove they stall SHORT -> failure. (Seated vs empty is not
+        distinguished yet.) Reads the gripper position in counts (settles first for a steady value)."""
+        self._sleep(self.grasp_check_settle_s)      # let the gripper stall/seat after closing
+        counts = self._gripper_counts()
+        if counts is None:
+            self.get_logger().warn(
+                f"No '{self.gripper_joint}' in /joint_states; can't check the grasp -- assuming OK.")
+            return True
+        seated = counts >= self.grasp_closed_counts - self.grasp_tol_counts
+        self.get_logger().info(
+            f'Grasp check: gripper at {counts}/255 (fully closed if >= '
+            f'{self.grasp_closed_counts - self.grasp_tol_counts}) -> '
+            f'{"CLOSED (seated or empty)" if seated else "SHORT -- cable NOT in the groove: FAILED"}.')
+        return seated
+
+    def _recover_to_home(self, home_joints):
+        """Failure recovery: open the gripper (drop anything held) and return to the initial pose."""
+        return (
+            self._do('recover: open gripper (drop)',
+                     lambda: self.gripper_to(self.gripper_open, 'open'))
+            and self._do('recover: return to initial pose',
+                         lambda: self.send_joints(home_joints)))
+
+    def _attempt_grasp(self, home_joints):
+        """One pick attempt through closing on the cable. Returns 'ok' (grasp check passed or
+        disabled), 'retry' (grasp EMPTY -- recoverable), or 'abort' (a motion/step failed)."""
+        steps_ok = (
             self._do('open gripper', lambda: self.gripper_to(self.gripper_open, 'open'))
             and self._do('scan cable (multi-view)', self._scan)
             and self._do('estimate connector pose', self._estimate_connector)
@@ -231,8 +302,40 @@ class CablePickPlace(PickPlace):
             and self._do('move to grasp',
                          lambda: self.move_grasp_tcp_to(self.T_base_grasp, 'grasp'))
             and self._do('close gripper (grasp)',
-                         lambda: self.gripper_to(self.gripper_closed, 'close'))
-            and self._do('lift', lambda: self.move_grasp_tcp_to(self._lift_pose(), 'lift'))
+                         lambda: self.gripper_to(self.grasp_close, 'close')))
+        if not steps_ok:
+            return 'abort'
+        if not self.grasp_check_enabled:
+            return 'ok'
+        return 'ok' if self._grasp_succeeded() else 'retry'
+
+    # --------------------------------------------------------------------- run
+    def run(self):
+        home_joints = self._current_joints()
+
+        # Pick the cable, with optional failure detection + recovery/retry.
+        attempt = 0
+        while True:
+            result = self._attempt_grasp(home_joints)
+            if result == 'ok':
+                break
+            if result == 'abort':
+                return False
+            # 'retry': the grasp came up empty.
+            if attempt >= self.grasp_max_retries:
+                self.get_logger().error(
+                    f'Grasp failed on all {self.grasp_max_retries + 1} attempts; aborting.')
+                return False
+            attempt += 1
+            self.get_logger().warn(
+                f'Pick-up failed (gripper closed past threshold -- no cable). Recovering and '
+                f'retrying (attempt {attempt + 1}/{self.grasp_max_retries + 1})...')
+            if not self._recover_to_home(home_joints):
+                return False
+
+        # Grasp OK -> lift, place, release, home.
+        ok = (
+            self._do('lift', lambda: self.move_grasp_tcp_to(self._lift_pose(), 'lift'))
             and self._do('move to pre-place',
                          lambda: self.move_grasp_tcp_to(self._pre_place_pose(), 'pre-place'))
             and self._do('move to place',
@@ -241,8 +344,7 @@ class CablePickPlace(PickPlace):
                          lambda: self.gripper_to(self.gripper_open, 'open'))
             and self._do('retreat',
                          lambda: self.move_grasp_tcp_to(self._pre_place_pose(), 'retreat'))
-            and self._do('return home', lambda: self.send_joints(home_joints))
-        )
+            and self._do('return home', lambda: self.send_joints(home_joints)))
         if ok:
             self.get_logger().info('Cable pick-and-place complete.')
         return ok

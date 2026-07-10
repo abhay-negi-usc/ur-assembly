@@ -42,6 +42,15 @@ waypoint_dt_s: 0.5               # time per (dense) waypoint segment
 settle_s: 0.2
 move_timeout_s: 120.0
 
+# ---- Speed (max joint velocity cap) ----
+# A joint-velocity CEILING (rad/s) applied to BOTH the position-control approach moves and the
+# admittance reference ramp: if a segment's largest joint move would exceed this at the authored dt,
+# that segment is stretched (it never speeds up the authored pacing). 0 = off. This prevents the
+# joint-velocity-limit faults that big free-space moves can trigger. (Replaces the old
+# sampling.max_joint_speed_rad_s, which still works as a fallback.)
+speed:
+  max_joint_velocity_rad_s: 0.5
+
 # ---- Admittance control (used only when control_mode == 'admittance') ----
 admittance:
   controller: admittance_controller
@@ -93,10 +102,7 @@ sampling:
   # (1.0 -> 1 mm is worth 1 deg).
   closest_pose_rot_weight_mm_per_deg: 1.0
 
-  # Cap the admittance reference ramp speed (rad/s per joint) so no move is commanded faster than
-  # the joints allow. Large free-space moves (home->stand-off->start, and home) run in POSITION
-  # control instead; only the small in-contact trial moves stream as admittance references.
-  max_joint_speed_rad_s: 0.5
+  # (Joint-velocity cap moved to the top-level `speed:` section above.)
 
   random_seed: 0                 # 0 = nondeterministic; >0 seeds numpy for reproducible trials
 

@@ -9,17 +9,27 @@ separately and are coupled only through TF.
 ## Sequence
 
 ```
-open → scan (multi-view) → estimate connector pose → grasp-align → grasp → close → lift
-     → pre-place → place → open → retreat → home
+open → scan (multi-view) → estimate connector pose → grasp-align → grasp → close → [grasp check]
+     ↳ SHORT (cable not seated in fingertip groove) → open (drop) → return to initial pose → retry
+     → lift → pre-place → place → open → retreat → home
 ```
 
-1. **Scan** — the robot moves the **camera** to each `scan.camera_poses` view (camera‑w.r.t.‑base),
-   holding still for `scan.dwell_s` so the SAM3 detector processes a clean frame and the pose
-   estimator accumulates that view. The views must have **parallax** (the camera translates/rotates
-   between them) while keeping the cable in frame.
+1. **Scan** — the robot sweeps the **camera** through a set of views **relative to its pose at the
+   start of the scan** (jog the robot so the cable is in view first). Each view is `scan.offsets[i]`
+   applied in the **camera frame** and clamped to `scan.relative_bounds`, holding still for
+   `scan.dwell_s` so the SAM3 detector processes a clean frame and the pose estimator accumulates
+   that view. The offsets must give **parallax** (the camera translates between them) while keeping
+   the cable in frame — no absolute cell coordinates to tune.
 2. **Estimate** — the SAM3 `connector_pose_node` fuses the views and broadcasts TF
    `base_link → connector`. This demo reads it and builds the grasp.
-3. **Pick & place** — identical to `ur_pick_place_demo` from the grasp on.
+3. **Grasp check** (`grasp_check.enabled`) — the grasp **commands a full close**, then reads the
+   gripper position in **counts (0–255)** (converted from `/joint_states`). With the cable **seated in
+   the fingertip groove** (or the fingers empty) the fingers reach `grasp_check.closed_counts` (~228);
+   if the cable is caught **outside the groove** they stall **short** → failure. On failure the robot
+   **opens (drops), returns to the initial pose, and retries** the whole scan→grasp sequence (up to
+   `grasp_check.max_retries`). *(This detects only the not‑in‑groove failure — an empty pickup also
+   reaches `closed_counts` and isn't distinguished yet.)*
+4. **Pick & place** — identical to `ur_pick_place_demo` from the (successful) grasp on.
 
 ### Connector frame convention
 
@@ -47,23 +57,79 @@ at grasp. `connector_grasp` is now just an optional offset of the fingertip targ
 > in the **intrinsic‑XYZ** (moving‑frame) convention CAD tools report, which equals **`[180, 0, -90]°`**
 > = `[π, 0, -π/2]` here — so the config uses `-π/2`, not `+π/2`, for the yaw.
 
-## Prerequisites (all running)
+## Run — one process per terminal
 
-1. **Integrated bringup** (arm + gripper): `ros2 launch ur_gripper_bringup ur_gripper_control.launch.py`
-2. **move_group** for `/compute_ik` (with your calibration — see `ur_gripper_bringup`).
-3. **Hand‑eye tf** so `base_link → camera` is published: `ros2 launch ur_tf_demo tf_streaming.launch.py`
-4. **RealSense** publishing color image + `camera_info`.
-5. **SAM3 nodes** (from the `sam3-abhay` repo), started separately — they produce the `connector` TF:
-   ```bash
-   # detector (needs torch + rclpy; ~1-2 s/frame):
-   python scripts/cable_neck_ros_node.py --ros-args \
-     -p image_topic:=/camera1/camera/color/image_raw
-   # fusion -> base_link -> connector (plain rclpy, no torch):
-   python scripts/connector_pose_node.py --ros-args \
-     -p world_frame:=base_link -p connector_frame:=connector \
-     -p necks_topic:=/cable_neck_detector/necks \
-     -p camera_info_topic:=/camera1/camera/color/camera_info
-   ```
+Everything runs inside the Docker container; open a **new terminal per step** with
+`docker exec -it jazzy-dev bash`. Only **Terminal 5** (the SAM3 detector) uses the SAM3 venv — all
+the others use plain system Python. (One-time: build the workspace, and set up the SAM3 venv per the
+`sam3-abhay` repo.)
+
+**Build once** (any terminal):
+```bash
+source /opt/ros/jazzy/setup.bash
+cd /abhay_ws/ur-assembly
+colcon build --packages-select ur_pick_place_demo ur_cable_pick_place_demo --symlink-install
+```
+
+**Terminal 1 — arm + gripper bringup** (then press *Play* on the pendant's External Control program):
+```bash
+source /opt/ros/jazzy/setup.bash && source /abhay_ws/ur-assembly/install/setup.bash
+ros2 launch ur_gripper_bringup ur_gripper_control.launch.py
+```
+
+**Terminal 2 — move_group** (`/compute_ik`, with this robot's calibration):
+```bash
+source /opt/ros/jazzy/setup.bash
+CAL=$(ros2 pkg prefix ur_gripper_bringup)/share/ur_gripper_bringup/config/ur10e_calibration.yaml
+ros2 launch ur_moveit_config ur_moveit.launch.py ur_type:=ur10e kinematics_params_file:=$CAL
+```
+
+**Terminal 3 — RealSense camera** (frame `camera1_color_optical_frame`, and `publish_tf:=false` so it
+doesn't double‑parent that frame — the hand‑eye tf owns it):
+```bash
+source /opt/ros/jazzy/setup.bash
+ros2 launch realsense2_camera rs_launch.py \
+  camera_name:=camera1 serial_no:=_218622272137 \
+  enable_depth:=false enable_color:=true publish_tf:=false
+# -> /camera1/color/image_raw + /camera1/color/camera_info, frame camera1_color_optical_frame
+```
+
+**Terminal 4 — hand‑eye tf** (publishes `tool0 -> camera1_color_optical_frame`):
+```bash
+source /opt/ros/jazzy/setup.bash && source /abhay_ws/ur-assembly/install/setup.bash
+ros2 launch ur_tf_demo tf_streaming.launch.py
+```
+
+**Terminal 5 — SAM3 detector (Node 1)** — the ONLY terminal that activates the SAM3 venv (torch/GPU):
+```bash
+source /opt/sam3_venv/bin/activate && source /opt/ros/jazzy/setup.bash
+python /abhay_ws/sam3-abhay/scripts/cable_neck_ros_node.py --ros-args \
+  -p image_topic:=/camera1/color/image_raw -p publish_debug:=true
+```
+
+**Terminal 6 — SAM3 fusion (Node 2)** — plain system Python; broadcasts `base_link -> connector`:
+```bash
+source /opt/ros/jazzy/setup.bash
+python /abhay_ws/sam3-abhay/scripts/connector_pose_node.py --ros-args \
+  -p world_frame:=base_link -p connector_frame:=connector \
+  -p necks_topic:=/cable_neck_detector/necks \
+  -p camera_info_topic:=/camera1/color/camera_info
+```
+
+**Terminal 7 — the cable pick‑and‑place demo** (from the workspace root, so `data/` lands there):
+```bash
+cd /abhay_ws/ur-assembly
+source /opt/ros/jazzy/setup.bash && source install/setup.bash
+ros2 run ur_cable_pick_place_demo cable_pick_place
+```
+
+> The frame names must line up: RealSense publishes images in `camera1_color_optical_frame` (Terminal
+> 3), the hand‑eye tf connects `base_link → camera1_color_optical_frame` (Terminal 4), Node 1 copies
+> that frame onto `/cable_neck_detector/necks`, and Node 2 looks up `base_link ← camera1_color_optical_frame`
+> to fuse — then the demo reads the resulting `base_link → connector`.
+
+*(Optional Terminal 8 — RViz to watch the frames: `rviz2`, then add TF and check `fingertip` lands on
+`connector` at grasp.)*
 
 ## Configure — [config/cable_pick_place.yaml](config/cable_pick_place.yaml)
 
@@ -76,10 +142,17 @@ at grasp. `connector_grasp` is now just an optional offset of the fingertip targ
 | `grasp_tcp_offset` (xyz/rpy) | gripper (fingers‑center) frame, relative to `tool0` |
 | `fingertip_grasp` (xyz/rpy) | fingertip frame w.r.t. the gripper; the **grasp reference** (xyz `[0, 12.54, 181.65] mm`, rpy `[π,0,-π/2]` sxyz) |
 | `publish_fingertip_tf` | broadcast `tool0 → fingertip` for RViz verification |
-| `scan.camera_poses` | list of camera‑w.r.t.‑base views to visit (**set for your cell**) |
+| `scan.offsets` | per‑view offsets from the **start** camera pose, in the **camera frame** (xyz m, rpy rad); give parallax |
+| `scan.relative_bounds` | max \|offset\| (camera frame) — a safety clamp so the camera stays near the start pose |
 | `scan.dwell_s` | hold time per view (≥ SAM3 inference, ~2 s) |
 | `save_scan_images` / `debug_image_topic` | save the SAM3 overlay per view / Node 1's `~/debug_image` |
 | `data_dir` / `scan_images_subdir` | where overlays go: `<data_dir>/<subdir>/<timestamp>/view_NN.png` |
+| `speed.max_joint_velocity_rad_s` / `speed.max_cartesian_velocity_m_s` | cap arm velocity — each move's duration scales with its size (more restrictive wins; `0` = that cap off; **both `0` → fixed `move_duration_s`**). Runtime override: `-p max_joint_velocity:=` / `-p max_cartesian_velocity:=` |
+| `speed.min_move_duration_s` | floor so tiny moves aren't near‑instantaneous |
+| `grasp_check.enabled` | detect a not‑in‑groove grasp from the gripper counts and recover/retry (commands a full close) |
+| `grasp_check.closed_counts` / `tolerance_counts` | counts (0–255) at full closure / tolerance — reading `>= closed_counts − tolerance` is OK, short is a failure |
+| `grasp_check.full_close_rad` | knuckle joint value at 255 counts (radians→counts conversion; verify against `/joint_states`) |
+| `grasp_check.settle_s` / `grasp_check.max_retries` | settle before reading / extra retries after the first attempt |
 | `approach_*` / `lift_*` / `place_offset_*` / `gripper.*` | same as `ur_pick_place_demo` |
 
 **Scan overlays:** at each view the demo saves Node 1's annotated frame (masks + neck + orientation
@@ -88,24 +161,30 @@ arrow — the same output as the `sam3-abhay` CLI) to
 Run `cable_neck_ros_node` with `publish_debug:=true`, and run this demo from the workspace root so
 `data/` resolves there.
 
-## Build & run
-
-```bash
-cd /abhay_ws/ur-assembly
-colcon build --packages-select ur_pick_place_demo ur_cable_pick_place_demo --symlink-install
-source install/setup.bash
-
-ros2 run ur_cable_pick_place_demo cable_pick_place     # prompts render under `ros2 run`
-```
-
 ## Notes & caveats
 
-- **Set `scan.camera_poses` for your cell.** The bundled examples look down at ~`[0.4, 0, *]`; they
-  must keep *your* cable in view and provide parallax (the fusion won't triangulate without it).
+- **Jog the camera onto the cable first, then run.** The scan is **relative to the start pose**, so
+  there are no cell coordinates to set — just position the camera so the cable is in view. Tune
+  `scan.offsets` (camera‑frame) for enough parallax and `scan.relative_bounds` to keep the sweep safe;
+  the fusion won't triangulate without translation between views.
 - **SAM3 timing:** the detector runs ~1–2 s/frame and drops frames while busy, so `dwell_s` must be
   long enough to get one clean, static frame per view.
 - **Estimator history:** `connector_pose_node` accumulates a rolling window of views. For a clean run
   restart it (or let its window roll over) so a previous cable's views don't bias the estimate.
 - **Grasp clocking:** with the base‑Z‑up assumption the connector frame is fully determined, so the
   grasp is repeatable. If a cable ever tilts far from horizontal, revisit `connector_up_axis`.
+- **Grasp check calibration:** the check works in **counts (0–255)**, converted from the joint via
+  `grasp_check.full_close_rad`. Verify the conversion once: fully close the gripper and read
+  `robotiq_85_left_knuckle_joint` (`ros2 topic echo /joint_states`) — that value should map to ~255,
+  so set `full_close_rad` to it (the 2F‑85 knuckle upper limit, ~0.8). The node prints the live counts
+  each check, so confirm a full close reports ~`closed_counts` (228) and a not‑in‑groove catch reports
+  lower. The grasp deliberately **commands a full close** (not `gripper.closed_position`) so the stall
+  position is cable‑determined; force is still bounded by `gripper.max_effort`. Set
+  `grasp_check.enabled: false` to disable detection/recovery. Empty‑pickup detection is future work.
+- **Speed caps:** `speed.max_joint_velocity_rad_s` / `speed.max_cartesian_velocity_m_s` bound how fast
+  the arm moves (the more restrictive wins). This times each move so velocity stays under the cap —
+  which also prevents the joint‑velocity‑limit protective stops a too‑short fixed `move_duration_s`
+  can trigger. They bound the *average* speed of a single‑point move (peak can be ~1.5×), so set them
+  conservatively. Set both to `0` to revert to the fixed `move_duration_s`. Tune per run without
+  editing the config: `ros2 run ur_cable_pick_place_demo cable_pick_place --ros-args -p max_joint_velocity:=0.3`.
 - No collision avoidance (`avoid_collisions: false`) — keep the workspace clear; **e‑stop in hand**.

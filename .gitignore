@@ -3,3 +3,4 @@ install/
 log/
 *core.* 
 *.pyc
+data/

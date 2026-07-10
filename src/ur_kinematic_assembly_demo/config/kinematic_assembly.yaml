@@ -55,6 +55,15 @@ waypoint_dt_s: 1.0               # time allotted per trajectory segment
 settle_s: 0.5
 move_timeout_s: 120.0            # give up waiting on a trajectory result after this
 
+# ---- Speed (max joint velocity cap) ----
+# A joint-velocity CEILING (rad/s) that only ever SLOWS a segment: if the largest joint move in a
+# segment would exceed this at the authored dt (standoff_move_duration_s / waypoint_dt_s), that
+# segment is stretched. It never speeds up the authored pacing -- important for contact-rich
+# trajectories. 0 = off (use the authored durations as-is). This prevents joint-velocity-limit faults
+# on large free-space moves. Applies to both position control and the admittance reference ramp.
+speed:
+  max_joint_velocity_rad_s: 0.5
+
 # ---- Wind-down ----
 # After assembling, if disassemble_after is true: run the trajectory in REVERSE (extraction, in the
 # same control_mode), then go to the stand-off, then the initial pose. This takes precedence over

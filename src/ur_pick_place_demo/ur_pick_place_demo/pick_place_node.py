@@ -161,6 +161,26 @@ class PickPlace(Node):
         self.gripper_velocity = float(g.get('max_velocity', 0.5))
 
         self.move_duration = float(c.get('move_duration_s', 4.0))
+        # Speed caps (see _move_duration_for): bound joint and/or Cartesian velocity so each move's
+        # duration scales with its size (larger move -> more time), which also avoids the joint-
+        # velocity-limit protective stops a fixed duration can trigger. 0 = that cap off; if BOTH are
+        # 0, moves use the fixed move_duration_s. Runtime overrides:
+        #   --ros-args -p max_joint_velocity:=0.6 -p max_cartesian_velocity:=0.10
+        speed = c.get('speed', {}) or {}
+        self.max_joint_vel = float(speed.get('max_joint_velocity_rad_s', 0.0))
+        self.max_cart_vel = float(speed.get('max_cartesian_velocity_m_s', 0.0))
+        self.min_move_duration = float(speed.get('min_move_duration_s', 0.5))
+        jv = float(self.declare_parameter('max_joint_velocity', 0.0).value)
+        cv = float(self.declare_parameter('max_cartesian_velocity', 0.0).value)
+        if jv > 0.0:
+            self.max_joint_vel = jv
+        if cv > 0.0:
+            self.max_cart_vel = cv
+        if self.max_joint_vel > 0.0 or self.max_cart_vel > 0.0:
+            self.get_logger().info(
+                f'Speed caps: joint<={self.max_joint_vel or float("inf"):.3g} rad/s, '
+                f'cartesian<={self.max_cart_vel or float("inf"):.3g} m/s, '
+                f'floor {self.min_move_duration:.2f}s.')
         self.move_timeout = float(c.get('move_timeout_s', 60.0))
         self.settle_s = float(c.get('settle_s', 0.5))
         self.confirm = bool(c.get('confirm_each_step', True))
@@ -302,13 +322,36 @@ class PickPlace(Node):
             'target unreachable, in self-collision, or at a singularity.')
         return None
 
-    def send_joints(self, positions):
+    def _move_duration_for(self, positions, cart_pose=None):
+        """Seconds to allot for a single-point move to `positions` (target tool0 `cart_pose`
+        optional). Caps the arm's velocity: duration = max, over the enabled caps, of
+        (delta / max_velocity), floored at min_move_duration_s -- `delta` is the largest single-joint
+        change (joint cap) and the tool0 straight-line distance (Cartesian cap). Falls back to the
+        fixed move_duration_s when neither cap is set. Bounds the AVERAGE velocity of the move (peak
+        ~1.5x for a smooth profile), so set the caps conservatively."""
+        if self.max_joint_vel <= 0.0 and self.max_cart_vel <= 0.0:
+            return self.move_duration
+        dur = self.min_move_duration
+        if self.max_joint_vel > 0.0 and all(j in self._joints for j in self.joint_names):
+            dj = max(abs(p - cur) for p, cur in zip(positions, self._current_joints()))
+            dur = max(dur, dj / self.max_joint_vel)
+        if self.max_cart_vel > 0.0 and cart_pose is not None:
+            T_cur = self._tf_matrix(self.base_frame, self.tip_frame, timeout_s=0.5)
+            if T_cur is not None:
+                dp = float(np.linalg.norm(
+                    [cart_pose.position.x - T_cur[0, 3],
+                     cart_pose.position.y - T_cur[1, 3],
+                     cart_pose.position.z - T_cur[2, 3]]))
+                dur = max(dur, dp / self.max_cart_vel)
+        return dur
+
+    def send_joints(self, positions, cart_pose=None):
         goal = FollowJointTrajectory.Goal()
         goal.trajectory = JointTrajectory()
         goal.trajectory.joint_names = list(self.joint_names)
         point = JointTrajectoryPoint()
         point.positions = list(positions)
-        point.time_from_start = _duration(self.move_duration)
+        point.time_from_start = _duration(self._move_duration_for(positions, cart_pose))
         goal.trajectory.points.append(point)
 
         sf = self.traj_client.send_goal_async(goal)
@@ -404,7 +447,7 @@ class PickPlace(Node):
             self._log_ik_failure(label, tool0_pose)
             self.get_logger().error(f'[{label}] no IK solution; aborting.')
             return False
-        if not self.send_joints(joints):
+        if not self.send_joints(joints, cart_pose=tool0_pose):
             self.get_logger().error(f'[{label}] move failed; aborting.')
             return False
         self._sleep(self.settle_s)

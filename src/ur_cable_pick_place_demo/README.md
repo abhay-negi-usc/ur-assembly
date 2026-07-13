@@ -9,17 +9,25 @@ separately and are coupled only through TF.
 ## Sequence
 
 ```
-open → scan (multi-view) → estimate connector pose → grasp-align → grasp → close → [grasp check]
+open → scan (multi-view) → estimate connector pose → return to initial pose
+     → grasp-align → grasp → close → [grasp check]
      ↳ SHORT (cable not seated in fingertip groove) → open (drop) → return to initial pose → retry
      → lift → pre-place → place → open → retreat → home
 ```
+> **The estimate happens *before* returning home, on purpose.** `connector_pose_node` only republishes
+> the connector TF while the camera can still **see** the cable. Leave the view first and it stops
+> refreshing, ages past `connector_max_age_s`, and the read fails. Reading it at the last scan view
+> captures `T_base_grasp` as a **base‑frame** pose, which stays valid however the arm moves after.
 
-1. **Scan** — the robot sweeps the **camera** through a set of views **relative to its pose at the
-   start of the scan** (jog the robot so the cable is in view first). Each view is `scan.offsets[i]`
-   applied in the **camera frame** and clamped to `scan.relative_bounds`, holding still for
-   `scan.dwell_s` so the SAM3 detector processes a clean frame and the pose estimator accumulates
-   that view. The offsets must give **parallax** (the camera translates between them) while keeping
-   the cable in frame — no absolute cell coordinates to tune.
+1. **Scan (two phases)** — all views are **relative to the camera's pose at the start of the scan**
+   (jog the robot so the cable is in view first — no absolute cell coordinates to tune). Each view
+   holds still for `scan.dwell_s` so SAM3 gets a clean, static frame.
+   - **Seed views** (`scan.offsets`) — swept along the camera's own image axes and clamped to
+     `scan.relative_bounds`, each tilted 10° back toward the start view so the cable stays framed.
+     These supply the translation **parallax** needed to triangulate the connector's **origin**.
+   - **Refine views** (`scan.refine`) — once a first estimate exists, these translate the camera along
+     the **measured connector y axis** and aim it exactly at the measured connector origin. This is
+     the *only* motion that sharpens the **axis** — see [Why the refine views go along y](#why-the-refine-views-go-along-y).
 2. **Estimate** — the SAM3 `connector_pose_node` fuses the views and broadcasts TF
    `base_link → connector`. This demo reads it and builds the grasp.
 3. **Grasp check** (`grasp_check.enabled`) — the grasp **commands a full close**, then reads the
@@ -180,6 +188,38 @@ ros2 run ur_cable_pick_place_demo cable_pick_place
 *(Optional Terminal 8 — RViz to watch the frames: `rviz2`, then add TF and check `fingertip` lands on
 `connector` at grasp.)*
 
+## Why the refine views go along `y`
+
+The multi‑view fusion recovers the connector **axis** as the intersection of back‑projected planes:
+view *k*'s 2D neck line back‑projects to a plane containing the camera **centre** `C_k` and the 3D axis
+line through `P`, with normal
+
+```
+n_k  ∝  a × (C_k − P)          ⟂ to both the axis and the viewing ray
+```
+
+and the axis is the **null space of the stacked `n_k`**. So a new view only helps if it produces a
+*different* `n_k` — which requires moving the camera **out of the current plane**, i.e. along `n` itself.
+With **x** = the axis and **z** ≈ the viewing direction, that is exactly **`y = z × x`** — the connector's
+own y axis.
+
+The corollary is the part that bites:
+
+| Camera translation | Helps the **origin**? | Helps the **axis**? |
+|---|---|---|
+| ⟂ axis, along connector **y** | ✅ | ✅ **the only one that does** |
+| **∥ axis** | ✅ | ❌ **zero** — `C` stays inside the same plane, reproducing the same `n_k` |
+| along the viewing ray (toward/away) | ❌ | ❌ |
+
+**Camera *rotation* contributes nothing at all** — both the triangulation ray and the back‑projected
+plane depend only on the camera *centre*, not its orientation. The 10° tilt on the seed views is purely
+a field‑of‑view device, not an information source.
+
+Because the seed views sweep the camera's **image** axes blindly, roughly **half of them land parallel
+to the cable and do nothing for the axis**. The refine phase fixes that: once the seed views give a
+first estimate, it reads the measured axis, computes `y`, and spends its motion there — aiming the
+camera exactly at the now‑known connector origin (an exact look‑at, so no tilt approximation is needed).
+
 ## Timing — everything is sized around SAM3's inference latency
 
 **This is the single most important thing to get right.** SAM3 is slow on a pre‑Ampere GPU (~**6 s per
@@ -215,8 +255,9 @@ Two subtleties worth knowing, because they caused real bugs here:
 | `grasp_tcp_offset` (xyz/rpy) | gripper (fingers‑center) frame, relative to `tool0` |
 | `fingertip_grasp` (xyz/rpy) | fingertip frame w.r.t. the gripper; the **grasp reference** (xyz `[0, 12.54, 181.65] mm`, rpy `[π,0,-π/2]` sxyz) |
 | `publish_fingertip_tf` | broadcast `tool0 → fingertip` for RViz verification |
-| `scan.offsets` | per‑view offsets from the **start** camera pose, in the **camera frame** (xyz m, rpy rad); give parallax |
+| `scan.offsets` | **seed views** — per‑view offsets from the **start** camera pose, in the **camera frame** (xyz m, rpy rad); give parallax for the **origin** |
 | `scan.relative_bounds` | max \|offset\| (camera frame) — a safety clamp so the camera stays near the start pose |
+| `scan.refine.enabled` / `offsets_m` / `max_offset_m` | **refine views** — signed distances along the *measured* connector **y** axis, aimed at the connector; the only motion that sharpens the **axis** |
 | `scan.dwell_s` | hold time per view — **must exceed one SAM3 inference** (~6 s on a pre‑Ampere GPU); see [Timing](#timing--everything-is-sized-around-sam3s-inference-latency) |
 | `save_scan_images` / `debug_image_topic` | save the SAM3 overlay per view / Node 1's `~/debug_image` |
 | `data_dir` / `scan_images_subdir` | where overlays go: `<data_dir>/<subdir>/<timestamp>/view_NN.png` |

@@ -20,6 +20,13 @@
 # separately by connector_max_age_s, so a long cache is safe.
 tf_cache_s: 60.0
 base_frame: base_link
+# tip_frame is the ROBOT'S TOOL FLANGE -- the link IK solves for. Despite the name, it is NOT the
+# fingertip: they are ~18 cm apart. Everything else in this file hangs off it:
+#     tip_frame (tool0) --grasp_tcp_offset--> gripper --fingertip_grasp--> fingertip  <-- grasp ref
+#     tip_frame (tool0) --hand-eye (ur_tf_demo)--> camera_frame
+# tool0 is the UR frame matching the pendant's all-zeros TCP. Do NOT switch this to `flange` (a
+# DIFFERENT frame, twisted ~90 deg about Z) without also rewriting grasp_tcp_offset, fingertip_grasp
+# AND the hand-eye parent -- mixing them silently offsets every target.
 tip_frame: tool0
 camera_frame: camera1_color_optical_frame   # optical frame the SAM3 detector uses
 planning_group: ur_manipulator
@@ -88,6 +95,30 @@ scan:
     - {xyz: [-0.04, 0.00, 0.00], rpy: [0.0, 0.1745, 0.0]}    # left  + tilt back RIGHT (+10 deg about cam y)
     - {xyz: [0.00, 0.04, 0.00], rpy: [0.1745, 0.0, 0.0]}     # down  + tilt back UP    (+10 deg about cam x)
     - {xyz: [0.00, -0.04, 0.00], rpy: [-0.1745, 0.0, 0.0]}   # up    + tilt back DOWN  (-10 deg about cam x)
+
+  # ---- PHASE 2: axis-aware refinement (run after the seed views above) ----
+  # The AXIS is the least observable part of the connector pose, and the seed views above sweep the
+  # camera's IMAGE axes blindly -- so roughly half of them land parallel to the cable and contribute
+  # NOTHING to it. Here is why, and what to do instead:
+  #
+  #   The fusion recovers the axis as the intersection of back-projected planes. View k's 2D neck line
+  #   back-projects to a plane containing the camera CENTRE C_k and the 3D axis line through P, whose
+  #   normal is   n_k ~ a x (C_k - P)   -- perpendicular to both the axis and the viewing ray. The axis
+  #   is the null space of the stacked n_k, so a new view only helps if it produces a DIFFERENT n_k,
+  #   which requires moving the camera OUT of the current plane -- i.e. along n itself.
+  #
+  #   * Translating PARALLEL to the axis keeps C inside the same plane -> same n_k -> ZERO axis info.
+  #     (It still gives parallax for the ORIGIN, so it isn't wasted -- just useless for the axis.)
+  #   * Translating along  y = z x x  (the connector's OWN y: perpendicular to both the axis and the
+  #     viewing direction) produces a new plane -> this is the ONLY translation that sharpens the axis.
+  #
+  # So once the seed views give a first estimate, these views translate the camera along the MEASURED
+  # connector y and AIM it exactly at the measured connector origin (an exact look-at -- no tilt guess
+  # needed, because by now we know where the connector is).
+  refine:
+    enabled: true
+    offsets_m: [0.06, -0.06, 0.10, -0.10]   # signed distances along the connector's y axis (m)
+    max_offset_m: 0.15                      # safety clamp on |offset|
 
 # ---- Scan overlay output ----
 # Save the SAM3 detector's overlay (masks + neck dot + orientation arrow) at each scan view -- the

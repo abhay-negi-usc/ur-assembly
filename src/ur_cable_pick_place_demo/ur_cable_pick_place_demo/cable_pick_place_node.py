@@ -10,8 +10,11 @@ builds a grasp frame, and runs the pick/place sequence. It needs NO torch -- the
 separately and are coupled only through TF.
 
 Sequence:
-  open -> scan (multi-view) -> estimate connector pose -> grasp-align -> grasp -> close -> lift
-  -> pre-place -> place -> open -> retreat -> home
+  open -> scan (multi-view) -> estimate connector pose -> return to initial pose -> grasp-align
+  -> grasp -> close -> lift -> pre-place -> place -> open -> retreat -> home
+
+(The estimate happens BEFORE returning home on purpose: the connector TF is only republished while the
+camera can still see the cable, so it must be read before leaving the view.)
 
 Connector frame convention (built by connector_pose_node, consumed here AS-IS):
   x = the cable-connector AXIS (the one rotational DOF the multi-view fusion measures),
@@ -31,6 +34,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import Image
 
 import tf2_ros
+from tf_transformations import euler_from_matrix
 
 from ur_pick_place_demo.pick_place_node import PickPlace, matrix_to_pose, xyzrpy_to_matrix
 
@@ -82,6 +86,13 @@ class CablePickPlace(PickPlace):
         self.scan_bounds_xyz = np.abs(np.asarray(rb.get('xyz', [0.06, 0.06, 0.05]), dtype=float))
         self.scan_bounds_rpy = np.abs(np.asarray(rb.get('rpy', [0.0, 0.15, 0.15]), dtype=float))
         self.scan_offsets = [self._xyzrpy(o) for o in (scan.get('offsets', []) or [])]
+
+        # Phase 2 -- axis-aware refinement. See _scan_refine for the geometry: only translation along
+        # the connector's own y axis adds AXIS information; translating parallel to the axis adds none.
+        refine = scan.get('refine', {}) or {}
+        self.refine_enabled = bool(refine.get('enabled', True))
+        self.refine_offsets = [float(v) for v in (refine.get('offsets_m', []) or [])]
+        self.refine_max_offset = float(refine.get('max_offset_m', 0.15))
 
         # Save the SAM3 overlay (Node 1's ~/debug_image) at each scan view.
         self.save_scan_images = bool(c.get('save_scan_images', True))
@@ -256,6 +267,122 @@ class CablePickPlace(PickPlace):
             self.get_logger().info(
                 f'  view {i + 1}/{n}: connector estimate '
                 f'{"available" if got else "not yet (need more views/parallax)"}.')
+
+        # Phase 2: the seed views above give a first estimate; these place the camera where it
+        # actually SHARPENS THE AXIS (see _scan_refine).
+        if self.refine_enabled and self.refine_offsets:
+            return self._scan_refine(T_base_cam0)
+        return True
+
+    @staticmethod
+    def _look_at(C, P, T_ref):
+        """Camera pose at position C with its optical axis (+z) aimed exactly at the point P.
+
+        Optical convention: x = right, y = down, z = forward, so x = y cross z and y = z cross x. Roll
+        is taken from T_ref so the image doesn't spin between views. Because the connector's 3D
+        position is KNOWN by refinement time, this aims the camera exactly -- no tilt approximation
+        (unlike the seed views, which must guess a fixed tilt to keep the target framed)."""
+        z = np.asarray(P, dtype=float) - np.asarray(C, dtype=float)
+        z = z / (np.linalg.norm(z) + 1e-12)
+        x = np.cross(T_ref[:3, 1], z)                    # reference 'down' x forward -> 'right'
+        if np.linalg.norm(x) < 1e-6:                     # degenerate: ref y is along the view ray
+            x = np.cross(T_ref[:3, 0], z)
+        x = x / (np.linalg.norm(x) + 1e-12)
+        y = np.cross(z, x)
+        T = np.eye(4)
+        T[:3, 0], T[:3, 1], T[:3, 2], T[:3, 3] = x, y, z, C
+        return T
+
+    def _scan_refine(self, T_base_cam0):
+        """Phase 2: views placed along the connector's y axis -- the ONLY direction that adds AXIS
+        information -- each aimed exactly at the measured connector origin.
+
+        Why y, specifically. The fusion recovers the axis as the intersection of back-projected planes:
+        view k's 2D neck line back-projects to a plane containing the camera CENTRE C_k and the 3D axis
+        line through P, with normal
+
+            n_k  ~  a x (C_k - P)          (perpendicular to the axis AND to the viewing ray)
+
+        and the axis is the null space of the stacked n_k. So a new view only helps if it yields a
+        DIFFERENT n_k -- which requires moving C out of the current plane, i.e. along n itself. With
+        x = the axis and z ~ the viewing direction, that direction is exactly y = z x x: the connector's
+        own y axis.
+
+        The corollary is the important part: moving the camera PARALLEL TO THE AXIS keeps C inside the
+        same plane, reproduces the same n_k, and adds ZERO axis information (it still gives parallax for
+        the ORIGIN, so it isn't wasted -- just useless for the axis). The seed views sweep the camera's
+        image axes blindly, so roughly half of them land parallel to the cable and do nothing for the
+        axis. These refine views spend the motion where it actually pays.
+
+        Non-fatal: if there's no estimate yet, or a view is unreachable, we warn and carry on -- the
+        seed views may already be enough."""
+        T_conn = self._tf_matrix(self.base_frame, self.connector_frame,
+                                 max_age_s=self.connector_max_age, timeout_s=self.connector_wait_s)
+        if T_conn is None:
+            self.get_logger().warn(
+                'No connector estimate after the seed views -- skipping the axis refinement. The seed '
+                'views may still suffice; if not, widen scan.offsets for more parallax.')
+            return True
+
+        P = T_conn[:3, 3]                                # connector origin (the neck), in base
+        axis = T_conn[:3, 0]                             # connector x = the cable axis
+        y_dir = T_conn[:3, 1]                            # connector y = THE informative direction
+        y_dir = y_dir / (np.linalg.norm(y_dir) + 1e-12)
+        C0 = T_base_cam0[:3, 3]                          # anchor on the camera's start position
+
+        n = len(self.refine_offsets)
+        self.get_logger().info(
+            f'Refining the axis with {n} view(s) along the connector y axis '
+            f'({y_dir[0]:+.2f},{y_dir[1]:+.2f},{y_dir[2]:+.2f}) -- perpendicular to the cable axis '
+            f'({axis[0]:+.2f},{axis[1]:+.2f},{axis[2]:+.2f}), which is the only translation that '
+            'sharpens it. Camera aims at the connector each view.')
+
+        for i, s in enumerate(self.refine_offsets):
+            s = float(np.clip(s, -self.refine_max_offset, self.refine_max_offset))
+            T_cam = self._look_at(C0 + s * y_dir, P, T_base_cam0)
+            label = f'refine view {i + 1}/{n} ({s * 100:+.0f} cm along connector y)'
+            if not self._go_to_camera_pose(T_cam, label):
+                self.get_logger().warn(f'{label}: unreachable -- skipping it.')
+                continue
+            self._latest_debug = None
+            self._sleep(self.scan_dwell_s)
+            self._save_view_image(len(self.scan_offsets) + i + 1)
+            self.get_logger().info(f'  {label}: done.')
+        return True
+
+    # ------------------------------------------------------------- grasp delta report
+    def _log_grasp_delta(self, label):
+        """Report the FINGERTIP's pose vs the grasp target, in the base frame.
+
+        The fingertip is this demo's grasp reference (T_tool0_grasp), and T_base_grasp is where it is
+        supposed to end up -- so this delta is the end-to-end error of the whole perception -> IK ->
+        motion chain, in the units you actually care about (mm at the fingers).
+
+        Always returns True: it is a REPORT, not a gate, so it can sit in the step chain without
+        changing control flow. Printed BEFORE the step's confirm prompt, so a bad number can be vetoed
+        before the robot commits to the motion."""
+        T_base_tool0 = self._tf_matrix(self.base_frame, self.tip_frame)
+        if T_base_tool0 is None:
+            self.get_logger().warn(
+                f'[{label}] no {self.base_frame} -> {self.tip_frame} tf; cannot report the delta.')
+            return True
+
+        T_cur = T_base_tool0 @ self.T_tool0_grasp     # fingertip NOW, in base
+        T_tgt = self.T_base_grasp                     # fingertip TARGET (connector + connector_grasp)
+        lin, ang = self._pose_error(T_cur, T_tgt)     # (m, rad)
+        d = T_tgt[:3, 3] - T_cur[:3, 3]
+        p_c, p_t = T_cur[:3, 3], T_tgt[:3, 3]
+        r_c = [np.degrees(a) for a in euler_from_matrix(T_cur)]
+        r_t = [np.degrees(a) for a in euler_from_matrix(T_tgt)]
+
+        self.get_logger().info(
+            f"[{label}] fingertip vs grasp target (in '{self.base_frame}'):\n"
+            f'  current: xyz=[{p_c[0]:+.4f}, {p_c[1]:+.4f}, {p_c[2]:+.4f}] m  '
+            f'rpy=[{r_c[0]:+.1f}, {r_c[1]:+.1f}, {r_c[2]:+.1f}] deg\n'
+            f'  target:  xyz=[{p_t[0]:+.4f}, {p_t[1]:+.4f}, {p_t[2]:+.4f}] m  '
+            f'rpy=[{r_t[0]:+.1f}, {r_t[1]:+.1f}, {r_t[2]:+.1f}] deg\n'
+            f'  DELTA:   xyz=[{d[0] * 1000:+.1f}, {d[1] * 1000:+.1f}, {d[2] * 1000:+.1f}] mm  '
+            f'|d|={lin * 1000:.1f} mm  angle={np.degrees(ang):.1f} deg')
         return True
 
     # ------------------------------------------------------ grasp check & recovery
@@ -299,11 +426,24 @@ class CablePickPlace(PickPlace):
         steps_ok = (
             self._do('open gripper', lambda: self.gripper_to(self.gripper_open, 'open'))
             and self._do('scan cable (multi-view)', self._scan)
+            # Estimate BEFORE returning home. connector_pose_node only republishes the connector TF
+            # while the camera can still SEE the cable -- leave the view first and it stops refreshing,
+            # ages past connector_max_age_s, and the read fails. Reading it here captures T_base_grasp
+            # as a BASE-frame pose, which stays valid however the arm moves afterwards.
             and self._do('estimate connector pose', self._estimate_connector)
+            # Back to the pose the demo started from, so the grasp approach always begins from the
+            # same known configuration instead of from whichever scan view happened to be last.
+            and self._do('return to initial pose (post-scan)',
+                         lambda: self.send_joints(home_joints))
             and self._do('move to grasp-align',
                          lambda: self.move_grasp_tcp_to(self._pre_grasp_pose(), 'grasp-align'))
+            # Report the motion the grasp is about to command, BEFORE its confirm prompt -- so a bad
+            # perception estimate can be vetoed at the prompt instead of driven into the cable.
+            and self._log_grasp_delta('pre-grasp')
             and self._do('move to grasp',
                          lambda: self.move_grasp_tcp_to(self.T_base_grasp, 'grasp'))
+            # Residual after the move: how accurately the fingertip actually landed on the connector.
+            and self._log_grasp_delta('at-grasp')
             and self._do('close gripper (grasp)',
                          lambda: self.gripper_to(self.grasp_close, 'close')))
         if not steps_ok:

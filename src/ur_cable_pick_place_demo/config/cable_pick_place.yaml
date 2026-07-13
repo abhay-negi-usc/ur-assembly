@@ -13,12 +13,13 @@
 # The grasp is that frame plus connector_grasp (below).
 
 # ---- Frames / IK / controller ----
-# tf_cache_s: how long THIS node keeps transforms. tf2's 10 s default is too short here -- the
-# connector is only republished about once per SAM3 inference (~6-12 s, since the detector is slow and
-# doesn't hit on every frame), so with a 10 s cache it EXPIRES from the buffer between publishes and
-# the lookup fails even though connector_pose_node is publishing fine. Staleness is still enforced
-# separately by connector_max_age_s, so a long cache is safe.
-tf_cache_s: 60.0
+# tf_cache_s: how long THIS node keeps transforms. tf2's 10 s default is far too short -- the connector
+# is only republished about once per SAM3 inference (~6-12 s, since the detector is slow and misses
+# roughly half the frames), so with a 10 s cache it EXPIRES from the buffer between publishes and the
+# lookup fails even though connector_pose_node is publishing fine. With a multi-minute 16-view scan a
+# run of missed detections can stretch that gap further, so keep a generous margin. A long cache is
+# safe: it only keeps transforms AVAILABLE -- staleness is still enforced by connector_max_age_s.
+tf_cache_s: 120.0
 base_frame: base_link
 # tip_frame is the ROBOT'S TOOL FLANGE -- the link IK solves for. Despite the name, it is NOT the
 # fingertip: they are ~18 cm apart. Everything else in this file hangs off it:
@@ -37,11 +38,14 @@ avoid_collisions: false
 
 # ---- Cable connector (the "object"), from the SAM3 pose estimator (Node 2) ----
 connector_frame: connector       # the TF Node 2 broadcasts (run it with world_frame:=base_link)
-# NOTE on staleness: connector_pose_node stamps the connector TF with the IMAGE timestamp, so the
-# estimate is always at least one SAM3 inference behind (seconds, on a slow GPU). These must exceed
-# the detector's latency or a perfectly good estimate gets rejected as "stale".
-connector_max_age_s: 15.0        # a connector TF older than this = not yet estimated / stale
-connector_wait_s: 25.0           # after the scan, wait up to this for a fresh connector estimate
+# NOTE on staleness. connector_pose_node republishes the connector only when a neck arrives -- i.e.
+# about once per SAM3 inference (~6-12 s: the detector is slow AND misses roughly half the frames). So
+# the TF's age at read time swings over that whole interval, and any view where the cable is NOT
+# detected extends it further. With 16 views (12 seed + 4 refine) the scan runs several minutes, and a
+# couple of consecutive misses near the end is normal -- so these are sized to ride out a gap of a few
+# views rather than reject a perfectly good estimate as "stale".
+connector_max_age_s: 30.0        # a connector TF older than this = not yet estimated / stale
+connector_wait_s: 40.0           # after the scan, wait up to this for a fresh connector estimate
 # NOTE: the connector FRAME convention (x = cable axis, z = up, y = z x x) is built by
 # connector_pose_node, not here -- this demo consumes its TF as-is. The "up" direction is that node's
 # `up_axis` param (default [0,0,1] = the "connector z is coincident with base z" assumption).
@@ -79,9 +83,10 @@ scan:
   dwell_s: 10.0                    # hold at each view; MUST exceed SAM3's inference time (~6 s on a
                                    # pre-Ampere GPU) so each view gets one clean, STATIC frame
   relative_bounds:                 # max |offset| from the start pose, in the CAMERA frame (safety clamp)
-    xyz: [0.06, 0.06, 0.05]        # +/- m along camera x (right), y (down), z (forward/depth)
-    rpy: [0.25, 0.25, 0.10]        # +/- rad about camera x, y, z (0.25 rad ~ 14 deg; must exceed the
-                                   # 10 deg view-keeping tilt below or it gets clamped away)
+    xyz: [0.08, 0.08, 0.05]        # +/- m along camera x (right), y (down), z (forward/depth)
+    rpy: [0.35, 0.35, 0.10]        # +/- rad about camera x, y, z (0.35 rad ~ 20 deg). MUST exceed the
+                                   # largest view-keeping tilt below (15.8 deg on the 6.5 cm ring) or
+                                   # that tilt is silently clamped away and the view drifts off target.
   # Each view TRANSLATES (for parallax) and TILTS 10 deg BACK TOWARD the start view, so the connector
   # stays framed instead of drifting out of view at the extremes. Camera optical axes: x = right,
   # y = down, z = forward. Moving +x makes the target drift LEFT, so we tilt about camera y by -10 deg
@@ -89,12 +94,22 @@ scan:
   # (10 deg = 0.1745 rad re-centres a target ~23 cm away at a 4 cm offset: atan(0.04/0.23).)
   # The tilt costs nothing in parallax -- the ray from the camera CENTRE to the connector is unchanged
   # by rotation; only the translation supplies the baseline the triangulation needs.
+  # 12 views: the start view + an 8-point ring at 4 cm + a 3-point ring at 6.5 cm (rotated 30 deg off
+  # the inner ring for angular diversity). Each tilt = atan(offset / 0.23 m), i.e. aimed back at a
+  # target ~23 cm away, so the connector stays framed at every view.
   offsets:                         # per-view offset from the start pose (camera frame); clamped above
-    - {xyz: [0.00, 0.00, 0.00], rpy: [0.0, 0.0, 0.0]}        # start view (no tilt)
-    - {xyz: [0.04, 0.00, 0.00], rpy: [0.0, -0.1745, 0.0]}    # right + tilt back LEFT  (-10 deg about cam y)
-    - {xyz: [-0.04, 0.00, 0.00], rpy: [0.0, 0.1745, 0.0]}    # left  + tilt back RIGHT (+10 deg about cam y)
-    - {xyz: [0.00, 0.04, 0.00], rpy: [0.1745, 0.0, 0.0]}     # down  + tilt back UP    (+10 deg about cam x)
-    - {xyz: [0.00, -0.04, 0.00], rpy: [-0.1745, 0.0, 0.0]}   # up    + tilt back DOWN  (-10 deg about cam x)
+    - {xyz: [ 0.000,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}   # start view (no tilt)
+    - {xyz: [ 0.040,  0.000, 0.00], rpy: [ 0.0000, -0.1722, 0.0]}   # inner ring 4 cm @   0 deg
+    - {xyz: [ 0.028,  0.028, 0.00], rpy: [ 0.1224, -0.1224, 0.0]}   # inner ring 4 cm @  45 deg
+    - {xyz: [ 0.000,  0.040, 0.00], rpy: [ 0.1722,  0.0000, 0.0]}   # inner ring 4 cm @  90 deg
+    - {xyz: [-0.028,  0.028, 0.00], rpy: [ 0.1224,  0.1224, 0.0]}   # inner ring 4 cm @ 135 deg
+    - {xyz: [-0.040,  0.000, 0.00], rpy: [ 0.0000,  0.1722, 0.0]}   # inner ring 4 cm @ 180 deg
+    - {xyz: [-0.028, -0.028, 0.00], rpy: [-0.1224,  0.1224, 0.0]}   # inner ring 4 cm @ 225 deg
+    - {xyz: [ 0.000, -0.040, 0.00], rpy: [-0.1722,  0.0000, 0.0]}   # inner ring 4 cm @ 270 deg
+    - {xyz: [ 0.028, -0.028, 0.00], rpy: [-0.1224, -0.1224, 0.0]}   # inner ring 4 cm @ 315 deg
+    - {xyz: [ 0.056,  0.032, 0.00], rpy: [ 0.1404, -0.2400, 0.0]}   # outer ring 6.5 cm @  30 deg
+    - {xyz: [-0.056,  0.032, 0.00], rpy: [ 0.1404,  0.2400, 0.0]}   # outer ring 6.5 cm @ 150 deg
+    - {xyz: [ 0.000, -0.065, 0.00], rpy: [-0.2754,  0.0000, 0.0]}   # outer ring 6.5 cm @ 270 deg
 
   # ---- PHASE 2: axis-aware refinement (run after the seed views above) ----
   # The AXIS is the least observable part of the connector pose, and the seed views above sweep the

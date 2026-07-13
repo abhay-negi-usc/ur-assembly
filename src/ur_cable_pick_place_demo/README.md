@@ -228,11 +228,15 @@ below assume ~6 s; **measure your own** from the cadence of Node 1's `necks=…`
 
 | Setting | Where | Default | Why it must be long |
 |---|---|---|---|
-| `tf_cache_s` | Node 2 (CLI param) | **60 s** | Necks carry the **image** stamp, so they arrive one inference late. Node 2 looks up the camera pose *at that stamp* — tf2's default **10 s** buffer is too short → `"extrapolation into the past"`. |
+| `tf_cache_s` | **Node 2** (CLI param) | **60 s** | Necks carry the **image** stamp, so they arrive one inference late. Node 2 looks up the camera pose *at that stamp* — tf2's default **10 s** buffer is too short → `"extrapolation into the past"`. |
+| `tf_cache_s` | **demo** yaml | **120 s** | Same disease, the *consumer* side. Node 2 republishes the connector only ~once per inference, so with tf2's 10 s default the transform **expires from the demo's buffer between publishes** and the lookup fails even though Node 2 is publishing fine. A long cache is safe — it only keeps transforms *available*; staleness is enforced separately by `connector_max_age_s`. |
 | `scan.dwell_s` | demo yaml | **10 s** | Must **exceed** one inference, or the robot moves to the next view before SAM3 has processed a clean, *static* frame from this one. |
-| `connector_max_age_s` | demo yaml | **15 s** | Node 2 only *republishes* about once per inference, so the frame's age swings 0–6 s. Too tight and a perfectly good estimate is thrown away as "stale". |
-| `connector_wait_s` | demo yaml | **25 s** | After the scan, the fusion still needs time to produce (or refresh) the estimate. |
+| `connector_max_age_s` | demo yaml | **30 s** | The TF's age at read time swings across the whole republish interval (~6–12 s), and **any view where the cable isn't detected extends it**. With a 16‑view (~4 min) scan, a couple of consecutive misses near the end is normal — too tight and a perfectly good estimate is thrown away as "stale". |
+| `connector_wait_s` | demo yaml | **40 s** | After the scan, the fusion still needs time to produce (or refresh) the estimate. |
 | `move_timeout_s` | demo yaml | 60 s | Unrelated to SAM3 — catches an accepted trajectory that never executes (pendant not playing, e‑stop, speed slider at 0). |
+
+**Scan budget:** 12 seed + 4 refine = **16 views × (10 s dwell + ~4 s move) ≈ 4 minutes.** If you move SAM3 to a
+faster GPU, `dwell_s` is the dominant term — drop it and everything else can come down proportionally.
 
 Two subtleties worth knowing, because they caused real bugs here:
 

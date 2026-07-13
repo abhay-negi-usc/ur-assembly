@@ -13,11 +13,12 @@ Sequence:
   open -> scan (multi-view) -> estimate connector pose -> grasp-align -> grasp -> close -> lift
   -> pre-place -> place -> open -> retreat -> home
 
-Connector frame convention (built here from the SAM3 axis + the up assumption):
-  x = the cable-connector AXIS (SAM3 measures it; it is that TF's z-column),
-  z = base +Z (connector_up_axis), re-orthogonalized perpendicular to x,
+Connector frame convention (built by connector_pose_node, consumed here AS-IS):
+  x = the cable-connector AXIS (the one rotational DOF the multi-view fusion measures),
+  z = up (its `up_axis` param, default base +Z), re-orthogonalized perpendicular to x,
   y = z x x  (right-handed, horizontal).
-The grasp (connector_grasp) is defined relative to this frame.
+Every axis is meaningful, so the published TF can be read straight from RViz / tf2_echo. The grasp
+(connector_grasp, default identity) is that frame plus an optional offset.
 """
 
 import os
@@ -52,8 +53,8 @@ class CablePickPlace(PickPlace):
         self.connector_frame = c.get('connector_frame', 'connector')
         self.connector_max_age = float(c.get('connector_max_age_s', 3.0))
         self.connector_wait_s = float(c.get('connector_wait_s', 8.0))
-        self.connector_up_axis = np.asarray(
-            c.get('connector_up_axis', [0.0, 0.0, 1.0]), dtype=float)
+        # NOTE: the connector frame's convention (x = cable axis, z = up) is now built by
+        # connector_pose_node itself -- see its `up_axis` param. This demo consumes that TF as-is.
         self.T_connector_grasp = xyzrpy_to_matrix(**self._xyzrpy(c.get('connector_grasp', {})))
 
         # Fingertip frame: defined w.r.t. the GRIPPER (grasp_tcp_offset, set by PickPlace). The cable
@@ -149,24 +150,6 @@ class CablePickPlace(PickPlace):
         return True
 
     # ------------------------------------------------------------ connector geometry
-    def _connector_frame_from_tf(self, T_base_conn):
-        """Rebuild the connector frame to this demo's convention: x = cable axis (SAM3's z-column),
-        z = base +Z (connector_up_axis, re-orthogonalized), y = z x x."""
-        origin = T_base_conn[:3, 3]
-        x = T_base_conn[:3, 2].astype(float)          # SAM3 puts the connector axis in the z-column
-        x = x / (np.linalg.norm(x) + 1e-12)
-        up = self.connector_up_axis / (np.linalg.norm(self.connector_up_axis) + 1e-12)
-        y = np.cross(up, x)
-        if np.linalg.norm(y) < 1e-6:                  # axis ~parallel to up; pick another reference
-            up = np.array([1.0, 0.0, 0.0]) if abs(x[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
-            y = np.cross(up, x)
-        y = y / (np.linalg.norm(y) + 1e-12)
-        z = np.cross(x, y)
-        z = z / (np.linalg.norm(z) + 1e-12)
-        T = np.eye(4)
-        T[:3, 0], T[:3, 1], T[:3, 2], T[:3, 3] = x, y, z, origin
-        return T
-
     def _read_connector(self):
         T = self._tf_matrix(self.base_frame, self.connector_frame,
                             max_age_s=self.connector_max_age, timeout_s=self.connector_wait_s)
@@ -178,14 +161,16 @@ class CablePickPlace(PickPlace):
         return T
 
     def _estimate_connector(self):
-        """Read the fused connector pose and set the grasp target (self.T_base_grasp)."""
+        """Read the fused connector pose and set the grasp target (self.T_base_grasp).
+
+        The TF from connector_pose_node IS the connector frame (x = cable axis, z = up, y = z x x),
+        so it is used as-is -- no rebuilding here. The grasp is that frame plus connector_grasp."""
         T_base_conn = self._read_connector()
         if T_base_conn is None:
             return False
-        T_frame = self._connector_frame_from_tf(T_base_conn)
-        self.T_base_grasp = T_frame @ self.T_connector_grasp
-        p = T_frame[:3, 3]
-        axis = T_frame[:3, 0]
+        self.T_base_grasp = T_base_conn @ self.T_connector_grasp
+        p = T_base_conn[:3, 3]
+        axis = T_base_conn[:3, 0]
         self.get_logger().info(
             f'Connector: origin=({p[0]:.3f},{p[1]:.3f},{p[2]:.3f}) '
             f'axis=({axis[0]:+.2f},{axis[1]:+.2f},{axis[2]:+.2f}).')

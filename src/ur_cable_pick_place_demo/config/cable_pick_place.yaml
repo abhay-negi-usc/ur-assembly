@@ -4,11 +4,13 @@
 # views and reads the fused 3D connector pose that the external SAM3 nodes publish over TF
 # (base_frame -> connector_frame). See the sam3-abhay repo for those nodes.
 #
-# Connector frame convention (this demo builds it from the SAM3 axis + the up assumption):
-#   x = the cable-connector AXIS (measured by SAM3; it lives in that TF's z-column),
-#   z = robot base +Z (connector_up_axis; the "z coincident with base z" assumption), re-orthogonalized,
+# Connector frame convention (built by connector_pose_node; consumed here AS-IS):
+#   x = the cable-connector AXIS (the one rotational DOF the multi-view fusion measures),
+#   z = "up" (that node's up_axis param, default base +Z; the "z coincident with base z" assumption),
+#       re-orthogonalized perpendicular to x,
 #   y = z x x  (completes the right-handed frame; horizontal).
-# The grasp is defined relative to THIS frame.
+# Every axis is meaningful, so `ros2 run tf2_ros tf2_echo base_link connector` shows the real frame.
+# The grasp is that frame plus connector_grasp (below).
 
 # ---- Frames / IK / controller ----
 base_frame: base_link
@@ -27,7 +29,9 @@ connector_frame: connector       # the TF Node 2 broadcasts (run it with world_f
 # the detector's latency or a perfectly good estimate gets rejected as "stale".
 connector_max_age_s: 15.0        # a connector TF older than this = not yet estimated / stale
 connector_wait_s: 25.0           # after the scan, wait up to this for a fresh connector estimate
-connector_up_axis: [0.0, 0.0, 1.0]   # base-frame axis the connector z aligns to (assume base +Z)
+# NOTE: the connector FRAME convention (x = cable axis, z = up, y = z x x) is built by
+# connector_pose_node, not here -- this demo consumes its TF as-is. The "up" direction is that node's
+# `up_axis` param (default [0,0,1] = the "connector z is coincident with base z" assumption).
 
 # Optional offset of the FINGERTIP target from the connector frame (x=axis, z=up, y=side).
 # Default identity -> the fingertip lands exactly on the connector frame at grasp.
@@ -63,13 +67,21 @@ scan:
                                    # pre-Ampere GPU) so each view gets one clean, STATIC frame
   relative_bounds:                 # max |offset| from the start pose, in the CAMERA frame (safety clamp)
     xyz: [0.06, 0.06, 0.05]        # +/- m along camera x (right), y (down), z (forward/depth)
-    rpy: [0.0, 0.15, 0.15]         # +/- rad about camera x, y, z
+    rpy: [0.25, 0.25, 0.10]        # +/- rad about camera x, y, z (0.25 rad ~ 14 deg; must exceed the
+                                   # 10 deg view-keeping tilt below or it gets clamped away)
+  # Each view TRANSLATES (for parallax) and TILTS 10 deg BACK TOWARD the start view, so the connector
+  # stays framed instead of drifting out of view at the extremes. Camera optical axes: x = right,
+  # y = down, z = forward. Moving +x makes the target drift LEFT, so we tilt about camera y by -10 deg
+  # to aim back at it; moving +y (down) makes it drift UP, so we tilt about camera x by +10 deg.
+  # (10 deg = 0.1745 rad re-centres a target ~23 cm away at a 4 cm offset: atan(0.04/0.23).)
+  # The tilt costs nothing in parallax -- the ray from the camera CENTRE to the connector is unchanged
+  # by rotation; only the translation supplies the baseline the triangulation needs.
   offsets:                         # per-view offset from the start pose (camera frame); clamped above
-    - {xyz: [0.00, 0.00, 0.00], rpy: [0.0, 0.0, 0.0]}   # start view
-    - {xyz: [0.04, 0.00, 0.00], rpy: [0.0, 0.0, 0.0]}   # right
-    - {xyz: [-0.04, 0.00, 0.00], rpy: [0.0, 0.0, 0.0]}  # left
-    - {xyz: [0.00, 0.04, 0.00], rpy: [0.0, 0.0, 0.0]}   # down
-    - {xyz: [0.00, -0.04, 0.00], rpy: [0.0, 0.0, 0.0]}  # up
+    - {xyz: [0.00, 0.00, 0.00], rpy: [0.0, 0.0, 0.0]}        # start view (no tilt)
+    - {xyz: [0.04, 0.00, 0.00], rpy: [0.0, -0.1745, 0.0]}    # right + tilt back LEFT  (-10 deg about cam y)
+    - {xyz: [-0.04, 0.00, 0.00], rpy: [0.0, 0.1745, 0.0]}    # left  + tilt back RIGHT (+10 deg about cam y)
+    - {xyz: [0.00, 0.04, 0.00], rpy: [0.1745, 0.0, 0.0]}     # down  + tilt back UP    (+10 deg about cam x)
+    - {xyz: [0.00, -0.04, 0.00], rpy: [-0.1745, 0.0, 0.0]}   # up    + tilt back DOWN  (-10 deg about cam x)
 
 # ---- Scan overlay output ----
 # Save the SAM3 detector's overlay (masks + neck dot + orientation arrow) at each scan view -- the

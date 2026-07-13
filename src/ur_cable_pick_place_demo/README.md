@@ -33,13 +33,17 @@ open → scan (multi-view) → estimate connector pose → grasp-align → grasp
 
 ### Connector frame convention
 
-The SAM3 estimator's connector axis (its only well‑determined rotational DOF) is measured; this demo
-rebuilds a full, deterministic grasp frame from it plus your "up" assumption:
+**`connector_pose_node` publishes the connector frame directly**, and this demo consumes that TF
+**as‑is**. (It used to publish the axis in *z* with arbitrary x/y and let the demo rebuild the frame —
+which meant the published TF looked wrong in RViz and hid whether the axis was actually right.)
 
-- **x** = the cable‑connector **axis** (SAM3 measures it; it's that TF's z‑column),
-- **z** = robot base **+Z** (`connector_up_axis`), re‑orthogonalized ⟂ x — the *"cable z coincident
-  with base z"* assumption,
+- **x** = the cable‑connector **axis** (the one rotational DOF the multi‑view fusion measures),
+- **z** = **up** (that node's `up_axis` param, default base **+Z**), re‑orthogonalized ⟂ x — the
+  *"cable z coincident with base z"* assumption, which pins down the roll the fusion cannot measure,
 - **y** = `z × x` (right‑handed, horizontal).
+
+Every axis is meaningful, so `ros2 run tf2_ros tf2_echo base_link connector` shows the **real** frame.
+The grasp is this frame plus `connector_grasp` (default identity).
 
 ### Fingertip frame — the grasp reference
 
@@ -172,7 +176,7 @@ ros2 run ur_cable_pick_place_demo cable_pick_place
 |---|---|
 | `connector_frame` | TF the SAM3 estimator broadcasts (match its `connector_frame`) |
 | `connector_max_age_s` / `connector_wait_s` | freshness of the estimate / how long to wait after the scan |
-| `connector_up_axis` | base axis the connector z aligns to (base +Z assumption) |
+| *(connector frame convention)* | **not here** — built by `connector_pose_node` (its `up_axis` param); this demo reads the TF as‑is |
 | `connector_grasp` (xyz/rpy) | optional offset of the fingertip target from the connector (default identity) |
 | `grasp_tcp_offset` (xyz/rpy) | gripper (fingers‑center) frame, relative to `tool0` |
 | `fingertip_grasp` (xyz/rpy) | fingertip frame w.r.t. the gripper; the **grasp reference** (xyz `[0, 12.54, 181.65] mm`, rpy `[π,0,-π/2]` sxyz) |
@@ -207,7 +211,8 @@ Run `cable_neck_ros_node` with `publish_debug:=true`, and run this demo from the
 - **Estimator history:** `connector_pose_node` accumulates a rolling window of views. For a clean run
   restart it (or let its window roll over) so a previous cable's views don't bias the estimate.
 - **Grasp clocking:** with the base‑Z‑up assumption the connector frame is fully determined, so the
-  grasp is repeatable. If a cable ever tilts far from horizontal, revisit `connector_up_axis`.
+  grasp is repeatable. If a cable ever tilts far from horizontal, revisit `connector_pose_node`'s
+  `up_axis` param (that's where the "up" assumption now lives).
 - **Grasp check calibration:** the check works in **counts (0–255)**, converted from the joint via
   `grasp_check.full_close_rad`. Verify the conversion once: fully close the gripper and read
   `robotiq_85_left_knuckle_joint` (`ros2 topic echo /joint_states`) — that value should map to ~255,

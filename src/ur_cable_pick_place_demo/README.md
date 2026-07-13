@@ -57,7 +57,42 @@ at grasp. `connector_grasp` is now just an optional offset of the fingertip targ
 > in the **intrinsic‑XYZ** (moving‑frame) convention CAD tools report, which equals **`[180, 0, -90]°`**
 > = `[π, 0, -π/2]` here — so the config uses `-π/2`, not `+π/2`, for the yaw.
 
-## Run — one process per terminal
+## Run — one command (recommended)
+
+`cable_stack.launch.py` starts the **whole stack** (bringup, move_group, RealSense, hand‑eye tf, and
+both SAM3 nodes) so you only need **two terminals**:
+
+```bash
+# Terminal A -- the whole stack
+source /opt/ros/jazzy/setup.bash && source /abhay_ws/ur-assembly/install/setup.bash
+ros2 launch ur_cable_pick_place_demo cable_stack.launch.py
+#   ... then press PLAY on the pendant's External Control program.
+
+# Terminal B -- the demo (kept separate: it prompts on stdin, which doesn't work under `ros2 launch`)
+cd /abhay_ws/ur-assembly
+source /opt/ros/jazzy/setup.bash && source install/setup.bash
+ros2 run ur_cable_pick_place_demo cable_pick_place
+```
+
+The launch file runs the **SAM3 detector under the venv's interpreter** (via `ExecuteProcess`, since a
+normal `Node` action would use system Python, which has no torch) and staggers startup so each piece
+comes up in dependency order.
+
+Skip anything you already have running, or point it at different hardware:
+```bash
+ros2 launch ur_cable_pick_place_demo cable_stack.launch.py bringup:=false camera:=false
+ros2 launch ur_cable_pick_place_demo cable_stack.launch.py camera_serial:=_123456789012
+```
+
+| Launch arg | Default | Purpose |
+|---|---|---|
+| `bringup` / `moveit` / `camera` / `handeye` / `sam3` | `true` | toggle each component off if it's already up |
+| `camera_name` / `camera_serial` | `camera1` / `_218622272137` | `camera_name` sets the image **frame** (`<name>_color_optical_frame`) — must match the hand‑eye tf |
+| `image_topic` / `camera_info_topic` | `/camera/camera1/color/...` | realsense2_camera nests topics under *namespace* **and** *name* — **not** `/camera1/...` |
+| `sam3_python` / `sam3_scripts` | `/opt/sam3_venv/bin/python` / `/abhay_ws/sam3-abhay/scripts` | where the venv + SAM3 nodes live |
+| `neck_diameter` / `tf_cache_s` | `0.0034` / `60.0` | connector diameter; TF history (must exceed SAM3's inference latency) |
+
+## Run — manually, one process per terminal (for debugging)
 
 Everything runs inside the Docker container; open a **new terminal per step** with
 `docker exec -it jazzy-dev bash`. Only **Terminal 5** (the SAM3 detector) uses the SAM3 venv — all

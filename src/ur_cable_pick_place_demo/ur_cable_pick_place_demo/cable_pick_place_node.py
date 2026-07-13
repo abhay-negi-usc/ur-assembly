@@ -27,7 +27,10 @@ from datetime import datetime
 import numpy as np
 
 import rclpy
+from rclpy.time import Time
 from sensor_msgs.msg import Image
+
+import tf2_ros
 
 from ur_pick_place_demo.pick_place_node import PickPlace, matrix_to_pose, xyzrpy_to_matrix
 
@@ -154,10 +157,25 @@ class CablePickPlace(PickPlace):
         T = self._tf_matrix(self.base_frame, self.connector_frame,
                             max_age_s=self.connector_max_age, timeout_s=self.connector_wait_s)
         if T is None:
-            self.get_logger().error(
-                f"No fresh '{self.base_frame} -> {self.connector_frame}' tf. Is connector_pose_node "
-                f"running (world_frame:={self.base_frame})? Did the scan give it enough views + "
-                'parallax? Add more scan.offsets or widen them (within scan.relative_bounds).')
+            # "Never published" and "published but stale" have OPPOSITE fixes, so say which it is.
+            try:
+                tf = self.tf_buffer.lookup_transform(
+                    self.base_frame, self.connector_frame, Time())
+                age = (self.get_clock().now()
+                       - Time.from_msg(tf.header.stamp)).nanoseconds / 1e9
+                self.get_logger().error(
+                    f"'{self.base_frame} -> {self.connector_frame}' exists but is STALE: {age:.1f}s "
+                    f'old, limit connector_max_age_s={self.connector_max_age:.1f}s. '
+                    'connector_pose_node is not republishing fast enough -- keep the cable in view so '
+                    'the detector keeps firing, or raise connector_max_age_s above your SAM3 '
+                    'inference interval.')
+            except tf2_ros.TransformException:
+                self.get_logger().error(
+                    f"No '{self.base_frame} -> {self.connector_frame}' tf at all. Is "
+                    f'connector_pose_node running (world_frame:={self.base_frame})? Did the scan give '
+                    'it enough views + parallax? Add more scan.offsets or widen them (within '
+                    'scan.relative_bounds). If the node IS publishing, raise tf_cache_s -- a slowly '
+                    "republished transform can expire from this node's tf buffer between publishes.")
         return T
 
     def _estimate_connector(self):

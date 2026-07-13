@@ -13,6 +13,12 @@
 # The grasp is that frame plus connector_grasp (below).
 
 # ---- Frames / IK / controller ----
+# tf_cache_s: how long THIS node keeps transforms. tf2's 10 s default is too short here -- the
+# connector is only republished about once per SAM3 inference (~6-12 s, since the detector is slow and
+# doesn't hit on every frame), so with a 10 s cache it EXPIRES from the buffer between publishes and
+# the lookup fails even though connector_pose_node is publishing fine. Staleness is still enforced
+# separately by connector_max_age_s, so a long cache is safe.
+tf_cache_s: 60.0
 base_frame: base_link
 tip_frame: tool0
 camera_frame: camera1_color_optical_frame   # optical frame the SAM3 detector uses

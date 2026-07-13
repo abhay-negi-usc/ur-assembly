@@ -35,6 +35,7 @@ import yaml
 
 import rclpy
 from rclpy.action import ActionClient
+from rclpy.duration import Duration as RclpyDuration
 from rclpy.node import Node
 from rclpy.time import Time
 
@@ -190,7 +191,13 @@ class PickPlace(Node):
                       or bool(self.declare_parameter('debug', False).value))
 
         # Interfaces
-        self.tf_buffer = tf2_ros.Buffer()
+        # TF history. tf2's default cache is only 10 s, which is too short when a perception node
+        # republishes SLOWLY -- e.g. a SAM3 connector estimate arriving every ~6-12 s. Its transform
+        # then EXPIRES from this buffer between publishes, and the lookup fails even though the frame
+        # is being published perfectly well. Staleness is still guarded per-lookup by max_age_s, so a
+        # longer cache is safe: it only keeps transforms available, it never makes stale ones pass.
+        self.tf_cache_s = float(c.get('tf_cache_s', 30.0))
+        self.tf_buffer = tf2_ros.Buffer(cache_time=RclpyDuration(seconds=self.tf_cache_s))
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         self._joints = {}
         self.create_subscription(JointState, '/joint_states', self._joint_cb, 10)

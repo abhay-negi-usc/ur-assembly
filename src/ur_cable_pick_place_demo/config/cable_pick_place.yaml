@@ -22,8 +22,11 @@ avoid_collisions: false
 
 # ---- Cable connector (the "object"), from the SAM3 pose estimator (Node 2) ----
 connector_frame: connector       # the TF Node 2 broadcasts (run it with world_frame:=base_link)
-connector_max_age_s: 3.0         # a connector TF older than this = not yet estimated / stale
-connector_wait_s: 8.0            # after the scan, wait up to this for a fresh connector estimate
+# NOTE on staleness: connector_pose_node stamps the connector TF with the IMAGE timestamp, so the
+# estimate is always at least one SAM3 inference behind (seconds, on a slow GPU). These must exceed
+# the detector's latency or a perfectly good estimate gets rejected as "stale".
+connector_max_age_s: 15.0        # a connector TF older than this = not yet estimated / stale
+connector_wait_s: 25.0           # after the scan, wait up to this for a fresh connector estimate
 connector_up_axis: [0.0, 0.0, 1.0]   # base-frame axis the connector z aligns to (assume base +Z)
 
 # Optional offset of the FINGERTIP target from the connector frame (x=axis, z=up, y=side).
@@ -56,7 +59,8 @@ publish_fingertip_tf: true       # broadcast tool0 -> fingertip so you can verif
 # Cartesian box around the start. Give enough spread (translation) for PARALLAX while keeping the
 # cable in frame. The default offsets sweep +/-4 cm along the camera's image axes.
 scan:
-  dwell_s: 3.0                     # hold at each view (>= SAM3 inference time, ~1-2 s, for a clean frame)
+  dwell_s: 10.0                    # hold at each view; MUST exceed SAM3's inference time (~6 s on a
+                                   # pre-Ampere GPU) so each view gets one clean, STATIC frame
   relative_bounds:                 # max |offset| from the start pose, in the CAMERA frame (safety clamp)
     xyz: [0.06, 0.06, 0.05]        # +/- m along camera x (right), y (down), z (forward/depth)
     rpy: [0.0, 0.15, 0.15]         # +/- rad about camera x, y, z

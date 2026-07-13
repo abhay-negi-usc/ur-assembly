@@ -130,8 +130,11 @@ source /opt/ros/jazzy/setup.bash
 ros2 launch realsense2_camera rs_launch.py \
   camera_name:=camera1 serial_no:=_218622272137 \
   enable_depth:=false enable_color:=true publish_tf:=false
-# -> /camera1/color/image_raw + /camera1/color/camera_info, frame camera1_color_optical_frame
 ```
+> **Topics are nested, frames are not.** realsense2_camera puts topics under *camera_namespace* **and**
+> *camera_name*, so you get **`/camera/camera1/color/image_raw`** and **`/camera/camera1/color/camera_info`**
+> — **not** `/camera1/...`. The **frame** is still `camera1_color_optical_frame` (from `camera_name`),
+> which is what must match the hand‑eye tf. Confirm with `ros2 topic list | grep image_raw`.
 
 **Terminal 4 — hand‑eye tf** (publishes `tool0 -> camera1_color_optical_frame`):
 ```bash
@@ -142,8 +145,9 @@ ros2 launch ur_tf_demo tf_streaming.launch.py
 **Terminal 5 — SAM3 detector (Node 1)** — the ONLY terminal that activates the SAM3 venv (torch/GPU):
 ```bash
 source /opt/sam3_venv/bin/activate && source /opt/ros/jazzy/setup.bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 python /abhay_ws/sam3-abhay/scripts/cable_neck_ros_node.py --ros-args \
-  -p image_topic:=/camera1/color/image_raw -p publish_debug:=true
+  -p image_topic:=/camera/camera1/color/image_raw -p publish_debug:=true
 ```
 
 **Terminal 6 — SAM3 fusion (Node 2)** — plain system Python; broadcasts `base_link -> connector`:
@@ -152,8 +156,14 @@ source /opt/ros/jazzy/setup.bash
 python /abhay_ws/sam3-abhay/scripts/connector_pose_node.py --ros-args \
   -p world_frame:=base_link -p connector_frame:=connector \
   -p necks_topic:=/cable_neck_detector/necks \
-  -p camera_info_topic:=/camera1/color/camera_info
+  -p camera_info_topic:=/camera/camera1/color/camera_info \
+  -p neck_diameter:=0.0034 \
+  -p up_axis:="[0.0, 0.0, 1.0]" \
+  -p tf_cache_s:=60.0
 ```
+> `tf_cache_s` is **required** on a slow GPU. Necks carry the **image** timestamp, so they arrive one
+> whole inference late (~6 s here). Node 2 looks up the camera pose *at that stamp*, and tf2's default
+> **10 s** buffer isn't enough headroom → `"Lookup would require extrapolation into the past"`.
 
 **Terminal 7 — the cable pick‑and‑place demo** (from the workspace root, so `data/` lands there):
 ```bash
@@ -170,12 +180,36 @@ ros2 run ur_cable_pick_place_demo cable_pick_place
 *(Optional Terminal 8 — RViz to watch the frames: `rviz2`, then add TF and check `fingertip` lands on
 `connector` at grasp.)*
 
+## Timing — everything is sized around SAM3's inference latency
+
+**This is the single most important thing to get right.** SAM3 is slow on a pre‑Ampere GPU (~**6 s per
+frame** on a GTX 1060), and *every* timeout in the pipeline has to be sized above that. The defaults
+below assume ~6 s; **measure your own** from the cadence of Node 1's `necks=…` log lines and scale.
+
+| Setting | Where | Default | Why it must be long |
+|---|---|---|---|
+| `tf_cache_s` | Node 2 (CLI param) | **60 s** | Necks carry the **image** stamp, so they arrive one inference late. Node 2 looks up the camera pose *at that stamp* — tf2's default **10 s** buffer is too short → `"extrapolation into the past"`. |
+| `scan.dwell_s` | demo yaml | **10 s** | Must **exceed** one inference, or the robot moves to the next view before SAM3 has processed a clean, *static* frame from this one. |
+| `connector_max_age_s` | demo yaml | **15 s** | Node 2 only *republishes* about once per inference, so the frame's age swings 0–6 s. Too tight and a perfectly good estimate is thrown away as "stale". |
+| `connector_wait_s` | demo yaml | **25 s** | After the scan, the fusion still needs time to produce (or refresh) the estimate. |
+| `move_timeout_s` | demo yaml | 60 s | Unrelated to SAM3 — catches an accepted trajectory that never executes (pendant not playing, e‑stop, speed slider at 0). |
+
+Two subtleties worth knowing, because they caused real bugs here:
+
+- **Node 2 stamps its output with `now`, not the image time.** The connector is a *static object pose* —
+  it answers "where is the cable," not "where was it 6 s ago." Stamping it with the (stale) image time
+  forced every consumer — `tf2_echo`, RViz, this demo — into a 6‑second time‑travel lookup that fails.
+  The image stamp is still used **internally** to fetch the camera pose at *capture* time, which is the
+  part that genuinely must be time‑accurate.
+- **A slow detector doesn't hurt accuracy, only throughput.** Each neck is paired with the camera pose
+  at its own capture time, so the triangulation stays correct no matter how far behind the detector runs.
+
 ## Configure — [config/cable_pick_place.yaml](config/cable_pick_place.yaml)
 
 | Param | Meaning |
 |---|---|
 | `connector_frame` | TF the SAM3 estimator broadcasts (match its `connector_frame`) |
-| `connector_max_age_s` / `connector_wait_s` | freshness of the estimate / how long to wait after the scan |
+| `connector_max_age_s` / `connector_wait_s` | freshness of the estimate / how long to wait after the scan — **both sized around SAM3's latency**; see [Timing](#timing--everything-is-sized-around-sam3s-inference-latency) |
 | *(connector frame convention)* | **not here** — built by `connector_pose_node` (its `up_axis` param); this demo reads the TF as‑is |
 | `connector_grasp` (xyz/rpy) | optional offset of the fingertip target from the connector (default identity) |
 | `grasp_tcp_offset` (xyz/rpy) | gripper (fingers‑center) frame, relative to `tool0` |
@@ -183,7 +217,7 @@ ros2 run ur_cable_pick_place_demo cable_pick_place
 | `publish_fingertip_tf` | broadcast `tool0 → fingertip` for RViz verification |
 | `scan.offsets` | per‑view offsets from the **start** camera pose, in the **camera frame** (xyz m, rpy rad); give parallax |
 | `scan.relative_bounds` | max \|offset\| (camera frame) — a safety clamp so the camera stays near the start pose |
-| `scan.dwell_s` | hold time per view (≥ SAM3 inference, ~2 s) |
+| `scan.dwell_s` | hold time per view — **must exceed one SAM3 inference** (~6 s on a pre‑Ampere GPU); see [Timing](#timing--everything-is-sized-around-sam3s-inference-latency) |
 | `save_scan_images` / `debug_image_topic` | save the SAM3 overlay per view / Node 1's `~/debug_image` |
 | `data_dir` / `scan_images_subdir` | where overlays go: `<data_dir>/<subdir>/<timestamp>/view_NN.png` |
 | `speed.max_joint_velocity_rad_s` / `speed.max_cartesian_velocity_m_s` | cap arm velocity — each move's duration scales with its size (more restrictive wins; `0` = that cap off; **both `0` → fixed `move_duration_s`**). Runtime override: `-p max_joint_velocity:=` / `-p max_cartesian_velocity:=` |

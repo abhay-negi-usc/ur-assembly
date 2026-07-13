@@ -91,8 +91,9 @@ class CablePickPlace(PickPlace):
         # the connector's own y axis adds AXIS information; translating parallel to the axis adds none.
         refine = scan.get('refine', {}) or {}
         self.refine_enabled = bool(refine.get('enabled', True))
-        self.refine_offsets = [float(v) for v in (refine.get('offsets_m', []) or [])]
-        self.refine_max_offset = float(refine.get('max_offset_m', 0.15))
+        self.refine_orbit_deg = [float(v) for v in (refine.get('orbit_deg', []) or [])]
+        self.refine_max_orbit = abs(float(refine.get('max_orbit_deg', 30.0)))
+        self.refine_min_height = float(refine.get('min_height_m', 0.10))
 
         # Save the SAM3 overlay (Node 1's ~/debug_image) at each scan view.
         self.save_scan_images = bool(c.get('save_scan_images', True))
@@ -270,7 +271,7 @@ class CablePickPlace(PickPlace):
 
         # Phase 2: the seed views above give a first estimate; these place the camera where it
         # actually SHARPENS THE AXIS (see _scan_refine).
-        if self.refine_enabled and self.refine_offsets:
+        if self.refine_enabled and self.refine_orbit_deg:
             return self._scan_refine(T_base_cam0)
         return True
 
@@ -294,28 +295,32 @@ class CablePickPlace(PickPlace):
         return T
 
     def _scan_refine(self, T_base_cam0):
-        """Phase 2: views placed along the connector's y axis -- the ONLY direction that adds AXIS
-        information -- each aimed exactly at the measured connector origin.
+        """Phase 2: ORBIT the camera around the CABLE AXIS at a constant standoff, aimed at the
+        connector. This is the motion that sharpens the AXIS -- in particular its out-of-image-plane
+        tilt, which a single view cannot see at all.
 
-        Why y, specifically. The fusion recovers the axis as the intersection of back-projected planes:
-        view k's 2D neck line back-projects to a plane containing the camera CENTRE C_k and the 3D axis
-        line through P, with normal
+        The geometry. The fusion recovers the axis as the intersection of back-projected planes: view
+        k's 2D neck line back-projects to a plane containing the camera CENTRE C_k and the 3D axis line
+        through P, with normal
 
             n_k  ~  a x (C_k - P)          (perpendicular to the axis AND to the viewing ray)
 
-        and the axis is the null space of the stacked n_k. So a new view only helps if it yields a
-        DIFFERENT n_k -- which requires moving C out of the current plane, i.e. along n itself. With
-        x = the axis and z ~ the viewing direction, that direction is exactly y = z x x: the connector's
-        own y axis.
+        and the axis is the null space of the stacked n_k. A new view only helps if it yields a
+        DIFFERENT n_k, which requires moving C OUT of the current plane -- i.e. along n itself. Moving
+        PARALLEL TO THE AXIS keeps C inside the same plane, reproduces the same n_k, and adds ZERO axis
+        information (it still gives parallax for the ORIGIN, so it is not wasted -- just useless here).
 
-        The corollary is the important part: moving the camera PARALLEL TO THE AXIS keeps C inside the
-        same plane, reproduces the same n_k, and adds ZERO axis information (it still gives parallax for
-        the ORIGIN, so it isn't wasted -- just useless for the axis). The seed views sweep the camera's
-        image axes blindly, so roughly half of them land parallel to the cable and do nothing for the
-        axis. These refine views spend the motion where it actually pays.
+        Why an ORBIT about the axis rather than a straight translation along n:
+          * its tangent IS n, so it is exactly the informative motion;
+          * it preserves |C - P|, so the connector stays at a CONSTANT RANGE (constant scale/focus);
+          * orbiting about the cable's OWN axis keeps the cable SIDE-ON -- its foreshortening never
+            changes, so it stays fully visible at every orbit angle;
+          * the excursion is bounded by an ANGLE (max_orbit_deg), so the view cannot skew off the
+            target the way an unbounded straight translation can -- which is exactly what a straight
+            offset did: it drove the camera to oblique poses that lost the cable entirely.
 
-        Non-fatal: if there's no estimate yet, or a view is unreachable, we warn and carry on -- the
-        seed views may already be enough."""
+        Non-fatal throughout: no estimate yet, a view that would dip too low, or one that is
+        unreachable -- warn and carry on. The seed views may already be enough."""
         T_conn = self._tf_matrix(self.base_frame, self.connector_frame,
                                  max_age_s=self.connector_max_age, timeout_s=self.connector_wait_s)
         if T_conn is None:
@@ -325,23 +330,44 @@ class CablePickPlace(PickPlace):
             return True
 
         P = T_conn[:3, 3]                                # connector origin (the neck), in base
-        axis = T_conn[:3, 0]                             # connector x = the cable axis
-        y_dir = T_conn[:3, 1]                            # connector y = THE informative direction
-        y_dir = y_dir / (np.linalg.norm(y_dir) + 1e-12)
-        C0 = T_base_cam0[:3, 3]                          # anchor on the camera's start position
+        a = T_conn[:3, 0].astype(float)                  # connector x = the cable axis
+        a = a / (np.linalg.norm(a) + 1e-12)
+        C0 = T_base_cam0[:3, 3]                          # camera start position
+        v0 = C0 - P                                      # viewing offset (connector -> camera)
+        r = float(np.linalg.norm(v0))
+        if r < 1e-3:
+            self.get_logger().warn('Camera is on top of the connector estimate; skipping refinement.')
+            return True
 
-        n = len(self.refine_offsets)
+        n = len(self.refine_orbit_deg)
         self.get_logger().info(
-            f'Refining the axis with {n} view(s) along the connector y axis '
-            f'({y_dir[0]:+.2f},{y_dir[1]:+.2f},{y_dir[2]:+.2f}) -- perpendicular to the cable axis '
-            f'({axis[0]:+.2f},{axis[1]:+.2f},{axis[2]:+.2f}), which is the only translation that '
-            'sharpens it. Camera aims at the connector each view.')
+            f'Refining the axis: {n} view(s) ORBITING the cable axis '
+            f'({a[0]:+.2f},{a[1]:+.2f},{a[2]:+.2f}) at a constant {r * 100:.0f} cm standoff, camera '
+            f'aimed at the connector. |orbit| capped at {self.refine_max_orbit:.0f} deg so the view '
+            'stays on the cable.')
 
-        for i, s in enumerate(self.refine_offsets):
-            s = float(np.clip(s, -self.refine_max_offset, self.refine_max_offset))
-            T_cam = self._look_at(C0 + s * y_dir, P, T_base_cam0)
-            label = f'refine view {i + 1}/{n} ({s * 100:+.0f} cm along connector y)'
-            if not self._go_to_camera_pose(T_cam, label):
+        for i, deg in enumerate(self.refine_orbit_deg):
+            th = np.radians(float(np.clip(deg, -self.refine_max_orbit, self.refine_max_orbit)))
+            # Rodrigues: rotate the viewing offset about the cable axis. Preserves |v0| exactly, so the
+            # standoff -- and hence the apparent scale of the connector -- is unchanged.
+            v = (v0 * np.cos(th)
+                 + np.cross(a, v0) * np.sin(th)
+                 + a * float(np.dot(a, v0)) * (1.0 - np.cos(th)))
+            C = P + v
+            label = (f'refine view {i + 1}/{n} '
+                     f'(orbit {np.degrees(th):+.0f} deg about the cable axis)')
+
+            # Guard: a large orbit about a HORIZONTAL cable swings the camera sideways AND DOWN,
+            # toward the table. Refuse any view that would drop it below min_height_m over the cable.
+            height = float(C[2] - P[2])
+            if height < self.refine_min_height:
+                self.get_logger().warn(
+                    f'{label}: would put the camera only {height * 100:.0f} cm above the connector '
+                    f'(min {self.refine_min_height * 100:.0f} cm) -- skipping. Reduce '
+                    'scan.refine.orbit_deg / max_orbit_deg.')
+                continue
+
+            if not self._go_to_camera_pose(self._look_at(C, P, T_base_cam0), label):
                 self.get_logger().warn(f'{label}: unreachable -- skipping it.')
                 continue
             self._latest_debug = None

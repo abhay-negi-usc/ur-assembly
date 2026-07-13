@@ -112,13 +112,24 @@ scan:
   #   * Translating along  y = z x x  (the connector's OWN y: perpendicular to both the axis and the
   #     viewing direction) produces a new plane -> this is the ONLY translation that sharpens the axis.
   #
-  # So once the seed views give a first estimate, these views translate the camera along the MEASURED
-  # connector y and AIM it exactly at the measured connector origin (an exact look-at -- no tilt guess
-  # needed, because by now we know where the connector is).
+  # So once the seed views give a first estimate, these views ORBIT the camera AROUND THE CABLE AXIS at
+  # a CONSTANT standoff, aimed at the measured connector origin. An orbit (rather than a straight slide
+  # along y) is what keeps the view usable:
+  #   * its tangent IS n, so it is exactly the informative motion,
+  #   * |C - P| is preserved -> the connector stays at a constant range (constant scale/focus),
+  #   * orbiting about the cable's OWN axis keeps the cable SIDE-ON: foreshortening never changes, so
+  #     the cable stays fully visible at every angle,
+  #   * the excursion is bounded by an ANGLE, so the camera cannot skew off the target -- which is
+  #     exactly what an unbounded straight offset did (it drove the camera to oblique poses that lost
+  #     the cable and connector entirely).
+  # KEEP THESE MODEST. A big orbit about a horizontal cable swings the camera sideways AND DOWN toward
+  # the table; min_height_m refuses any view that would drop it too low.
   refine:
     enabled: true
-    offsets_m: [0.06, -0.06, 0.10, -0.10]   # signed distances along the connector's y axis (m)
-    max_offset_m: 0.15                      # safety clamp on |offset|
+    orbit_deg: [12.0, -12.0, 20.0, -20.0]   # signed orbit angles about the cable axis (deg)
+    max_orbit_deg: 25.0                     # hard clamp on |angle| -- keeps the view on the cable
+    min_height_m: 0.12                      # skip any view that would put the camera lower than this
+                                            # above the connector (table-collision / grazing guard)
 
 # ---- Scan overlay output ----
 # Save the SAM3 detector's overlay (masks + neck dot + orientation arrow) at each scan view -- the

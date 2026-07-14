@@ -58,7 +58,7 @@ connector_grasp:
 
 # Grasp point between the fingers ("gripper" frame), relative to tip_frame (tool0). Same as pick_place.
 grasp_tcp_offset:
-  xyz: [0.0, 0.0, 0.16]
+  xyz: [0.0, 0.0, 0.0]
   rpy: [0.0, 0.0, 0.0]
 
 # ---- Fingertip frame ----
@@ -69,7 +69,7 @@ grasp_tcp_offset:
 # (the moving-frame convention CAD tools report) == [180, 0, -90] deg here = [pi, 0, -pi/2] rad.
 # Translation is [0, 12.54, 181.65] mm w.r.t. the gripper.
 fingertip_grasp:
-  xyz: [0.0, 0.01254, 0.18165]
+  xyz: [0.0, -0.01254, 0.18165]
   rpy: [3.14159, 0.0, -1.5708]
 publish_fingertip_tf: true       # broadcast tool0 -> fingertip so you can verify it coincides in RViz
 
@@ -157,7 +157,7 @@ scan_images_subdir: cable_pick_place
 
 # ---- Pick approach / lift (same as pick_place) ----
 approach_distance_m: 0.10        # grasp stand-off
-approach_axis: [0.0, 0.0, -1.0]  # in the GRASP frame
+approach_axis: [0.0, 0.0, +1.0]  # in the GRASP frame
 lift_distance_m: 0.10
 lift_axis: [0.0, 0.0, 1.0]       # in the BASE frame (+Z = up)
 

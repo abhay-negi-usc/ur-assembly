@@ -154,14 +154,21 @@ ros2 launch ur_tf_demo tf_streaming.launch.py
 ```bash
 source /opt/sam3_venv/bin/activate && source /opt/ros/jazzy/setup.bash
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-python /abhay_ws/sam3-abhay/scripts/cable_neck_ros_node.py --ros-args \
-  -p image_topic:=/camera/camera1/color/image_raw -p publish_debug:=true
+python3 /abhay_ws/sam3-abhay/scripts/cable_neck_ros_node.py --ros-args \
+  -p image_topic:=/camera/camera1/color/image_raw -p publish_debug:=true \
+  -p adaptive:=true -p confidence_floor:=0.2
 ```
+> **`adaptive:=true` is the important one.** With a fixed threshold, SAM3 flips between labelling the
+> connector "cable" and vice versa; whichever class comes up empty kills the neck entirely, because a
+> neck **is** the cable/connector contact. Adaptive mode runs SAM3 **once** at `confidence_floor`, then
+> searches the threshold *pair* in software, keeping the most confident masks that still yield a valid
+> neck. It costs **no extra inference** — the threshold is only a filter on per‑mask scores. The log
+> shows what it chose: `thr: cable=0.91 conn=0.18 (eff 0.18, 1 combos)`.
 
 **Terminal 6 — SAM3 fusion (Node 2)** — plain system Python; broadcasts `base_link -> connector`:
 ```bash
 source /opt/ros/jazzy/setup.bash
-python /abhay_ws/sam3-abhay/scripts/connector_pose_node.py --ros-args \
+python3 /abhay_ws/sam3-abhay/scripts/connector_pose_node.py --ros-args \
   -p world_frame:=base_link -p connector_frame:=connector \
   -p necks_topic:=/cable_neck_detector/necks \
   -p camera_info_topic:=/camera/camera1/color/camera_info \

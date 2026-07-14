@@ -329,6 +329,14 @@ class PickPlace(Node):
             'target unreachable, in self-collision, or at a singularity.')
         return None
 
+    def _abort_move(self):
+        """Hook: return True to CANCEL the trajectory currently executing (see send_joints).
+
+        Base implementation never aborts. Subclasses override it to arm a guard over EVERY motion --
+        e.g. ur_cable_pick_assemble_demo returns True on a force/torque limit, so an unexpected
+        collision stops the arm mid-move instead of being discovered after it."""
+        return False
+
     def _move_duration_for(self, positions, cart_pose=None):
         """Seconds to allot for a single-point move to `positions` (target tool0 `cart_pose`
         optional). Caps the arm's velocity: duration = max, over the enabled caps, of
@@ -379,6 +387,13 @@ class PickPlace(Node):
         deadline = self.get_clock().now().nanoseconds + int(self.move_timeout * 1e9)
         while rclpy.ok() and not rf.done():
             rclpy.spin_once(self, timeout_sec=0.1)
+            # Abort hook: subclasses use this to arm a guard (e.g. force/torque) over EVERY motion, not
+            # just the ones that expect contact. Checked while the trajectory is actually executing, so
+            # it can cancel mid-move rather than after.
+            if self._abort_move():
+                self.get_logger().warn('Aborting the trajectory (move guard tripped). Canceling.')
+                gh.cancel_goal_async()
+                return False
             self.get_logger().info('executing trajectory...', throttle_duration_sec=5.0)
             if self.get_clock().now().nanoseconds > deadline:
                 self.get_logger().error(

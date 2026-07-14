@@ -96,6 +96,27 @@ scan:
   view_settle_s: 0.5               # let the arm come to rest before crediting any frame to this view
   necks_topic: /cable_neck_detector/necks   # the detector's output the demo listens to
   dwell_s: 10.0                    # only used when require_detection is false (fixed hold per view)
+
+  # ---- Progressive approach: move CLOSER after each GOOD view ----
+  # The highest-leverage thing the scan can do for accuracy. The triangulated DEPTH error grows as Z^2
+  # (sigma_Z ~ Z^2 * sigma_px / (f * B)), so HALVING the range QUARTERS it -- far more than any extra
+  # baseline buys. It also puts more pixels on the cable, sharpening the 2D neck/axis measurement that
+  # everything downstream is built on.
+  # Only a GOOD view triggers a step in: a view that saw nothing is no evidence that closing in is safe
+  # or useful, and stepping anyway would compound a bad estimate.
+  approach:
+    enabled: true
+    step_m: 0.010                  # move at most 10 mm closer per good view
+    min_distance_m: 0.045          # never get closer than 45 mm to the cable
+    # The offsets below are authored for THIS camera-to-cable distance, and are SCALED by
+    # (current / nominal) as the camera closes in. THIS IS NOT OPTIONAL: a 4 cm lateral offset is a sane
+    # ~10 deg excursion at 230 mm, but at the 45 mm floor that SAME 4 cm is a 42 deg excursion -- the
+    # cable leaves the frame entirely and the view is worthless.
+    # The TILTS are deliberately NOT scaled, and that is not a coincidence: each is
+    # atan(offset / distance), which is INVARIANT when the offset scales in proportion to the distance.
+    # So scaling xyz and leaving rpy is exactly self-consistent at every range.
+    nominal_distance_m: 0.23
+    scale_offsets: true
   relative_bounds:                 # max |offset| from the start pose, in the CAMERA frame (safety clamp)
     xyz: [0.08, 0.08, 0.05]        # +/- m along camera x (right), y (down), z (forward/depth)
     rpy: [0.35, 0.35, 0.10]        # +/- rad about camera x, y, z (0.35 rad ~ 20 deg). MUST exceed the
@@ -157,7 +178,12 @@ scan:
     enabled: true
     orbit_deg: [12.0, -12.0, 20.0, -20.0]   # signed orbit angles about the cable axis (deg)
     max_orbit_deg: 25.0                     # hard clamp on |angle| -- keeps the view on the cable
-    min_height_m: 0.12                      # skip any view that would put the camera lower than this
+    # MUST be BELOW approach.min_distance_m, or the guard rejects EVERY orbit view once the camera has
+    # closed in: at a 45 mm standoff a 20 deg orbit leaves the camera 45*cos(20) = 42 mm up, so a 120 mm
+    # floor would refuse all of them. The orbit radius shrinks with the approach automatically (it is
+    # |C - P|), so the excursions shrink too -- but so does the clearance. KEEP THE E-STOP IN HAND at
+    # close range: the camera body is swinging within a few cm of the part.
+    min_height_m: 0.030                     # skip any view that would put the camera lower than this
                                             # above the connector (table-collision / grazing guard)
 
 # ---- Scan overlay output ----

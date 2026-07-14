@@ -82,6 +82,15 @@ def generate_launch_description():
         DeclareLaunchArgument('tf_cache_s', default_value='60.0',
                               description='TF history for Node 2. Necks carry the IMAGE stamp, so they '
                                           'lag by one SAM3 inference -- keep this well above that.'),
+
+        # ADAPTIVE THRESHOLD. With a fixed threshold SAM3 flips between labelling the connector "cable"
+        # and vice versa; whichever class comes up empty kills the neck outright, because a neck IS the
+        # cable/connector contact. Adaptive mode runs SAM3 ONCE at confidence_floor and then searches
+        # the threshold PAIR in software, keeping the most confident masks that still yield a valid
+        # neck -- at no extra inference cost.
+        DeclareLaunchArgument('adaptive', default_value='true'),
+        DeclareLaunchArgument('confidence_floor', default_value='0.2',
+                              description='Never admit a mask below this, however the search relaxes.'),
     ]
 
     # 1. Arm + gripper (t=0). Press PLAY on the pendant once this is up.
@@ -133,6 +142,8 @@ def generate_launch_description():
                  PathJoinSubstitution([sam3_scripts, 'cable_neck_ros_node.py']),
                  '--ros-args',
                  '-p', ['image_topic:=', image_topic],
+                 '-p', ['adaptive:=', LaunchConfiguration('adaptive')],
+                 '-p', ['confidence_floor:=', LaunchConfiguration('confidence_floor')],
                  '-p', 'publish_debug:=true'],
             additional_env={'PYTORCH_CUDA_ALLOC_CONF': 'expandable_segments:True'},
             name='cable_neck_detector', output='screen',

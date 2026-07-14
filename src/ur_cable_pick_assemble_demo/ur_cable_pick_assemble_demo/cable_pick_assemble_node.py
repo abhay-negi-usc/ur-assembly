@@ -96,6 +96,16 @@ class CablePickAssemble(CablePickPlace):
         self.wrench_topic = fg.get('wrench_topic', '/force_torque_sensor_broadcaster/wrench')
         self.max_force = float(fg.get('max_force_n', 20.0))     # 0 disables
         self.max_torque = float(fg.get('max_torque_nm', 5.0))   # 0 disables
+        # Guard ARMED OVER EVERY MOTION, not just the insertion (see _abort_move): an unexpected
+        # collision during the scan, the traverse to the stand-off, or the retract cancels the
+        # trajectory MID-MOVE instead of being discovered after it.
+        self.force_guard_enabled = bool(fg.get('enabled', True))
+        # TARE BEFORE EVERY TASK (see _do). Not paranoia -- the PAYLOAD CHANGES mid-sequence: the moment
+        # the cable is grasped its weight lands on the sensor, and residual bias would otherwise read as
+        # 'contact' and trip the guard spuriously (or mask a real contact).
+        self.tare_each_task = bool(fg.get('tare_each_task', True))
+        self.tare_settle_s = float(fg.get('tare_settle_s', 0.3))
+        self._guard_tripped = False
 
         i = a.get('insertion', {}) or {}
         self.chunk_fraction = float(i.get('chunk_fraction', 0.25))
@@ -104,8 +114,16 @@ class CablePickAssemble(CablePickPlace):
 
         r = a.get('retract', {}) or {}
         self.retract_frame = str(r.get('frame', 'target')).lower()
-        self.retract_axis = np.asarray(r.get('axis', [0.0, 0.0, 1.0]), dtype=float)
-        self.retract_dist = float(r.get('distance_m', 0.08))
+        # A SEQUENCE of displacement steps, each expressed in retract_frame and applied in order. This
+        # is what a real escape path needs (back out along the mate, clear laterally, come down) -- a
+        # single axis*distance cannot express it. Falls back to the old axis/distance_m form.
+        steps = r.get('steps')
+        if steps:
+            self.retract_steps = [np.asarray(s['xyz'], dtype=float) for s in steps]
+        else:
+            axis = np.asarray(r.get('axis', [0.0, 0.0, 1.0]), dtype=float)
+            dist = float(r.get('distance_m', 0.08))
+            self.retract_steps = [axis * dist] if abs(dist) > 1e-9 else []
 
         # Interfaces
         self._wrench = None
@@ -169,9 +187,8 @@ class CablePickAssemble(CablePickPlace):
             return True
         return False
 
-    def _tare_ft(self):
-        if not self.tare_before:
-            return True
+    def _tare_ft(self, quiet=False):
+        """Zero the F/T sensor. The caller decides WHEN -- per task (_do) and/or before compliance."""
         if not self.ft_zero_client.wait_for_service(timeout_sec=5.0):
             self.get_logger().warn(f"FT zero '{self.ft_zero_service}' unavailable; skipping tare.")
             return False
@@ -181,7 +198,50 @@ class CablePickAssemble(CablePickPlace):
         if resp is None or not resp.success:
             self.get_logger().warn('F/T tare did not report success; continuing.')
             return False
-        self.get_logger().info('F/T sensor tared.')
+        if not quiet:
+            self.get_logger().info('F/T sensor tared.')
+        return True
+
+    # ------------------------------------------------- force guard over EVERY motion
+    def _abort_move(self):
+        """Force guard, armed over EVERY trajectory (hook in PickPlace.send_joints). True -> cancel.
+
+        This is what makes the guard cover ALL phases rather than just the insertion: a collision during
+        the scan, the traverse to the stand-off, or the retract cancels the move immediately.
+
+        Callers tell 'guard tripped' apart from 'move failed' via self._guard_tripped -- and the two
+        mean OPPOSITE things depending on the phase: during the insertion a trip means the part is
+        SEATED (success); anywhere else it means we hit something we should not have (failure)."""
+        if not self.force_guard_enabled:
+            return False
+        if self._contact_exceeded():
+            self._guard_tripped = True
+            return True
+        return False
+
+    def _do(self, label, fn):
+        """Every task: TARE first, then run it with the force guard armed.
+
+        Per-task taring matters because the PAYLOAD CHANGES mid-sequence -- the moment the cable is
+        grasped, its weight lands on the sensor. Without re-zeroing, that weight (and any drift) reads
+        as 'contact': the guard would trip spuriously on the very next move, or, if the bias went the
+        other way, mask a real collision. Zeroing at the start of each task means the guard measures
+        only the force THAT task generates."""
+        if not self._confirm(label):
+            self.get_logger().info('Aborted by user.')
+            return False
+        if self.tare_each_task and self.force_guard_enabled:
+            self._tare_ft(quiet=True)
+            self._sleep(self.tare_settle_s)      # let a fresh, tared sample land before arming
+        self._guard_tripped = False
+        if not fn():
+            if self._guard_tripped:
+                self.get_logger().error(
+                    f'FORCE GUARD tripped during "{label}" (limit {self.max_force:.0f} N / '
+                    f'{self.max_torque:.1f} Nm) -- the arm contacted something unexpected. Stopping.')
+            else:
+                self.get_logger().error(f'Step failed: {label}. Stopping.')
+            return False
         return True
 
     # -------------------------------------------------------- compliance control
@@ -248,7 +308,8 @@ class CablePickAssemble(CablePickPlace):
             self.get_logger().info('Compliance disabled; inserting under POSITION control.')
             return True
         self._apply_admittance_params()
-        self._tare_ft()
+        if self.tare_before:
+            self._tare_ft()
         if not self._switch_controllers([self.adm_controller], [self.position_controller]):
             return False
         self._in_compliance = True
@@ -388,7 +449,16 @@ class CablePickAssemble(CablePickPlace):
                     self.get_logger().info('Stopped on the contact limit (seated).')
                     return True
             else:
+                # Position control: the guard cancels the trajectory MID-CHUNK via _abort_move. Here --
+                # and ONLY here -- that trip means the part is SEATED, not that we hit something wrong,
+                # so it is a SUCCESS. Everywhere else in the sequence the same trip fails the task.
+                self._guard_tripped = False
                 if not self.move_grasp_tcp_to(T, label):
+                    if self._guard_tripped:
+                        self.get_logger().info(
+                            f'[{label}] force guard tripped mid-chunk -- the part is SEATED. Stopping '
+                            'the insertion here (success, not a failure).')
+                        return True
                     return False
             self._sleep(self.chunk_settle_s)     # let the wrench settle before the next check
 
@@ -396,23 +466,49 @@ class CablePickAssemble(CablePickPlace):
         return True
 
     def _retract(self):
-        """Retract the fingertip by retract.axis * distance, expressed in retract.frame."""
-        R = self._frame_rotation(self.retract_frame)
-        if R is None:
-            self.get_logger().error(
-                f"assembly.retract.frame '{self.retract_frame}' is not one of "
-                "'base' | 'target' | 'tool0' | 'fingertip' (or its tf is missing).")
-            return False
-        T_now = self._fingertip_now()
-        if T_now is None:
-            self.get_logger().error('No fingertip pose to retract from.')
-            return False
-        T_new = T_now.copy()
-        T_new[:3, 3] = T_now[:3, 3] + R @ (self.retract_axis * self.retract_dist)
+        """Retract in a SEQUENCE of displacement steps, each expressed in retract.frame.
+
+        Each step moves the FINGERTIP by its displacement vector, and the steps are applied in order --
+        so a multi-leg escape (back out along the mate, clear laterally, come down) is expressible
+        without inventing a trajectory format.
+
+        WHICH FRAMES MOVE matters here:
+          * 'base' and 'target' are FIXED -- every step means the same world direction regardless of how
+            the arm ends up. This is almost always what you want for an escape path.
+          * 'tool0'/'fingertip' move WITH the arm, so their axes are re-evaluated at each step: step 2's
+            "+X" is relative to wherever step 1 left the tool. Rarely what you want.
+        """
+        if not self.retract_steps:
+            self.get_logger().info('No retract steps configured; skipping.')
+            return True
+
+        n = len(self.retract_steps)
         self.get_logger().info(
-            f'Retracting {self.retract_dist * 100:.0f} cm along '
-            f'{self.retract_axis} of the {self.retract_frame} frame.')
-        return self.move_grasp_tcp_to(T_new, 'retract')
+            f'Retracting in {n} step(s), each expressed in the {self.retract_frame.upper()} frame '
+            f'({"FIXED" if self.retract_frame in ("base", "target") else "MOVES WITH THE ARM"}).')
+
+        for k, d in enumerate(self.retract_steps, start=1):
+            # Re-read the rotation each step: a no-op for fixed frames, but correct for moving ones.
+            R = self._frame_rotation(self.retract_frame)
+            if R is None:
+                self.get_logger().error(
+                    f"assembly.retract.frame '{self.retract_frame}' is not one of "
+                    "'base' | 'target' | 'tool0' | 'fingertip' (or its tf is missing).")
+                return False
+            T_now = self._fingertip_now()
+            if T_now is None:
+                self.get_logger().error('No fingertip pose to retract from.')
+                return False
+            T_new = T_now.copy()
+            T_new[:3, 3] = T_now[:3, 3] + R @ d
+            label = (f'retract {k}/{n}: [{d[0] * 100:+.0f}, {d[1] * 100:+.0f}, {d[2] * 100:+.0f}] cm '
+                     f'in {self.retract_frame}')
+            if not self.move_grasp_tcp_to(T_new, label):
+                self.get_logger().error(
+                    f'{label} failed -- unreachable or in collision. Retract steps are LARGE '
+                    'free-space moves and avoid_collisions is false: check the path is clear.')
+                return False
+        return True
 
     # ---------------------------------------------------------------- assemble
     def _assemble_kinematic(self):

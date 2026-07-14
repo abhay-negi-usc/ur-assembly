@@ -36,12 +36,12 @@ publish_fingertip_tf: true
 # ---- Scan phase (detection-gated; see cable_pick_place.yaml for the full rationale) ----
 scan:
   require_detection: true
-  min_good_views: 4
+  min_good_views: 3
   max_passes: 3
   max_dwell_s: 20.0
   view_settle_s: 0.5
   necks_topic: /cable_neck_detector/necks
-  dwell_s: 10.0
+  dwell_s: 8.0
   relative_bounds:
     xyz: [0.08, 0.08, 0.05]
     rpy: [0.35, 0.35, 0.10]
@@ -166,13 +166,26 @@ assembly:
     stiffness:     [200.0, 200.0, 200.0, 15.0, 15.0, 15.0]   # LOWER = more compliant
     selected_axes: [true, true, true, true, true, true]
 
-  # ---- Force guard ----
-  # Stops the insertion when the TARED contact reaches these. Checked BETWEEN chunks and, under
-  # compliance, continuously WITHIN a chunk. 0 disables that check.
+  # ---- Force guard -- ARMED OVER EVERY PHASE ----
+  # Not just the insertion. Every trajectory (scan moves, grasp, traverse to the stand-off, retract,
+  # return home) is monitored WHILE IT EXECUTES and CANCELLED mid-move the instant the limit is hit.
+  #
+  # The same trip means OPPOSITE things by phase, and the demo distinguishes them:
+  #   * during the INSERTION -> the part is SEATED. Success; the insertion stops there.
+  #   * ANYWHERE ELSE        -> we hit something we should not have. The TASK FAILS and the sequence
+  #                             stops immediately.
+  #
+  # tare_each_task: re-zero the sensor at the start of EVERY task. This is essential, not cautious --
+  # the PAYLOAD CHANGES mid-sequence: the moment the cable is grasped its weight lands on the sensor.
+  # Without re-zeroing, that weight reads as 'contact' and would trip the guard on the very next move
+  # (or, with the bias the other way, mask a real collision).
   force_guard:
+    enabled: true
     wrench_topic: /force_torque_sensor_broadcaster/wrench
-    max_force_n: 20.0
-    max_torque_nm: 5.0
+    max_force_n: 20.0            # 0 disables the force check
+    max_torque_nm: 5.0           # 0 disables the torque check
+    tare_each_task: true
+    tare_settle_s: 0.3           # let a fresh, tared sample land before arming the guard
 
   # ---- Insertion ----
   # The ideal stand-off -> target trajectory (linear in position, SLERP in orientation), executed in
@@ -185,10 +198,24 @@ assembly:
     settle_s: 0.5                # pause between chunks so the wrench reading settles before the check
 
   # ---- Retract (after releasing) ----
-  # Move the fingertip by axis * distance, expressed in `frame`:
+  # A SEQUENCE of displacement steps, applied in order, each expressed in `frame`:
   #   base | target | tool0 | fingertip
-  # 'target' is usually right: retract straight back out along the mating axis, whatever the arm's pose.
+  #
+  # WHICH FRAMES MOVE matters:
+  #   * base / target  -- FIXED. Every step means the same world direction however the arm ends up.
+  #                       This is almost always what you want for an escape path.
+  #   * tool0 / fingertip -- MOVE WITH THE ARM, so step 2's "+X" is relative to wherever step 1 left the
+  #                       tool. Rarely what you want.
+  #
+  # Each step is a DISPLACEMENT VECTOR (metres), not axis+distance -- clearer, and it composes.
+  # (The old single-step `axis:` + `distance_m:` form still works if `steps:` is omitted.)
+  #
+  # WARNING: these are LARGE free-space moves and avoid_collisions is false. Make sure the whole path
+  # is clear, and that every waypoint is reachable -- a 50 cm lateral move can easily leave the
+  # workspace or hit a joint limit.
   retract:
     frame: target
-    axis: [0.0, 0.0, 1.0]
-    distance_m: 0.08
+    steps:
+      - xyz: [ 0.00,  0.00,  0.08]   # 1) +8 cm Z   -- back straight out along the mating axis
+      - xyz: [-0.50,  0.00,  0.00]   # 2) -50 cm X  -- clear the assembly laterally
+      - xyz: [ 0.00,  0.00, -0.25]   # 3) -25 cm Z  -- come back down

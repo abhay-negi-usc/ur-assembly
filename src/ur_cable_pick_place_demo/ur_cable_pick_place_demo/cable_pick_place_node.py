@@ -111,6 +111,20 @@ class CablePickPlace(PickPlace):
         self.view_settle_s = float(scan.get('view_settle_s', 0.5))
         self.necks_topic = scan.get('necks_topic', '/cable_neck_detector/necks')
 
+        # ---- Progressive approach ----
+        # Step the camera CLOSER to the cable after each GOOD view. This is the single highest-leverage
+        # thing the scan can do for accuracy: the triangulated DEPTH error grows as Z^2
+        # (sigma_Z ~ Z^2 * sigma_px / (f * B)), so HALVING the range QUARTERS it -- far more than any
+        # extra baseline buys. It also puts more pixels on the cable, sharpening the 2D neck/axis
+        # measurement that everything downstream is built on.
+        ap = scan.get('approach', {}) or {}
+        self.approach_enabled = bool(ap.get('enabled', True))
+        self.approach_step = float(ap.get('step_m', 0.010))
+        self.scan_min_distance = float(ap.get('min_distance_m', 0.045))
+        self.scan_nominal_distance = float(ap.get('nominal_distance_m', 0.23))
+        self.scale_offsets = bool(ap.get('scale_offsets', True))
+        self._scan_distance = None      # camera->connector distance; unknown until the first estimate
+
         # Detection bookkeeping. _good_since is the time the arm SETTLED at the current view; only
         # detections of images captured after it are credited to this viewpoint (see _necks_cb).
         self._good_views = 0
@@ -310,6 +324,63 @@ class CablePickPlace(PickPlace):
             f'({self._good_views}/{self.min_good_views} good so far).')
         return False
 
+    # ----------------------------------------------------- progressive approach
+    def _scaled_offset(self, off):
+        """The authored offset, SCALED to the current camera->cable distance. Tilts are left alone.
+
+        Scaling is NOT optional once the camera approaches. The offsets are authored for
+        nominal_distance_m (230 mm), where a 4 cm lateral step is a sane ~10 deg excursion. At the
+        45 mm floor that SAME 4 cm becomes a 42 deg excursion -- the cable leaves the frame entirely and
+        the view is worthless. Scaling by (current / nominal) keeps every view at the same angular
+        geometry at every range.
+
+        The TILTS need no scaling, and that is not a coincidence: each is atan(offset / distance), which
+        is INVARIANT when the offset scales in proportion to the distance. So scaling xyz and leaving
+        rpy is exactly self-consistent -- the views keep aiming at the cable at every range."""
+        s = 1.0
+        if self.scale_offsets and self._scan_distance is not None:
+            s = self._scan_distance / max(1e-6, self.scan_nominal_distance)
+        xyz = np.clip(np.asarray(off['xyz'], dtype=float) * s,
+                      -self.scan_bounds_xyz, self.scan_bounds_xyz)
+        rpy = np.clip(np.asarray(off['rpy'], dtype=float),
+                      -self.scan_bounds_rpy, self.scan_bounds_rpy)
+        return xyz, rpy
+
+    def _approach(self, T_base_cam0):
+        """Learn the camera->connector distance and, if enabled, step the scan ANCHOR closer.
+
+        Called after each GOOD view. Moving along the viewing ray (C - P) keeps the connector centred,
+        so no re-aiming is needed. Returns the new anchor (unchanged if there is no estimate yet, or if
+        we are already at the floor)."""
+        T_conn = self._tf_matrix(self.base_frame, self.connector_frame,
+                                 max_age_s=self.connector_max_age, timeout_s=0.5)
+        if T_conn is None:
+            return T_base_cam0                    # no estimate yet -- nothing to approach or scale to
+
+        P, C = T_conn[:3, 3], T_base_cam0[:3, 3]
+        v = C - P
+        d = float(np.linalg.norm(v))
+        if d < 1e-4:
+            return T_base_cam0
+        self._scan_distance = d                   # known now -> the offsets scale from here on
+
+        if not self.approach_enabled or d <= self.scan_min_distance + 1e-4:
+            if self.approach_enabled:
+                self.get_logger().info(
+                    f'  at the {self.scan_min_distance * 1000:.0f} mm floor ({d * 1000:.0f} mm) -- '
+                    'not approaching further.')
+            return T_base_cam0
+
+        d_new = max(self.scan_min_distance, d - self.approach_step)
+        T_new = T_base_cam0.copy()
+        T_new[:3, 3] = P + v / d * d_new          # slide along the viewing ray; stays centred
+        self._scan_distance = d_new
+        self.get_logger().info(
+            f'  approach: {d * 1000:.0f} -> {d_new * 1000:.0f} mm from the cable '
+            f'(step {(d - d_new) * 1000:.0f} mm, floor {self.scan_min_distance * 1000:.0f} mm). '
+            f'Offsets now scale x{d_new / self.scan_nominal_distance:.2f}.')
+        return T_new
+
     # --------------------------------------------------------------------- scan
     def _scan(self):
         if not self.scan_offsets:
@@ -336,16 +407,18 @@ class CablePickPlace(PickPlace):
             for i, off in enumerate(self.scan_offsets):
                 if self._good_views >= self.min_good_views:
                     break
-                xyz = np.clip(np.asarray(off['xyz'], dtype=float),
-                              -self.scan_bounds_xyz, self.scan_bounds_xyz)
-                rpy = np.clip(np.asarray(off['rpy'], dtype=float),
-                              -self.scan_bounds_rpy, self.scan_bounds_rpy)
+                xyz, rpy = self._scaled_offset(off)                      # scaled to the current range
                 T_cam_target = T_base_cam0 @ xyzrpy_to_matrix(xyz, rpy)  # offset in the camera frame
-                label = f'scan view {i + 1}/{n} (pass {p + 1}/{self.max_passes})'
+                d_txt = ('' if self._scan_distance is None
+                         else f' @{self._scan_distance * 1000:.0f}mm')
+                label = f'scan view {i + 1}/{n} (pass {p + 1}/{self.max_passes}){d_txt}'
                 if not self._go_to_camera_pose(T_cam_target, label):
                     return False
                 self._view_idx += 1
-                self._hold_view(label, self._view_idx)
+                # Approach only on a GOOD view: a view that saw nothing is no evidence that getting
+                # closer is safe or useful, and stepping in anyway would compound a bad estimate.
+                if self._hold_view(label, self._view_idx):
+                    T_base_cam0 = self._approach(T_base_cam0)
 
             if self._good_views >= self.min_good_views:
                 break

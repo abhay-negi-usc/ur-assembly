@@ -54,8 +54,11 @@ def _imgmsg_to_bgr(msg):
 class CablePickPlace(PickPlace):
     """Pick-and-place a cable using a multi-view SAM3 connector-pose estimate."""
 
-    def __init__(self):
-        super().__init__(node_name='cable_pick_place', default_config=self._cable_config())
+    def __init__(self, node_name='cable_pick_place', default_config=None):
+        # node_name/default_config are exposed so subclasses (e.g. ur_cable_touch_pick_place_demo) can
+        # reuse this whole machinery -- scan, fingertip, grasp check, speed caps -- with their own yaml.
+        super().__init__(node_name=node_name,
+                         default_config=default_config or self._cable_config())
         c = self.cfg
         self.connector_frame = c.get('connector_frame', 'connector')
         self.connector_max_age = float(c.get('connector_max_age_s', 3.0))

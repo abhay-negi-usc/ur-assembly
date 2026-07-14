@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ur_cable_touch_pick_place_demo</name>
+  <version>0.1.0</version>
+  <description>
+    Cable TOUCH-then-pick for the UR10e + Robotiq 2F-85. Subclasses ur_cable_pick_place_demo, but
+    obtains the connector's pose differently: VISION supplies x, y and yaw (well determined, since
+    they are lateral in the image), while Z -- the camera's depth direction and the weakest axis of a
+    monocular multi-view fit -- is MEASURED by touch. The gripper closes its fingers and probes
+    straight down until a very low force trips; the contact height is the connector's z. Roll and
+    pitch are assumed zero, which is what makes a single touch sufficient. It then retracts, opens,
+    aligns and picks. Perception comes from the SAM3 TIP pipeline (sam3-abhay), which unions the cable
+    and connector masks so it survives SAM3 labelling the whole assembly "cable". Needs no torch.
+  </description>
+  <maintainer email="negiabhay98@gmail.com">abhay</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>ur_cable_pick_place_demo</exec_depend>
+  <exec_depend>ur_pick_place_demo</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>trajectory_msgs</exec_depend>
+  <exec_depend>control_msgs</exec_depend>
+  <exec_depend>moveit_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>tf_transformations</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

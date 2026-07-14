@@ -87,6 +87,10 @@ class CablePickAssemble(CablePickPlace):
         self.ft_zero_service = c.get('ft_zero_service', '/io_and_status_controller/zero_ftsensor')
         self.tare_before = bool(c.get('tare_before', True))
         self.apply_params = bool(c.get('apply_params', True))
+        # How long to PIN the admittance reference to the arm's current pose on each side of a
+        # controller switch. This is what stops the joint-velocity fault on the transition -- see
+        # _hold_reference. Cheap insurance; there is no reason to shrink it.
+        self.switch_settle_s = float(c.get('switch_settle_s', 0.5))
         self.adm_mass = c.get('mass', [5.0] * 3 + [0.5] * 3)
         self.adm_damping = c.get('damping_ratio', [1.0] * 6)
         self.adm_stiffness = c.get('stiffness', [200.0] * 3 + [15.0] * 3)
@@ -298,6 +302,28 @@ class CablePickAssemble(CablePickPlace):
             return False
         return True
 
+    def _hold_reference(self, seconds):
+        """Publish the arm's CURRENT joint positions as the admittance reference for `seconds`.
+
+        THIS IS WHAT PREVENTS THE JOINT-VELOCITY VIOLATION ON A CONTROLLER SWITCH.
+
+        The admittance controller starts tracking its reference the INSTANT it activates. If that
+        reference is anything other than where the arm actually is -- a stale message left in its buffer,
+        or a default -- it commands a step change from the real pose to that reference in a single
+        control cycle. The driver sees an impossible joint velocity (joint 0 first, since the shoulder
+        pan carries the largest excursion) and faults.
+
+        Publishing the current position makes activation a NO-OP by construction: the target IS where the
+        arm already is, whatever the controller's own initialisation happens to do. Held on BOTH sides of
+        the switch -- before, to seed the buffer; after, to pin it there until we deliberately ramp."""
+        j = self._current_joints()
+        period = 1.0 / self.reference_rate
+        for _ in range(max(1, int(seconds * self.reference_rate))):
+            pt = JointTrajectoryPoint()
+            pt.positions = list(j)
+            self.ref_pub.publish(pt)
+            self._sleep(period)
+
     def _enable_compliance(self):
         """Tare, push the gains, and hand the arm over to the admittance controller.
 
@@ -310,22 +336,43 @@ class CablePickAssemble(CablePickPlace):
         self._apply_admittance_params()
         if self.tare_before:
             self._tare_ft()
+            self._sleep(self.tare_settle_s)
+
+        # Seed the reference with the CURRENT pose BEFORE the switch, so activation cannot jump.
+        self._hold_reference(self.switch_settle_s)
         if not self._switch_controllers([self.adm_controller], [self.position_controller]):
             return False
         self._in_compliance = True
-        self._sleep(0.3)      # let a fresh, tared wrench sample arrive before we start pushing
+        # Pin it there now that the controller is live, until we deliberately start ramping.
+        self._hold_reference(self.switch_settle_s)
+
+        # A tared sensor should read ~0. If it does not, the admittance controller will DRIVE the arm to
+        # "comply" with that phantom force -- a runaway, not an insertion. This is the other way joint 0
+        # runs away on a switch, and no amount of reference seeding fixes it.
+        residual = self._wrench[0] if self._wrench else 0.0
+        if self.max_force > 0.0 and residual > 0.25 * self.max_force:
+            self.get_logger().warn(
+                f'Residual force after tare is {residual:.1f} N (limit {self.max_force:.0f} N). The '
+                'admittance controller will actively push the arm to null that. Check the tare took '
+                "effect, and that the controller's gravity/payload compensation is configured -- an "
+                'uncompensated tool weight looks exactly like a constant external force.')
+
         self.get_logger().info(
             f'Compliance ON. Force-guarded at {self.max_force:.0f} N / {self.max_torque:.1f} Nm.')
         return True
 
     def _switch_to_position(self):
+        """Hand the arm back to the JTC. Hold the reference across the switch for the same reason as
+        _enable_compliance: a reference that disagrees with the arm's real pose is a step command."""
         if not self._in_compliance:
             return True
-        if self._switch_controllers([self.position_controller], [self.adm_controller]):
-            self._in_compliance = False
-            self.get_logger().info('Position control restored.')
-            return True
-        return False
+        self._hold_reference(self.switch_settle_s)     # pin the arm before handing it over
+        if not self._switch_controllers([self.position_controller], [self.adm_controller]):
+            return False
+        self._in_compliance = False
+        self._sleep(self.switch_settle_s)              # let the JTC latch the current pose as its hold
+        self.get_logger().info('Position control restored.')
+        return True
 
     # ------------------------------------------------------------ target geometry
     def _fingertip_target(self):

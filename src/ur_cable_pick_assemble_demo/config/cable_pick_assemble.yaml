@@ -184,6 +184,13 @@ assembly:
     ft_zero_service: /io_and_status_controller/zero_ftsensor
     tare_before: true            # essential -- the tool weight dwarfs the contact forces
     apply_params: true           # push the gains below onto the running controller (they are dynamic)
+    # PIN the admittance reference to the arm's CURRENT pose for this long on EACH SIDE of a controller
+    # switch. This is what prevents the joint-velocity fault on the transition: the admittance controller
+    # starts tracking its reference the instant it activates, so if that reference disagrees with where
+    # the arm actually is, it commands a step change in ONE control cycle -- which the driver rejects as
+    # an impossible joint velocity (joint 0 first: the shoulder pan carries the largest excursion).
+    # Publishing the current pose makes activation a no-op by construction.
+    switch_settle_s: 0.5
     mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
     damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     stiffness:     [200.0, 200.0, 200.0, 15.0, 15.0, 15.0]   # LOWER = more compliant

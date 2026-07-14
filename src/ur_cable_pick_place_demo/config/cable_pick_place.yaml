@@ -107,17 +107,17 @@ scan:
   approach:
     enabled: true
     step_m: 0.010                  # move at most 10 mm closer per good view
-    min_distance_m: 0.045          # never get closer than 45 mm to the cable
+    min_distance_m: 0.200          # never get closer than 200 mm to the cable (the VIEW FLOOR)
     # The offsets below are authored for THIS camera-to-cable distance, and are SCALED by
     # (current / nominal) as the camera closes in. THIS IS NOT OPTIONAL: a 4 cm lateral offset is a sane
-    # ~10 deg excursion at 230 mm, but at the 45 mm floor that SAME 4 cm is a 42 deg excursion -- the
+    # ~10 deg excursion at 230 mm, but at a tight floor the SAME 4 cm becomes a huge excursion -- the
     # cable leaves the frame entirely and the view is worthless.
     # The TILTS are deliberately NOT scaled, and that is not a coincidence: each is
     # atan(offset / distance), which is INVARIANT when the offset scales in proportion to the distance.
     # So scaling xyz and leaving rpy is exactly self-consistent at every range.
     # RE-CENTRE the cable in the image on every step: aim the optical axis (+z) at the connector.
     # NOT cosmetic. Sliding along the viewing ray alone PRESERVES the framing error you started with --
-    # harmless at 230 mm, fatal at 45 mm, because the field of view shrinks in world terms as the camera
+    # harmless far away, fatal up close, because the field of view shrinks in world terms as the camera
     # closes in, so an off-centre cable drifts OUT OF FRAME exactly when you most need it. Centring also
     # puts the cable where the lens is sharpest, and makes the offsets symmetric about the target -- which
     # is what the view-keeping tilts already assume.
@@ -190,7 +190,7 @@ scan:
     # floor would refuse all of them. The orbit radius shrinks with the approach automatically (it is
     # |C - P|), so the excursions shrink too -- but so does the clearance. KEEP THE E-STOP IN HAND at
     # close range: the camera body is swinging within a few cm of the part.
-    min_height_m: 0.030                     # skip any view that would put the camera lower than this
+    min_height_m: 0.12                     # skip any view that would put the camera lower than this
                                             # above the connector (table-collision / grazing guard)
 
 # ---- Scan overlay output ----

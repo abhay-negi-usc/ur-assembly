@@ -45,21 +45,21 @@ scan:
 
   # ---- Progressive approach: move CLOSER after each GOOD view ----
   # The highest-leverage thing the scan can do for accuracy: the triangulated DEPTH error grows as Z^2
-  # (sigma_Z ~ Z^2 * sigma_px / (f * B)), so 230 mm -> 45 mm cuts it by ~26x -- far more than any extra
+  # (sigma_Z ~ Z^2 * sigma_px / (f * B)), so halving the range QUARTERS it -- far more than any extra
   # baseline buys. It also puts more pixels on the cable, sharpening the 2D neck/axis measurement.
   # Only a GOOD view triggers a step in: a view that saw nothing is no evidence that closing in is safe.
   approach:
     enabled: true
     step_m: 0.010                  # move at most 10 mm closer per good view
-    min_distance_m: 0.045          # never get closer than 45 mm to the cable
+    min_distance_m: 0.200          # never get closer than 200 mm to the cable (the VIEW FLOOR)
     # The offsets below are authored for THIS range and are SCALED by (current / nominal) as the camera
     # closes in. NOT OPTIONAL: the largest authored offset (65 mm) is a sane 15.8 deg excursion at
-    # 230 mm, but at the 45 mm floor that same 65 mm is a 55 deg excursion -- the cable leaves the frame.
+    # 230 mm; at a tight floor that same 65 mm becomes a huge excursion and the cable leaves the frame.
     # The TILTS are deliberately NOT scaled: each is atan(offset/distance), which is INVARIANT when the
     # offset scales in proportion to the distance. So the view angle stays 15.8 deg at EVERY range.
     # RE-CENTRE the cable in the image on every step: aim the optical axis (+z) at the connector.
     # NOT cosmetic. Sliding along the viewing ray alone PRESERVES the framing error you started with --
-    # harmless at 230 mm, fatal at 45 mm, because the field of view shrinks in world terms as the camera
+    # harmless far away, fatal up close, because the field of view shrinks in world terms as the camera
     # closes in, so an off-centre cable drifts OUT OF FRAME exactly when you most need it. Centring also
     # puts the cable where the lens is sharpest, and makes the offsets symmetric about the target -- which
     # is what the view-keeping tilts already assume.
@@ -88,11 +88,10 @@ scan:
     orbit_deg: [12.0, -12.0, 20.0, -20.0]
     max_orbit_deg: 25.0
     # MUST be BELOW approach.min_distance_m, or the guard rejects EVERY orbit view once the camera has
-    # closed in: at a 45 mm standoff a 20 deg orbit leaves the camera 45*cos(20) = 42 mm up, so the old
-    # 120 mm floor would have silently refused all of them. The orbit radius shrinks with the approach
-    # automatically (it is |C - P|) -- but so does the clearance. E-STOP IN HAND at close range: the
-    # camera body swings within a few cm of the part.
-    min_height_m: 0.030
+    # closed in. At the 200 mm view floor a 25 deg orbit leaves the camera 200*cos(25) = 181 mm up, so
+    # a 120 mm clearance is comfortably satisfied. If you ever LOWER the view floor, lower this too or
+    # every orbit view is silently rejected.
+    min_height_m: 0.12
 
 # ---- Scan overlay output ----
 save_scan_images: true
@@ -219,7 +218,7 @@ assembly:
   force_guard:
     enabled: true
     wrench_topic: /force_torque_sensor_broadcaster/wrench
-    max_force_n: 20.0            # 0 disables the force check
+    max_force_n: 30.0            # 0 disables the force check
     max_torque_nm: 5.0           # 0 disables the torque check
     tare_each_task: true
     tare_settle_s: 0.3           # let a fresh, tared sample land before arming the guard

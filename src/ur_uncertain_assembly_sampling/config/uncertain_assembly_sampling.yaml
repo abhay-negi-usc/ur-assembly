@@ -70,7 +70,7 @@ admittance:
   # such param). 'wrench_filtered' also exists (smoother). The sampling node reads the message's
   # frame_id and transforms the wrench to tool0 (tool0_controller ~= tool0), then to the held frame.
   wrench_topic: /force_torque_sensor_broadcaster/wrench
-  max_force_n: 10.0             # force-guarded stop of the chunk (0 disables)
+  max_force_n: 30.0             # force-guarded stop of the chunk (0 disables)
   max_torque_nm: 1.0            # torque-guarded stop (0 disables)
 
 confirm_each_step: false          # prompts at trial boundaries (set false for an unattended run)

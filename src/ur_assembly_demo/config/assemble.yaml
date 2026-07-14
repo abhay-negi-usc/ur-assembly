@@ -148,5 +148,5 @@ assembly:
     # Force-guarded stop: halt the ramp when the TARED contact wrench reaches these magnitudes,
     # then hold there (part seated). The wrench is read after the F/T tare, so it's contact-only.
     wrench_topic: /force_torque_sensor_broadcaster/wrench
-    max_force_n: 20.0             # stop when |force|  >= this (N).  0 disables the force check
+    max_force_n: 30.0             # stop when |force|  >= this (N).  0 disables the force check
     max_torque_nm: 5.0            # stop when |torque| >= this (Nm). 0 disables the torque check

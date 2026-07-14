@@ -1,0 +1,23 @@
+# Conda environment for urlab.
+#
+#   conda env create -f environment.yml     # run from the repo ROOT (the pip -r path is relative)
+#   conda activate urlab
+#
+# Python is pinned to 3.12 because ur_rtde and pyrealsense2 ship wheels only through cp312 -- a
+# newer Python leaves those two uninstallable. The actual dependencies come from the pip
+# requirements files, so conda and venv build from ONE source of truth and never drift.
+#
+# For a lighter env, point the pip line at a different layer:
+#   - requirements/core.txt   math + fusion + --dry-run (no robot/camera/torch)
+#   - requirements/dev.txt    core + perception + pytest (to run tests/)
+#   - requirements.txt        everything for a hardware run (the default below)
+#
+# SAM3 is NOT installed here -- it runs from the sam3-abhay checkout under its own venv.
+name: urlab
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - -r requirements.txt

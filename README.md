@@ -44,6 +44,21 @@ pip install -r requirements/dev.txt           # core + perception + pytest (to r
 or the packaged extras: `pip install -e .[robot,perception]`. Core (`numpy scipy pyyaml`) is enough
 to import the library, run the tests, and plan with `--dry-run`.
 
+**One-command environment setup.** Both paths pin Python to **3.12** (`ur_rtde` and `pyrealsense2`
+ship wheels only through cp312):
+
+```bash
+# conda
+conda env create -f environment.yml        # run from the repo root; then: conda activate urlab
+
+# venv (creates .venv/ and installs)
+./setup-venv.sh                             # Linux/macOS or Git Bash   (arg: core|robot|perception|all|dev)
+.\setup-venv.ps1                            # Windows PowerShell        (same optional arg)
+```
+
+Both read the same `requirements/` files, so conda and venv never drift. Pass a layer name to
+either script (default `all`) for a lighter env, e.g. `./setup-venv.sh core`.
+
 **SAM3 is not installed by any of these** — it runs from your `sam3-abhay` checkout under its own
 venv, because it needs pins this environment must not inherit (`torch==2.4.1+cu121` for the Pascal
 GPU, the gated model weights, the 6 GB memory workaround). Point `sam3.repo_path` at that checkout;

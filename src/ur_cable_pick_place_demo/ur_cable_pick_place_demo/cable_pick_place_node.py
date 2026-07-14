@@ -30,6 +30,7 @@ from datetime import datetime
 import numpy as np
 
 import rclpy
+from geometry_msgs.msg import PoseArray
 from rclpy.time import Time
 from sensor_msgs.msg import Image
 
@@ -97,6 +98,25 @@ class CablePickPlace(PickPlace):
         self.refine_orbit_deg = [float(v) for v in (refine.get('orbit_deg', []) or [])]
         self.refine_max_orbit = abs(float(refine.get('max_orbit_deg', 30.0)))
         self.refine_min_height = float(refine.get('min_height_m', 0.10))
+
+        # ---- Detection-gated scanning ----
+        # A fixed view list gives no guarantee about how many USABLE views the fusion actually got: the
+        # detector misses many frames, so some views yield nothing. Instead, hold each view until it
+        # produces a POSITIVE detection, and keep sweeping until min_good_views are banked. This also
+        # SAVES time -- a view that detects in 4 s is left immediately instead of dwelling the full max.
+        self.require_detection = bool(scan.get('require_detection', True))
+        self.min_good_views = int(scan.get('min_good_views', 4))
+        self.max_passes = int(scan.get('max_passes', 3))
+        self.max_dwell_s = float(scan.get('max_dwell_s', 20.0))
+        self.view_settle_s = float(scan.get('view_settle_s', 0.5))
+        self.necks_topic = scan.get('necks_topic', '/cable_neck_detector/necks')
+
+        # Detection bookkeeping. _good_since is the time the arm SETTLED at the current view; only
+        # detections of images captured after it are credited to this viewpoint (see _necks_cb).
+        self._good_views = 0
+        self._good_since = None
+        self._got_detection = False
+        self.create_subscription(PoseArray, self.necks_topic, self._necks_cb, 10)
 
         # Save the SAM3 overlay (Node 1's ~/debug_image) at each scan view.
         self.save_scan_images = bool(c.get('save_scan_images', True))
@@ -241,6 +261,56 @@ class CablePickPlace(PickPlace):
         except Exception as exc:   # noqa: BLE001 - saving is best-effort
             self.get_logger().warn(f'Could not save scan overlay: {exc}')
 
+    # ------------------------------------------------------- detection-gated dwell
+    def _necks_cb(self, msg):
+        """A POSITIVE detection, credited to the CURRENT view only if the IMAGE was captured here.
+
+        Attribution matters. The detector lags by one inference (~6 s on a slow GPU), so a detection
+        arriving NOW may correspond to an image captured during the PREVIOUS view, or mid-motion while
+        the camera was smearing between views. Crediting that to this viewpoint would be a lie -- and a
+        blurred, in-motion frame is exactly the view we do not want to count. So we compare the message's
+        IMAGE STAMP against the moment the arm settled here."""
+        if not msg.poses or self._good_since is None:
+            return                                   # detector alive but saw nothing (or not dwelling)
+        if Time.from_msg(msg.header.stamp) >= self._good_since:
+            self._got_detection = True
+
+    def _hold_view(self, label, index):
+        """Hold at the current view until the detector reports a positive detection of a frame captured
+        HERE, or until max_dwell_s. Saves the overlay and returns True if this was a GOOD view.
+
+        Leaving as soon as a detection lands is what makes this FASTER than a fixed dwell, not slower:
+        a view that detects in 4 s costs 4 s, not the full budget."""
+        self._latest_debug = None                    # discard any stale overlay before this view
+        if not self.require_detection:               # legacy behaviour: fixed dwell, count it good
+            self._sleep(self.scan_dwell_s)
+            self._save_view_image(index)
+            self._good_views += 1
+            return True
+
+        self._sleep(self.view_settle_s)              # let the arm come to REST before crediting frames
+        self._good_since = self.get_clock().now()
+        self._got_detection = False
+
+        deadline = self._good_since.nanoseconds + int(self.max_dwell_s * 1e9)
+        while rclpy.ok() and self.get_clock().now().nanoseconds < deadline:
+            if self._got_detection:
+                waited = (self.get_clock().now() - self._good_since).nanoseconds / 1e9
+                self._good_views += 1
+                self._save_view_image(index)
+                self.get_logger().info(
+                    f'  {label}: GOOD view (detected after {waited:.1f}s) -- '
+                    f'{self._good_views}/{self.min_good_views} good.')
+                return True
+            rclpy.spin_once(self, timeout_sec=0.1)
+
+        self._save_view_image(index)                 # save it anyway: the overlay shows WHY it missed
+        self.get_logger().warn(
+            f'  {label}: no detection within {self.max_dwell_s:.0f}s -- not a good view '
+            f'({self._good_views}/{self.min_good_views} good so far).')
+        return False
+
+    # --------------------------------------------------------------------- scan
     def _scan(self):
         if not self.scan_offsets:
             self.get_logger().error('No scan.offsets configured.')
@@ -251,31 +321,57 @@ class CablePickPlace(PickPlace):
             self.get_logger().error(
                 f'No {self.base_frame} -> {self.camera_frame} tf to anchor the relative scan.')
             return False
+
+        self._good_views = 0
+        self._view_idx = 0
         n = len(self.scan_offsets)
         self.get_logger().info(
-            f'Scanning the cable from {n} views relative to the current camera pose '
-            '(offsets in the camera frame, clamped to relative_bounds; must give parallax)...')
-        for i, off in enumerate(self.scan_offsets):
-            xyz = np.clip(np.asarray(off['xyz'], dtype=float),
-                          -self.scan_bounds_xyz, self.scan_bounds_xyz)
-            rpy = np.clip(np.asarray(off['rpy'], dtype=float),
-                          -self.scan_bounds_rpy, self.scan_bounds_rpy)
-            T_cam_target = T_base_cam0 @ xyzrpy_to_matrix(xyz, rpy)   # offset in the camera frame
-            if not self._go_to_camera_pose(T_cam_target, f'scan view {i + 1}/{n}'):
-                return False
-            self._latest_debug = None            # discard any stale overlay before this view
-            self._sleep(self.scan_dwell_s)       # hold still so SAM3 processes a clean frame here
-            self._save_view_image(i + 1)         # save the fresh SAM3 overlay for this view
-            got = self._tf_matrix(self.base_frame, self.connector_frame,
-                                  max_age_s=self.connector_max_age, timeout_s=0.2) is not None
-            self.get_logger().info(
-                f'  view {i + 1}/{n}: connector estimate '
-                f'{"available" if got else "not yet (need more views/parallax)"}.')
+            f'Scanning until {self.min_good_views} GOOD view(s) -- a view only counts once the '
+            f'detector positively detects a frame captured while STATIONARY there. {n} seed view(s) '
+            f'per pass, up to {self.max_passes} pass(es), max {self.max_dwell_s:.0f}s per view.'
+            if self.require_detection else
+            f'Scanning {n} views (fixed dwell; detection gating disabled)...')
 
-        # Phase 2: the seed views above give a first estimate; these place the camera where it
-        # actually SHARPENS THE AXIS (see _scan_refine).
-        if self.refine_enabled and self.refine_orbit_deg:
-            return self._scan_refine(T_base_cam0)
+        for p in range(self.max_passes):
+            for i, off in enumerate(self.scan_offsets):
+                if self._good_views >= self.min_good_views:
+                    break
+                xyz = np.clip(np.asarray(off['xyz'], dtype=float),
+                              -self.scan_bounds_xyz, self.scan_bounds_xyz)
+                rpy = np.clip(np.asarray(off['rpy'], dtype=float),
+                              -self.scan_bounds_rpy, self.scan_bounds_rpy)
+                T_cam_target = T_base_cam0 @ xyzrpy_to_matrix(xyz, rpy)  # offset in the camera frame
+                label = f'scan view {i + 1}/{n} (pass {p + 1}/{self.max_passes})'
+                if not self._go_to_camera_pose(T_cam_target, label):
+                    return False
+                self._view_idx += 1
+                self._hold_view(label, self._view_idx)
+
+            if self._good_views >= self.min_good_views:
+                break
+
+            # Phase 2: the seed views give a first estimate; these place the camera where it actually
+            # SHARPENS THE AXIS (see _scan_refine). They also count toward the good-view quota.
+            if self.refine_enabled and self.refine_orbit_deg:
+                if not self._scan_refine(T_base_cam0):
+                    return False
+            if self._good_views >= self.min_good_views:
+                break
+
+            if p + 1 < self.max_passes:
+                self.get_logger().warn(
+                    f'Pass {p + 1}/{self.max_passes} done with only '
+                    f'{self._good_views}/{self.min_good_views} good view(s). Sweeping again...')
+
+        if self.require_detection and self._good_views < self.min_good_views:
+            self.get_logger().error(
+                f'Only {self._good_views}/{self.min_good_views} good view(s) after '
+                f'{self.max_passes} pass(es). The detector is not seeing the cable often enough to '
+                'trust an estimate. Check the debug overlay, lower the detector\'s confidence_floor, '
+                'or reword the prompts. Aborting rather than fitting a pose to too few views.')
+            return False
+
+        self.get_logger().info(f'Scan complete: {self._good_views} good view(s).')
         return True
 
     @staticmethod
@@ -350,6 +446,9 @@ class CablePickPlace(PickPlace):
             'stays on the cable.')
 
         for i, deg in enumerate(self.refine_orbit_deg):
+            if self._good_views >= self.min_good_views:
+                self.get_logger().info('  quota of good views reached; ending the refinement early.')
+                break
             th = np.radians(float(np.clip(deg, -self.refine_max_orbit, self.refine_max_orbit)))
             # Rodrigues: rotate the viewing offset about the cable axis. Preserves |v0| exactly, so the
             # standoff -- and hence the apparent scale of the connector -- is unchanged.
@@ -373,10 +472,8 @@ class CablePickPlace(PickPlace):
             if not self._go_to_camera_pose(self._look_at(C, P, T_base_cam0), label):
                 self.get_logger().warn(f'{label}: unreachable -- skipping it.')
                 continue
-            self._latest_debug = None
-            self._sleep(self.scan_dwell_s)
-            self._save_view_image(len(self.scan_offsets) + i + 1)
-            self.get_logger().info(f'  {label}: done.')
+            self._view_idx += 1
+            self._hold_view(label, self._view_idx)   # gated dwell; counts toward the good-view quota
         return True
 
     # ------------------------------------------------------------- grasp delta report

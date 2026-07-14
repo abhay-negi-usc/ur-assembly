@@ -80,8 +80,22 @@ publish_fingertip_tf: true       # broadcast tool0 -> fingertip so you can verif
 # Cartesian box around the start. Give enough spread (translation) for PARALLAX while keeping the
 # cable in frame. The default offsets sweep +/-4 cm along the camera's image axes.
 scan:
-  dwell_s: 10.0                    # hold at each view; MUST exceed SAM3's inference time (~6 s on a
-                                   # pre-Ampere GPU) so each view gets one clean, STATIC frame
+  # ---- Detection-gated scanning: keep going until N GOOD views ----
+  # A fixed view list says nothing about how many USABLE views the fusion actually got -- the detector
+  # misses many frames, so some views yield nothing at all. Instead each view is HELD until the detector
+  # positively detects a frame captured while the arm is STATIONARY there, and the sweep repeats until
+  # min_good_views are banked. This is also FASTER on average: a view that detects in 4 s is left
+  # immediately instead of always burning the full dwell.
+  # ATTRIBUTION: the detector lags one inference (~6 s), so a detection arriving now may be of an image
+  # taken during the PREVIOUS view or mid-motion (blurred). Only detections whose IMAGE STAMP is after
+  # the arm settled at this view are credited to it.
+  require_detection: true          # false -> legacy fixed-dwell behaviour (every view counts)
+  min_good_views: 4                # keep scanning until this many views yield a positive detection
+  max_passes: 3                    # how many times to re-sweep the list before giving up (then ABORT)
+  max_dwell_s: 20.0                # per view: wait up to this for a detection, then move on
+  view_settle_s: 0.5               # let the arm come to rest before crediting any frame to this view
+  necks_topic: /cable_neck_detector/necks   # the detector's output the demo listens to
+  dwell_s: 10.0                    # only used when require_detection is false (fixed hold per view)
   relative_bounds:                 # max |offset| from the start pose, in the CAMERA frame (safety clamp)
     xyz: [0.08, 0.08, 0.05]        # +/- m along camera x (right), y (down), z (forward/depth)
     rpy: [0.35, 0.35, 0.10]        # +/- rad about camera x, y, z (0.35 rad ~ 20 deg). MUST exceed the

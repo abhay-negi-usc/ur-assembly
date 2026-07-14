@@ -91,7 +91,16 @@ publish_fingertip_tf: true       # broadcast tool0 -> fingertip; verify the prob
 
 # ---- Scan phase (inherited; refines the TIP's axis) ----
 scan:
-  dwell_s: 10.0
+  # Detection-gated: hold each view until the detector positively detects a frame captured while
+  # STATIONARY there, and keep sweeping until min_good_views are banked (then ABORT if it can't).
+  # NOTE the topic: this demo uses the TIP detector, not the neck detector.
+  require_detection: true
+  min_good_views: 4
+  max_passes: 3
+  max_dwell_s: 20.0
+  view_settle_s: 0.5
+  necks_topic: /cable_tip_detector/tips    # <-- the TIP detector's output
+  dwell_s: 10.0                            # only used when require_detection is false
   relative_bounds:
     xyz: [0.08, 0.08, 0.05]
     rpy: [0.35, 0.35, 0.10]

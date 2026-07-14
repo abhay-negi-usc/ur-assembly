@@ -1,0 +1,46 @@
+# Uncertain-assembly sampling (data collection). Repeatedly drive a PERTURBED part into the mate
+# under compliance, logging commanded/actual poses + wrench, then disassemble and repeat.
+# Ported from ur_uncertain_assembly_sampling. Compliance is UR forceMode.
+robot:
+  ip: 192.168.125.2
+  dry_run: false
+base_frame: base_link
+tip_frame: tool0
+
+assembled_pose:
+  xyz: [-0.103, -1.048, -0.068]
+  rpy: [-3.129, -0.011, -3.139]
+held_object_pose:
+  xyz: [0.0, -0.089, 0.010]
+  rpy: [-1.5708, 0.0, 0.0]
+
+standoff_distance_m: 0.200
+standoff_axis: [0.0, 0.0, 1.0]
+trajectory_csv: assembly_trajectory.csv
+trajectory_angles_deg: false
+
+admittance:
+  max_force_n: 30.0
+  max_torque_nm: 8.0
+
+sampling:
+  num_trials: 20
+  chunk_fraction: 0.2            # fraction of the resampled trajectory to execute per trial
+  translational_resolution_m: 0.001
+  rotational_resolution_deg: 1.0
+  # Per-dimension half-widths [x, y, z (m), roll, pitch, yaw (deg)] of the uniform perturbation.
+  bias:  [0.001, 0.001, 0.000, 1.0, 1.0, 1.0]   # ONE draw per trial (systematic offset)
+  noise: [0.0,   0.0,   0.0,   0.0, 0.0, 0.0]   # fresh draw per waypoint (jitter)
+  closest_pose_rot_weight_mm_per_deg: 1.0
+  max_force_n: 30.0
+  random_seed: 0                # 0 = nondeterministic; >0 seeds a dedicated RNG for reproducible trials
+  csv_path: data/uncertain_assembly_sampling/uncertain_assembly_log.csv
+
+speed:
+  max_joint_velocity_rad_s: 0.5
+  joint_acceleration_rad_s2: 1.0
+
+move_timeout_s: 120.0
+settle_s: 0.2
+confirm_each_step: false
+debug: false

@@ -1,0 +1,39 @@
+# Kinematic assembly (no vision, no gripper). Follow a CSV trajectory of held-object poses from a
+# stand-off to the mate. The assembled tool0 pose is ground truth; the target frame is back-derived.
+# Ported from ur_kinematic_assembly_demo. control_mode: admittance now uses UR forceMode.
+robot:
+  ip: 192.168.125.2
+  dry_run: false
+base_frame: base_link
+tip_frame: tool0
+
+# ---- Ground-truth poses ----
+# assembled_pose: TOOL0 in base at a good mate. Jog there and read base_link->tool0 off the robot.
+assembled_pose:
+  xyz: [-0.103, -1.048, -0.068]
+  rpy: [-3.129, -0.011, -3.139]
+held_object_pose:                # the held part w.r.t. tool0
+  xyz: [0.0, -0.089, 0.010]
+  rpy: [-1.5708, 0.0, 0.0]
+
+standoff_distance_m: 0.200
+standoff_axis: [0.0, 0.0, 1.0]   # target-object frame
+
+trajectory_csv: assembly_trajectory.csv
+trajectory_angles_deg: false
+
+control_mode: position           # position | admittance (forceMode)
+disassemble_after: true
+
+admittance:                      # used only when control_mode == admittance
+  max_force_n: 30.0
+  max_torque_nm: 8.0
+
+speed:
+  max_joint_velocity_rad_s: 0.5
+  joint_acceleration_rad_s2: 1.0
+
+move_timeout_s: 120.0
+settle_s: 0.5
+confirm_each_step: true
+debug: false

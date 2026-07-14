@@ -1,0 +1,192 @@
+"""Smoke + math tests for the ROS-free layers -- no robot, no camera, no torch.
+
+Run: python -m pytest tests/ -q     (or: python tests/test_smoke.py)
+
+Covers the parts that are pure computation and therefore fully testable offline: the transform
+conventions (the thing most likely to be silently wrong), the FrameGraph staleness semantics, the
+config loader, and the connector-fusion geometry against a synthetic ground truth.
+"""
+
+import os
+import sys
+
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from urlab import transforms as T   # noqa: E402
+from urlab.frames import FrameGraph   # noqa: E402
+
+
+def approx(a, b, tol=1e-9):
+    return np.allclose(a, b, atol=tol)
+
+
+# ------------------------------------------------------------------ transforms
+def test_xyzrpy_roundtrip():
+    xyz = [0.1, -0.2, 0.3]
+    rpy = [0.3, -0.5, 1.2]
+    M = T.xyzrpy_to_matrix(xyz, rpy)
+    xyz2, rpy2 = T.matrix_to_xyzrpy(M)
+    assert approx(xyz, xyz2) and approx(rpy, rpy2)
+
+
+def test_inverse_matches_numpy():
+    M = T.xyzrpy_to_matrix([0.4, 0.1, -0.2], [1.1, -0.3, 0.7])
+    assert approx(T.inverse(M), np.linalg.inv(M), 1e-9)
+    assert approx(T.inverse(M) @ M, np.eye(4), 1e-9)
+
+
+def test_extrinsic_xyz_convention():
+    # Extrinsic XYZ: R = Rz(yaw) @ Ry(pitch) @ Rx(roll). A pure yaw about +Z sends +X -> +Y.
+    R = T.xyzrpy_to_matrix([0, 0, 0], [0, 0, np.pi / 2])[:3, :3]
+    assert approx(R @ [1, 0, 0], [0, 1, 0], 1e-9)
+
+
+def test_rtde_base_link_bridge():
+    # base_link and UR base differ by Rz(pi). A UR-base point on +x lands on base_link -x.
+    M = T.rtde_to_matrix([1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    assert approx(M[:3, 3], [-1.0, 0.0, 0.0], 1e-9)
+    # And the round trip is exact.
+    pose = [0.3, -0.2, 0.5, 0.1, -0.2, 1.3]
+    assert approx(T.matrix_to_rtde(T.rtde_to_matrix(pose)), pose, 1e-9)
+
+
+def test_rotvec_roundtrip():
+    pose = [0.4, 0.0, 0.4, 1.2, -0.3, 0.8]
+    M = T.rtde_to_matrix(pose, ur_base=True)
+    assert approx(T.matrix_to_rtde(M, ur_base=True), pose, 1e-9)
+
+
+def test_look_at_points_at_target():
+    T_ref = np.eye(4)
+    eye = np.array([0.0, 0.0, 0.5])
+    target = np.array([0.1, 0.0, 0.0])
+    M = T.look_at(eye, target, T_ref)
+    z = M[:3, 2]                                  # optical axis
+    expect = (target - eye) / np.linalg.norm(target - eye)
+    assert approx(z, expect, 1e-9)
+    assert approx(np.linalg.det(M[:3, :3]), 1.0, 1e-9)   # right-handed
+
+
+def test_rotate_about_axis_preserves_radius():
+    T0 = T.xyzrpy_to_matrix([0.3, 0.0, 0.2], [0, 0, 0])
+    P = np.array([0.0, 0.0, 0.2])
+    axis = np.array([0.0, 0.0, 1.0])
+    T1 = T.rotate_about_axis(T0, axis, P, np.radians(37))
+    assert approx(np.linalg.norm(T1[:3, 3] - P), np.linalg.norm(T0[:3, 3] - P), 1e-9)
+
+
+def test_frame_from_axis_orthonormal():
+    R = T.frame_from_axis([1.0, 0.5, 0.0], [0, 0, 1])
+    assert approx(R.T @ R, np.eye(3), 1e-9)
+    assert approx(R[:, 0], [1.0, 0.5, 0.0] / np.linalg.norm([1.0, 0.5, 0.0]), 1e-9)
+
+
+def test_transform_wrench_cross_term():
+    # A pure force offset by a lever arm produces a torque; magnitude of force is preserved.
+    f = np.array([0.0, 0.0, -10.0])
+    tau = np.zeros(3)
+    T_ba = T.translation_matrix([0.1, 0.0, 0.0])
+    fb, taub = T.transform_wrench(f, tau, T_ba)
+    assert approx(fb, f, 1e-9)                    # pure translation: force unchanged
+    assert approx(taub, np.cross([0.1, 0, 0], f), 1e-9)
+
+
+def test_clamp_pose_delta():
+    T_ref = T.xyzrpy_to_matrix([0.4, 0.0, 0.4], [0, 0, 0])
+    far = T_ref @ T.xyzrpy_to_matrix([0.5, 0, 0], [0, 0, 0])   # 0.5 m out in ref-x
+    clamped = T.clamp_pose_delta(T_ref, far, [0.08, 0.08, 0.05], [0.3, 0.3, 0.3])
+    rel = T.inverse(T_ref) @ clamped
+    assert rel[0, 3] <= 0.08 + 1e-9
+
+
+# ------------------------------------------------------------------ frame graph
+def test_framegraph_chain():
+    g = FrameGraph()
+    g.set_static('a', 'b', T.translation_matrix([1, 0, 0]))
+    g.set_static('b', 'c', T.translation_matrix([0, 1, 0]))
+    M = g.lookup('a', 'c')
+    assert approx(M[:3, 3], [1, 1, 0], 1e-9)
+    # And the reverse walks the same edges inverted.
+    assert approx(g.lookup('c', 'a')[:3, 3], [-1, -1, 0], 1e-9)
+
+
+def test_framegraph_live_never_stale():
+    g = FrameGraph()
+    g.set_live('a', 'b', lambda: T.translation_matrix([2, 0, 0]))
+    assert g.age('a', 'b') == 0.0
+    assert g.lookup('a', 'b', max_age=0.001) is not None   # live edges never expire
+
+
+def test_framegraph_observed_staleness():
+    import time
+    g = FrameGraph()
+    g.set_observed('a', 'b', np.eye(4), stamp=time.monotonic() - 5.0)
+    assert g.lookup('a', 'b', max_age=10.0) is not None
+    assert g.lookup('a', 'b', max_age=2.0) is None         # older than the budget -> rejected
+    assert g.lookup('a', 'b') is not None                  # no budget -> never rejected
+
+
+# ------------------------------------------------------------------ config
+def test_config_dotted_and_override():
+    from urlab import config as C
+    cfg = C.load('cartesian')
+    assert cfg.get('base_frame') == 'base_link'
+    cfg2 = C.load('cartesian', ['linear_step_m=0.05', 'robot.dry_run=true'])
+    assert cfg2.get('linear_step_m') == 0.05
+    assert cfg2.get_path('robot.dry_run') is True
+
+
+# ------------------------------------------------------------------ fusion geometry
+def test_connector_fusion_recovers_synthetic_axis():
+    """A synthetic cable at a known pose, seen from several translated views, should be recovered
+    (origin within a mm, axis within a couple of degrees)."""
+    from urlab.config import Config
+    from urlab.perception.connector import ConnectorEstimator
+
+    K = np.array([[900.0, 0, 640.0], [0, 900.0, 360.0], [0, 0, 1.0]])
+    P_true = np.array([0.5, 0.0, 0.2])            # connector origin in base
+    axis_true = np.array([1.0, 0.2, 0.0])
+    axis_true = axis_true / np.linalg.norm(axis_true)
+
+    est = ConnectorEstimator(Config({'connector_estimator': {
+        'min_inlier_views': 3, 'min_parallax_deg': 1.0, 'inlier_dist_m': 0.02,
+        'max_range_m': 2.0, 'up_axis': [0, 0, 1]}}))
+
+    # Cameras looking down (-z world) from above, translated laterally for parallax.
+    for dx in (-0.08, -0.04, 0.0, 0.04, 0.08):
+        C = np.array([0.5 + dx, 0.0, 0.6])
+        # Optical frame: z toward the target (down), x right, y down.
+        T_bc = T.look_at(C, P_true, np.eye(4))
+        # Project the origin and a point along the axis to get (u, v) and the pixel-frame yaw.
+        Rcw = T_bc[:3, :3].T
+        def proj(Xw):
+            Xc = Rcw @ (Xw - C)
+            uv = K @ (Xc / Xc[2])
+            return uv[:2]
+        p0 = proj(P_true)
+        p1 = proj(P_true + 0.03 * axis_true)
+        yaw = np.arctan2(*(p1 - p0)[::-1])        # atan2(dy, dx)
+        est.add_view([(p0[0], p0[1], yaw)], K, T_bc, 0.0)
+
+    M = est.estimate()
+    assert M is not None, 'fusion refused a clean synthetic case'
+    assert np.linalg.norm(M[:3, 3] - P_true) < 0.005, f'origin off by {M[:3,3]-P_true}'
+    axis_est = M[:3, 0]
+    cos = abs(float(np.dot(axis_est, axis_true)))
+    assert cos > np.cos(np.radians(5)), f'axis off by {np.degrees(np.arccos(cos)):.1f} deg'
+
+
+if __name__ == '__main__':
+    fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
+    failed = 0
+    for fn in fns:
+        try:
+            fn()
+            print(f'PASS {fn.__name__}')
+        except Exception as exc:                  # noqa: BLE001
+            failed += 1
+            print(f'FAIL {fn.__name__}: {exc}')
+    print(f'\n{len(fns) - failed}/{len(fns)} passed')
+    sys.exit(1 if failed else 0)

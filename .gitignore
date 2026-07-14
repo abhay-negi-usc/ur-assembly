@@ -1,6 +1,18 @@
+# ROS colcon artifacts (present on dev/main; harmless here).
 build/
 install/
 log/
-*core.* 
-*.pyc
+*core.*
+
+# Python.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+.pytest_cache/
+.venv/
+venv/
+
+# Run outputs (scan overlays, sampling logs).
 data/

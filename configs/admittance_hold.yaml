@@ -1,0 +1,18 @@
+# Admittance hold -- make the arm compliant in place (UR forceMode, all axes soft, seek 0 force).
+robot:
+  ip: 192.168.125.2
+  dry_run: false
+base_frame: base_link
+tip_frame: tool0
+
+admittance:
+  selected_axes: [1, 1, 1, 1, 1, 1]     # all six compliant -> hand-guidable in every direction
+  force_limits: [0.10, 0.10, 0.10, 0.35, 0.35, 0.35]   # compliant-axis speed caps (m/s, rad/s)
+  damping: 0.005
+  gain_scaling: 0.8
+  hold_duration_s: 0.0                  # 0 = hold until Ctrl-C
+
+move_timeout_s: 30.0
+settle_s: 0.2
+confirm_each_step: false
+debug: false

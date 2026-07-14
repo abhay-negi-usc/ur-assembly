@@ -1,0 +1,4 @@
+# Everything needed to run the demos on hardware: core + robot + perception.
+# (SAM3 still runs from its own venv -- see requirements/perception.txt.)
+-r robot.txt
+-r perception.txt

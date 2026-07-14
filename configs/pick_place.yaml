@@ -1,0 +1,77 @@
+# Fiducial pick-and-place (ArUco). Detect a marker, visually approach, grasp, place.
+robot:
+  ip: 192.168.125.2
+  dry_run: false
+base_frame: base_link
+tip_frame: tool0
+camera_frame: camera1_color_optical_frame
+
+hand_eye:
+  xyz: [0.0, -0.080, 0.031]
+  rpy: [0.0, 0.0, 0.0]
+
+camera:
+  serial_no: "218622272137"
+  width: 1280
+  height: 720
+  fps: 30
+
+aruco:
+  dictionary: DICT_4X4_50
+  marker_size_m: 0.0203
+
+# ---- Object to PICK ----
+marker:
+  id: 11
+object_marker:                   # marker pose w.r.t. the object frame
+  xyz: [0.0, 0.0635, 0.045]
+  rpy: [-1.5708, 0.0, 0.0]
+object_grasp:                    # grasp-TCP pose w.r.t. the object frame
+  xyz: [0.0, 0.041, 0.045]
+  rpy: [3.14159, 0.0, 0.0]
+grasp_tcp_offset:                # grasp TCP w.r.t. tool0
+  xyz: [0.0, 0.0, 0.16]
+  rpy: [0.0, 0.0, 0.0]
+fingertip_grasp:                 # kept for the Robot facade; unused by this demo
+  xyz: [0.0, 0.0, 0.16]
+  rpy: [0.0, 0.0, 0.0]
+
+# ---- Pick approach / lift / place ----
+approach_distance_m: 0.20
+approach_axis: [0.0, 0.0, -1.0]
+lift_distance_m: 0.10
+lift_axis: [0.0, 0.0, 1.0]
+place_offset_xyz: [0.0, 0.20, 0.0]
+place_offset_rpy: [0.0, 0.0, 0.0]
+
+# ---- Visual approach ----
+servo_standoff_m: 0.060
+servo_step_m: 0.05
+servo_cam_rpy_in_marker: [3.14159, 0.0, 0.0]
+servo_max_iterations: 20
+marker_max_age_s: 1.0
+
+# ---- Reaching the grasp ----
+blind_pick: true                 # true: home then open-loop grasp; false: closed-loop visual servo
+servo_gain: 1.0
+servo_max_linear_step_m: 0.03
+servo_max_angular_step_deg: 20.0
+servo_pos_deadband_m: 0.010
+servo_ang_deadband_deg: 5.0
+
+gripper:
+  port: /dev/ttyUSB0
+  open_counts: 0
+  closed_counts: 200
+  speed_counts: 255
+  force_counts: 150
+
+speed:
+  max_joint_velocity_rad_s: 0.5
+  max_cartesian_velocity_m_s: 0.10
+  joint_acceleration_rad_s2: 1.2
+
+move_timeout_s: 60.0
+settle_s: 0.5
+confirm_each_step: true
+debug: false

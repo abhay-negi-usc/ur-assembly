@@ -1,0 +1,45 @@
+# Visual servo -- drive the camera to a fixed standoff square to a marker, continuously.
+robot:
+  ip: 192.168.125.2
+  dry_run: false
+base_frame: base_link
+tip_frame: tool0
+camera_frame: camera1_color_optical_frame
+
+hand_eye:
+  xyz: [0.0, -0.080, 0.031]
+  rpy: [0.0, 0.0, 0.0]
+
+camera:
+  serial_no: "218622272137"
+  width: 1280
+  height: 720
+  fps: 30
+
+aruco:
+  dictionary: DICT_4X4_50
+  marker_size_m: 0.0203
+
+marker:
+  id: 11
+
+standoff_m: 0.10
+cam_rpy_in_marker: [3.14159, 0.0, 0.0]
+servo_gain: 0.4
+servo_max_linear_step_m: 0.02
+servo_max_angular_step_deg: 15.0
+pos_deadband_m: 0.005
+ang_deadband_deg: 1.5
+rate_hz: 2.0
+marker_max_age_s: 0.5
+confirm_start: true
+
+speed:
+  max_joint_velocity_rad_s: 0.4
+  max_cartesian_velocity_m_s: 0.08
+  joint_acceleration_rad_s2: 1.0
+
+move_timeout_s: 30.0
+settle_s: 0.2
+confirm_each_step: false
+debug: false

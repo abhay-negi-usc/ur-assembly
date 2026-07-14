@@ -1,0 +1,14 @@
+# Convenience entry point. Pick the layer you need:
+#
+#   pip install -r requirements/core.txt         # math + fusion + --dry-run (no robot/camera/torch)
+#   pip install -r requirements/robot.txt        # + drive the arm & gripper (RTDE + Modbus)
+#   pip install -r requirements/perception.txt   # + camera & ArUco (RealSense + opencv)
+#   pip install -r requirements/all.txt          # everything for a hardware run
+#   pip install -r requirements/dev.txt          # core + perception + pytest (to run tests/)
+#
+# Or use the packaged extras: pip install -e .[robot,perception]
+#
+# SAM3 is NOT installed by any of these -- it runs from the sam3-abhay checkout under its own venv.
+# See requirements/perception.txt for the reason and the pins it needs.
+
+-r requirements/all.txt

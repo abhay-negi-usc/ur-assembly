@@ -1,0 +1,176 @@
+# Cable PICK-and-ASSEMBLE. The PICK half is identical to cable_pick_place.yaml. What replaces
+# "place" is the `assembly:` section. Ported from ur_cable_pick_assemble_demo.
+#
+# Compliance is now UR forceMode, not the ros2_control admittance_controller -- so there is no
+# controller to load, no controller switch, and no joint-velocity fault to prevent. The
+# switch_settle_s / reference_rate_hz / apply_params keys the ROS version needed are simply gone;
+# the compliance block below is the forceMode parameterisation instead.
+
+robot:
+  ip: 192.168.125.2
+  dry_run: false
+base_frame: base_link
+tip_frame: tool0
+camera_frame: camera1_color_optical_frame
+
+hand_eye:
+  xyz: [0.0, -0.080, 0.031]
+  rpy: [0.0, 0.0, 0.0]
+
+camera:
+  serial_no: "218622272137"
+  width: 1280
+  height: 720
+  fps: 30
+
+sam3:
+  repo_path: /abhay_ws/sam3-abhay
+  mode: neck
+  cable_prompt: cable
+  connector_prompt: connector
+  adaptive: true
+  confidence_floor: 0.2
+
+connector_estimator:
+  min_views: 2
+  min_inlier_views: 3
+  min_parallax_deg: 3.0
+  inlier_dist_m: 0.010
+  max_range_m: 0.80
+  up_axis: [0.0, 0.0, 1.0]
+  workspace_min: [-1.5, -1.5, -0.5]
+  workspace_max: [1.5, 1.5, 1.5]
+
+connector_frame: connector
+connector_grasp:
+  xyz: [0.0, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
+grasp_tcp_offset:
+  xyz: [0.0, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
+fingertip_grasp:
+  xyz: [0.0, -0.01254, 0.175]
+  rpy: [3.14159, 0.0, -1.5708]
+
+scan:
+  require_detection: true
+  min_good_views: 3
+  max_passes: 3
+  view_settle_s: 0.5
+  approach:
+    enabled: true
+    step_m: 0.010
+    min_distance_m: 0.200
+    nominal_distance_m: 0.23
+    scale_offsets: true
+    recenter: true
+  relative_bounds:
+    xyz: [0.08, 0.08, 0.05]
+    rpy: [0.35, 0.35, 0.10]
+  offsets:
+    - {xyz: [ 0.000,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
+    - {xyz: [ 0.040,  0.000, 0.00], rpy: [ 0.0000, -0.1722, 0.0]}
+    - {xyz: [ 0.028,  0.028, 0.00], rpy: [ 0.1224, -0.1224, 0.0]}
+    - {xyz: [ 0.000,  0.040, 0.00], rpy: [ 0.1722,  0.0000, 0.0]}
+    - {xyz: [-0.028,  0.028, 0.00], rpy: [ 0.1224,  0.1224, 0.0]}
+    - {xyz: [-0.040,  0.000, 0.00], rpy: [ 0.0000,  0.1722, 0.0]}
+    - {xyz: [-0.028, -0.028, 0.00], rpy: [-0.1224,  0.1224, 0.0]}
+    - {xyz: [ 0.000, -0.040, 0.00], rpy: [-0.1722,  0.0000, 0.0]}
+    - {xyz: [ 0.028, -0.028, 0.00], rpy: [-0.1224, -0.1224, 0.0]}
+    - {xyz: [ 0.056,  0.032, 0.00], rpy: [ 0.1404, -0.2400, 0.0]}
+    - {xyz: [-0.056,  0.032, 0.00], rpy: [ 0.1404,  0.2400, 0.0]}
+    - {xyz: [ 0.000, -0.065, 0.00], rpy: [-0.2754,  0.0000, 0.0]}
+  refine:
+    enabled: true
+    orbit_deg: [12.0, -12.0, 20.0, -20.0]
+    max_orbit_deg: 25.0
+    min_height_m: 0.12
+
+save_scan_images: true
+data_dir: data
+scan_images_subdir: cable_pick_assemble
+
+approach_distance_m: 0.10
+approach_axis: [0.0, 0.0, 1.0]
+lift_distance_m: 0.10
+lift_axis: [0.0, 0.0, 1.0]
+
+gripper:
+  port: /dev/ttyUSB0
+  open_counts: 0
+  closed_counts: 255
+  speed_counts: 255
+  force_counts: 150
+
+grasp_check:
+  enabled: true
+  closed_counts: 228
+  tolerance_counts: 1
+  detect_empty: false
+  settle_s: 1.0
+  max_retries: 2
+
+speed:
+  max_joint_velocity_rad_s: 0.5
+  max_cartesian_velocity_m_s: 0.10
+  joint_acceleration_rad_s2: 1.2
+
+move_timeout_s: 60.0
+settle_s: 0.5
+confirm_each_step: true
+debug: false
+
+# ===================================================================================================
+# ASSEMBLY
+# ===================================================================================================
+assembly:
+  method: kinematic                # kinematic (implemented) | vision (fails loudly)
+
+  # WHERE the assembly ends. `frame` says which frame the pose describes; all reduce to a fingertip
+  # command. 'connector' is usually what you mean (you care where the PART goes, not the arm).
+  # MEASURE THIS: jog to a good mate and read the chosen frame off the robot, then paste it here.
+  target:
+    frame: fingertip
+    xyz: [-0.128, -1.086, -0.073]
+    rpy: [0.015, -0.038, -1.601]
+
+  standoff:
+    axis: [-1.0, 0.0, 0.0]
+    distance_m: 0.25
+
+  lift_after_pick: true
+
+  # ---- Compliance = UR forceMode ----
+  # The TARGET frame is the task frame. selected_axes marks the COMPLIANT axes (1 = yield toward
+  # target_wrench, 0 = stay rigid). force_limits bounds compliant-axis speed / rigid-axis deviation.
+  # No controller to load, no switch, no reference streaming -- forceMode is a mode of the running
+  # controller and starts from where the arm is.
+  compliance:
+    enabled: true
+    tare_before: true
+    selected_axes: [1, 1, 1, 1, 1, 1]       # all compliant during the mate
+    target_wrench: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   # seek no force -- just go soft
+    force_limits: [0.05, 0.05, 0.05, 0.17, 0.17, 0.17]   # m/s (compliant) or m (rigid); rad/s or rad
+    damping: 0.005
+    gain_scaling: 0.8
+
+  # ---- Force guard (armed over the free-space moves; insert_chunked manages it itself) ----
+  force_guard:
+    enabled: true
+    max_force_n: 30.0
+    max_torque_nm: 5.0
+
+  # ---- Insertion: the ideal stand-off -> target trajectory in fractional CHUNKS, force-guarded ----
+  insertion:
+    chunk_fraction: 0.25
+    chunk_time_s: 2.0
+    settle_s: 0.5
+
+  # ---- Retract: a SEQUENCE of displacement steps, each in `frame` (base/target = FIXED world
+  # directions; tool0/fingertip MOVE with the arm). WARNING: large free-space moves -- clear the path. ----
+  retract:
+    frame: target
+    steps:
+      - xyz: [ 0.00,  0.00,  0.08]   # 1) +8 cm along the mating axis -- back straight out
+      - xyz: [-0.50,  0.00,  0.00]   # 2) -50 cm -- clear the assembly laterally
+      - xyz: [ 0.00,  0.00, -0.25]   # 3) -25 cm -- come back down

@@ -1,0 +1,21 @@
+# Gripper cycle demo (Robotiq 2F-85 over Modbus RTU).
+robot:
+  ip: 192.168.125.2
+  dry_run: false
+
+gripper:
+  port: /dev/ttyUSB0
+  baud: 115200
+  open_counts: 0
+  closed_counts: 255
+  speed_counts: 255
+  force_counts: 150
+  timeout_s: 5.0
+
+gripper_demo:
+  fractions: [0.0, 0.25, 0.5, 0.75, 1.0, 0.0]   # 0 = open, 1 = closed
+  cycles: 1
+  dwell_s: 1.5
+
+confirm_each_step: false
+debug: false

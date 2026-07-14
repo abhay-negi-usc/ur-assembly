@@ -1,0 +1,22 @@
+# urlab perception -- RealSense capture + ArUco. NOT SAM3 (that lives in the sam3-abhay venv; see
+# the note at the bottom). Omit this layer if you only run the motion demos.
+-r core.txt
+
+# opencv-python-HEADLESS: urlab never opens a GUI window (scan overlays are written with
+# cv2.imwrite), so the headless build is correct and avoids the GUI/Qt system libraries. If you
+# WANT live imshow windows, swap this for `opencv-python`.
+opencv-python-headless>=4.7        # >=4.7 for the cv2.aruco.ArucoDetector API urlab uses
+pillow>=9.0                        # SAM3 detectors take a PIL image
+pyrealsense2>=2.54                 # D405 support
+
+# ---------------------------------------------------------------------------------------------
+# SAM3 is deliberately NOT listed anywhere in these files. It runs from the sam3-abhay checkout
+# under its OWN virtualenv, because it needs pins this environment must not inherit:
+#   * torch==2.4.1+cu121  -- the last build with Pascal (sm_61 / GTX 1060) kernels; newer cu128
+#                            wheels dropped Pascal. CPU-only torch works too, just slowly.
+#   * the SAM3 model weights (gated: request access to facebook/sam3, then huggingface-cli login)
+#   * the mem-efficient-SDPA + fp16-autocast workaround for the 6 GB card (baked into
+#     sam3-abhay/scripts/cable_neck_core.py; the input resolution is LOCKED to 1008).
+# urlab imports cable_neck_core from that checkout at runtime -- point sam3.repo_path at it. See
+# sam3-abhay's own README for building that environment.
+# ---------------------------------------------------------------------------------------------

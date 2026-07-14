@@ -1,0 +1,13 @@
+# urlab robot -- drive the UR10e over RTDE and the Robotiq 2F-85 over Modbus.
+# Omit this layer if you only need --dry-run planning or the perception math.
+-r core.txt
+
+# ur_rtde ships manylinux + macOS + Windows wheels for CPython 3.8-3.12. On Python 3.13+ there may
+# be no wheel yet -- either use a 3.12 interpreter for the robot host, or build ur_rtde from source
+# (needs Boost + a C++17 compiler). The DEPLOYMENT host is the Docker box, where 3.10/3.12 is fine;
+# this repo's dev machine can stay on core-only + --dry-run.
+ur_rtde>=1.5.6
+
+# pymodbus 3.x changed the client API (ModbusSerialClient signature); urlab/robot/gripper.py targets 3.x.
+pymodbus>=3.0,<4.0
+pyserial>=3.5        # pymodbus's serial backend (pulled in transitively, pinned here for clarity)

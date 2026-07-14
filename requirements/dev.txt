@@ -1,0 +1,4 @@
+# Development: core + the test/lint tooling. The offline tests (tests/) need cv2 for the one
+# fusion test that imports through the perception package, so pull perception in too.
+-r perception.txt
+pytest>=7.0

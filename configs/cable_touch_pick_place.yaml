@@ -1,0 +1,147 @@
+# Cable TOUCH-then-pick. Vision gives x/y/yaw; TOUCH gives z (the camera's weak depth axis). The
+# probe is the gripper's own fingers, fully closed. Ported from ur_cable_touch_pick_place_demo.
+#
+# Perception uses the SAM3 TIP pipeline (mode: tip) -- CLASSIFICATION-FREE (it unions the cable and
+# connector masks), so it survives SAM3 labelling the whole assembly "cable", which starves the
+# neck pipeline. connector_frame is named connector_tip so the inherited scan refines the TIP axis.
+
+robot:
+  ip: 192.168.125.2
+  dry_run: false
+base_frame: base_link
+tip_frame: tool0
+camera_frame: camera1_color_optical_frame
+
+hand_eye:
+  xyz: [0.0, -0.080, 0.031]
+  rpy: [0.0, 0.0, 0.0]
+
+camera:
+  serial_no: "218622272137"
+  width: 1280
+  height: 720
+  fps: 30
+
+sam3:
+  repo_path: /abhay_ws/sam3-abhay
+  mode: tip                        # the TIP detector: classification-free
+  cable_prompt: cable
+  connector_prompt: connector
+  adaptive: true
+  confidence_floor: 0.2
+  curve_px: 40                     # arc length walked back from the tip for the axis
+
+connector_estimator:
+  min_views: 2
+  min_inlier_views: 3
+  min_parallax_deg: 3.0
+  inlier_dist_m: 0.010
+  max_range_m: 0.80
+  up_axis: [0.0, 0.0, 1.0]
+  workspace_min: [-1.5, -1.5, -0.5]
+  workspace_max: [1.5, 1.5, 1.5]
+
+connector_frame: connector_tip
+
+grasp_tcp_offset:
+  xyz: [0.0, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
+fingertip_grasp:
+  xyz: [0.0, -0.01254, 0.18165]
+  rpy: [3.14159, 0.0, -1.5708]
+
+# WHERE TO TOUCH / GRASP, relative to the TIP frame (x = connector axis toward the tip; -x = back
+# along the cable). Grasp defaults to the touch point -- z is only KNOWN where we touched.
+touch_offset:
+  xyz: [-0.05, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
+grasp_offset:
+  xyz: [-0.05, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
+
+# ---- Touch probe: fingers fully closed, position-controlled descent, force checked BEFORE each step ----
+touch:
+  force_n: 3.0                     # VERY low -- a probe, not a push. KEEP THE E-STOP IN HAND.
+  step_m: 0.001                    # 1 mm -> bounds the force overshoot to one step
+  max_descent_m: 0.06
+  settle_s: 0.25
+  hover_height_m: 0.05
+  contact_z_offset_m: 0.0          # added to the contact z for the grasp; tune on the real part
+  tare_before: true
+
+align:
+  max_iterations: 8
+  pos_deadband_m: 0.002
+  ang_deadband_deg: 1.5
+
+# ---- Scan (refines the TIP axis; same machinery as cable_pick_place) ----
+scan:
+  require_detection: true
+  min_good_views: 4
+  max_passes: 3
+  view_settle_s: 0.5
+  approach:
+    enabled: true
+    step_m: 0.010
+    min_distance_m: 0.200
+    nominal_distance_m: 0.23
+    scale_offsets: true
+    recenter: true
+  relative_bounds:
+    xyz: [0.08, 0.08, 0.05]
+    rpy: [0.35, 0.35, 0.10]
+  offsets:
+    - {xyz: [ 0.000,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
+    - {xyz: [ 0.040,  0.000, 0.00], rpy: [ 0.0000, -0.1722, 0.0]}
+    - {xyz: [ 0.028,  0.028, 0.00], rpy: [ 0.1224, -0.1224, 0.0]}
+    - {xyz: [ 0.000,  0.040, 0.00], rpy: [ 0.1722,  0.0000, 0.0]}
+    - {xyz: [-0.028,  0.028, 0.00], rpy: [ 0.1224,  0.1224, 0.0]}
+    - {xyz: [-0.040,  0.000, 0.00], rpy: [ 0.0000,  0.1722, 0.0]}
+    - {xyz: [-0.028, -0.028, 0.00], rpy: [-0.1224,  0.1224, 0.0]}
+    - {xyz: [ 0.000, -0.040, 0.00], rpy: [-0.1722,  0.0000, 0.0]}
+    - {xyz: [ 0.028, -0.028, 0.00], rpy: [-0.1224, -0.1224, 0.0]}
+    - {xyz: [ 0.056,  0.032, 0.00], rpy: [ 0.1404, -0.2400, 0.0]}
+    - {xyz: [-0.056,  0.032, 0.00], rpy: [ 0.1404,  0.2400, 0.0]}
+    - {xyz: [ 0.000, -0.065, 0.00], rpy: [-0.2754,  0.0000, 0.0]}
+  refine:
+    enabled: true
+    orbit_deg: [12.0, -12.0, 20.0, -20.0]
+    max_orbit_deg: 25.0
+    min_height_m: 0.12
+
+save_scan_images: true
+data_dir: data
+scan_images_subdir: cable_touch_pick_place
+
+approach_distance_m: 0.10
+approach_axis: [0.0, 0.0, 1.0]
+lift_distance_m: 0.10
+lift_axis: [0.0, 0.0, 1.0]
+place_offset_xyz: [0.050, 0.0, 0.0]
+place_offset_rpy: [0.0, 0.0, 0.0]
+
+gripper:
+  port: /dev/ttyUSB0
+  open_counts: 0
+  closed_counts: 255
+  speed_counts: 255
+  force_counts: 150
+
+grasp_check:
+  enabled: true
+  closed_counts: 228
+  tolerance_counts: 1
+  detect_empty: false
+  settle_s: 1.0
+  max_retries: 2
+
+# Keep speeds MODEST: the descent is a stack of ~60 one-millimetre moves.
+speed:
+  max_joint_velocity_rad_s: 0.4
+  max_cartesian_velocity_m_s: 0.05
+  joint_acceleration_rad_s2: 1.0
+
+move_timeout_s: 60.0
+settle_s: 0.5
+confirm_each_step: true            # STRONGLY recommended: this demo drives the arm into contact
+debug: false

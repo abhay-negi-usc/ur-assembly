@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "urlab"
+version = "0.1.0"
+description = "ROS-free control + perception for a UR10e + Robotiq 2F-85 + RealSense D405"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# The robot: RTDE control + the Robotiq over Modbus. ur_rtde has wheels for CPython 3.8-3.12.
+robot = [
+    "ur_rtde>=1.5.6",
+    "pymodbus>=3.0,<4.0",
+    "pyserial>=3.5",
+]
+# Perception: camera + ArUco. HEADLESS opencv -- urlab writes overlays, never opens a window.
+# (SAM3 itself lives in the sam3-abhay checkout with its own venv -- it is NOT pulled in here;
+# point sam3.repo_path at it. See requirements/perception.txt for why.)
+perception = [
+    "pyrealsense2>=2.54",
+    "opencv-python-headless>=4.7",
+    "pillow>=9.0",
+]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+# Every demo as a console command, e.g. `urlab-cable-pick-place --config cable_pick_place`.
+urlab-cartesian = "urlab.apps.cartesian:main"
+urlab-gripper = "urlab.apps.gripper:main"
+urlab-pick-place = "urlab.apps.pick_place:main"
+urlab-visual-servo = "urlab.apps.visual_servo:main"
+urlab-admittance-hold = "urlab.apps.admittance_hold:main"
+urlab-kinematic-assembly = "urlab.apps.kinematic_assembly:main"
+urlab-uncertain-sampling = "urlab.apps.uncertain_sampling:main"
+urlab-cable-pick-place = "urlab.apps.cable_pick_place:main"
+urlab-cable-touch-pick-place = "urlab.apps.cable_touch_pick_place:main"
+urlab-cable-pick-assemble = "urlab.apps.cable_pick_assemble:main"
+
+[tool.setuptools]
+packages = ["urlab", "urlab.robot", "urlab.perception", "urlab.skills", "urlab.apps"]
+
+[tool.setuptools.package-data]
+urlab = ["../configs/*.yaml", "../configs/*.csv"]

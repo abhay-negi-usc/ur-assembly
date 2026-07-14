@@ -112,6 +112,13 @@ scan:
     min_distance_m: 0.045
     # Offsets scale with range; tilts do not (each is atan(offset/distance), invariant under
     # proportional scaling), so the view angle stays constant at every range.
+    # RE-CENTRE the cable in the image on every step: aim the optical axis (+z) at the connector.
+    # NOT cosmetic. Sliding along the viewing ray alone PRESERVES the framing error you started with --
+    # harmless at 230 mm, fatal at 45 mm, because the field of view shrinks in world terms as the camera
+    # closes in, so an off-centre cable drifts OUT OF FRAME exactly when you most need it. Centring also
+    # puts the cable where the lens is sharpest, and makes the offsets symmetric about the target -- which
+    # is what the view-keeping tilts already assume.
+    recenter: true
     nominal_distance_m: 0.23
     scale_offsets: true
 

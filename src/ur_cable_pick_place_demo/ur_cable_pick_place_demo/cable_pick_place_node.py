@@ -123,6 +123,10 @@ class CablePickPlace(PickPlace):
         self.scan_min_distance = float(ap.get('min_distance_m', 0.045))
         self.scan_nominal_distance = float(ap.get('nominal_distance_m', 0.23))
         self.scale_offsets = bool(ap.get('scale_offsets', True))
+        # Re-aim the optical axis at the connector on every step. Without this, a framing error that is
+        # harmless at 230 mm walks the cable OUT OF FRAME by the 45 mm floor -- the FOV shrinks in world
+        # terms as the camera closes in, so the same angular error covers far less of the scene.
+        self.recenter = bool(ap.get('recenter', True))
         self._scan_distance = None      # camera->connector distance; unknown until the first estimate
 
         # Detection bookkeeping. _good_since is the time the arm SETTLED at the current view; only
@@ -347,11 +351,20 @@ class CablePickPlace(PickPlace):
         return xyz, rpy
 
     def _approach(self, T_base_cam0):
-        """Learn the camera->connector distance and, if enabled, step the scan ANCHOR closer.
+        """After each GOOD view: RE-CENTRE the cable in the image, and step the scan ANCHOR closer.
 
-        Called after each GOOD view. Moving along the viewing ray (C - P) keeps the connector centred,
-        so no re-aiming is needed. Returns the new anchor (unchanged if there is no estimate yet, or if
-        we are already at the floor)."""
+        Both halves matter, and centring is the one that is easy to skip:
+
+        * CENTRE. Sliding along the viewing ray alone PRESERVES whatever framing error you started with.
+          That error is harmless at 230 mm and fatal at 45 mm: the field of view shrinks in world terms
+          as the camera closes in, so an off-centre cable drifts OUT OF FRAME exactly when you most need
+          it. Aiming the optical axis (+z) at the connector each step also puts the cable where the lens
+          is sharpest and least distorted, and makes the scan offsets symmetric about the target -- which
+          is what the view-keeping tilts already assume.
+        * APPROACH. Depth error grows as Z^2, so closing the range is the highest-leverage thing the scan
+          can do (see the config).
+
+        Returns the new anchor (unchanged if there is no estimate yet)."""
         T_conn = self._tf_matrix(self.base_frame, self.connector_frame,
                                  max_age_s=self.connector_max_age, timeout_s=0.5)
         if T_conn is None:
@@ -364,21 +377,35 @@ class CablePickPlace(PickPlace):
             return T_base_cam0
         self._scan_distance = d                   # known now -> the offsets scale from here on
 
-        if not self.approach_enabled or d <= self.scan_min_distance + 1e-4:
-            if self.approach_enabled:
-                self.get_logger().info(
-                    f'  at the {self.scan_min_distance * 1000:.0f} mm floor ({d * 1000:.0f} mm) -- '
-                    'not approaching further.')
-            return T_base_cam0
+        # How far off-centre is the cable right now? The angle between the optical axis and the ray to
+        # the connector -- 0 deg means dead centre.
+        to_P = -v / d
+        off_deg = float(np.degrees(np.arccos(
+            np.clip(float(np.dot(T_base_cam0[:3, 2], to_P)), -1.0, 1.0))))
 
-        d_new = max(self.scan_min_distance, d - self.approach_step)
-        T_new = T_base_cam0.copy()
-        T_new[:3, 3] = P + v / d * d_new          # slide along the viewing ray; stays centred
+        at_floor = (not self.approach_enabled) or (d <= self.scan_min_distance + 1e-4)
+        d_new = d if at_floor else max(self.scan_min_distance, d - self.approach_step)
+        C_new = P + v / d * d_new
+
+        # Aim the camera at the connector. T_base_cam0 supplies the roll, so the image does not spin
+        # between views.
+        T_new = (self._look_at(C_new, P, T_base_cam0) if self.recenter
+                 else np.vstack([np.hstack([T_base_cam0[:3, :3], C_new.reshape(3, 1)]),
+                                 [0, 0, 0, 1]]))
+
         self._scan_distance = d_new
-        self.get_logger().info(
-            f'  approach: {d * 1000:.0f} -> {d_new * 1000:.0f} mm from the cable '
-            f'(step {(d - d_new) * 1000:.0f} mm, floor {self.scan_min_distance * 1000:.0f} mm). '
-            f'Offsets now scale x{d_new / self.scan_nominal_distance:.2f}.')
+        if at_floor:
+            self.get_logger().info(
+                f'  at the {self.scan_min_distance * 1000:.0f} mm floor ({d * 1000:.0f} mm) -- '
+                f'holding range; {"re-centring" if self.recenter else "not re-centring"} '
+                f'(cable was {off_deg:.1f} deg off-axis).')
+        else:
+            self.get_logger().info(
+                f'  approach: {d * 1000:.0f} -> {d_new * 1000:.0f} mm from the cable '
+                f'(step {(d - d_new) * 1000:.0f} mm, floor {self.scan_min_distance * 1000:.0f} mm); '
+                f'{"re-centred" if self.recenter else "no re-centring"} '
+                f'(cable was {off_deg:.1f} deg off-axis). '
+                f'Offsets now scale x{d_new / self.scan_nominal_distance:.2f}.')
         return T_new
 
     # --------------------------------------------------------------------- scan

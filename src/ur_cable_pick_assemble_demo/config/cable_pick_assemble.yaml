@@ -42,6 +42,24 @@ scan:
   view_settle_s: 0.5
   necks_topic: /cable_neck_detector/necks
   dwell_s: 8.0
+
+  # ---- Progressive approach: move CLOSER after each GOOD view ----
+  # The highest-leverage thing the scan can do for accuracy: the triangulated DEPTH error grows as Z^2
+  # (sigma_Z ~ Z^2 * sigma_px / (f * B)), so 230 mm -> 45 mm cuts it by ~26x -- far more than any extra
+  # baseline buys. It also puts more pixels on the cable, sharpening the 2D neck/axis measurement.
+  # Only a GOOD view triggers a step in: a view that saw nothing is no evidence that closing in is safe.
+  approach:
+    enabled: true
+    step_m: 0.010                  # move at most 10 mm closer per good view
+    min_distance_m: 0.045          # never get closer than 45 mm to the cable
+    # The offsets below are authored for THIS range and are SCALED by (current / nominal) as the camera
+    # closes in. NOT OPTIONAL: the largest authored offset (65 mm) is a sane 15.8 deg excursion at
+    # 230 mm, but at the 45 mm floor that same 65 mm is a 55 deg excursion -- the cable leaves the frame.
+    # The TILTS are deliberately NOT scaled: each is atan(offset/distance), which is INVARIANT when the
+    # offset scales in proportion to the distance. So the view angle stays 15.8 deg at EVERY range.
+    nominal_distance_m: 0.23
+    scale_offsets: true
+
   relative_bounds:
     xyz: [0.08, 0.08, 0.05]
     rpy: [0.35, 0.35, 0.10]
@@ -62,7 +80,12 @@ scan:
     enabled: true
     orbit_deg: [12.0, -12.0, 20.0, -20.0]
     max_orbit_deg: 25.0
-    min_height_m: 0.12
+    # MUST be BELOW approach.min_distance_m, or the guard rejects EVERY orbit view once the camera has
+    # closed in: at a 45 mm standoff a 20 deg orbit leaves the camera 45*cos(20) = 42 mm up, so the old
+    # 120 mm floor would have silently refused all of them. The orbit radius shrinks with the approach
+    # automatically (it is |C - P|) -- but so does the clearance. E-STOP IN HAND at close range: the
+    # camera body swings within a few cm of the part.
+    min_height_m: 0.030
 
 # ---- Scan overlay output ----
 save_scan_images: true

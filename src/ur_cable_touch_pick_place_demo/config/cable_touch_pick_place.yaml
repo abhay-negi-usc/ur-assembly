@@ -101,6 +101,20 @@ scan:
   view_settle_s: 0.5
   necks_topic: /cable_tip_detector/tips    # <-- the TIP detector's output
   dwell_s: 10.0                            # only used when require_detection is false
+
+  # ---- Progressive approach: move CLOSER after each GOOD view ----
+  # Depth error grows as Z^2, so closing from 230 mm to 45 mm cuts it ~26x. It matters LESS here than in
+  # the other demos -- this one measures z by TOUCHING anyway -- but it still sharpens the x/y and YAW
+  # that the touch CANNOT recover, and those are exactly what this demo depends on vision for.
+  approach:
+    enabled: true
+    step_m: 0.010
+    min_distance_m: 0.045
+    # Offsets scale with range; tilts do not (each is atan(offset/distance), invariant under
+    # proportional scaling), so the view angle stays constant at every range.
+    nominal_distance_m: 0.23
+    scale_offsets: true
+
   relative_bounds:
     xyz: [0.08, 0.08, 0.05]
     rpy: [0.35, 0.35, 0.10]
@@ -123,7 +137,9 @@ scan:
     enabled: true
     orbit_deg: [12.0, -12.0, 20.0, -20.0]
     max_orbit_deg: 25.0
-    min_height_m: 0.12
+    # MUST be BELOW approach.min_distance_m, or EVERY orbit view is rejected once the camera closes in
+    # (at a 45 mm standoff a 20 deg orbit leaves it only 42 mm up -- a 120 mm floor refuses them all).
+    min_height_m: 0.030
 
 # ---- Scan overlay output ----
 save_scan_images: true

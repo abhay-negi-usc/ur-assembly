@@ -69,7 +69,7 @@ grasp_tcp_offset:
 # (the moving-frame convention CAD tools report) == [180, 0, -90] deg here = [pi, 0, -pi/2] rad.
 # Translation is [0, 12.54, 181.65] mm w.r.t. the gripper.
 fingertip_grasp:
-  xyz: [0.0, -0.01254, 0.18165]
+  xyz: [0.0, -0.01254, 0.175]
   rpy: [3.14159, 0.0, -1.5708]
 publish_fingertip_tf: true       # broadcast tool0 -> fingertip so you can verify it coincides in RViz
 
@@ -203,7 +203,7 @@ grasp_check:
   # full_close_rad = the knuckle joint value at 255 counts (its upper limit; ~0.8 for the 2F-85).
   # VERIFY: fully close the gripper, `ros2 topic echo /joint_states`, read robotiq_85_left_knuckle_joint;
   # that value should map to ~255. Adjust full_close_rad (or closed_counts) so the printed counts match.
-  full_close_rad: 0.8
+  full_close_rad: 0.8 # TODO: verify me
   settle_s: 1.0                  # wait after closing before reading the position (let it stall/seat)
   max_retries: 2                 # extra attempts after the first (total attempts = max_retries + 1)
 

@@ -1,0 +1,194 @@
+# Cable PICK-and-ASSEMBLE configuration.
+#
+# The PICK half is identical to cable_pick_place.yaml (this demo subclasses that one), so those keys
+# are reproduced below unchanged -- keep them in step. What replaces "place" is the `assembly:` section
+# at the bottom.
+
+# ---- Frames / IK / controller ----
+tf_cache_s: 120.0
+base_frame: base_link
+# tip_frame is the ROBOT'S TOOL FLANGE (the link IK solves for) -- NOT the fingertip (~18 cm apart).
+tip_frame: tool0
+camera_frame: camera1_color_optical_frame
+planning_group: ur_manipulator
+controller_action: /scaled_joint_trajectory_controller/follow_joint_trajectory
+ik_timeout_s: 2.0
+ik_attempts: 12
+avoid_collisions: false
+
+# ---- Cable connector (from the SAM3 pose estimator) ----
+connector_frame: connector
+connector_max_age_s: 30.0
+connector_wait_s: 40.0
+connector_grasp:                 # offset of the FINGERTIP target from the connector frame
+  xyz: [0.0, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
+
+# ---- Gripper frame / fingertip (the grasp reference) ----
+grasp_tcp_offset:
+  xyz: [0.0, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
+fingertip_grasp:
+  xyz: [0.0, -0.01254, 0.175]
+  rpy: [3.14159, 0.0, -1.5708]   # EXTRINSIC XYZ (sxyz)
+publish_fingertip_tf: true
+
+# ---- Scan phase (detection-gated; see cable_pick_place.yaml for the full rationale) ----
+scan:
+  require_detection: true
+  min_good_views: 4
+  max_passes: 3
+  max_dwell_s: 20.0
+  view_settle_s: 0.5
+  necks_topic: /cable_neck_detector/necks
+  dwell_s: 10.0
+  relative_bounds:
+    xyz: [0.08, 0.08, 0.05]
+    rpy: [0.35, 0.35, 0.10]
+  offsets:
+    - {xyz: [ 0.000,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
+    - {xyz: [ 0.040,  0.000, 0.00], rpy: [ 0.0000, -0.1722, 0.0]}
+    - {xyz: [ 0.028,  0.028, 0.00], rpy: [ 0.1224, -0.1224, 0.0]}
+    - {xyz: [ 0.000,  0.040, 0.00], rpy: [ 0.1722,  0.0000, 0.0]}
+    - {xyz: [-0.028,  0.028, 0.00], rpy: [ 0.1224,  0.1224, 0.0]}
+    - {xyz: [-0.040,  0.000, 0.00], rpy: [ 0.0000,  0.1722, 0.0]}
+    - {xyz: [-0.028, -0.028, 0.00], rpy: [-0.1224,  0.1224, 0.0]}
+    - {xyz: [ 0.000, -0.040, 0.00], rpy: [-0.1722,  0.0000, 0.0]}
+    - {xyz: [ 0.028, -0.028, 0.00], rpy: [-0.1224, -0.1224, 0.0]}
+    - {xyz: [ 0.056,  0.032, 0.00], rpy: [ 0.1404, -0.2400, 0.0]}
+    - {xyz: [-0.056,  0.032, 0.00], rpy: [ 0.1404,  0.2400, 0.0]}
+    - {xyz: [ 0.000, -0.065, 0.00], rpy: [-0.2754,  0.0000, 0.0]}
+  refine:
+    enabled: true
+    orbit_deg: [12.0, -12.0, 20.0, -20.0]
+    max_orbit_deg: 25.0
+    min_height_m: 0.12
+
+# ---- Scan overlay output ----
+save_scan_images: true
+debug_image_topic: /cable_neck_detector/debug_image
+data_dir: data
+scan_images_subdir: cable_pick_assemble
+
+# ---- Pick approach / lift ----
+approach_distance_m: 0.10
+approach_axis: [0.0, 0.0, 1.0]   # in the GRASP frame
+lift_distance_m: 0.10
+lift_axis: [0.0, 0.0, 1.0]       # in the BASE frame (+Z = up)
+
+# (place_offset_* is unused here -- this demo assembles instead of placing.)
+
+# ---- Gripper ----
+gripper:
+  action: /robotiq_gripper_controller/gripper_cmd
+  joint: robotiq_85_left_knuckle_joint
+  open_position: 0.0
+  closed_position: 0.6
+  max_effort: 50.0
+  max_velocity: 0.5
+
+# ---- Pick-up failure detection & recovery ----
+grasp_check:
+  enabled: true
+  closed_counts: 228
+  tolerance_counts: 1
+  full_close_rad: 0.8 # TODO: verify me 
+  settle_s: 1.0
+  max_retries: 2
+
+# ---- Speed (max velocity caps) ----
+speed:
+  max_joint_velocity_rad_s: 0.5
+  max_cartesian_velocity_m_s: 0.10
+  min_move_duration_s: 0.5
+
+# ---- Timing / safety / debug ----
+move_duration_s: 4.0
+move_timeout_s: 60.0
+settle_s: 0.5
+confirm_each_step: true          # STRONGLY recommended: this demo drives the arm into contact
+debug: false
+
+
+# ===================================================================================================
+# ASSEMBLY
+# ===================================================================================================
+assembly:
+  # Which assembly to run. Everything downstream (stand-off, chunked insertion, force guard,
+  # compliance, retract) is METHOD-AGNOSTIC, so a new method only has to supply a target pose.
+  #   kinematic -- IMPLEMENTED. The target is given outright; no perception during the assembly.
+  #   vision    -- placeholder (a perceived socket). NOT implemented: it fails loudly rather than
+  #                silently doing something else.
+  method: kinematic
+
+  # WHERE the assembly ends. The pose is always in base_link; `frame` says WHICH FRAME that pose
+  # describes. All three are reduced to a FINGERTIP command (that is what the demo controls):
+  #   fingertip -- the pose IS the fingertip's target.               fingertip = target
+  #   tool0     -- the pose is where the FLANGE must end up.         fingertip = target * T_tool0_fingertip
+  #   connector -- the pose is where the HELD CONNECTOR must end up. fingertip = target * connector_grasp
+  #                (the connector is rigidly held: at grasp the fingertip was commanded to
+  #                 connector * connector_grasp, so T_connector_fingertip == connector_grasp)
+  # 'connector' is usually what you mean for an assembly -- you care where the PART goes, not the arm.
+  # MEASURE THIS: jog the robot to a good mate and read the frame you chose
+  # (`ros2 run tf2_ros tf2_echo base_link fingertip`), then paste it here.
+  target:
+    frame: fingertip
+    xyz: [-0.128, -1.086, -0.073]      
+    rpy: [0.015, -0.038, -1.601]
+
+  # Stand-off: back off from the target along this axis by this distance, IN THE TARGET FRAME (so the
+  # axis means the same thing however the target is oriented in base). This is the pose the arm
+  # traverses to under POSITION control before compliance is engaged.
+  standoff:
+    axis: [-1.0, 0.0, 0.0]
+    distance_m: 0.25
+
+  lift_after_pick: true          # clear the surface before traversing to the stand-off
+
+  # ---- Compliance (admittance) ----
+  # Engaged AFTER reaching the stand-off. Requires the admittance_controller to be LOADED (inactive)
+  # on the controller_manager -- see ur_admittance_demo. NOTE: activating it DEACTIVATES the JTC, so
+  # while compliant the demo streams joint references instead of running trajectories.
+  # Set enabled: false to insert under plain position control (stiff -- it will NOT yield to a
+  # misalignment, so the force guard is the only thing protecting the part).
+  compliance:
+    enabled: true
+    controller: admittance_controller
+    position_controller: scaled_joint_trajectory_controller
+    switch_service: /controller_manager/switch_controller
+    reference_topic: /admittance_controller/joint_references
+    reference_rate_hz: 20.0
+    ft_zero_service: /io_and_status_controller/zero_ftsensor
+    tare_before: true            # essential -- the tool weight dwarfs the contact forces
+    apply_params: true           # push the gains below onto the running controller (they are dynamic)
+    mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+    damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    stiffness:     [200.0, 200.0, 200.0, 15.0, 15.0, 15.0]   # LOWER = more compliant
+    selected_axes: [true, true, true, true, true, true]
+
+  # ---- Force guard ----
+  # Stops the insertion when the TARED contact reaches these. Checked BETWEEN chunks and, under
+  # compliance, continuously WITHIN a chunk. 0 disables that check.
+  force_guard:
+    wrench_topic: /force_torque_sensor_broadcaster/wrench
+    max_force_n: 20.0
+    max_torque_nm: 5.0
+
+  # ---- Insertion ----
+  # The ideal stand-off -> target trajectory (linear in position, SLERP in orientation), executed in
+  # fractional CHUNKS. Chunking is what makes the insertion inspectable: the wrench is checked between
+  # chunks, so a jam is caught after a FRACTION of the travel rather than after all of it -- and with
+  # confirm_each_step you get a veto at each fraction.
+  insertion:
+    chunk_fraction: 0.25         # each chunk = this fraction of the travel -> 4 chunks
+    chunk_time_s: 2.0            # ramp duration per chunk (also velocity-capped by speed.*)
+    settle_s: 0.5                # pause between chunks so the wrench reading settles before the check
+
+  # ---- Retract (after releasing) ----
+  # Move the fingertip by axis * distance, expressed in `frame`:
+  #   base | target | tool0 | fingertip
+  # 'target' is usually right: retract straight back out along the mating axis, whatever the arm's pose.
+  retract:
+    frame: target
+    axis: [0.0, 0.0, 1.0]
+    distance_m: 0.08

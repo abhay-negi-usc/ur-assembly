@@ -68,7 +68,7 @@ gripper:
 
 speed:
   max_joint_velocity_rad_s: 0.5
-  max_cartesian_velocity_m_s: 0.10
+  max_cartesian_velocity_m_s: 4.0
   joint_acceleration_rad_s2: 1.2
 
 move_timeout_s: 60.0

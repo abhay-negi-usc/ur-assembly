@@ -138,7 +138,7 @@ grasp_check:
 # Keep speeds MODEST: the descent is a stack of ~60 one-millimetre moves.
 speed:
   max_joint_velocity_rad_s: 0.4
-  max_cartesian_velocity_m_s: 0.05
+  max_cartesian_velocity_m_s: 4.0
   joint_acceleration_rad_s2: 1.0
 
 move_timeout_s: 60.0

@@ -44,6 +44,12 @@ def _count(x):
         return int(x) if isinstance(x, (int, float)) else 0
 
 
+def _num(x, default=-1.0):
+    """A float for logging. detect_adaptive returns thr_cable/thr_conn/eff_conf as None when it
+    finds no valid neck combo, and %.2f can't format None -- coalesce to a sentinel."""
+    return float(x) if isinstance(x, (int, float)) else default
+
+
 def _load_core(repo_path):
     """Import cable_neck_core from the sam3-abhay checkout."""
     scripts = os.path.join(repo_path, 'scripts')
@@ -111,14 +117,15 @@ class NeckDetector(_Base):
                 pil, floor=self.confidence_floor, mislabel_overlap=self.mislabel_overlap)
             log.info('  adaptive: thr_cable=%.2f thr_conn=%.2f eff=%.2f (%d combos), '
                      'cables=%d connectors=%d necks=%d',
-                     res.get('thr_cable', -1), res.get('thr_conn', -1), res.get('eff_conf', -1),
-                     res.get('combos_tried', 0), _count(res.get('cables_raw')),
-                     _count(res.get('connectors_raw')), _count(res.get('necks')))
+                     _num(res.get('thr_cable')), _num(res.get('thr_conn')),
+                     _num(res.get('eff_conf')), _count(res.get('combos_tried')),
+                     _count(res.get('cables_raw')), _count(res.get('connectors_raw')),
+                     _count(res.get('necks')))
         else:
             res = self.detector.detect(pil)
             log.info('  cables=%d connectors=%d necks=%d dropped=%d',
                      _count(res.get('cables_raw')), _count(res.get('connectors_raw')),
-                     _count(res.get('necks')), res.get('n_dropped', 0))
+                     _count(res.get('necks')), _count(res.get('n_dropped')))
 
         self.last_debug = self._overlay(frame, res)
         out = []

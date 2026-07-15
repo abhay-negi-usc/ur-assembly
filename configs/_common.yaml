@@ -41,7 +41,7 @@ gripper:
 # ---- Speed caps (HARD ceilings, applied as RTDE limits) ----
 speed:
   max_joint_velocity_rad_s: 0.5
-  max_cartesian_velocity_m_s: 0.10
+  max_cartesian_velocity_m_s: 4.0
   joint_acceleration_rad_s2: 1.2
   cartesian_acceleration_m_s2: 0.5
   min_move_duration_s: 0.5       # kept for schema parity; RTDE paces by velocity, not duration

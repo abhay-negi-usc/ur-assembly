@@ -64,6 +64,9 @@ class Robotiq2F85:
         except ImportError as exc:
             raise GripperError('pymodbus is not installed. `pip install pymodbus`') from exc
 
+        # pymodbus renamed the slave-id keyword across 3.x (unit -> slave -> device_id), so we
+        # discover the one THIS version accepts on first use rather than hardcoding it. See _call.
+        self._unit_kw = None
         self.client = ModbusSerialClient(
             port=self.port, baudrate=self.baud, bytesize=8, parity='N', stopbits=1, timeout=0.2)
         if not self.client.connect():
@@ -74,16 +77,38 @@ class Robotiq2F85:
         self.activate()
 
     # ------------------------------------------------------------------ raw io
+    def _call(self, method_name, *args, **kwargs):
+        """Call a pymodbus client method, passing the slave id under whatever keyword this version
+        wants. pymodbus renamed it across 3.x (unit -> slave -> device_id) AND removed the old
+        names, so a hardcoded keyword raises `unexpected keyword argument`. We try the known names
+        in order, cache the one that works, and reuse it thereafter."""
+        fn = getattr(self.client, method_name)
+        candidates = [self._unit_kw] if self._unit_kw else ['slave', 'device_id', 'unit']
+        last = None
+        for kw in candidates:
+            try:
+                result = fn(*args, **kwargs, **{kw: _SLAVE})
+            except TypeError as exc:
+                if 'unexpected keyword' not in str(exc):
+                    raise                        # a real signature error, not the id-keyword rename
+                last = exc
+                continue
+            self._unit_kw = kw                   # cache the working keyword
+            return result
+        raise GripperError(
+            'Could not find the slave-id keyword for this pymodbus version (tried slave, '
+            f'device_id, unit). Installed pymodbus may be too new/old. Last error: {last}')
+
     def _write(self, action, position, speed, force):
         words = [(action << 8) | 0x00,
                  (0x00 << 8) | int(np.clip(position, 0, 255)),
                  (int(np.clip(speed, 0, 255)) << 8) | int(np.clip(force, 0, 255))]
-        result = self.client.write_registers(_WRITE_ADDR, words, slave=_SLAVE)
+        result = self._call('write_registers', _WRITE_ADDR, words)
         if result.isError():
             raise GripperError(f'Modbus write failed: {result}')
 
     def _read(self):
-        result = self.client.read_holding_registers(_READ_ADDR, count=3, slave=_SLAVE)
+        result = self._call('read_holding_registers', _READ_ADDR, count=3)
         if result.isError():
             raise GripperError(f'Modbus read failed: {result}')
         regs = result.registers

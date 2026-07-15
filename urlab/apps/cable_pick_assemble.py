@@ -24,7 +24,6 @@ log = urlog.get('cable-assemble')
 def _pick(cfg, robot, scanner, geom, check, confirm):
     """The cable pick, returning 'ok' | 'missed' | 'empty' | 'abort'."""
     scanner.estimator.reset()
-    q_home = robot.arm.q()
     T_conn_grasp = from_cfg(cfg.section('connector_grasp'))
     if not robot.gripper.open('open'):
         return 'abort'
@@ -33,9 +32,9 @@ def _pick(cfg, robot, scanner, geom, check, confirm):
         return 'abort'
     geom.T_base_grasp = T_conn @ T_conn_grasp
 
+    # Grasp directly from wherever the scan ended (already close to the cable) -- no detour home first.
     runner = StepRunner(log, confirm=confirm is not None)
     if not runner.run([
-        ('return to initial pose (post-scan)', lambda: robot.arm.move_j(q_home, label='home')),
         ('move to grasp-align', lambda: robot.move_fingertip(geom.pre_grasp(), 'grasp-align')),
         ('report pre-grasp delta', lambda: log_grasp_delta(robot, geom.T_base_grasp, 'pre-grasp')),
         ('move to grasp', lambda: robot.move_fingertip(geom.T_base_grasp, 'grasp')),

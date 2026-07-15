@@ -22,7 +22,6 @@ log = urlog.get('cable-pick-place')
 def _attempt(cfg, robot, scanner, geom, check, confirm):
     """One scan->grasp attempt. Returns 'ok' | 'missed' | 'empty' | 'abort'."""
     scanner.estimator.reset()
-    q_home = robot.arm.q()
     T_conn_grasp = from_cfg(cfg.section('connector_grasp'))
 
     if not robot.gripper.open('open'):
@@ -34,9 +33,10 @@ def _attempt(cfg, robot, scanner, geom, check, confirm):
     geom.T_base_grasp = T_conn @ T_conn_grasp
     log.info('Connector origin %s, grasp target set.', T_conn[:3, 3].round(3))
 
+    # Grasp directly from wherever the scan ended (already close to the cable) -- no detour back to
+    # the initial pose first.
     runner = StepRunner(log, confirm=confirm is not None)
     steps = [
-        ('return to initial pose (post-scan)', lambda: robot.arm.move_j(q_home, label='home')),
         ('move to grasp-align', lambda: robot.move_fingertip(geom.pre_grasp(), 'grasp-align')),
         ('report pre-grasp delta', lambda: log_grasp_delta(robot, geom.T_base_grasp, 'pre-grasp')),
         ('move to grasp', lambda: robot.move_fingertip(geom.T_base_grasp, 'grasp')),

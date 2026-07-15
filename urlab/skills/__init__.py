@@ -12,6 +12,6 @@ A demo is a short script that composes these; they do not know about each other,
 combine (scan + insert, scan + touch + insert) without one being a base class of the other.
 """
 
-from . import insert, pick, scan, servo, touch
+from . import insert, pick, reset, scan, servo, touch
 
-__all__ = ['servo', 'scan', 'pick', 'touch', 'insert']
+__all__ = ['servo', 'scan', 'pick', 'touch', 'insert', 'reset']

@@ -2,7 +2,9 @@
 build/
 install/
 log/
-core.[0-9]*        # core dumps (core.12345) -- NOT source files like requirements/core.txt
+# core dumps (core.12345) -- but NOT source files like requirements/core.txt.
+# NOTE: gitignore has no inline comments; a trailing "# ..." becomes part of the pattern.
+core.[0-9]*
 
 # Python.
 __pycache__/

@@ -1,0 +1,12 @@
+# urlab core -- the pose math, FrameGraph, config, and the multi-view connector fusion.
+# Enough to import the library, run tests/, and plan with --dry-run. No robot, camera, or torch.
+#
+# Version FLOORS, not exact pins: the robot/camera wheels below are platform- and
+# Python-version-specific, and hard-pinning numpy/scipy tends to fight them. If you need a fully
+# frozen set for a specific machine, `pip freeze > requirements/lock-<host>.txt` after installing.
+#
+# Verified with: Python 3.14, numpy 2.4, scipy 1.18, PyYAML 6.0.
+
+numpy>=1.24
+scipy>=1.10
+PyYAML>=6.0

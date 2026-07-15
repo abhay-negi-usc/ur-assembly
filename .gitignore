@@ -2,7 +2,7 @@
 build/
 install/
 log/
-*core.*
+core.[0-9]*        # core dumps (core.12345) -- NOT source files like requirements/core.txt
 
 # Python.
 __pycache__/

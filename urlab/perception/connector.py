@@ -66,22 +66,11 @@ def triangulate(centers, rays):
 class Detection:
     """One 2D neck/tip observation, lifted into 3D rays and planes at ingestion time."""
 
-    def __init__(self, u, v, yaw, K, T_base_cam, view_id, stamp, diam_px=None, cable_sample=None):
+    def __init__(self, u, v, yaw, K, T_base_cam, view_id, stamp):
         self.view = view_id
         self.stamp = stamp
         self.p = np.array([u, v], dtype=float)
         self.d = np.array([math.cos(yaw), math.sin(yaw)])      # pixel-frame direction (v is DOWN)
-        # Detected pixel diameter at the neck/junction (junction method only; None otherwise). With
-        # a known physical diameter this yields a monocular depth -- see _triangulate_fused.
-        self.diam_px = float(diam_px) if diam_px else None
-        # Second diameter sample farther down the cable (u2, v2, diam2_px), for the diameter-gradient
-        # axis (_diameter_axis). None unless the junction detector provided it.
-        self.p2 = None
-        self.diam_px2 = None
-        if cable_sample:
-            self.p2 = np.array([cable_sample[0], cable_sample[1]], dtype=float)
-            self.diam_px2 = float(cable_sample[2]) if cable_sample[2] else None
-
         self.C = np.array(T_base_cam[:3, 3], dtype=float)      # camera centre in base
         self.R = np.array(T_base_cam[:3, :3], dtype=float)     # base <- camera
         self.K = K
@@ -112,18 +101,6 @@ class ConnectorEstimator:
         self.ransac_iters = int(c.get('ransac_iters', 200))
         self.inlier_dist = float(c.get('inlier_dist_m', 0.010))
         self.max_range = float(c.get('max_range_m', 0.80))
-        self.neck_diameter = float(c.get('neck_diameter_m', 0.02))
-        # Diameter-based depth fusion: use the KNOWN physical cable diameter + the detected pixel
-        # diameter (junction method) to pin each view's depth -- the axis pure ray triangulation is
-        # weakest on. Fused into the origin least-squares with this weight (0 or use_diameter:false
-        # -> pure triangulation). See _triangulate_fused / _diameter_axis.
-        self.use_diameter = bool(c.get('use_diameter', False))
-        self.diameter_weight = float(c.get('diameter_weight', 1.0))
-        # Diameter-based AXIS (out-of-image-plane tilt) from the pixel-diameter gradient along the
-        # cable. A weak, noisy signal (see the note) -- OFF by default; blended with the multi-view
-        # axis by axis_diameter_weight when on.
-        self.use_diameter_axis = bool(c.get('use_diameter_axis', False))
-        self.axis_diameter_weight = float(c.get('axis_diameter_weight', 0.3))
         self.up_axis = np.array(c.get('up_axis', [0.0, 0.0, 1.0]), dtype=float)
         # Workspace box for the triangulated origin. Defaults match the dev connector_pose_node
         # (its launch never overrode these, so it ran the [-10, 10] node default) -- effectively no
@@ -148,12 +125,8 @@ class ConnectorEstimator:
         if not detections:
             return 0
         self._view_id += 1
-        for det in detections:
-            u, v, yaw = det[0], det[1], det[2]
-            diam_px = det[3] if len(det) > 3 else None       # junction method carries a diameter
-            cable_sample = det[4] if len(det) > 4 else None  # ...and (optionally) a 2nd sample
-            self.history.append(
-                Detection(u, v, yaw, K, T_base_cam, self._view_id, stamp, diam_px, cable_sample))
+        for (u, v, yaw) in detections:
+            self.history.append(Detection(u, v, yaw, K, T_base_cam, self._view_id, stamp))
         if len(self.history) > self.max_history:
             self.history = self.history[-self.max_history:]
         return self._view_id
@@ -215,73 +188,10 @@ class ConnectorEstimator:
         parallax), but the DIRECTION from the camera to the cable is sound, which is all the
         approach needs to step and re-centre. None if there are <2 views or no origin survives the
         workspace/range gates. The final grasp still comes from the strict estimate()."""
-        if self.use_diameter and any(d.diam_px for d in self.history):
-            # A known diameter pins depth, so even ONE view gives a full 3D origin -- the approach
-            # can steer from the very first detection (no 2-view baseline needed).
-            return self._triangulate_fused(self.history)
         if self.n_views < 2:
             return None
         P, _ = self._ransac()
         return P
-
-    # ------------------------------------------------------------ diameter-based depth / axis
-    def _triangulate_fused(self, dets):
-        """Origin from the viewing rays, AUGMENTED (when use_diameter) with a per-view depth
-        constraint from the known cable diameter.
-
-        A cylinder of diameter D subtends p = fx*D/Z pixels at optical depth Z, so each detected
-        pixel diameter pins Z along that camera's optical axis a = R[:,2] (in base): the constraint
-        a.(P - C) = Z. That is exactly the depth direction pure ray triangulation is weakest on, so
-        the two are complementary -- rays fix the lateral position, the diameter fixes the range.
-        diameter_weight balances them; 0 (or no diameters) recovers plain triangulation. None if the
-        normal matrix is singular (e.g. a single ray with no diameter)."""
-        A = np.zeros((3, 3))
-        b = np.zeros(3)
-        for d in dets:
-            Pperp = np.eye(3) - np.outer(d.g, d.g)              # rays: lateral (perpendicular) fix
-            A += Pperp
-            b += Pperp @ d.C
-            if self.use_diameter and d.diam_px:
-                Z = d.K[0, 0] * self.neck_diameter / d.diam_px  # optical-axis depth from the diameter
-                a = d.R[:, 2]                                    # camera optical axis, in base
-                A += self.diameter_weight * np.outer(a, a)
-                b += self.diameter_weight * a * (float(a @ d.C) + Z)
-        try:
-            return np.linalg.solve(A, b)
-        except np.linalg.LinAlgError:
-            return None
-
-    def _diameter_axis(self, dets):
-        """Best out-of-image-plane cable AXIS from the pixel-diameter GRADIENT along the cable,
-        blended across views. Returns a unit axis (base) or None.
-
-        For a CONSTANT-diameter cable the pixel diameter varies only with depth (p = fx*D/Z), so a
-        diameter that changes ALONG the cable means the cable changes DEPTH along its length -- i.e.
-        it tilts toward/away from the camera. Each detection carries the diameter at its neck AND at
-        a point one arc-step further down the cable (diam_px2 at pixel p2); the two depths give two
-        3D points whose difference is the axis direction, including the tilt the multi-view fusion
-        under-constrains. WEAK/NOISY (the diameter changes only ~1-2 px over a short cable), so it is
-        averaged over views and blended, not trusted alone. None if no detection carries the second
-        sample."""
-        dirs = []
-        for d in dets:
-            p2 = getattr(d, 'diam_px2', None)
-            uv2 = getattr(d, 'p2', None)
-            if not (d.diam_px and p2 and uv2 is not None):
-                continue
-            Z1 = d.K[0, 0] * self.neck_diameter / d.diam_px
-            Z2 = d.K[0, 0] * self.neck_diameter / p2
-            X1 = d.R @ (np.linalg.inv(d.K) @ np.array([d.p[0], d.p[1], 1.0]) * Z1) + d.C
-            X2 = d.R @ (np.linalg.inv(d.K) @ np.array([uv2[0], uv2[1], 1.0]) * Z2) + d.C
-            v = X2 - X1
-            nv = np.linalg.norm(v)
-            if nv > 1e-6:
-                dirs.append(v / nv)
-        if not dirs:
-            return None
-        mean = np.mean(dirs, axis=0)
-        n = np.linalg.norm(mean)
-        return mean / n if n > 1e-9 else None
 
     def estimate(self):
         """Fit the connector pose in base_link. Returns a 4x4, or None with a logged reason.
@@ -319,9 +229,8 @@ class ConnectorEstimator:
                         max_ang, self.min_parallax_deg)
             return None
 
-        # Refit the origin on the inliers only. _triangulate_fused folds in the diameter-based
-        # depth when use_diameter is on; with it off it is identical to plain ray triangulation.
-        P = self._triangulate_fused(inliers)
+        # Refit the origin on the inliers only.
+        P = triangulate([d.C for d in inliers], [d.g for d in inliers])
         if not self._in_workspace(P):
             log.warning('Refit origin is outside the workspace.')
             return None
@@ -348,19 +257,6 @@ class ConnectorEstimator:
         if vote < 0:
             axis = -axis
 
-        # Optionally blend in the diameter-gradient axis (resolves the out-of-plane tilt the
-        # multi-view null-space under-constrains). Sign-aligned then weighted-averaged. Weak signal
-        # -- kept at a modest weight and off by default.
-        if self.use_diameter_axis:
-            da = self._diameter_axis(inliers)
-            if da is not None:
-                if float(np.dot(da, axis)) < 0:
-                    da = -da
-                w = self.axis_diameter_weight
-                axis = (1.0 - w) * axis + w * da
-                axis = axis / (np.linalg.norm(axis) + 1e-12)
-                log.info('  blended diameter-gradient axis (weight %.2f).', w)
-
         T = np.eye(4)
         T[:3, :3] = frame_from_axis(axis, self.up_axis)
         T[:3, 3] = P
@@ -371,10 +267,9 @@ class ConnectorEstimator:
         # mode that wastes the most time on the robot.
         cond = float(sv[-1] / (sv[-2] + 1e-12)) if len(sv) >= 2 else float('nan')
         depth = float((inliers[0].R.T @ (P - inliers[0].C))[2])
-        expected_r = inliers[0].K[0, 0] * (self.neck_diameter / 2.0) / max(depth, 1e-6)
         log.info('Connector fit: %d detections / %d views, parallax %.1f deg, '
-                 'axis conditioning %.3f (lower is better), depth %.3f m, expected neck radius '
-                 '%.1f px.', len(inliers), n_inlier_views, max_ang, cond, depth, expected_r)
+                 'axis conditioning %.3f (lower is better), depth %.3f m.',
+                 len(inliers), n_inlier_views, max_ang, cond, depth)
         return T
 
 

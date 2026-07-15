@@ -194,45 +194,11 @@ class JunctionDetector(_Base):
                 continue
             u, v = j['junction']
             dx, dy = j['direction']
-            # 4th element = the cable's PIXEL diameter at the junction. With a known physical
-            # diameter (connector_estimator.neck_diameter_m + use_diameter) this pins the view's
-            # depth. `cable_sample` (5th) is a second point down the cable + its diameter, for the
-            # diameter-gradient axis (use_diameter_axis); None if the detector didn't provide it.
-            diam = float(j.get('cable_diameter_px', 0.0)) or None
-            cable_sample = self._cable_sample(j)        # (u2, v2, diam2_px) down the cable, or None
-            out.append((float(u), float(v), float(np.arctan2(dy, dx)), diam, cable_sample))
+            out.append((float(u), float(v), float(np.arctan2(dy, dx))))
         log.info('  junctions=%d (dropped %d < contrast %.1f) | cables=%d connectors=%d',
                  len(out), dropped, self.min_contrast,
                  _count(res.get('cables_raw')), _count(res.get('connectors_raw')))
         return out
-
-    @staticmethod
-    def _cable_sample(j):
-        """A second point down the CABLE (recentred onto the cross-section) + its PIXEL diameter,
-        in full-res coords -- for the diameter-gradient axis (connector_estimator.use_diameter_axis).
-
-        Computed from the junction detector's exposed traced-profile artifacts (_path, _dia, ...),
-        so no change to cable_neck_diameter.py is needed. Samples the MIDPOINT of the cable-side run
-        (the thinner end), far from the junction. Returns (u2, v2, diam2_px) or None."""
-        try:
-            path = np.asarray(j['_path'], dtype=float)      # (N, 2) small-image (y, x)
-            dia = np.asarray(j['_dia'], dtype=float)         # small-image px
-            normals = np.asarray(j['_normals'], dtype=float)
-            dp = np.asarray(j['_half_plus'], dtype=float)
-            dm = np.asarray(j['_half_minus'], dtype=float)
-            k = int(j['_junction_k'])
-            inv = 1.0 / float(j['_scale'])
-        except (KeyError, TypeError, ValueError):
-            return None
-        n = len(path)
-        if n < 6 or k <= 1 or k >= n - 1:
-            return None
-        e = max(1, n // 5)
-        cable_at_start = float(np.mean(dia[:e])) < float(np.mean(dia[-e:]))   # thinner end = cable
-        j2 = int(np.clip(k // 2 if cable_at_start else (k + n - 1) // 2, 0, n - 1))
-        y, x = path[j2] + 0.5 * (dp[j2] - dm[j2]) * normals[j2]   # recentre onto the cross-section
-        d2 = float(dia[j2] * inv)
-        return (float(x * inv), float(y * inv), d2) if d2 > 0 else None
 
     def _overlay(self, frame, res):
         import cv2

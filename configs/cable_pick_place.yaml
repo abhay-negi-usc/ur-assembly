@@ -58,14 +58,6 @@ connector_estimator:
   ransac_iters: 200
   inlier_dist_m: 0.005
   max_range_m: 0.80
-  neck_diameter_m: 0.02             # <-- SET to your MEASURED cable diameter (m); used below
-  use_diameter: true                # fuse diameter-based DEPTH into the origin (junction mode
-                                    # only). Pins the range -- the axis ray triangulation is
-                                    # weakest on. Needs neck_diameter_m correct.
-  diameter_weight: 1.0              # weight of the diameter depth vs ray triangulation
-  use_diameter_axis: false          # also blend the diameter-GRADIENT axis (out-of-image-plane
-                                    # tilt). WEAK/NOISY signal -- opt-in.
-  axis_diameter_weight: 0.3
   up_axis: [0.0, 0.0, 1.0]         # pins the roll about the axis (NOT a measurement)
   workspace_min: [-10.0, -10.0, -10.0]   # matches dev connector_pose_node default (no box)
   workspace_max: [10.0, 10.0, 10.0]

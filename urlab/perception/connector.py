@@ -183,6 +183,18 @@ class ConnectorEstimator:
 
         return best_P, [self.history[i] for i in best_inliers]
 
+    def rough_origin(self):
+        """Best-effort connector origin (base frame) for STEERING the scan's approach BEFORE the
+        strict fit converges. It is the RANSAC origin WITHOUT the inlier-count or parallax gates
+        that estimate() enforces -- rough (the depth along the ray is poorly constrained at low
+        parallax), but the DIRECTION from the camera to the cable is sound, which is all the
+        approach needs to step and re-centre. None if there are <2 views or no origin survives the
+        workspace/range gates. The final grasp still comes from the strict estimate()."""
+        if self.n_views < 2:
+            return None
+        P, _ = self._ransac()
+        return P
+
     def estimate(self):
         """Fit the connector pose in base_link. Returns a 4x4, or None with a logged reason.
 

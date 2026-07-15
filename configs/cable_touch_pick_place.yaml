@@ -86,6 +86,9 @@ scan:
   min_good_views: 4
   max_passes: 3
   view_settle_s: 0.5
+  max_view_distance_m: 0.250      # a detected view counts toward min_good_views only
+                                  # within this range; farther detections still steer
+                                  # the approach in but do not count (>= approach floor)
   approach:
     enabled: true
     step_m: 0.010

@@ -42,6 +42,12 @@ class ScanConfig:
         self.max_passes = int(s.get('max_passes', 3))
         self.view_settle_s = float(s.get('view_settle_s', 0.5))
         self.require_detection = bool(s.get('require_detection', True))
+        # A detected view only counts toward the good-view quota (min_good_views, the fit-trust
+        # gate before the grasp) if the camera is within this range of the cable -- so the fit is
+        # built from CLOSE, low-depth-error views. Detections FARTHER than this are still ingested
+        # (they steer the approach in) but do not count. Should be >= approach.min_distance_m, or
+        # the camera stops approaching beyond the counting range and no view ever counts.
+        self.max_view_distance_m = float(s.get('max_view_distance_m', 0.250))
 
         rb = s.get('relative_bounds', {}) or {}
         self.bounds_xyz = np.abs(np.asarray(rb.get('xyz', [0.08, 0.08, 0.05]), dtype=float))
@@ -103,10 +109,26 @@ class CableScanner:
                         label, self.good_views, self.s.min_good_views)
             return False
 
+        # Ingest ALWAYS (a far detection still steers the approach in via the rough origin).
         self.estimator.add_view(dets, frame.K, frame.T_base_cam, frame.stamp)
-        self.good_views += 1
-        log.info('  %s: GOOD view, %d detection(s) -- %d/%d good.',
-                 label, len(dets), self.good_views, self.s.min_good_views)
+
+        # Count toward the good-view quota only if we can confirm the camera is CLOSE enough. The
+        # distance needs an origin estimate; until there is one (the first view, or the camera
+        # beyond max_range) we cannot confirm "close", so the view does not count -- but it still
+        # returns True so the approach runs and closes the range.
+        P = self.estimator.rough_origin() if frame.T_base_cam is not None else None
+        if P is not None:
+            d = float(np.linalg.norm(frame.T_base_cam[:3, 3] - np.asarray(P, dtype=float)))
+            if d <= self.s.max_view_distance_m:
+                self.good_views += 1
+                log.info('  %s: GOOD view @%.0f mm, %d detection(s) -- %d/%d good.',
+                         label, d * 1000, len(dets), self.good_views, self.s.min_good_views)
+            else:
+                log.info('  %s: detected @%.0f mm > %.0f mm max -- NOT counted (approaching in).',
+                         label, d * 1000, self.s.max_view_distance_m * 1000)
+        else:
+            log.info('  %s: detected, %d -- range unknown yet, not counted (need 2 views / in range).',
+                     label, len(dets))
         return True
 
     def _save_overlay(self):
@@ -136,13 +158,15 @@ class CableScanner:
         rpy = np.clip(rpy, -self.s.bounds_rpy, self.s.bounds_rpy)
         return xyz, rpy
 
-    def _approach(self, T_cam0, T_conn):
-        """After a good view: re-centre the cable and step the anchor closer, using the connector
-        estimate `T_conn`. Returns the new anchor (unchanged if there is no estimate to aim at)."""
-        if T_conn is None:
+    def _approach(self, T_cam0, P):
+        """After a good view: re-centre the cable and step the anchor closer toward the connector
+        origin `P` (a base-frame 3-vector -- from the strict fit if it has converged, else a rough
+        origin). Returns the new anchor (unchanged if there is no origin to aim at yet)."""
+        if P is None:
             return T_cam0
 
-        P, C = T_conn[:3, 3], T_cam0[:3, 3]
+        P = np.asarray(P, dtype=float)
+        C = T_cam0[:3, 3]
         v = C - P
         d = float(np.linalg.norm(v))
         if d < 1e-4:
@@ -195,15 +219,19 @@ class CableScanner:
                 self._hold_view(f'refine {np.degrees(th):+.0f} deg')
 
     def _fit_and_approach(self, T_cam0):
-        """One estimate() after a good view: use it to re-centre/approach, and report whether it
-        has CONVERGED enough to stop (all estimator gates pass AND >= min_good_views banked).
+        """After a good view: step the approach in, and report whether the fit has CONVERGED enough
+        to stop (all estimator gates pass AND >= min_good_views banked).
 
-        Returns (new_anchor, converged_pose_or_None). The estimate is computed ONCE and serves
-        both jobs. It is only attempted once there are enough views for RANSAC to possibly agree
-        (min_inlier_views), so early views don't spam failed-fit warnings."""
+        The APPROACH runs on ANY good view, not only once the strict fit converges: it steers by the
+        converged origin when available, else by a ROUGH origin from the accumulated views (see
+        ConnectorEstimator.rough_origin) -- so the camera starts closing in immediately (from the
+        2nd view, once there is a baseline to triangulate). The strict estimate() -- which decides
+        when to STOP -- is only attempted once min_inlier_views are banked, so early views don't
+        spam failed-fit warnings."""
         T_conn = (self.estimator.estimate()
                   if self.good_views >= self.estimator.min_inlier_views else None)
-        T_cam0 = self._approach(T_cam0, T_conn)        # re-centre + step closer while we have a fit
+        P = T_conn[:3, 3] if T_conn is not None else self.estimator.rough_origin()
+        T_cam0 = self._approach(T_cam0, P)             # step in on ANY detection with an origin
         converged = T_conn if (T_conn is not None
                                and self.good_views >= self.s.min_good_views) else None
         return T_cam0, converged

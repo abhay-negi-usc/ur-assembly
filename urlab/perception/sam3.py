@@ -244,7 +244,7 @@ _MODES = {'neck': NeckDetector, 'junction': JunctionDetector, 'tip': TipDetector
 
 def make_detector(cfg):
     """The detector for `sam3.mode` ('neck' | 'junction' | 'tip')."""
-    mode = cfg.get_path('sam3.mode', 'neck')
+    mode = cfg.get_path('sam3.mode', 'junction')
     if mode not in _MODES:
         raise ValueError(f"sam3.mode must be one of {sorted(_MODES)}, got {mode!r}")
     return _MODES[mode](cfg)

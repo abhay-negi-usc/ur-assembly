@@ -51,6 +51,11 @@ class AdmittanceController:
         self.rate = float(c.get('reference_rate_hz', 125.0))
         self.lookahead = float(c.get('lookahead_time_s', 0.1))
         self.gain = float(c.get('servo_gain', 300.0))
+        # Warm-up: hold the start pose this long before the guard is trusted. servoL ENGAGING
+        # produces a joint-torque transient that getActualTCPForce reports as tens of N of phantom
+        # force -- enough to trip a 30 N guard on the very first cycle, before anything is touched.
+        # Holding still lets it decay first.
+        self.warmup_s = float(c.get('warmup_s', 0.5))
         self.max_delta = float(c.get('max_delta_m', 0.05))      # runaway clamp (translation)
         self.max_delta_rot = float(c.get('max_delta_rad', 0.5))
         self._delta = np.zeros(6)
@@ -60,6 +65,19 @@ class AdmittanceController:
         """Zero the integrator -- call before an insertion so it starts on the reference."""
         self._delta = np.zeros(6)
         self._vel = np.zeros(6)
+
+    def warmup(self, T_ref, seconds=None):
+        """Hold T_ref via servoL for `seconds` (default warmup_s), engaging servo mode and letting
+        the joint-torque transient in getActualTCPForce decay BEFORE the guard is armed -- so a
+        phantom startup force does not trip it. The ODE is NOT run here (we don't want it reacting
+        to the transient either); the integrator is zeroed afterward."""
+        s = self.warmup_s if seconds is None else seconds
+        if s <= 0 or self.arm.dry_run:
+            return
+        dt = 1.0 / self.rate
+        for _ in range(max(1, int(s * self.rate))):
+            self.arm.servo_l(T_ref, dt, self.lookahead, self.gain)
+        self.reset()
 
     def _command_pose(self, T_ref):
         """The reference tool0 pose displaced by the compliant delta IN THE TOOL0 FRAME
@@ -106,6 +124,9 @@ class AdmittanceController:
         q0, q1 = np.asarray(q_start, dtype=float), np.asarray(q_end, dtype=float)
         n = max(1, min(int(waypoints), steps))
         wp = [self.arm.fk(q0 + (q1 - q0) * (j / n)) for j in range(n + 1)]   # precompute FK
+        self.warmup(wp[0])                          # settle the servo before trusting the guard
+        if guard is not None:
+            guard.reset()
         for k in range(1, steps + 1):
             u = (k / steps) * n
             j = min(int(u), n - 1)

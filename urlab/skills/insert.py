@@ -105,6 +105,8 @@ def insert_compliant(robot, adm, guard, ic, T_standoff_ftip, T_target_ftip):
         return T_ft @ inverse(T_t0_ft)                  # fingertip pose -> tool0 reference for servoL
 
     adm.reset()
+    adm.warmup(ref(T_standoff_ftip))                # settle the servo before the guard is trusted
+    guard.reset()
     n = max(1, int(math.ceil(1.0 / max(1e-6, ic.chunk_fraction))))
     log.info('Inserting under ADMITTANCE (S=%.0f N/m trans, %.0f Nm/rad rot) in %d chunk(s) at '
              '%d Hz, guarded at %.0f N / %.1f Nm.',

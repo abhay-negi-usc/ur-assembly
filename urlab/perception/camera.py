@@ -154,10 +154,17 @@ class RealSenseCamera:
             return Frame(color, self.K, self.D, time.monotonic(),
                          self.pose_fn() if self.pose_fn else None)
 
+        # DRAIN the pipeline's buffered frames first, THEN wait for a genuinely new one. The
+        # pipeline keeps producing frames at 15 fps while the arm moves and settles, so a plain
+        # wait_for_frames() can hand back a STALE frame captured mid-move -- which we would then
+        # label with the current (settled) pose, corrupting the ray geometry the fusion depends on.
+        # (The ROS stack avoided this differently: it looked the pose up at the image's OWN
+        # timestamp via tf2. Here we instead guarantee the frame is fresh, so "pose now" == "pose of
+        # this frame".) Draining discards the mid-move backlog; the wait then returns a frame
+        # exposed after the arm has come to rest, matching the pose we sample right after.
+        while self.pipeline.poll_for_frames():
+            pass
         frames = self.pipeline.wait_for_frames(timeout_ms)
-        # Sample the pose as close to the capture as we can get. The residual skew is the
-        # USB/driver latency (a few ms); at scan speeds the arm has settled anyway, which is the
-        # reason the scan holds each view still before detecting.
         T_base_cam = self.pose_fn() if self.pose_fn else None
         stamp = time.monotonic()
 

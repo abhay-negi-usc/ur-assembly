@@ -1,17 +1,18 @@
 """Cable pick-and-assemble -- port of ur_cable_pick_assemble_demo.
 
 The PICK is the exact cable-pick-place pipeline. What replaces "place" is a pluggable assembly:
-stand-off, compliant chunked insertion (force mode), release, retract. Only 'kinematic' is
-implemented (the target pose is given outright); 'vision' fails loudly.
+stand-off, compliant chunked insertion (software admittance), release, retract. Only 'kinematic'
+is implemented (the target pose is given outright); 'vision' fails loudly.
 
-    [PICK] -> lift -> stand-off -> enter compliance -> insert (chunked, guarded)
-      -> open (release) -> end compliance -> retract (multi-step) -> home
+    [start reset] -> [PICK] -> lift -> stand-off -> insert (admittance, guarded)
+      -> open (release) -> retract (multi-step) -> [end reset]
 """
 
 from .. import log as urlog
 from ..log import StepRunner
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import insert as ins
+from ..skills import reset
 from ..skills.pick import GraspCheck, GraspGeometry, log_grasp_delta
 from ..transforms import from_cfg
 from ._cable import build_scanner, make_confirm
@@ -55,6 +56,10 @@ def build_and_run(cfg, robot, camera, args):
     check = GraspCheck(cfg)
     guard = ForceGuard(robot.arm, cfg.get_path('assembly.force_guard', {}))
     confirm = make_confirm(cfg)
+
+    # RESET at the start: open the gripper and go to the defined HOME pose under admittance.
+    if not reset.reset_robot(robot, cfg, confirm, 'start reset'):
+        return False
     q_home = robot.arm.q()
 
     # 1. PICK, with grasp-check retry.
@@ -111,7 +116,8 @@ def build_and_run(cfg, robot, camera, args):
     if not ok:
         return False
 
-    return robot.arm.move_j(q_home, label='return home')
+    # RESET at the end: open the gripper and go home under admittance.
+    return reset.reset_robot(robot, cfg, None, 'end reset')
 
 
 def _guarded(robot, guard, move_fn):

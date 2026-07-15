@@ -10,6 +10,7 @@ fingertip groove and retries the whole scan->grasp sequence.
 
 from .. import log as urlog
 from ..log import StepRunner
+from ..skills import reset
 from ..skills.pick import GraspCheck, GraspGeometry, log_grasp_delta
 from ..transforms import from_cfg, inverse
 from ._cable import build_scanner, make_confirm
@@ -52,6 +53,11 @@ def build_and_run(cfg, robot, camera, args):
     geom = GraspGeometry(cfg)
     check = GraspCheck(cfg)
     confirm = make_confirm(cfg)
+
+    # RESET at the start: open the gripper and go to the defined HOME pose under admittance, so the
+    # run always begins from the same known configuration. q_home is then that home config.
+    if not reset.reset_robot(robot, cfg, confirm, 'start reset'):
+        return False
     q_home = robot.arm.q()
 
     # Pick, with grasp-check retry.
@@ -71,7 +77,7 @@ def build_and_run(cfg, robot, camera, args):
         if not (robot.gripper.open('drop') and robot.arm.move_j(q_home, label='home')):
             return False
 
-    # Place, release, home.
+    # Place, release, then RESET at the end (open gripper + go home under admittance).
     runner = StepRunner(log, confirm=confirm is not None)
     return runner.run([
         ('lift', lambda: robot.move_fingertip(geom.lift(), 'lift')),
@@ -79,7 +85,8 @@ def build_and_run(cfg, robot, camera, args):
         ('move to place', lambda: robot.move_fingertip(geom.place(), 'place')),
         ('open gripper (release)', robot.gripper.open),
         ('retreat', lambda: robot.move_fingertip(geom.pre_place(), 'retreat')),
-        ('return home', lambda: robot.arm.move_j(q_home, label='home')),
+        ('end reset (open + home under admittance)',
+         lambda: reset.reset_robot(robot, cfg, None, 'end reset')),
     ])
 
 

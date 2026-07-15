@@ -146,3 +146,21 @@ move_timeout_s: 60.0
 settle_s: 0.5
 confirm_each_step: true
 debug: false
+
+# ---- Reset behavior (START + END of the run): open the gripper and return to a defined HOME joint
+# pose under ADMITTANCE (a compliant move -- if it bumps something on the way home it yields and the
+# guard stops it, rather than forcing through). The home is a fixed joint config, so a reset always
+# lands in the same known place. ----
+reset:
+  home_joints_deg: [90, -135, -135, 0, 90, 0]   # shoulder_pan, lift, elbow, wrist_1, wrist_2, wrist_3
+  home_duration_s: 6.0
+  max_force_n: 30.0                              # guard: stop the home move if it hits something
+  compliance:                                    # admittance params for the compliant home move
+    tare_before: true
+    mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+    stiffness:     [2000.0, 2000.0, 2000.0, 15.0, 15.0, 15.0]
+    damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    selected_axes: [1, 1, 1, 1, 1, 1]
+    reference_rate_hz: 125.0
+    max_delta_m: 0.05
+    max_delta_rad: 0.5

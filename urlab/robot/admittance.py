@@ -94,6 +94,26 @@ class AdmittanceController:
                 return 'seated'
         return 'done'
 
+    def ramp_joint_path(self, q_start, q_end, duration, guard=None, waypoints=60):
+        """Admittance around a JOINT-interpolated reference path -- for a compliant move to a joint
+        target (e.g. a home reset). The tool follows a predictable joint-space path (no
+        Cartesian-slerp singularity surprises from an arbitrary start) while the spring yields to
+        contact. FK is evaluated at `waypoints` coarse points and slerped between, so the servo
+        loop stays real-time (no per-cycle FK). Returns 'seated' if the guard trips, else 'done'."""
+        from ..transforms import slerp_matrix
+        dt = 1.0 / self.rate
+        steps = max(1, int(duration * self.rate))
+        q0, q1 = np.asarray(q_start, dtype=float), np.asarray(q_end, dtype=float)
+        n = max(1, min(int(waypoints), steps))
+        wp = [self.arm.fk(q0 + (q1 - q0) * (j / n)) for j in range(n + 1)]   # precompute FK
+        for k in range(1, steps + 1):
+            u = (k / steps) * n
+            j = min(int(u), n - 1)
+            self._step(slerp_matrix(wp[j], wp[j + 1], u - j), dt)
+            if guard is not None and guard.check():
+                return 'seated'
+        return 'done'
+
     def hold(self, T_ref, seconds, guard=None):
         """Hold the reference for `seconds` under admittance (let the mate settle / keep yielding)."""
         return self.ramp(T_ref, T_ref, seconds, guard)

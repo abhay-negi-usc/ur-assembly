@@ -42,7 +42,7 @@ connector_estimator:
   min_inlier_views: 3
   min_parallax_deg: 3.0            # rotating in place adds NO information; refuse a low-parallax fit
   ransac_iters: 200
-  inlier_dist_m: 0.010
+  inlier_dist_m: 0.005
   max_range_m: 0.80
   neck_diameter_m: 0.02
   up_axis: [0.0, 0.0, 1.0]         # pins the roll about the axis (NOT a measurement)

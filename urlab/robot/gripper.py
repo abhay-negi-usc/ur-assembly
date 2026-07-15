@@ -111,15 +111,22 @@ class Robotiq2F85:
         result = self._call('read_holding_registers', _READ_ADDR, count=3)
         if result.isError():
             raise GripperError(f'Modbus read failed: {result}')
+        # Robotiq input registers (read from 0x07D0): each 16-bit register packs two status bytes,
+        # MSB first. regs[0]: [gripper status | reserved]; regs[1]: [FAULT (gFLT) | position-request
+        # echo (gPR)]; regs[2]: [POSITION (gPO) | current (gCU)]. The fault and the actual position
+        # are the HIGH bytes of regs[1]/regs[2] -- reading the low bytes instead picks up the gPR
+        # echo (which equals the last commanded position, e.g. 0xFF after a full close) and the
+        # motor current, which is why a close-to-255 looked like "fault 0xFF".
         regs = result.registers
         status = regs[0] >> 8
         return {
             'activated': bool(status & 0x01),               # gACT
             'status': (status >> 4) & 0x03,                 # gSTA: 3 = activation complete
             'obj': (status >> 6) & 0x03,                    # gOBJ
-            'fault': regs[1] & 0xFF,
-            'pos_req': regs[2] >> 8,
-            'pos': regs[2] & 0xFF,                          # gPO -- ACTUAL POSITION IN COUNTS
+            'fault': regs[1] >> 8,                          # gFLT (Byte 2); 0 = no fault
+            'pos_req': regs[1] & 0xFF,                       # gPR -- echo of the commanded position
+            'pos': regs[2] >> 8,                            # gPO -- ACTUAL POSITION IN COUNTS
+            'current': regs[2] & 0xFF,                       # gCU -- motor current
         }
 
     # ------------------------------------------------------------------ lifecycle

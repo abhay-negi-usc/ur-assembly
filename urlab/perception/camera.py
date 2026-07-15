@@ -67,16 +67,14 @@ class RealSenseCamera:
             raise RuntimeError('pyrealsense2 is not installed. `pip install pyrealsense2`') from exc
         self._rs = rs
 
-        config = rs.config()
-        if self.serial:
-            config.enable_device(self.serial)
-        config.enable_stream(rs.stream.color, self.width, self.height, rs.format.bgr8, self.fps)
-        if self.enable_depth:
-            config.enable_stream(rs.stream.depth, self.width, self.height, rs.format.z16, self.fps)
-
         self.pipeline = rs.pipeline()
-        profile = self.pipeline.start(config)
-        intr = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
+        profile = self._start_color(rs)
+
+        cp = profile.get_stream(rs.stream.color).as_video_stream_profile()
+        intr = cp.get_intrinsics()
+        # Read the ACTUAL resolution back from the device -- after a fallback it may differ from
+        # what the config asked for, and K/width/height must describe what we're really getting.
+        self.width, self.height, self.fps = cp.width(), cp.height(), cp.fps()
         self.K = np.array([[intr.fx, 0.0, intr.ppx],
                            [0.0, intr.fy, intr.ppy],
                            [0.0, 0.0, 1.0]])
@@ -87,6 +85,57 @@ class RealSenseCamera:
 
         for _ in range(5):              # auto-exposure settle
             self.pipeline.wait_for_frames()
+
+    def _start_color(self, rs):
+        """Start the pipeline with the configured color mode, falling back to a device-supported
+        one if the exact request is not offered.
+
+        The D405's color sensor exposes a specific set of (resolution, fps, format) profiles, and
+        an unsupported combination makes pipeline.start() raise 'Couldn't resolve requests'. So we
+        try the configured mode, then let librealsense pick its DEFAULT color profile, and only
+        then give up -- with the list of modes the device actually supports."""
+        def base_config():
+            cfg = rs.config()
+            if self.serial:
+                cfg.enable_device(self.serial)
+            if self.enable_depth:
+                cfg.enable_stream(rs.stream.depth, rs.format.z16, self.fps)
+            return cfg
+
+        # 1. Exactly what the config asked for.
+        cfg = base_config()
+        cfg.enable_stream(rs.stream.color, self.width, self.height, rs.format.bgr8, self.fps)
+        try:
+            return self.pipeline.start(cfg)
+        except RuntimeError as exc:
+            log.warning("Color %dx%d @ %d fps not supported by this device (%s); falling back to "
+                        "its default color mode.", self.width, self.height, self.fps, exc)
+
+        # 2. Let librealsense choose a valid default color profile.
+        cfg = base_config()
+        cfg.enable_stream(rs.stream.color, rs.format.bgr8)
+        try:
+            return self.pipeline.start(cfg)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"Could not start the D405 color stream. Supported color modes:\n"
+                f"{self._supported_color(rs)}\n"
+                f"Set camera.width/height/fps in the config to one of these. Original error: {exc}"
+            ) from exc
+
+    def _supported_color(self, rs):
+        try:
+            devs = rs.context().query_devices()
+            if not devs:
+                return '  (no device found)'
+            modes = sorted({(v.width(), v.height(), p.fps())
+                            for s in devs[0].query_sensors()
+                            for p in s.get_stream_profiles()
+                            if p.stream_type() == rs.stream.color and p.is_video_stream_profile()
+                            for v in [p.as_video_stream_profile()]})
+            return '\n'.join(f'  {w}x{h} @ {f} fps' for w, h, f in modes) or '  (none)'
+        except Exception as exc:                    # noqa: BLE001
+            return f'  (could not enumerate: {exc})'
 
     def capture(self, timeout_ms=5000):
         """One frame, stamped with the camera pose at capture."""

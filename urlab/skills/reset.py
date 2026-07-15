@@ -10,7 +10,7 @@ in the same known place regardless of where the demo left it.
 import numpy as np
 
 from .. import log as urlog
-from ..robot import AdmittanceController, ForceGuard
+from ..robot import ForceGuard
 
 log = urlog.get('reset')
 
@@ -22,35 +22,36 @@ def home_joints(cfg):
 
 
 def go_home(robot, cfg, guard=None):
-    """Return to the home joint config under admittance. The F/T is tared MID-WARMUP (once the
-    servo is engaged and static) so the guard's baseline matches the reading it will actually see
-    -- taring while idle leaves the tool-weight offset that only appears under active control.
-    Returns True on a clean home, False if the guard tripped (hit something) or a move failed."""
+    """Return to the home joint config under POSITION control (moveJ) with the force guard armed.
+
+    NOT Cartesian servoL admittance: a large, arbitrary joint traverse streamed as Cartesian
+    servoL can flip IK branches (elbow/wrist), which the arm executes as a fast lunge in the wrong
+    direction -- and servoL ignores the velocity caps, so they can't rein it in. moveJ plans a
+    proper JOINT trajectory (no branch flips), honours max_joint/cartesian_velocity, and the armed
+    guard STOPS it on contact -- which is the actual safety intent of a compliant home. (Cartesian
+    admittance stays for the insertion, a small move near the target where servoL is appropriate.)
+
+    Returns True on a clean home, False if the guard tripped (hit something) or the move failed."""
     q_home = home_joints(cfg)
-    log.info('Going home under admittance to %s deg.',
-             list(np.round(np.degrees(q_home)).astype(int)))
+    log.info('Returning home to %s deg (position control, contact-guarded at %.0f N).',
+             list(np.round(np.degrees(q_home)).astype(int)),
+             float(cfg.get_path('reset.max_force_n', 30.0)))
     if robot.arm.dry_run:
         return robot.arm.move_j(q_home, label='home (dry-run)')
 
-    adm = AdmittanceController(robot.arm, cfg.get_path('reset.compliance', {}))
+    robot.arm.zero_ft()                              # tare so the guard measures contact only
     if guard is None:
         guard = ForceGuard(robot.arm, {'max_force_n': cfg.get_path('reset.max_force_n', 30.0)})
     guard.reset()
-
-    def tare():
-        log.info('Taring the F/T sensor (servo engaged, before the home travel).')
-        robot.arm.zero_ft(settle=False)              # settle=False: don't block the servo loop
-
-    duration = float(cfg.get_path('reset.home_duration_s', 6.0))
+    robot.arm.add_guard(guard)                       # armed -> moveJ runs async and polls the guard
     try:
-        result = adm.ramp_joint_path(robot.arm.q(), q_home, duration, guard, tare_fn=tare)
+        ok = robot.arm.move_j(q_home, label='home')
     finally:
-        robot.arm.servo_stop()
-    if result == 'seated':
+        robot.arm.clear_guards()
+    if not ok and guard.tripped_by:
         log.error('Home move hit something (guard tripped: %s) -- stopped. Clear the path and '
                   'retry.', guard.tripped_by)
-        return False
-    return True
+    return ok
 
 
 def reset_robot(robot, cfg, confirm=None, label='reset'):

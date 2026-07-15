@@ -108,34 +108,44 @@ class RealSenseCamera:
         try:
             return self.pipeline.start(cfg)
         except RuntimeError as exc:
-            log.warning("Color %dx%d @ %d fps not supported by this device (%s); falling back to "
-                        "its default color mode.", self.width, self.height, self.fps, exc)
+            log.warning("Color %dx%d @ %d fps not supported by this device (%s); auto-selecting a "
+                        "supported mode.", self.width, self.height, self.fps, exc)
 
-        # 2. Let librealsense choose a valid default color profile.
+        # 2. Auto-select from the modes the device ACTUALLY reports -- not librealsense's "default"
+        #    profile, which for the D405 is 30 fps and does not actually start. Highest resolution
+        #    first, then highest fps at that resolution: more pixels sharpen the cable fit, and the
+        #    scan holds each view still so fps barely matters. (The D405 tops out at 1280x720 @ 15.)
+        modes = self._color_modes(rs)
+        if not modes:
+            raise RuntimeError('The D405 reports no color profiles (a depth-only unit?).')
+        w, h, f = max(modes, key=lambda m: (m[0] * m[1], m[2]))
+        log.info('Auto-selected color mode %dx%d @ %d fps.', w, h, f)
         cfg = base_config()
-        cfg.enable_stream(rs.stream.color, rs.format.bgr8)
+        cfg.enable_stream(rs.stream.color, w, h, rs.format.bgr8, f)
         try:
             return self.pipeline.start(cfg)
         except RuntimeError as exc:
             raise RuntimeError(
-                f"Could not start the D405 color stream. Supported color modes:\n"
-                f"{self._supported_color(rs)}\n"
-                f"Set camera.width/height/fps in the config to one of these. Original error: {exc}"
-            ) from exc
+                f"Could not start the D405 color stream even at its own reported {w}x{h} @ {f} fps."
+                f" Supported color modes:\n{self._fmt_modes(modes)}\nOriginal error: {exc}") from exc
 
-    def _supported_color(self, rs):
+    def _color_modes(self, rs):
+        """Sorted [(w, h, fps)] color modes the connected device supports."""
         try:
             devs = rs.context().query_devices()
             if not devs:
-                return '  (no device found)'
-            modes = sorted({(v.width(), v.height(), p.fps())
-                            for s in devs[0].query_sensors()
-                            for p in s.get_stream_profiles()
-                            if p.stream_type() == rs.stream.color and p.is_video_stream_profile()
-                            for v in [p.as_video_stream_profile()]})
-            return '\n'.join(f'  {w}x{h} @ {f} fps' for w, h, f in modes) or '  (none)'
-        except Exception as exc:                    # noqa: BLE001
-            return f'  (could not enumerate: {exc})'
+                return []
+            return sorted({(v.width(), v.height(), p.fps())
+                           for s in devs[0].query_sensors()
+                           for p in s.get_stream_profiles()
+                           if p.stream_type() == rs.stream.color and p.is_video_stream_profile()
+                           for v in [p.as_video_stream_profile()]})
+        except Exception:                           # noqa: BLE001
+            return []
+
+    @staticmethod
+    def _fmt_modes(modes):
+        return '\n'.join(f'  {w}x{h} @ {f} fps' for w, h, f in modes) or '  (none)'
 
     def capture(self, timeout_ms=5000):
         """One frame, stamped with the camera pose at capture."""

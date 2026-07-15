@@ -47,6 +47,11 @@ connector_estimator:
   min_parallax_deg: 3.0
   inlier_dist_m: 0.010
   max_range_m: 0.80
+  neck_diameter_m: 0.02             # <-- SET to your MEASURED cable diameter (m); used below
+  use_diameter: true                # fuse diameter-based DEPTH into the origin (junction mode only)
+  diameter_weight: 1.0
+  use_diameter_axis: false          # blend the diameter-GRADIENT axis (out-of-plane tilt); WEAK/NOISY
+  axis_diameter_weight: 0.3
   up_axis: [0.0, 0.0, 1.0]
   workspace_min: [-10.0, -10.0, -10.0]   # matches dev connector_pose_node default (no box)
   workspace_max: [10.0, 10.0, 10.0]

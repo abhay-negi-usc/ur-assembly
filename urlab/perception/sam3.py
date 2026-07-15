@@ -33,6 +33,17 @@ from .. import log as urlog
 log = urlog.get('sam3')
 
 
+def _count(x):
+    """Length for a logged count -- tolerant of cable_neck_core returning either a list of masks
+    or an already-counted int for the *_raw fields (it varies), and of None."""
+    if x is None:
+        return 0
+    try:
+        return len(x)
+    except TypeError:
+        return int(x) if isinstance(x, (int, float)) else 0
+
+
 def _load_core(repo_path):
     """Import cable_neck_core from the sam3-abhay checkout."""
     scripts = os.path.join(repo_path, 'scripts')
@@ -101,13 +112,13 @@ class NeckDetector(_Base):
             log.info('  adaptive: thr_cable=%.2f thr_conn=%.2f eff=%.2f (%d combos), '
                      'cables=%d connectors=%d necks=%d',
                      res.get('thr_cable', -1), res.get('thr_conn', -1), res.get('eff_conf', -1),
-                     res.get('combos_tried', 0), len(res.get('cables_raw', [])),
-                     len(res.get('connectors_raw', [])), len(res.get('necks', [])))
+                     res.get('combos_tried', 0), _count(res.get('cables_raw')),
+                     _count(res.get('connectors_raw')), _count(res.get('necks')))
         else:
             res = self.detector.detect(pil)
             log.info('  cables=%d connectors=%d necks=%d dropped=%d',
-                     len(res.get('cables_raw', [])), len(res.get('connectors_raw', [])),
-                     len(res.get('necks', [])), res.get('n_dropped', 0))
+                     _count(res.get('cables_raw')), _count(res.get('connectors_raw')),
+                     _count(res.get('necks')), res.get('n_dropped', 0))
 
         self.last_debug = self._overlay(frame, res)
         out = []

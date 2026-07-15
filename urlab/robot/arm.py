@@ -182,7 +182,14 @@ class URArm:
         return max(speed, 1e-3), self.joint_accel
 
     def move_j(self, q_target, speed=None, accel=None, label='move'):
-        """Joint-space move to `q_target`. Blocking, guard-checked. Returns True on success."""
+        """Joint-space move to `q_target`. Blocking; returns True on success.
+
+        SYNCHRONOUS unless a guard is armed. A synchronous moveJ blocks until the arm has actually
+        finished -- simplest, and immune to the async-progress race: right after an async moveJ,
+        ur_rtde's getAsyncOperationProgress() can report 'no operation' for a tick before the move
+        registers, and a wait that reads that as 'done' returns instantly, so the next command
+        supersedes the move before it happens and the arm never visibly moves. Only a guarded move
+        needs to run async, so the guard can be polled while the arm is in motion."""
         if self.dry_run:
             log.info('[dry-run] %s -> q=%s', label, np.round(q_target, 3))
             self._sim_q = np.asarray(q_target, dtype=float)
@@ -192,30 +199,53 @@ class URArm:
         speed = auto_speed if speed is None else speed
         accel = auto_accel if accel is None else accel
 
-        # asynchronous=True hands control back immediately so we can poll the guards while the
-        # arm is moving. The synchronous form would block until the move finished, which is
-        # exactly when a force guard is too late to be useful.
-        self.rtde_c.moveJ(list(q_target), speed, accel, True)
+        if not self._guards:
+            ok = self.rtde_c.moveJ(list(q_target), speed, accel, False)   # blocks until finished
+            if not ok:
+                log.error('[%s] move rejected/failed. On the pendant: Remote Control on, brakes '
+                          'released (green "Normal"), speed slider up, and NOT in Simulation mode?',
+                          label)
+            return bool(ok)
+
+        self.rtde_c.moveJ(list(q_target), speed, accel, True)             # async -> pollable guard
         return self._await_move(label)
 
     def move_l(self, T_base_tool0, speed=None, accel=None, label='move'):
-        """Straight-line Cartesian move (the tool travels a line in space, not a joint arc)."""
+        """Straight-line Cartesian move (the tool travels a line in space, not a joint arc).
+
+        Synchronous unless a guard is armed, for the same reason as move_j."""
         if self.dry_run:
             log.info('[dry-run] %s -> linear', label)
             return True
-        self.rtde_c.moveL(matrix_to_rtde(T_base_tool0),
-                          self.max_cart_vel if speed is None else speed,
-                          self.cart_accel if accel is None else accel, True)
+        pose = matrix_to_rtde(T_base_tool0)
+        speed = self.max_cart_vel if speed is None else speed
+        accel = self.cart_accel if accel is None else accel
+        if not self._guards:
+            ok = self.rtde_c.moveL(pose, speed, accel, False)
+            if not ok:
+                log.error('[%s] linear move rejected/failed (unreachable, or the checks above).',
+                          label)
+            return bool(ok)
+        self.rtde_c.moveL(pose, speed, accel, True)
         return self._await_move(label)
 
     def _await_move(self, label):
-        """Poll until the async move finishes, the guard trips, or the timeout expires."""
+        """Poll an ASYNC move until it finishes, a guard trips, or it times out.
+
+        Waits for the move to actually START before accepting 'no operation' as finished. Right
+        after an async move, getAsyncOperationProgress() can read < 0 for a tick before the
+        controller registers it; returning then would skip the move. So < 0 counts as 'done' only
+        once we have seen it running -- or after a short grace, which covers a genuinely instant
+        (near-zero) move that never registers progress at all."""
         deadline = time.monotonic() + self.move_timeout
+        start_grace = time.monotonic() + 1.0
         last_log = 0.0
+        started = False
         while True:
-            # < 0 means "no async operation running", i.e. finished. ur_rtde returns the progress
-            # of the running op otherwise.
-            if self.rtde_c.getAsyncOperationProgress() < 0:
+            prog = self.rtde_c.getAsyncOperationProgress()
+            if prog >= 0:
+                started = True
+            elif started or time.monotonic() > start_grace:
                 time.sleep(0.02)                        # let the final setpoint land
                 return True
 
@@ -227,8 +257,8 @@ class URArm:
             now = time.monotonic()
             if now > deadline:
                 log.error(
-                    '[%s] not finished after %.0fs. On the pendant: is the robot in Remote '
-                    'Control, is there a protective/e-stop, and is the speed slider up? Stopping.',
+                    '[%s] not finished after %.0fs. On the pendant: Remote Control on, no '
+                    'protective/e-stop, speed slider up, NOT in Simulation mode? Stopping.',
                     label, self.move_timeout)
                 self.rtde_c.stopJ(2.0)
                 return False

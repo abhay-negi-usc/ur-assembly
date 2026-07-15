@@ -22,6 +22,7 @@ def home_joints(cfg):
 
 
 def go_home(robot, cfg, guard=None):
+<<<<<<< HEAD
     """Return to the home joint config under POSITION control (moveJ) with the force guard armed.
 
     NOT Cartesian servoL admittance: a large, arbitrary joint traverse streamed as Cartesian
@@ -32,6 +33,12 @@ def go_home(robot, cfg, guard=None):
     admittance stays for the insertion, a small move near the target where servoL is appropriate.)
 
     Returns True on a clean home, False if the guard tripped (hit something) or the move failed."""
+=======
+    """Return to the home joint config under admittance. The F/T is tared MID-WARMUP (once the
+    servo is engaged and static) so the guard's baseline matches the reading it will actually see
+    -- taring while idle leaves the tool-weight offset that only appears under active control.
+    Returns True on a clean home, False if the guard tripped (hit something) or a move failed."""
+>>>>>>> 89a94c0a42ebf4047b19bebb052007a18ad79235
     q_home = home_joints(cfg)
     log.info('Returning home to %s deg (position control, contact-guarded at %.0f N).',
              list(np.round(np.degrees(q_home)).astype(int)),
@@ -39,7 +46,11 @@ def go_home(robot, cfg, guard=None):
     if robot.arm.dry_run:
         return robot.arm.move_j(q_home, label='home (dry-run)')
 
+<<<<<<< HEAD
     robot.arm.zero_ft()                              # tare so the guard measures contact only
+=======
+    adm = AdmittanceController(robot.arm, cfg.get_path('reset.compliance', {}))
+>>>>>>> 89a94c0a42ebf4047b19bebb052007a18ad79235
     if guard is None:
         guard = ForceGuard(robot.arm, {'max_force_n': cfg.get_path('reset.max_force_n', 30.0)})
     guard.reset()

@@ -58,7 +58,7 @@ def build_and_run(cfg, robot, camera, args):
     confirm = make_confirm(cfg)
 
     # RESET at the start: open the gripper and go to the defined HOME pose under admittance.
-    if not reset.reset_robot(robot, cfg, confirm, 'start reset'):
+    if not reset.reset_robot(robot, cfg, 'start reset'):
         return False
     q_home = robot.arm.q()
 
@@ -117,7 +117,7 @@ def build_and_run(cfg, robot, camera, args):
         return False
 
     # RESET at the end: open the gripper and go home under admittance.
-    return reset.reset_robot(robot, cfg, None, 'end reset')
+    return reset.reset_robot(robot, cfg, 'end reset')
 
 
 def _guarded(robot, guard, move_fn):

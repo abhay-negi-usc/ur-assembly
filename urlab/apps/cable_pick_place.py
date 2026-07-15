@@ -56,7 +56,7 @@ def build_and_run(cfg, robot, camera, args):
 
     # RESET at the start: open the gripper and go to the defined HOME pose under admittance, so the
     # run always begins from the same known configuration. q_home is then that home config.
-    if not reset.reset_robot(robot, cfg, confirm, 'start reset'):
+    if not reset.reset_robot(robot, cfg, 'start reset'):
         return False
     q_home = robot.arm.q()
 
@@ -86,7 +86,7 @@ def build_and_run(cfg, robot, camera, args):
         ('open gripper (release)', robot.gripper.open),
         ('retreat', lambda: robot.move_fingertip(geom.pre_place(), 'retreat')),
         ('end reset (open + home under admittance)',
-         lambda: reset.reset_robot(robot, cfg, None, 'end reset')),
+         lambda: reset.reset_robot(robot, cfg, 'end reset')),
     ])
 
 

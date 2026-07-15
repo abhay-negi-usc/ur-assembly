@@ -54,11 +54,21 @@ def go_home(robot, cfg, guard=None):
     return ok
 
 
-def reset_robot(robot, cfg, confirm=None, label='reset'):
-    """Open the gripper -> go home under admittance (taring mid-move once the servo is engaged).
-    The whole-run bookend."""
-    if confirm and not confirm(f'{label}: open gripper -> tare -> go home (admittance)'):
-        return False
+def reset_robot(robot, cfg, label='reset'):
+    """Open the gripper -> return home (guarded moveJ). The whole-run bookend.
+
+    ALWAYS prompts for Enter before moving -- UNCONDITIONALLY, ignoring --yes / confirm_each_step.
+    The reset drives the arm home, and that is exactly the motion you want a human to gate every
+    time (especially after a bad home move). Only a dry run skips the prompt."""
+    if not robot.arm.dry_run:
+        try:
+            answer = input(f'\n[{label}] The arm will OPEN THE GRIPPER and RETURN HOME. '
+                           'Enter to proceed (q to abort): ')
+        except EOFError:
+            answer = ''
+        if answer.strip().lower() in ('q', 'quit', 'n', 'no'):
+            log.info('Reset aborted by the user.')
+            return False
     if robot.gripper is not None and not robot.gripper.open('reset: open gripper'):
         return False
     return go_home(robot, cfg)

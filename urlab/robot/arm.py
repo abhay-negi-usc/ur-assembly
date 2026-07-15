@@ -308,6 +308,19 @@ class URArm:
         self.rtde_c.servoJ(list(q), 0.0, 0.0, dt, lookahead, gain)
         self.rtde_c.waitPeriod(t0)
 
+    def servo_l(self, T_base_tool0, dt, lookahead=0.1, gain=300):
+        """One step of a streamed CARTESIAN reference -- the software-admittance inner loop.
+
+        Drives tool0 toward the pose (the controller's own IK handles it) and returns immediately.
+        Like servo_j it plans no profile, so call it at a steady rate; the initPeriod/waitPeriod
+        pair holds that rate. `dt` is the control period."""
+        if self.dry_run:
+            self._sim_q = self.ik(T_base_tool0) or self._sim_q
+            return
+        t0 = self.rtde_c.initPeriod()
+        self.rtde_c.servoL(matrix_to_rtde(T_base_tool0), 0.0, 0.0, dt, lookahead, gain)
+        self.rtde_c.waitPeriod(t0)
+
     def servo_stop(self):
         if not self.dry_run:
             self.rtde_c.servoStop()

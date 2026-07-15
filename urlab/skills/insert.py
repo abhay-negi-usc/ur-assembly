@@ -1,23 +1,14 @@
 """Assembly insertion -- stand-off, compliant chunked insertion, and a multi-step retract.
 
-Ported from CablePickAssemble (_insert_chunked, _stream_to, _enable_compliance, _retract) and the
-KinematicAssembly node. The behaviour is the same; the compliance implementation is far simpler.
+COMPLIANCE is a SOFTWARE ADMITTANCE law (see robot/admittance.py): a virtual spring-mass-damper
+with a real, finite restoring stiffness (S = 2000 N/m by default), streamed over servoL. It
+reimplements the dev branch's ros2_control admittance_controller in Python -- so there is a
+restoring spring again (forceMode had none; it yields freely to zero force and cannot push a part
+toward its mate), but none of the controller install/load/switch machinery. The insertion ramps
+the reference stand-off -> target; the arm yields to contact and springs back toward the reference,
+exactly as the dev insertion did.
 
-WHAT forceMode DELETES. The ROS insertion needed the ros2_control admittance_controller, which
-had to be installed, loaded inactive, parameterised over a service, and ACTIVATED -- and
-activating it DEACTIVATED the trajectory controller, so everything from that point had to stream
-joint references instead of using normal moves. Activation also made the arm jump to its
-reference, which caused a joint-0 velocity fault, patched with an elaborate _hold_reference dance
-that pinned the reference to the arm's current pose on both sides of both switches.
-
-forceMode is a mode of the SAME controller. It starts from where the arm is, so there is no jump
-and nothing to pin. There is no controller to switch out, so normal moves keep working. The
-selection vector says which axes yield; everything else stays position-controlled. The entire
-_enable_compliance / _hold_reference / _switch_to_position apparatus reduces to:
-
-    arm.force_mode(...) ; do the insertion ; arm.end_force_mode()
-
-with end_force_mode() in a finally so a crash mid-insert cannot leave the arm compliant.
+A position-control fallback (insert_chunked) is kept for compliance disabled.
 """
 
 import math
@@ -46,20 +37,12 @@ class InsertConfig:
         self.standoff_dist = float(s.get('distance_m', 0.05))
         self.lift_after_pick = bool(a.get('lift_after_pick', True))
 
+        # The compliance section is parsed by AdmittanceController (mass/stiffness/damping_ratio/
+        # selected_axes/rate); the insert only needs whether it is on and whether to tare first.
         c = a.get('compliance', {}) or {}
+        self.compliance = c
         self.compliance_enabled = bool(c.get('enabled', True))
         self.tare_before = bool(c.get('tare_before', True))
-        # forceMode: which axes yield, and toward what wrench. selected_axes marks compliant axes;
-        # a compliant axis regulates toward `target_wrench` (0 = "go soft, seek no force"), a rigid
-        # axis holds position. The task frame is the TARGET frame, so 'z compliant' means "float
-        # along the mating direction" if the target's z is the insertion axis.
-        self.selected_axes = [int(bool(v)) for v in c.get('selected_axes', [1, 1, 1, 1, 1, 1])]
-        self.target_wrench = [float(v) for v in c.get('target_wrench', [0.0] * 6)]
-        # Speed/deviation limits per axis: compliant axes -> max speed (m/s, rad/s); rigid axes ->
-        # max deviation (m, rad). Conservative by default; contact should be gentle.
-        self.force_limits = [float(v) for v in c.get('force_limits', [0.05] * 3 + [0.17] * 3)]
-        self.force_damping = float(c.get('damping', 0.005))
-        self.force_gain_scaling = float(c.get('gain_scaling', 0.8))
 
         fg = a.get('force_guard', {}) or {}
         self.max_force = float(fg.get('max_force_n', 30.0))
@@ -106,21 +89,53 @@ def standoff_of(ic, T_target):
     return T_target @ translation_matrix(ic.standoff_axis * ic.standoff_dist)
 
 
-def insert_chunked(robot, guard, ic, T_start, T_target, confirm=None):
-    """Execute the stand-off -> target trajectory in fractional chunks, force-guarded.
+def insert_compliant(robot, adm, guard, ic, T_standoff_ftip, T_target_ftip):
+    """Insert stand-off -> target under SOFTWARE ADMITTANCE (robot/admittance.py). The reference
+    ramps to the target while the spring-damper yields to contact and restores toward the
+    reference; a force-guard trip means the part SEATED (success).
 
-    Chunking is what makes the insertion inspectable: contact is checked BETWEEN chunks, so a jam
-    is caught after a fraction of the travel, and (with confirm) each fraction can be vetoed.
-    Under force mode the arm ALSO yields within a chunk.
+    Runs as ONE continuous servoL loop -- chunk_fraction only sets the guard/progress granularity
+    within it. servoL cannot be paused for a per-chunk prompt without dropping servo control, so
+    the veto is the single confirm the caller puts before this whole step (not per chunk)."""
+    if ic.tare_before:
+        robot.arm.zero_ft()
+    T_t0_ft = robot.T_tool0_fingertip
 
-    The force guard's trip means OPPOSITE things by phase, and here is the one place it means
-    SUCCESS: a trip during insertion is the part SEATING against its mate. Everywhere else it is a
-    collision. So this function reads the guard directly rather than arming it as a move-canceller,
-    and treats a trip as 'done, seated'."""
+    def ref(T_ft):
+        return T_ft @ inverse(T_t0_ft)                  # fingertip pose -> tool0 reference for servoL
+
+    adm.reset()
     n = max(1, int(math.ceil(1.0 / max(1e-6, ic.chunk_fraction))))
-    mode = 'FORCE MODE' if robot.arm.in_force_mode else 'POSITION'
-    log.info('Inserting in %d chunk(s) of %.0f%% (%s), guarded at %.0f N / %.1f Nm.',
-             n, ic.chunk_fraction * 100, mode, ic.max_force, ic.max_torque)
+    log.info('Inserting under ADMITTANCE (S=%.0f N/m trans, %.0f Nm/rad rot) in %d chunk(s) at '
+             '%d Hz, guarded at %.0f N / %.1f Nm.',
+             adm.S[0], adm.S[3], n, int(adm.rate), ic.max_force, ic.max_torque)
+    try:
+        for k in range(1, n + 1):
+            if guard.check():
+                log.info('Contact limit reached before chunk %d/%d -- part seated.', k, n)
+                return True
+            a0, a1 = (k - 1) * ic.chunk_fraction, min(1.0, k * ic.chunk_fraction)
+            result = adm.ramp(ref(slerp_matrix(T_standoff_ftip, T_target_ftip, a0)),
+                              ref(slerp_matrix(T_standoff_ftip, T_target_ftip, a1)),
+                              ic.chunk_time_s, guard)
+            log.info('  chunk %d/%d (%.0f%%): %s', k, n, a1 * 100, result)
+            if result == 'seated':
+                log.info('Contact limit reached -- part SEATED. Stopping the insertion.')
+                return True
+        adm.hold(ref(T_target_ftip), ic.chunk_settle_s, guard)   # settle at the target
+        log.info('Insertion complete (contact limit not reached).')
+        return True
+    finally:
+        robot.arm.servo_stop()
+
+
+def insert_chunked(robot, guard, ic, T_start, T_target, confirm=None):
+    """POSITION-control fallback (compliance disabled): stand-off -> target in force-guarded
+    chunks, no yielding. A guard trip mid-chunk = the part SEATED (the one place a trip is
+    success); anywhere else it is a collision."""
+    n = max(1, int(math.ceil(1.0 / max(1e-6, ic.chunk_fraction))))
+    log.info('Inserting in %d chunk(s) of %.0f%% (POSITION control -- STIFF, no yielding), '
+             'guarded at %.0f N / %.1f Nm.', n, ic.chunk_fraction * 100, ic.max_force, ic.max_torque)
 
     for k in range(1, n + 1):
         if guard.check():
@@ -132,7 +147,6 @@ def insert_chunked(robot, guard, ic, T_start, T_target, confirm=None):
         if confirm and not confirm(label):
             return False
 
-        # Arm the guard as a move-canceller for THIS chunk so a seat stops the arm mid-travel.
         guard.reset()
         robot.arm.add_guard(guard)
         ok = robot.move_fingertip(T, label)
@@ -178,21 +192,6 @@ def retract(robot, ic):
             log.error('%s failed -- retract steps are large free-space moves; check the path.',
                       label)
             return False
-    return True
-
-
-def enter_compliance(robot, ic, T_target):
-    """Enter force mode with the TARGET frame as the task frame. No-op if compliance is disabled.
-
-    Returns True if the arm is now compliant (or compliance was intentionally off)."""
-    if not ic.compliance_enabled:
-        log.info('Compliance disabled; inserting under POSITION control.')
-        return True
-    if ic.tare_before:
-        robot.arm.zero_ft()
-    robot.arm.force_mode(T_target, ic.selected_axes, ic.target_wrench, ic.force_limits,
-                         damping=ic.force_damping, gain_scaling=ic.force_gain_scaling)
-    log.info('Compliance ON (force mode), task frame = assembly target.')
     return True
 
 

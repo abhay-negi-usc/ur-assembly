@@ -10,7 +10,7 @@ implemented (the target pose is given outright); 'vision' fails loudly.
 
 from .. import log as urlog
 from ..log import StepRunner
-from ..robot import ForceGuard
+from ..robot import AdmittanceController, ForceGuard
 from ..skills import insert as ins
 from ..skills.pick import GraspCheck, GraspGeometry, log_grasp_delta
 from ..transforms import from_cfg
@@ -82,8 +82,18 @@ def build_and_run(cfg, robot, camera, args):
              T_target[:3, 3].round(4), T_standoff[:3, 3].round(4))
 
     # 3. Assemble. The force guard is armed over the free-space moves (a trip = unexpected
-    #    collision); insert_chunked manages the guard itself (a trip there = SEATED). end_force_mode
-    #    in the finally guarantees the arm is never left compliant.
+    #    collision); the insertion reads the guard itself (a trip there = SEATED). servo_stop in the
+    #    finally guarantees the arm is left out of the servo loop.
+    #    Compliance is a SOFTWARE ADMITTANCE law (finite restoring stiffness) -- see the config's
+    #    compliance block and robot/admittance.py. insert_compliant runs it; if compliance is
+    #    disabled it falls back to a stiff position insert.
+    adm = AdmittanceController(robot.arm, cfg.get_path('assembly.compliance', {}))
+
+    def do_insert():
+        if ic.compliance_enabled:
+            return ins.insert_compliant(robot, adm, guard, ic, T_standoff, T_target)
+        return ins.insert_chunked(robot, guard, ic, T_standoff, T_target, confirm)
+
     runner = StepRunner(log, confirm=confirm is not None)
     ok = False
     try:
@@ -92,17 +102,12 @@ def build_and_run(cfg, robot, camera, args):
             ('move to stand-off',
              lambda: _guarded(robot, guard,
                               lambda: robot.move_fingertip(T_standoff, 'stand-off'))),
-            ('enter compliance', lambda: ins.enter_compliance(robot, ic, T_target)),
-            ('insert (chunked)',
-             lambda: ins.insert_chunked(robot, guard, ic, T_standoff, T_target, confirm)),
+            ('insert (admittance)', do_insert),
             ('open gripper (release)', robot.gripper.open),
-            ('end compliance', lambda: (robot.arm.end_force_mode(), True)[1]),
             ('retract', lambda: ins.retract(robot, ic)),
         ])
     finally:
-        if robot.arm.in_force_mode:
-            log.warning('Restoring position control (was left compliant).')
-            robot.arm.end_force_mode()
+        robot.arm.servo_stop()          # leave the servo loop no matter how the insertion ended
     if not ok:
         return False
 

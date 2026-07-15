@@ -31,11 +31,15 @@ camera:
 
 sam3:
   repo_path: /abhay_ws/sam3-abhay
-  mode: neck
+  mode: neck                        # neck | junction | tip  (junction = diameter-profiling method,
+                                    # same physical point as neck; classification-free, no adaptive)
   cable_prompt: cable
   connector_prompt: connector
-  adaptive: true
+  adaptive: true                    # (neck only)
   confidence_floor: 0.2
+  # ---- junction method only ----
+  min_contrast: 0.0                 # drop junctions with too weak a connector/cable diameter step; 0 = off
+  work_dim: 1024
 
 connector_estimator:
   min_views: 2

@@ -62,7 +62,8 @@ either script (default `all`) for a lighter env, e.g. `./setup-venv.sh core`.
 **SAM3 is not installed by any of these** — it runs from your `sam3-abhay` checkout under its own
 venv, because it needs pins this environment must not inherit (`torch==2.4.1+cu121` for the Pascal
 GPU, the gated model weights, the 6 GB memory workaround). Point `sam3.repo_path` at that checkout;
-urlab imports `cable_neck_core` from it at runtime. See `requirements/perception.txt` for the full
+urlab imports the detector module from it at runtime (`sam3.mode` selects which: `neck`, `junction`,
+or `tip`). See `requirements/perception.txt` for the full
 note.
 
 ### Robot prerequisites

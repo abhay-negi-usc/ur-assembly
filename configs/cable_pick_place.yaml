@@ -34,13 +34,21 @@ camera:
 
 # ---- SAM3 detector (in-process) ----
 sam3:
-  repo_path: /abhay_ws/sam3-abhay   # the checkout holding cable_neck_core.py + the model venv
-  mode: neck                        # neck | tip
+  repo_path: /abhay_ws/sam3-abhay   # the checkout holding the detector modules + the model venv
+  # neck     -- cable/connector junction (cable_neck_core), adaptive-threshold mode available.
+  # junction -- the SAME junction by the DIAMETER-PROFILING method (cable_neck_diameter): unions
+  #             both prompts, classification-free, ONE junction per frame, NO adaptive mode.
+  # tip      -- the cable's free END (classification-free).
+  mode: neck                        # neck | junction | tip
   cable_prompt: cable
   connector_prompt: connector
-  adaptive: true                    # tune the threshold per image above a confidence floor
+  adaptive: true                    # (neck only) tune the threshold per image above a floor
   confidence_floor: 0.2
   mislabel_overlap: 0.6
+  # ---- junction method only (ignored by neck/tip) ----
+  min_contrast: 0.0                 # drop a junction whose connector/cable diameter ratio is below
+                                    # this (a flat profile isn't a real cable->connector step); 0 = off
+  work_dim: 1024                    # internal resolution for the diameter tracer
 
 # ---- Multi-view fusion (the connector pose estimator) ----
 connector_estimator:

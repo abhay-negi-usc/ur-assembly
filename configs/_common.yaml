@@ -6,6 +6,11 @@
 robot:
   ip: 192.168.125.2
   dry_run: false                 # --dry-run overrides; plans every move without a robot
+  # Tool payload (gripper + coupler + camera): mass + CoG in the tool0 frame (m). REQUIRED so
+  # getActualTCPForce() subtracts the tool weight and reports true EXTERNAL force.
+  payload:
+    mass_kg: 1.3
+    cog_m: [-0.026, 0.028, 0.030]
   # IMPORTANT: ur_rtde uploads its own control script. The External Control URCap must NOT be
   # playing, and the robot must be in Remote Control on the pendant.
 

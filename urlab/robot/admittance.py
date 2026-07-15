@@ -66,17 +66,29 @@ class AdmittanceController:
         self._delta = np.zeros(6)
         self._vel = np.zeros(6)
 
-    def warmup(self, T_ref, seconds=None):
+    def warmup(self, T_ref, seconds=None, tare_fn=None):
         """Hold T_ref via servoL for `seconds` (default warmup_s), engaging servo mode and letting
-        the joint-torque transient in getActualTCPForce decay BEFORE the guard is armed -- so a
-        phantom startup force does not trip it. The ODE is NOT run here (we don't want it reacting
-        to the transient either); the integrator is zeroed afterward."""
+        the joint-torque transient in getActualTCPForce decay BEFORE the guard is armed.
+
+        If `tare_fn` is given it is called MIDWAY -- once the servo is engaged and the arm is
+        holding still -- so the F/T is zeroed against the SERVO-ACTIVE reading the guard will
+        actually see. This matters when the payload is not configured: taring while idle leaves an
+        offset (the tool weight) that only appears once the arm is under active control. servoL
+        keeps streaming around the tare so servo mode is not dropped, so `tare_fn` must NOT block
+        (use zero_ft(settle=False)). The ODE is not run here; the integrator is zeroed afterward."""
         s = self.warmup_s if seconds is None else seconds
-        if s <= 0 or self.arm.dry_run:
+        if self.arm.dry_run:
+            return
+        if s <= 0:
+            if tare_fn is not None:
+                tare_fn()
             return
         dt = 1.0 / self.rate
-        for _ in range(max(1, int(s * self.rate))):
+        steps = max(2, int(s * self.rate))
+        for i in range(steps):
             self.arm.servo_l(T_ref, dt, self.lookahead, self.gain)
+            if tare_fn is not None and i == steps // 2:    # tare while servo-active and static
+                tare_fn()
         self.reset()
 
     def _command_pose(self, T_ref):
@@ -112,19 +124,20 @@ class AdmittanceController:
                 return 'seated'
         return 'done'
 
-    def ramp_joint_path(self, q_start, q_end, duration, guard=None, waypoints=60):
+    def ramp_joint_path(self, q_start, q_end, duration, guard=None, waypoints=60, tare_fn=None):
         """Admittance around a JOINT-interpolated reference path -- for a compliant move to a joint
         target (e.g. a home reset). The tool follows a predictable joint-space path (no
         Cartesian-slerp singularity surprises from an arbitrary start) while the spring yields to
         contact. FK is evaluated at `waypoints` coarse points and slerped between, so the servo
-        loop stays real-time (no per-cycle FK). Returns 'seated' if the guard trips, else 'done'."""
+        loop stays real-time (no per-cycle FK). `tare_fn` (if given) tares mid-warmup, once the
+        servo is engaged. Returns 'seated' if the guard trips, else 'done'."""
         from ..transforms import slerp_matrix
         dt = 1.0 / self.rate
         steps = max(1, int(duration * self.rate))
         q0, q1 = np.asarray(q_start, dtype=float), np.asarray(q_end, dtype=float)
         n = max(1, min(int(waypoints), steps))
         wp = [self.arm.fk(q0 + (q1 - q0) * (j / n)) for j in range(n + 1)]   # precompute FK
-        self.warmup(wp[0])                          # settle the servo before trusting the guard
+        self.warmup(wp[0], tare_fn=tare_fn)         # settle the servo (+ tare) before the guard
         if guard is not None:
             guard.reset()
         for k in range(1, steps + 1):

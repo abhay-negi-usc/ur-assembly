@@ -97,15 +97,16 @@ def insert_compliant(robot, adm, guard, ic, T_standoff_ftip, T_target_ftip):
     Runs as ONE continuous servoL loop -- chunk_fraction only sets the guard/progress granularity
     within it. servoL cannot be paused for a per-chunk prompt without dropping servo control, so
     the veto is the single confirm the caller puts before this whole step (not per chunk)."""
-    if ic.tare_before:
-        robot.arm.zero_ft()
     T_t0_ft = robot.T_tool0_fingertip
 
     def ref(T_ft):
         return T_ft @ inverse(T_t0_ft)                  # fingertip pose -> tool0 reference for servoL
 
+    # Tare MID-WARMUP (servo engaged, static) so the guard baseline matches the servo-active
+    # reading; taring while idle leaves the tool-weight offset when the payload is not configured.
+    tare = (lambda: robot.arm.zero_ft(settle=False)) if ic.tare_before else None
     adm.reset()
-    adm.warmup(ref(T_standoff_ftip))                # settle the servo before the guard is trusted
+    adm.warmup(ref(T_standoff_ftip), tare_fn=tare)  # settle the servo (+ tare) before the guard
     guard.reset()
     n = max(1, int(math.ceil(1.0 / max(1e-6, ic.chunk_fraction))))
     log.info('Inserting under ADMITTANCE (S=%.0f N/m trans, %.0f Nm/rad rot) in %d chunk(s) at '

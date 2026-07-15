@@ -94,6 +94,7 @@ class URArm:
             self.rtde_c = RTDEControlInterface(self.ip)
             self.rtde_r = RTDEReceiveInterface(self.ip)
             log.info('Connected.')
+            self._set_payload(r.get('payload', {}) or {})
 
         if frames is not None:
             self.publish_frames(frames, cfg)
@@ -330,19 +331,42 @@ class URArm:
             self.rtde_c.stopJ(2.0)
 
     # ------------------------------------------------------------------ force / torque
-    def zero_ft(self):
-        """Tare the wrist F/T. Everything after this is CONTACT force, with the tool's own weight
-        subtracted -- so it must be done with the tool hanging free, not in contact."""
+    def _set_payload(self, payload):
+        """Tell the controller the tool's mass + CoG so getActualTCPForce() subtracts the tool's
+        own weight and reports true EXTERNAL force. Without this, the wrench reads the tool weight
+        (~tens of N) as contact -- and a tare only cancels it at the tare pose and only while idle,
+        so a force guard trips spuriously the moment the arm is under active control. Configure
+        robot.payload.mass_kg + cog_m for correct readings everywhere (guard, admittance, touch)."""
+        mass = float(payload.get('mass_kg', 0.0))
+        cog = [float(v) for v in payload.get('cog_m', [0.0, 0.0, 0.0])]
+        if mass > 0.0:
+            try:
+                self.rtde_c.setPayload(mass, cog)
+                log.info('Payload set: %.2f kg, CoG %s m.', mass, cog)
+            except Exception as exc:                       # noqa: BLE001
+                log.warning('setPayload failed: %s', exc)
+        else:
+            log.warning('No robot.payload configured -- getActualTCPForce() will read the tool '
+                        "weight as external force, so the force guard/admittance can't be trusted. "
+                        'Set robot.payload.mass_kg and cog_m (mass + centre of gravity of the '
+                        'gripper + coupler + camera).')
+
+    def zero_ft(self, settle=True):
+        """Tare the wrist F/T. Everything after this is CONTACT force -- so do it with the tool
+        hanging free, not in contact. `settle=False` skips the sample-wait + residual check, for
+        taring INSIDE a servo loop (where blocking would drop servo mode)."""
         if self.dry_run:
             return True
         ok = self.rtde_c.zeroFtSensor()
+        if not settle:
+            return ok
         time.sleep(0.3)                     # let a fresh tared sample arrive before anyone reads
         residual = float(np.linalg.norm(self.wrench()[:3]))
         if residual > 5.0:
             log.warning(
                 'Residual force %.1f N after taring. The tool weight is NOT being compensated '
-                '(check the payload/CoG on the pendant) -- force thresholds will be wrong and '
-                'force mode will drift.', residual)
+                '(set robot.payload) -- force thresholds will be wrong and force mode will drift.',
+                residual)
         return ok
 
     def wrench(self):

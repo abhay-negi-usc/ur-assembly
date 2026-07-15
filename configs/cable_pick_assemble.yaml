@@ -9,6 +9,12 @@
 robot:
   ip: 192.168.125.2
   dry_run: false
+  # Tool payload -- REQUIRED for correct force readings (guard, admittance, touch). Without
+  # it, getActualTCPForce reads the tool's own weight as external force. MEASURE/estimate the
+  # mass + CoG of the gripper + coupler + camera (CoG in the tool0 frame, metres).
+  payload:
+    mass_kg: 1.3
+    cog_m: [-0.026, 0.028, 0.030]
 base_frame: base_link
 tip_frame: tool0
 camera_frame: camera1_color_optical_frame
@@ -49,7 +55,7 @@ grasp_tcp_offset:
   xyz: [0.0, 0.0, 0.0]
   rpy: [0.0, 0.0, 0.0]
 fingertip_grasp:
-  xyz: [0.0, -0.01254, 0.175]
+  xyz: [0.0, -0.01254, 0.170]
   rpy: [3.14159, 0.0, -1.5708]
 
 scan:

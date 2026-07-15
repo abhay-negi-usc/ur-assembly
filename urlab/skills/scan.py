@@ -136,13 +136,15 @@ class CableScanner:
         rpy = np.clip(rpy, -self.s.bounds_rpy, self.s.bounds_rpy)
         return xyz, rpy
 
-    def _approach(self, T_cam0, T_conn):
-        """After a good view: re-centre the cable and step the anchor closer, using the connector
-        estimate `T_conn`. Returns the new anchor (unchanged if there is no estimate to aim at)."""
-        if T_conn is None:
+    def _approach(self, T_cam0, P):
+        """After a good view: re-centre the cable and step the anchor closer toward the connector
+        origin `P` (a base-frame 3-vector -- from the strict fit if it has converged, else a rough
+        origin). Returns the new anchor (unchanged if there is no origin to aim at yet)."""
+        if P is None:
             return T_cam0
 
-        P, C = T_conn[:3, 3], T_cam0[:3, 3]
+        P = np.asarray(P, dtype=float)
+        C = T_cam0[:3, 3]
         v = C - P
         d = float(np.linalg.norm(v))
         if d < 1e-4:
@@ -195,15 +197,19 @@ class CableScanner:
                 self._hold_view(f'refine {np.degrees(th):+.0f} deg')
 
     def _fit_and_approach(self, T_cam0):
-        """One estimate() after a good view: use it to re-centre/approach, and report whether it
-        has CONVERGED enough to stop (all estimator gates pass AND >= min_good_views banked).
+        """After a good view: step the approach in, and report whether the fit has CONVERGED enough
+        to stop (all estimator gates pass AND >= min_good_views banked).
 
-        Returns (new_anchor, converged_pose_or_None). The estimate is computed ONCE and serves
-        both jobs. It is only attempted once there are enough views for RANSAC to possibly agree
-        (min_inlier_views), so early views don't spam failed-fit warnings."""
+        The APPROACH runs on ANY good view, not only once the strict fit converges: it steers by the
+        converged origin when available, else by a ROUGH origin from the accumulated views (see
+        ConnectorEstimator.rough_origin) -- so the camera starts closing in immediately (from the
+        2nd view, once there is a baseline to triangulate). The strict estimate() -- which decides
+        when to STOP -- is only attempted once min_inlier_views are banked, so early views don't
+        spam failed-fit warnings."""
         T_conn = (self.estimator.estimate()
                   if self.good_views >= self.estimator.min_inlier_views else None)
-        T_cam0 = self._approach(T_cam0, T_conn)        # re-centre + step closer while we have a fit
+        P = T_conn[:3, 3] if T_conn is not None else self.estimator.rough_origin()
+        T_cam0 = self._approach(T_cam0, P)             # step in on ANY detection with an origin
         converged = T_conn if (T_conn is not None
                                and self.good_views >= self.s.min_good_views) else None
         return T_cam0, converged

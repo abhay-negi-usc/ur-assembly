@@ -104,8 +104,12 @@ class ConnectorEstimator:
         self.max_range = float(c.get('max_range_m', 0.80))
         self.neck_diameter = float(c.get('neck_diameter_m', 0.02))
         self.up_axis = np.array(c.get('up_axis', [0.0, 0.0, 1.0]), dtype=float)
-        self.ws_min = np.array(c.get('workspace_min', [-1.5, -1.5, -0.5]), dtype=float)
-        self.ws_max = np.array(c.get('workspace_max', [1.5, 1.5, 1.5]), dtype=float)
+        # Workspace box for the triangulated origin. Defaults match the dev connector_pose_node
+        # (its launch never overrode these, so it ran the [-10, 10] node default) -- effectively no
+        # box; the max_range_m gate does the real far-clutter rejection. Tighten these only if you
+        # want to reject a specific region, and keep z_min well below your work surface.
+        self.ws_min = np.array(c.get('workspace_min', [-10.0, -10.0, -10.0]), dtype=float)
+        self.ws_max = np.array(c.get('workspace_max', [10.0, 10.0, 10.0]), dtype=float)
 
         self.history = []
         self._view_id = 0

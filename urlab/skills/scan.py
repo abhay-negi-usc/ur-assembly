@@ -136,10 +136,9 @@ class CableScanner:
         rpy = np.clip(rpy, -self.s.bounds_rpy, self.s.bounds_rpy)
         return xyz, rpy
 
-    def _approach(self, T_cam0):
-        """After a good view: re-centre the cable and step the anchor closer. Returns the new
-        anchor (unchanged if there is no estimate to aim at yet)."""
-        T_conn = self.estimator.estimate()
+    def _approach(self, T_cam0, T_conn):
+        """After a good view: re-centre the cable and step the anchor closer, using the connector
+        estimate `T_conn`. Returns the new anchor (unchanged if there is no estimate to aim at)."""
         if T_conn is None:
             return T_cam0
 
@@ -195,9 +194,30 @@ class CableScanner:
                                       f'refine orbit {np.degrees(th):+.0f} deg'):
                 self._hold_view(f'refine {np.degrees(th):+.0f} deg')
 
+    def _fit_and_approach(self, T_cam0):
+        """One estimate() after a good view: use it to re-centre/approach, and report whether it
+        has CONVERGED enough to stop (all estimator gates pass AND >= min_good_views banked).
+
+        Returns (new_anchor, converged_pose_or_None). The estimate is computed ONCE and serves
+        both jobs. It is only attempted once there are enough views for RANSAC to possibly agree
+        (min_inlier_views), so early views don't spam failed-fit warnings."""
+        T_conn = (self.estimator.estimate()
+                  if self.good_views >= self.estimator.min_inlier_views else None)
+        T_cam0 = self._approach(T_cam0, T_conn)        # re-centre + step closer while we have a fit
+        converged = T_conn if (T_conn is not None
+                               and self.good_views >= self.s.min_good_views) else None
+        return T_cam0, converged
+
     # ------------------------------------------------------------------ run
     def scan(self, confirm=None):
-        """Drive the full scan. Returns T_base_connector, or None if it could not converge."""
+        """Drive the scan until the connector fit CONVERGES. Returns T_base_connector, or None.
+
+        The scan keeps ADDING viewpoints until RANSAC finds an origin consistent across the views
+        (the estimator's inlier + parallax gates pass) AND at least min_good_views detections are
+        banked -- not merely until a count of detections is reached. So a fit that stalls at
+        min_good_views keeps sweeping the WIDER offsets and re-sweeping, which is exactly what a
+        stalled fit needs: more baseline, or more views to outvote a detection that landed on the
+        wrong cable."""
         if not self.s.offsets:
             log.error('No scan.offsets configured.')
             return None
@@ -205,13 +225,12 @@ class CableScanner:
         self.good_views = 0
         self.view_idx = 0
         n = len(self.s.offsets)
-        log.info('Scanning until %d good view(s): %d seed view(s) per pass, up to %d pass(es).',
+        log.info('Scanning until the fit CONVERGES (need >= %d good views AND cross-view '
+                 'agreement); %d view(s) per pass, up to %d pass(es).',
                  self.s.min_good_views, n, self.s.max_passes)
 
         for p in range(self.s.max_passes):
             for i, (xyz, rpy) in enumerate(self.s.offsets):
-                if self.good_views >= self.s.min_good_views:
-                    break
                 dxyz, drpy = self._scaled_offset(xyz, rpy)
                 target = clamp_pose_delta(T_cam0, T_cam0 @ xyzrpy_to_matrix(dxyz, drpy),
                                           self.s.bounds_xyz, self.s.bounds_rpy)
@@ -223,31 +242,39 @@ class CableScanner:
                 if not self.robot.move_camera(target, label):
                     return None
                 if self._hold_view(label):
-                    T_cam0 = self._approach(T_cam0)
+                    T_cam0, converged = self._fit_and_approach(T_cam0)
+                    if converged is not None:
+                        log.info('Scan complete: %d good views, fit CONVERGED.', self.good_views)
+                        return converged
 
-            if self.good_views >= self.s.min_good_views:
-                break
+            # A full sweep did not converge -- add the axis-refine views, then re-check.
             if self.s.refine_enabled and self.s.refine_orbit_deg:
                 self._refine(T_cam0)
-            if self.good_views >= self.s.min_good_views:
-                break
-            log.warning('Pass %d/%d done with %d/%d good views -- sweeping again.',
-                        p + 1, self.s.max_passes, self.good_views, self.s.min_good_views)
+                if self.good_views >= self.s.min_good_views:
+                    T = self.estimator.estimate()
+                    if T is not None:
+                        log.info('Scan complete after refine: %d good views.', self.good_views)
+                        return T
+            log.warning('Pass %d/%d swept, fit not converged yet (%d good views). Sweeping again '
+                        'for more viewpoints / parallax.',
+                        p + 1, self.s.max_passes, self.good_views)
 
         if self.s.require_detection and self.good_views < self.s.min_good_views:
             log.error('Only %d/%d good views after %d passes -- the detector is not seeing the '
-                      'cable often enough to trust a fit. Check the saved overlays, lower the '
-                      'confidence_floor, or reword the prompts. Refusing to fit.',
+                      'cable often enough. Check the overlays, lower sam3.confidence_floor, or '
+                      'reword the prompts. Refusing to fit.',
                       self.good_views, self.s.min_good_views, self.s.max_passes)
             return None
 
-        T = self.estimator.estimate()
-        if T is None:
-            log.error('Scan gathered %d good views but the fit did not converge (see the gate '
-                      'messages above).', self.good_views)
-            return None
-        log.info('Scan complete: %d good views, connector fit obtained.', self.good_views)
-        return T
+        log.error(
+            'Scan exhausted %d pass(es) with %d good views, but RANSAC never found an origin '
+            'consistent across the views. This is almost always too little PARALLAX (the camera '
+            'barely translated between the views that detected) or the neck landing on DIFFERENT '
+            'cables across views. Fixes: widen scan.relative_bounds and scan.offsets for more '
+            'baseline, start further back so the offsets subtend a larger angle, raise '
+            'scan.max_passes, or check the saved overlays show the SAME connector each view.',
+            self.s.max_passes, self.good_views)
+        return None
 
 
 def _with_origin(T, C):

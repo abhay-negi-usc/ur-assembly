@@ -38,8 +38,8 @@ connector_estimator:
   inlier_dist_m: 0.010
   max_range_m: 0.80
   up_axis: [0.0, 0.0, 1.0]
-  workspace_min: [-1.5, -1.5, -0.5]
-  workspace_max: [1.5, 1.5, 1.5]
+  workspace_min: [-10.0, -10.0, -10.0]   # matches dev connector_pose_node default (no box)
+  workspace_max: [10.0, 10.0, 10.0]
 
 connector_frame: connector_tip
 

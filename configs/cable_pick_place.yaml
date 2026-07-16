@@ -176,7 +176,24 @@ grasp_check:
   tolerance_counts: 1
   detect_empty: false            # gOBJ-based empty detection -- UNVERIFIED on this hardware; see gripper.py
   settle_s: 1.0
-  max_retries: 2
+  max_retries: 2                 # whole scan->grasp attempts (outer loop) if recovery still misses
+
+  # ---- Failed-grasp RECOVERY (see skills/pick.py GraspRecovery) ----
+  # The stalled close count tells the failure apart (higher = more closed): ~closed_counts (228) =
+  # seated (success); ~faces_counts (220, the floor) = cable on the flat faces -> reseat by moving
+  # the gripper TOWARD the cable; between them = cable pinched at the fingertip TIPS -> move AWAY.
+  # On a miss: a blind loose->close retry first, then up to max_tries corrective iterations that
+  # open to loose_counts, nudge the arm increment_m along the corrective direction, and re-close.
+  recovery:
+    enabled: true
+    max_tries: 5                 # N corrective iterations after the blind retry
+    loose_counts: 215            # loose grip the fingers open to before each reseat / retry
+    increment_m: 0.0005          # corrective arm step per iteration (0.5 mm)
+    faces_counts: 220            # the "cable on the flat faces" count floor
+    faces_band_counts: 1         # pos <= faces_counts + this => FACES; higher (but < closed) => TIPS
+    # toward_cable_axis: [0, 0, -1]   # "toward the cable" in the GRASP frame; default = -approach_axis
+                                  # (deeper along the approach). Uncomment + flip the sign if the
+                                  # reseat moves the wrong way on hardware.
 
 speed:
   max_joint_velocity_rad_s: 0.5

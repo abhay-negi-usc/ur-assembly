@@ -13,7 +13,7 @@ from ..log import StepRunner
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import insert as ins
 from ..skills import reset
-from ..skills.pick import GraspCheck, GraspGeometry, log_grasp_delta
+from ..skills.pick import GraspCheck, GraspGeometry, GraspRecovery, log_grasp_delta
 from ..transforms import from_cfg
 from ._cable import build_scanner, make_confirm
 from ._runner import run_app
@@ -21,7 +21,7 @@ from ._runner import run_app
 log = urlog.get('cable-assemble')
 
 
-def _pick(cfg, robot, scanner, geom, check, confirm):
+def _pick(cfg, robot, scanner, geom, check, recovery, confirm):
     """The cable pick, returning 'ok' | 'missed' | 'empty' | 'abort'."""
     scanner.estimator.reset()
     T_conn_grasp = from_cfg(cfg.section('connector_grasp'))
@@ -38,10 +38,11 @@ def _pick(cfg, robot, scanner, geom, check, confirm):
         ('move to grasp-align', lambda: robot.move_fingertip(geom.pre_grasp(), 'grasp-align')),
         ('report pre-grasp delta', lambda: log_grasp_delta(robot, geom.T_base_grasp, 'pre-grasp')),
         ('move to grasp', lambda: robot.move_fingertip(geom.T_base_grasp, 'grasp')),
-        ('close gripper (grasp)', robot.gripper.close),
     ]):
         return 'abort'
-    return check.evaluate(robot.gripper)
+    # Close + grasp-check + recovery (blind retry, then mode-directed reseat nudges) -- see
+    # GraspRecovery -- so a cable on the fingertip flats/tips is reseated, not failed.
+    return recovery.grasp_with_recovery(robot, geom, check)
 
 
 def build_and_run(cfg, robot, camera, args):
@@ -53,6 +54,7 @@ def build_and_run(cfg, robot, camera, args):
     scanner, _detector, _estimator = build_scanner(cfg, robot, camera)
     geom = GraspGeometry(cfg)
     check = GraspCheck(cfg)
+    recovery = GraspRecovery(cfg)
     guard = ForceGuard(robot.arm, cfg.get_path('assembly.force_guard', {}))
     confirm = make_confirm(cfg)
 
@@ -64,7 +66,7 @@ def build_and_run(cfg, robot, camera, args):
     # 1. PICK, with grasp-check retry.
     attempt = 0
     while True:
-        result = _pick(cfg, robot, scanner, geom, check, confirm)
+        result = _pick(cfg, robot, scanner, geom, check, recovery, confirm)
         if result == 'ok':
             break
         if result == 'abort':

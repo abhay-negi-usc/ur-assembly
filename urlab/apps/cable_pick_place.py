@@ -11,7 +11,7 @@ fingertip groove and retries the whole scan->grasp sequence.
 from .. import log as urlog
 from ..log import StepRunner
 from ..skills import reset
-from ..skills.pick import GraspCheck, GraspGeometry, log_grasp_delta
+from ..skills.pick import GraspCheck, GraspGeometry, GraspRecovery, log_grasp_delta
 from ..transforms import from_cfg, inverse
 from ._cable import build_scanner, make_confirm
 from ._runner import run_app
@@ -19,7 +19,7 @@ from ._runner import run_app
 log = urlog.get('cable-pick-place')
 
 
-def _attempt(cfg, robot, scanner, geom, check, confirm):
+def _attempt(cfg, robot, scanner, geom, check, recovery, confirm):
     """One scan->grasp attempt. Returns 'ok' | 'missed' | 'empty' | 'abort'."""
     scanner.estimator.reset()
     T_conn_grasp = from_cfg(cfg.section('connector_grasp'))
@@ -41,17 +41,20 @@ def _attempt(cfg, robot, scanner, geom, check, confirm):
         ('report pre-grasp delta', lambda: log_grasp_delta(robot, geom.T_base_grasp, 'pre-grasp')),
         ('move to grasp', lambda: robot.move_fingertip(geom.T_base_grasp, 'grasp')),
         ('report at-grasp delta', lambda: log_grasp_delta(robot, geom.T_base_grasp, 'at-grasp')),
-        ('close gripper (grasp)', robot.gripper.close),
     ]
     if not runner.run(steps):
         return 'abort'
-    return check.evaluate(robot.gripper)
+    # Close + grasp-check + recovery: a blind loose->close retry, then mode-directed reseat nudges
+    # (see GraspRecovery) instead of a bare close, so a cable on the fingertip flats/tips is
+    # reseated rather than failing the whole scan->grasp attempt.
+    return recovery.grasp_with_recovery(robot, geom, check)
 
 
 def build_and_run(cfg, robot, camera, args):
     scanner, _detector, _estimator = build_scanner(cfg, robot, camera)
     geom = GraspGeometry(cfg)
     check = GraspCheck(cfg)
+    recovery = GraspRecovery(cfg)
     confirm = make_confirm(cfg)
 
     # RESET at the start: open the gripper and go to the defined HOME pose under admittance, so the
@@ -63,7 +66,7 @@ def build_and_run(cfg, robot, camera, args):
     # Pick, with grasp-check retry.
     attempt = 0
     while True:
-        result = _attempt(cfg, robot, scanner, geom, check, confirm)
+        result = _attempt(cfg, robot, scanner, geom, check, recovery, confirm)
         if result == 'ok':
             break
         if result == 'abort':

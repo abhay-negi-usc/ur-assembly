@@ -66,6 +66,92 @@ class GraspCheck:
         return gripper.grasp_result(self.closed_counts, self.tolerance, self.detect_empty)
 
 
+class GraspRecovery:
+    """Failed-grasp recovery for the cable pick. When the fingers stall short of `closed_counts`
+    the cable is between them but NOT seated in the fingertip groove; the stalled COUNT tells the
+    two failure modes apart (higher count = more closed):
+
+      * ~`closed_counts` (228)  -- cable in the groove (or empty): SUCCESS, no recovery.
+      * ~`faces_counts` (220)   -- cable on the flat parallel faces, propping the fingers widest
+                                   apart (the count FLOOR): move the gripper TOWARD the cable so it
+                                   drops off the flats into the groove.
+      * between the two         -- cable pinched at the fingertip TIPS: move the gripper AWAY.
+
+    Recovery is: (1) a BLIND retry -- loose grip then full close, no arm motion, which alone
+    reseats a cable that was merely nipped; then (2) up to `max_tries` corrective iterations that
+    classify the mode, open to the loose grip, nudge the arm `increment_m` (default 0.5 mm) in the
+    corrective direction, and close again. The correction is along the grasp-frame approach axis
+    ('toward the cable' = deeper along the approach) and ACCUMULATES into the grasp target, so a
+    successful reseat leaves the corrected pose in geom.T_base_grasp for the lift/place.
+
+    The two failure bands overlap in practice (a tips reading sits just above the faces floor), so
+    `faces_band_counts` sets the split -- tune it on hardware; a misclassification just costs one
+    iteration."""
+
+    def __init__(self, cfg):
+        rc = (cfg.section('grasp_check').get('recovery', {}) or {})
+        self.enabled = bool(rc.get('enabled', True))
+        self.max_tries = int(rc.get('max_tries', 5))
+        self.loose_counts = int(rc.get('loose_counts', 215))
+        self.increment_m = float(rc.get('increment_m', 0.0005))
+        self.faces_counts = int(rc.get('faces_counts', 220))
+        self.faces_band = int(rc.get('faces_band_counts', 1))
+        self._toward_cfg = rc.get('toward_cable_axis', None)   # grasp frame; else -approach_axis
+
+    def _toward(self, geom):
+        """Unit 'toward the cable' direction in the GRASP frame: the config override, else the
+        negated approach axis (continuing the approach = deeper onto the cable)."""
+        v = (np.asarray(self._toward_cfg, dtype=float) if self._toward_cfg is not None
+             else -np.asarray(geom.approach_axis, dtype=float))
+        n = float(np.linalg.norm(v))
+        return v / n if n > 1e-9 else np.array([0.0, 0.0, -1.0])
+
+    def _classify(self, pos):
+        """'faces' (at/near the count floor) | 'tips' (above it, but short of success)."""
+        return 'faces' if pos <= self.faces_counts + self.faces_band else 'tips'
+
+    def grasp_with_recovery(self, robot, geom, check):
+        """Close, grasp-check, and on a MISS run the blind retry + corrective loop. Returns
+        'ok' | 'missed' | 'empty' | 'abort'. Leaves the (possibly corrected) grasp in
+        geom.T_base_grasp."""
+        g = robot.gripper
+        if not g.close('grasp'):
+            return 'abort'
+        result = check.evaluate(g)
+        if result != 'missed' or not self.enabled:
+            return result
+
+        # 1. Blind retry: loose grip, then full close -- no arm motion.
+        log.warning('Grasp missed at %d counts -- blind retry (loose grip -> close).', g.position())
+        if not (g.go_to(self.loose_counts, 'loose grip') and g.close('grasp')):
+            return 'abort'
+        result = check.evaluate(g)
+        if result != 'missed':
+            return result
+
+        # 2. Mode-directed corrective loop.
+        toward = self._toward(geom)
+        for i in range(self.max_tries):
+            pos = g.position()
+            mode = self._classify(pos)
+            direction = toward if mode == 'faces' else -toward
+            geom.T_base_grasp = geom.T_base_grasp @ translation_matrix(direction * self.increment_m)
+            log.warning('Recovery %d/%d: %s mode (%d counts) -- reseat %.1f mm %s the cable.',
+                        i + 1, self.max_tries, mode, pos, self.increment_m * 1000,
+                        'toward' if mode == 'faces' else 'away from')
+            if not (g.go_to(self.loose_counts, 'loose grip')
+                    and robot.move_fingertip(geom.T_base_grasp, f'reseat ({mode})')
+                    and g.close('grasp')):
+                return 'abort'
+            result = check.evaluate(g)
+            if result != 'missed':
+                return result
+
+        log.error('Grasp still MISSED after the blind retry and %d corrective tries.',
+                  self.max_tries)
+        return 'missed'
+
+
 def log_grasp_delta(robot, T_base_grasp, label):
     """Report the fingertip's pose vs the grasp target -- the end-to-end error of the whole
     perception -> IK -> motion chain, in the units that matter (mm at the fingers).

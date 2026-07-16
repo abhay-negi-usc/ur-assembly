@@ -20,7 +20,7 @@ tip_frame: tool0
 camera_frame: camera1_color_optical_frame
 
 hand_eye:
-  xyz: [0.0, -0.080, 0.031]
+  xyz: [0.0, -0.080, 0.02917] # accounting for plate deformation 
   rpy: [0.0, 0.0, 0.0]
 
 camera:
@@ -71,7 +71,7 @@ grasp_tcp_offset:
   xyz: [0.0, 0.0, 0.0]
   rpy: [0.0, 0.0, 0.0]
 fingertip_grasp:
-  xyz: [0.0, -0.01254, 0.170]
+  xyz: [0.0, -0.01254, 0.186]
   rpy: [3.14159, 0.0, -1.5708]
 
 scan:
@@ -134,7 +134,17 @@ grasp_check:
   tolerance_counts: 1
   detect_empty: false
   settle_s: 1.0
-  max_retries: 2
+  max_retries: 2                 # whole scan->grasp attempts (outer loop) if recovery still misses
+
+  # ---- Failed-grasp RECOVERY (see skills/pick.py GraspRecovery + cable_pick_place.yaml notes) ----
+  recovery:
+    enabled: true
+    max_tries: 5                 # N corrective iterations after the blind retry
+    loose_counts: 215            # loose grip the fingers open to before each reseat / retry
+    increment_m: 0.0005          # corrective arm step per iteration (0.5 mm)
+    faces_counts: 220            # the "cable on the flat faces" count floor -> reseat TOWARD cable
+    faces_band_counts: 1         # pos <= faces_counts + this => FACES; higher (but < closed) => TIPS
+    # toward_cable_axis: [0, 0, -1]   # GRASP-frame "toward the cable"; default = -approach_axis
 
 speed:
   max_joint_velocity_rad_s: 0.5

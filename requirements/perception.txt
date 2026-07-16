@@ -8,6 +8,8 @@
 opencv-python-headless>=4.7        # >=4.7 for the cv2.aruco.ArucoDetector API urlab uses
 pillow>=9.0                        # SAM3 detectors take a PIL image
 pyrealsense2>=2.54                 # D405 support
+matplotlib>=3.5                    # scan.mode: reconstruction saves 3D cable-point plots
+                                   # (best-effort -- the scan still runs if it is absent)
 
 # ---------------------------------------------------------------------------------------------
 # SAM3 is deliberately NOT listed anywhere in these files. It runs from the sam3-abhay checkout

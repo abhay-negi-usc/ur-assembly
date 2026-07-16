@@ -42,6 +42,15 @@ class ScanConfig:
         self.max_passes = int(s.get('max_passes', 3))
         self.view_settle_s = float(s.get('view_settle_s', 0.5))
         self.require_detection = bool(s.get('require_detection', True))
+        # Scan mode. 'fuse' (default) is the original behaviour: fuse per-view junction detections
+        # into a pose with the ConnectorEstimator. 'reconstruction' additionally reconstructs the
+        # 3D cable centreline and REFINES the junction pose from it (needs sam3.mode: junction, so
+        # the cable skeleton is available). The two convergence thresholds below apply to it.
+        self.mode = str(s.get('mode', 'fuse'))
+        rc = cfg.section('reconstruction') if hasattr(cfg, 'section') else {}
+        rc = rc or {}
+        self.recon_max_reproj_px = float(rc.get('max_reproj_error_px', 3.0))
+        self.recon_min_pose_shift_m = float(rc.get('min_pose_shift_m', 0.003))
         # A detected view only counts toward the good-view quota (min_good_views, the fit-trust
         # gate before the grasp) if the camera is within this range of the cable -- so the fit is
         # built from CLOSE, low-depth-error views. Detections FARTHER than this are still ingested
@@ -80,15 +89,21 @@ class CableScanner:
     Holds a Robot, a camera, a SAM3 detector and a ConnectorEstimator; drives the arm through
     viewpoints; returns T_base_connector or None."""
 
-    def __init__(self, robot, camera, detector, estimator, scan_cfg, data_root='data'):
+    def __init__(self, robot, camera, detector, estimator, scan_cfg, data_root='data',
+                 reconstructor=None):
         self.robot = robot
         self.camera = camera
         self.detector = detector
         self.estimator = estimator
+        self.reconstructor = reconstructor           # CableReconstructor, only in 'reconstruction' mode
+        self.mode = scan_cfg.mode
         self.s = scan_cfg
         self.scan_distance = None                    # camera->connector range; unknown until fit
         self.good_views = 0
         self.view_idx = 0
+        self._recon = None                           # last Reconstruction (reconstruction mode)
+        self._last_est_vid = 0                       # view id the estimator gave the current frame
+        self._last_rec_vid = 0                       # ...and the reconstructor (for good-marking)
         from datetime import datetime
         self.image_dir = os.path.join(data_root, self.s.images_dir,
                                       datetime.now().strftime('%Y%m%d_%H%M%S'))
@@ -102,34 +117,77 @@ class CableScanner:
         import time
         time.sleep(self.s.view_settle_s)             # let the arm come to REST before capturing
         frame = self.camera.capture()
-        dets = self.detector.detect(frame)
+        self._recon = None
+        dets = self._detect_and_ingest(frame)        # mode-aware: fuse vs reconstruction
         self._save_overlay()
         if not dets and self.s.require_detection:
             log.warning('  %s: no detection -- not a good view (%d/%d good).',
                         label, self.good_views, self.s.min_good_views)
             return False
 
-        # Ingest ALWAYS (a far detection still steers the approach in via the rough origin).
-        self.estimator.add_view(dets, frame.K, frame.T_base_cam, frame.stamp)
-
-        # Count toward the good-view quota only if we can confirm the camera is CLOSE enough. The
-        # distance needs an origin estimate; until there is one (the first view, or the camera
-        # beyond max_range) we cannot confirm "close", so the view does not count -- but it still
-        # returns True so the approach runs and closes the range.
+        # Count (and FUSE) this view only if we can confirm the camera is CLOSE enough. The distance
+        # needs an origin estimate; until there is one (the first view, or the camera beyond
+        # max_range) we cannot confirm "close", so the view is not counted or fused -- but it still
+        # returns True so the approach runs and closes the range. The good/far decision is pushed to
+        # both estimators (mark_view), so ONLY within-distance views enter the final fit; the far
+        # ones only ever steered the approach via rough_origin.
         P = self.estimator.rough_origin() if frame.T_base_cam is not None else None
         if P is not None:
             d = float(np.linalg.norm(frame.T_base_cam[:3, 3] - np.asarray(P, dtype=float)))
-            if d <= self.s.max_view_distance_m:
+            good = d <= self.s.max_view_distance_m
+            self._mark_good(good)
+            if good:
                 self.good_views += 1
-                log.info('  %s: GOOD view @%.0f mm, %d detection(s) -- %d/%d good.',
+                log.info('  %s: GOOD view @%.0f mm, %d detection(s) -- %d/%d good (fused).',
                          label, d * 1000, len(dets), self.good_views, self.s.min_good_views)
             else:
-                log.info('  %s: detected @%.0f mm > %.0f mm max -- NOT counted (approaching in).',
+                log.info('  %s: detected @%.0f mm > %.0f mm max -- NOT fused (approaching in).',
                          label, d * 1000, self.s.max_view_distance_m * 1000)
         else:
-            log.info('  %s: detected, %d -- range unknown yet, not counted (need 2 views / in range).',
+            self._mark_good(False)
+            log.info('  %s: detected, %d -- range unknown yet, not fused (need 2 views / in range).',
                      label, len(dets))
+
+        # Reconstruction (and its plot) runs AFTER the good decision, so the current view's
+        # good/far mark is reflected in the curve the stop rule and the figure use.
+        if self.mode == 'reconstruction':
+            self._recon = self.reconstructor.reconstruct()
+            self._save_recon_plot()
         return True
+
+    def _detect_and_ingest(self, frame):
+        """Detect and ingest one frame. Records the estimator/reconstructor view ids (so the caller
+        can mark this view good/far AFTER the distance is known) and returns the junction detections
+        [(u, v, yaw), ...] the good-view/approach logic works on.
+
+        In BOTH modes the ConnectorEstimator receives the junction point(s) -- it drives the
+        approach steering (rough_origin) and the good-view distance gate. In reconstruction mode the
+        detector also yields the full cable SKELETON, which the CableReconstructor ingests. Neither
+        reconstructs here -- that waits until the view is marked (see _hold_view)."""
+        self._last_est_vid = 0
+        self._last_rec_vid = 0
+        if self.mode == 'reconstruction':
+            obs = self.detector.detect_cable(frame)
+            dets = ([(obs['junction'][0], obs['junction'][1], obs['yaw'])]
+                    if obs is not None else [])
+            if obs is not None:
+                self._last_rec_vid = self.reconstructor.add_view(
+                    obs, frame.K, frame.T_base_cam, frame.stamp)
+            self._last_est_vid = self.estimator.add_view(
+                dets, frame.K, frame.T_base_cam, frame.stamp)
+            return dets
+
+        dets = self.detector.detect(frame)
+        # Ingest ALWAYS (a far detection still steers the approach in via the rough origin).
+        self._last_est_vid = self.estimator.add_view(dets, frame.K, frame.T_base_cam, frame.stamp)
+        return dets
+
+    def _mark_good(self, good):
+        """Push the good/far decision for the current frame to both estimators, so only close views
+        enter the final fusion."""
+        self.estimator.mark_view(self._last_est_vid, good)
+        if self.mode == 'reconstruction':
+            self.reconstructor.mark_view(self._last_rec_vid, good)
 
     def _save_overlay(self):
         if not self.s.save_images or self.detector.last_debug is None:
@@ -142,6 +200,18 @@ class CableScanner:
             log.info('  saved overlay %s', path)
         except Exception as exc:                     # noqa: BLE001 -- saving is best-effort
             log.warning('  could not save overlay: %s', exc)
+
+    def _save_recon_plot(self):
+        """Reconstruction mode: save the 3D cable-points figure next to the overlay (best-effort)."""
+        if self.mode != 'reconstruction' or not self.s.save_images or self._recon is None:
+            return
+        try:
+            os.makedirs(self.image_dir, exist_ok=True)
+            path = os.path.join(self.image_dir, f'recon_{self.view_idx:02d}.png')
+            if self.reconstructor.save_plot(path):
+                log.info('  saved reconstruction plot %s', path)
+        except Exception as exc:                     # noqa: BLE001 -- plotting is best-effort
+            log.warning('  could not save reconstruction plot: %s', exc)
 
     # ------------------------------------------------------------------ geometry
     def _scaled_offset(self, xyz, rpy):
@@ -232,9 +302,39 @@ class CableScanner:
                   if self.good_views >= self.estimator.min_inlier_views else None)
         P = T_conn[:3, 3] if T_conn is not None else self.estimator.rough_origin()
         T_cam0 = self._approach(T_cam0, P)             # step in on ANY detection with an origin
-        converged = T_conn if (T_conn is not None
-                               and self.good_views >= self.s.min_good_views) else None
-        return T_cam0, converged
+        return T_cam0, self._converged_pose(T_conn)
+
+    def _converged_pose(self, T_conn):
+        """The pose to RETURN if the scan has CONVERGED, else None -- mode aware.
+
+        fuse: the strict estimate (already gated) once min_good_views are banked. reconstruction:
+        the reconstruction-refined pose once its cross-view reproj error AND its view-to-view origin
+        shift are both under threshold (the dual stability criterion) with min_good_views banked."""
+        if self.good_views < self.s.min_good_views:
+            return None
+        if self.mode == 'reconstruction':
+            res = self._recon
+            if res is None:
+                return None
+            if (res.reproj_rms_px <= self.s.recon_max_reproj_px
+                    and res.pose_shift_m <= self.s.recon_min_pose_shift_m):
+                log.info('  reconstruction CONVERGED: reproj %.2f <= %.2f px AND origin shift '
+                         '%.1f <= %.1f mm.', res.reproj_rms_px, self.s.recon_max_reproj_px,
+                         res.pose_shift_m * 1000, self.s.recon_min_pose_shift_m * 1000)
+                return res.T
+            log.info('  reconstruction not yet stable: reproj %.2f px (need <= %.2f), origin shift '
+                     '%.1f mm (need <= %.1f) -- more views.', res.reproj_rms_px,
+                     self.s.recon_max_reproj_px, res.pose_shift_m * 1000,
+                     self.s.recon_min_pose_shift_m * 1000)
+            return None
+        return T_conn                                  # fuse mode: estimate() already gated
+
+    def _final_pose(self):
+        """The best available pose after a refine sweep (mode aware) -- the completion fallback."""
+        if self.mode == 'reconstruction':
+            res = self.reconstructor.reconstruct()
+            return res.T if res is not None else None
+        return self.estimator.estimate()
 
     # ------------------------------------------------------------------ run
     def scan(self, confirm=None):
@@ -279,7 +379,7 @@ class CableScanner:
             if self.s.refine_enabled and self.s.refine_orbit_deg:
                 self._refine(T_cam0)
                 if self.good_views >= self.s.min_good_views:
-                    T = self.estimator.estimate()
+                    T = self._final_pose()
                     if T is not None:
                         log.info('Scan complete after refine: %d good views.', self.good_views)
                         return T

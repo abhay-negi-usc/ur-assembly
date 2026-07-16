@@ -1,6 +1,8 @@
 # cable_pick_assemble — pick a cable, then assemble it
 
-Port of `ur_cable_pick_assemble_demo`. The **pick** is the exact cable-pick-place pipeline. What
+Port of `ur_cable_pick_assemble_demo`. The **pick** is the exact cable-pick-place pipeline — same
+`sam3.mode` (detector) and `scan.mode` (`fuse` \| `reconstruction`) choices; see
+[cable_pick_place.md](cable_pick_place.md) for how to pick the junction pose estimator. What
 replaces "place" is a pluggable assembly: stand-off, compliant chunked insertion, release,
 multi-step retract. Only `kinematic` is implemented (the target pose is given outright); `vision`
 fails loudly.

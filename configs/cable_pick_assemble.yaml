@@ -51,6 +51,18 @@ connector_estimator:
   workspace_min: [-10.0, -10.0, -10.0]   # matches dev connector_pose_node default (no box)
   workspace_max: [10.0, 10.0, 10.0]
 
+# ---- Cable reconstruction (only used when scan.mode: reconstruction; see cable_pick_place.yaml) ----
+reconstruction:
+  min_views: 3
+  samples: 32
+  max_range_m: 0.80
+  min_support_views: 2
+  junction_span_m: 0.04
+  use_curve_plane_roll: false
+  curvature_min_per_m: 5.0
+  max_reproj_error_px: 3.0
+  min_pose_shift_m: 0.003
+
 connector_frame: connector
 connector_grasp:
   xyz: [0.0, 0.0, 0.0]
@@ -63,17 +75,18 @@ fingertip_grasp:
   rpy: [3.14159, 0.0, -1.5708]
 
 scan:
+  # mode: fuse | reconstruction (see cable_pick_place.yaml + the reconstruction block below).
+  mode: fuse
   require_detection: true
   min_good_views: 3
   max_passes: 3
   view_settle_s: 0.5
-  max_view_distance_m: 0.250      # a detected view counts toward min_good_views only
-                                  # within this range; farther detections still steer
-                                  # the approach in but do not count (>= approach floor)
+  max_view_distance_m: 0.250      # a detected view is COUNTED and FUSED only within this range;
+                                  # farther detections still steer the approach in but are not fused
   approach:
     enabled: true
-    step_m: 0.010
-    min_distance_m: 0.200
+    step_m: 0.250
+    min_distance_m: 0.250
     nominal_distance_m: 0.23
     scale_offsets: true
     recenter: true

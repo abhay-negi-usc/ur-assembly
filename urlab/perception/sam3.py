@@ -200,6 +200,55 @@ class JunctionDetector(_Base):
                  _count(res.get('cables_raw')), _count(res.get('connectors_raw')))
         return out
 
+    def detect_cable(self, frame):
+        """The junction PLUS the ordered CABLE-side centreline -- for the reconstruction scan mode.
+
+        Returns {'junction': (u,v), 'yaw': rad, 'skeleton': (N,2) full-res (u,v)} or None. The
+        skeleton is the traced centreline restricted to the CABLE (thin) side of the junction,
+        ordered from the junction (index 0) OUTWARD toward the free end, and recentred onto each
+        cross-section's midline (the geodesic trace hugs the inside of a bend). It is built entirely
+        from artefacts compute_junction already exposes (_path/_normals/_half_plus/_half_minus/
+        _scale/_junction_k), so cable_neck_diameter.py is untouched.
+
+        Only this detector implements detect_cable: the reconstruction needs the full centreline,
+        which the diameter-profiling method traces but the neck/tip methods do not."""
+        if self.dry_run:
+            return None
+        res = self.detector.detect(self._pil(frame))
+        self.last_debug = self._overlay(frame, res)
+        j = res.get('result')
+        if j is None:
+            log.info('  no junction -- no cable observation for reconstruction.')
+            return None
+
+        path = np.asarray(j['_path'], dtype=float)       # (M,2) small-image (y,x), tip A -> tip B
+        normals = np.asarray(j['_normals'], dtype=float)
+        d_plus = np.asarray(j['_half_plus'], dtype=float)
+        d_minus = np.asarray(j['_half_minus'], dtype=float)
+        dia = np.asarray(j['_dia'], dtype=float)
+        k = int(j['_junction_k'])
+        inv = 1.0 / float(j['_scale'])                   # small-image px -> full-res px
+        M = len(path)
+        if M < 6 or k < 0 or k > M - 1:
+            log.info('  junction trace too short for a cable skeleton.')
+            return None
+
+        # The cable is the THIN, constant-diameter side of the junction; the connector is thicker.
+        left_thin = float(np.mean(dia[:max(1, k)])) if k > 0 else np.inf
+        right_thin = float(np.mean(dia[k + 1:])) if k < M - 1 else np.inf
+        cable_left = left_thin <= right_thin
+        idx = range(k, -1, -1) if cable_left else range(k, M)   # from the junction outward
+
+        recentred = path + 0.5 * (d_plus - d_minus)[:, None] * normals   # onto the cross-section
+        skel = np.array([[recentred[i, 1] * inv, recentred[i, 0] * inv] for i in idx])  # (u,v) full
+        u, v = j['junction']
+        skel[0] = [float(u), float(v)]                   # anchor index 0 exactly on the junction
+        dx, dy = j['direction']
+        log.info('  cable skeleton: %d points on the %s side of the junction.',
+                 len(skel), 'left/A' if cable_left else 'right/B')
+        return {'junction': (float(u), float(v)), 'yaw': float(np.arctan2(dy, dx)),
+                'skeleton': skel}
+
     def _overlay(self, frame, res):
         import cv2
         bgr = cv2.cvtColor(frame.rgb, cv2.COLOR_RGB2BGR)

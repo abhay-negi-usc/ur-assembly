@@ -178,6 +178,84 @@ def test_connector_fusion_recovers_synthetic_axis():
     assert cos > np.cos(np.radians(5)), f'axis off by {np.degrees(np.arccos(cos)):.1f} deg'
 
 
+def test_cable_reconstruction_recovers_curve():
+    """A synthetic (slightly tilted) cable, seen from several translated views, should reconstruct:
+    the junction origin within a cm and the axis -- INCLUDING its out-of-plane tilt -- within a few
+    degrees. This is the quantity the point estimator is weakest on, so it is what the test pins."""
+    from urlab.config import Config
+    from urlab.perception.cable_recon import CableReconstructor
+
+    K = np.array([[900.0, 0, 640.0], [0, 900.0, 360.0], [0, 0, 1.0]])
+    P_j = np.array([0.5, 0.0, 0.2])                    # junction (connector end) in base
+    dir_cable = np.array([1.0, 0.2, 0.3])             # cable heads out with a real depth component
+    dir_cable = dir_cable / np.linalg.norm(dir_cable)
+    s = np.linspace(0.0, 0.15, 20)
+    cable3d = P_j[None, :] + s[:, None] * dir_cable[None, :]   # idx 0 = junction, outward
+
+    rec = CableReconstructor(Config({
+        'reconstruction': {'min_views': 3, 'samples': 24, 'junction_span_m': 0.05,
+                           'max_reproj_error_px': 5.0},
+        'connector_estimator': {'up_axis': [0, 0, 1]}}))
+
+    for dx in (-0.08, -0.04, 0.0, 0.04, 0.08):        # lateral translation for parallax
+        C = np.array([0.5 + dx, 0.0, 0.6])
+        T_bc = T.look_at(C, P_j, np.eye(4))
+        Rcw = T_bc[:3, :3].T
+
+        def proj(Xw, Rcw=Rcw, C=C):
+            Xc = Rcw @ (Xw - C)
+            uv = K @ (Xc / Xc[2])
+            return uv[:2]
+
+        skel = np.array([proj(X) for X in cable3d])   # ordered from junction outward
+        obs = {'junction': (float(skel[0, 0]), float(skel[0, 1])), 'yaw': 0.0, 'skeleton': skel}
+        rec.add_view(obs, K, T_bc, 0.0)
+
+    res = rec.reconstruct()
+    assert res is not None, 'reconstruction refused a clean synthetic cable'
+    assert np.linalg.norm(res.origin - P_j) < 0.01, f'origin off by {res.origin - P_j}'
+    axis_true = -dir_cable                            # frame x points INTO the connector
+    cos = abs(float(np.dot(res.axis, axis_true)))
+    assert cos > np.cos(np.radians(6)), f'axis off by {np.degrees(np.arccos(cos)):.1f} deg'
+
+
+def test_connector_estimator_fuses_only_marked_good_views():
+    """When views are marked good/far, estimate() must fuse ONLY the good ones -- a far, biased view
+    left unmarked should not move the origin."""
+    from urlab.config import Config
+    from urlab.perception.connector import ConnectorEstimator
+
+    K = np.array([[900.0, 0, 640.0], [0, 900.0, 360.0], [0, 0, 1.0]])
+    P_true = np.array([0.5, 0.0, 0.2])
+    axis_true = np.array([1.0, 0.0, 0.0]) / 1.0
+    est = ConnectorEstimator(Config({'connector_estimator': {
+        'min_inlier_views': 3, 'min_parallax_deg': 1.0, 'inlier_dist_m': 0.02,
+        'max_range_m': 3.0, 'up_axis': [0, 0, 1]}}))
+
+    def add(C, P, good):
+        T_bc = T.look_at(C, P, np.eye(4))
+        Rcw = T_bc[:3, :3].T
+        def proj(Xw):
+            Xc = Rcw @ (Xw - C)
+            return (K @ (Xc / Xc[2]))[:2]
+        p0, p1 = proj(P), proj(P + 0.03 * axis_true)
+        yaw = float(np.arctan2(*(p1 - p0)[::-1]))
+        vid = est.add_view([(p0[0], p0[1], yaw)], K, T_bc, 0.0)
+        est.mark_view(vid, good)
+
+    for dx in (-0.06, -0.02, 0.02, 0.06):             # good, close views of the TRUE origin
+        add(np.array([0.5 + dx, 0.0, 0.6]), P_true, good=True)
+    # A far view whose rays are consistent with a DIFFERENT (biased) origin -- must be excluded.
+    P_bias = P_true + np.array([0.10, 0.0, 0.0])
+    for dx in (-0.05, 0.05):
+        add(np.array([0.5 + dx, 0.0, 1.2]), P_bias, good=False)
+
+    M = est.estimate()
+    assert M is not None
+    assert np.linalg.norm(M[:3, 3] - P_true) < 0.01, \
+        f'far unmarked view leaked into the fit: origin {M[:3,3]} vs {P_true}'
+
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     failed = 0

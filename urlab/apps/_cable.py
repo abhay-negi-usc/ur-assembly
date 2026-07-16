@@ -5,18 +5,32 @@ detector (neck or tip), a connector estimator, and a CableScanner over them. Thi
 stack so each app is just the sequence that follows the scan.
 """
 
-from ..perception import ConnectorEstimator
+from ..perception import CableReconstructor, ConnectorEstimator
 from ..perception.sam3 import make_detector
 from ..skills.scan import CableScanner, ScanConfig
 
 
 def build_scanner(cfg, robot, camera):
-    """(scanner, detector, estimator) wired from the config's scan/sam3/connector_estimator blocks."""
+    """(scanner, detector, estimator) wired from the config's scan/sam3/connector_estimator blocks.
+
+    In scan.mode 'reconstruction' the scanner also gets a CableReconstructor, which refines the
+    junction pose from the reconstructed 3D cable centreline. That needs the cable SKELETON, which
+    only the junction detector (sam3.mode: junction) exposes -- validated here."""
     detector = make_detector(cfg)
     estimator = ConnectorEstimator(cfg)
     scan_cfg = ScanConfig(cfg)
+
+    reconstructor = None
+    if scan_cfg.mode == 'reconstruction':
+        if not hasattr(detector, 'detect_cable'):
+            raise ValueError(
+                "scan.mode 'reconstruction' needs the cable skeleton, which only the junction "
+                "detector provides -- set sam3.mode: junction (got %r)."
+                % cfg.get_path('sam3.mode', 'junction'))
+        reconstructor = CableReconstructor(cfg)
+
     scanner = CableScanner(robot, camera, detector, estimator, scan_cfg,
-                           data_root=cfg.get('data_dir', 'data'))
+                           data_root=cfg.get('data_dir', 'data'), reconstructor=reconstructor)
     return scanner, detector, estimator
 
 

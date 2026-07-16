@@ -112,6 +112,12 @@ class ConnectorEstimator:
         self.history = []
         self._view_id = 0
         self._rng = np.random.default_rng(0)
+        # Views the caller has marked GOOD (close enough for a low-depth-error ray). The final fit
+        # (estimate) fuses ONLY these when any are marked -- a far view's depth error grows as Z^2,
+        # so fusing it pulls the origin off as hard as a close one. rough_origin still uses ALL
+        # views (it only needs the direction, and the far early views are what steer the approach
+        # in). Empty -> no marking in use (e.g. direct/offline use) -> estimate fuses everything.
+        self.good_view_ids = set()
 
     # ------------------------------------------------------------------ ingestion
     def add_view(self, detections, K, T_base_cam, stamp):
@@ -135,9 +141,30 @@ class ConnectorEstimator:
     def n_views(self):
         return len({d.view for d in self.history})
 
+    def mark_view(self, view_id, good=True):
+        """Mark (or unmark) a view as GOOD -- close enough for the final fit to trust its depth.
+        `view_id` is the value add_view returned. estimate() fuses only marked views (see
+        good_view_ids)."""
+        if not view_id:
+            return
+        if good:
+            self.good_view_ids.add(view_id)
+        else:
+            self.good_view_ids.discard(view_id)
+
+    def _fuse_history(self):
+        """Detections the FINAL fit should fuse: the good (within-distance) views if any are marked,
+        else everything (so offline/direct use, with no marking, behaves as before)."""
+        if self.good_view_ids:
+            h = [d for d in self.history if d.view in self.good_view_ids]
+            if h:
+                return h
+        return self.history
+
     def reset(self):
         self.history = []
         self._view_id = 0
+        self.good_view_ids = set()
 
     # ------------------------------------------------------------------ fitting
     def _in_workspace(self, P):
@@ -148,10 +175,13 @@ class ConnectorEstimator:
             return False
         return bool(np.all(P >= self.ws_min) and np.all(P <= self.ws_max))
 
-    def _ransac(self):
-        """(origin, inlier detections) or (None, []). Scored by DISTINCT VIEWS, not detections."""
+    def _ransac(self, history=None):
+        """(origin, inlier detections) or (None, []). Scored by DISTINCT VIEWS, not detections.
+        Operates on `history` (defaults to the full ingested set; estimate passes the good-views
+        subset)."""
+        history = self.history if history is None else history
         by_view = {}
-        for i, d in enumerate(self.history):
+        for i, d in enumerate(history):
             by_view.setdefault(d.view, []).append(i)
         views = sorted(by_view)
         if len(views) < 2:
@@ -162,7 +192,7 @@ class ConnectorEstimator:
             va, vb = self._rng.choice(len(views), size=2, replace=False)
             ia = int(self._rng.choice(by_view[views[va]]))
             ib = int(self._rng.choice(by_view[views[vb]]))
-            a, b = self.history[ia], self.history[ib]
+            a, b = history[ia], history[ib]
 
             P = triangulate([a.C, b.C], [a.g, b.g])
             if not self._in_workspace(P):
@@ -173,13 +203,13 @@ class ConnectorEstimator:
                                          or np.linalg.norm(P - b.C) > self.max_range):
                 continue
 
-            inliers = [i for i, d in enumerate(self.history)
+            inliers = [i for i, d in enumerate(history)
                        if ray_point_distance(d.C, d.g, P) <= self.inlier_dist]
-            score = len({self.history[i].view for i in inliers})
+            score = len({history[i].view for i in inliers})
             if (score, len(inliers)) > (best_score, best_count):
                 best_P, best_inliers, best_score, best_count = P, inliers, score, len(inliers)
 
-        return best_P, [self.history[i] for i in best_inliers]
+        return best_P, [history[i] for i in best_inliers]
 
     def rough_origin(self):
         """Best-effort connector origin (base frame) for STEERING the scan's approach BEFORE the
@@ -198,12 +228,18 @@ class ConnectorEstimator:
 
         Refusing to publish is a FEATURE. Every gate below corresponds to a way the fit can be
         confidently wrong rather than merely noisy, and a wrong connector pose sends the gripper
-        somewhere real."""
-        if self.n_views < self.min_views:
-            log.info('Need %d views, have %d.', self.min_views, self.n_views)
+        somewhere real.
+
+        Fuses only the GOOD (within-distance) views when any are marked -- far views, whose depth
+        error grows as Z^2, are kept out of the fit (they still steered the approach via
+        rough_origin). With no marking it fuses everything, as before."""
+        hist = self._fuse_history()
+        n_views = len({d.view for d in hist})
+        if n_views < self.min_views:
+            log.info('Need %d views, have %d (within distance).', self.min_views, n_views)
             return None
 
-        P, inliers = self._ransac()
+        P, inliers = self._ransac(hist)
         if P is None:
             log.warning('RANSAC found no consistent origin across views.')
             return None

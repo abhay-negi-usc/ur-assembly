@@ -12,6 +12,8 @@ _LAZY = {
     'MarkerTracker': '.aruco',
     'ConnectorEstimator': '.connector',
     'ConnectorTracker': '.connector',
+    'CableReconstructor': '.cable_recon',
+    'Reconstruction': '.cable_recon',
 }
 
 __all__ = list(_LAZY)

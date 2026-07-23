@@ -175,7 +175,9 @@ grasp_check:
     loose_counts: 215            # loose grip the fingers open to before each reseat / retry
     increment_m: 0.0005          # corrective arm step per iteration (0.5 mm)
     faces_counts: 223            # pos <= faces_counts+band => FACES -> reseat AWAY from the cable
+    faces_counts: 223            # pos <= faces_counts+band => FACES -> reseat AWAY from the cable
     faces_band_counts: 0         # these fingertips show only faces (a miss is always <= 223)
+    # toward_cable_axis: [0, 0, -1]   # GRASP-frame "toward the cable" (faces reseats along its NEGATIVE)
     # toward_cable_axis: [0, 0, -1]   # GRASP-frame "toward the cable" (faces reseats along its NEGATIVE)
 
 speed:

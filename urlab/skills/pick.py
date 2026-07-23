@@ -84,11 +84,11 @@ class GraspRecovery:
     (see GraspCheck for the bands -- more obstruction = LESS closed):
 
       * faces (<= faces_counts + band, ~220-223) -- cable on the flat parallel faces, propping the
-                                   fingers open: move the gripper TOWARD the cable so it drops off
-                                   the flats into the groove (success ~225).
+                                   fingers open: move the gripper AWAY from the cable so it settles
+                                   off the flats into the groove (success ~225).
       * tips (higher, but short of the groove) -- cable pinched at the fingertip TIPS: move the
-                                   gripper AWAY. The CURRENT fingertips do not show this (a miss is
-                                   always 'faces'); kept configurable for other fingertips.
+                                   gripper TOWARD it. The CURRENT fingertips do not show this (a miss
+                                   is always 'faces'); kept configurable for other fingertips.
 
     Recovery is: (1) a BLIND retry -- loose grip then full close, no arm motion, which alone
     reseats a cable that was merely nipped; then (2) up to `max_tries` corrective iterations that
@@ -144,11 +144,13 @@ class GraspRecovery:
         for i in range(self.max_tries):
             pos = g.position()
             mode = self._classify(pos)
-            direction = toward if mode == 'faces' else -toward
+            # faces (cable on the flats) -> move AWAY from the cable so it settles into the groove;
+            # tips -> move TOWARD it.
+            direction = -toward if mode == 'faces' else toward
             geom.T_base_grasp = geom.T_base_grasp @ translation_matrix(direction * self.increment_m)
             log.warning('Recovery %d/%d: %s mode (%d counts) -- reseat %.1f mm %s the cable.',
                         i + 1, self.max_tries, mode, pos, self.increment_m * 1000,
-                        'toward' if mode == 'faces' else 'away from')
+                        'away from' if mode == 'faces' else 'toward')
             if not (g.go_to(self.loose_counts, 'loose grip')
                     and robot.move_fingertip(geom.T_base_grasp, f'reseat ({mode})')
                     and g.close('grasp')):

@@ -216,19 +216,19 @@ grasp_check:
 
   # ---- Failed-grasp RECOVERY (see skills/pick.py GraspRecovery) ----
   # On a MISS (cable on the flats, <= faces_max_counts): a blind loose->close retry first, then up
-  # to max_tries corrective iterations that open to loose_counts, nudge the arm increment_m TOWARD
-  # the cable (so it drops off the flats into the groove), and re-close.
+  # to max_tries corrective iterations that open to loose_counts, nudge the arm increment_m AWAY
+  # from the cable (so it settles off the flats into the groove), and re-close.
   recovery:
     enabled: true
-    max_tries: 5                 # N corrective iterations after the blind retry
+    max_tries: 20                # N corrective iterations after the blind retry
     loose_counts: 215            # loose grip the fingers open to before each reseat / retry
     increment_m: 0.0005          # corrective arm step per iteration (0.5 mm)
-    faces_counts: 223            # pos <= faces_counts+band => FACES -> reseat TOWARD the cable
+    faces_counts: 223            # pos <= faces_counts+band => FACES -> reseat AWAY from the cable
     faces_band_counts: 0         # these fingertips show only faces (a miss is always <= 223);
-                                 # raise faces_band to re-enable a TIPS (move-away) band if needed
+                                 # raise faces_band to re-enable a TIPS (move-toward) band if needed
     # toward_cable_axis: [0, 0, -1]   # "toward the cable" in the GRASP frame; default = -approach_axis
-                                  # (deeper along the approach). Uncomment + flip the sign if the
-                                  # reseat moves the wrong way on hardware.
+                                  # (deeper along the approach); faces reseats along its NEGATIVE.
+                                  # Uncomment + flip the sign if the reseat moves the wrong way.
 
 speed:
   max_joint_velocity_rad_s: 0.5

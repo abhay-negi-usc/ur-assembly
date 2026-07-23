@@ -152,12 +152,42 @@ scan:
 save_scan_images: true
 data_dir: data
 scan_images_subdir: cable_pick_place
+save_last_camera_image: true          # also mirror the latest overlay to a STABLE path, overwritten
+                                      # (atomically) each capture -- keep it open in a viewer to watch
+                                      # the live view + detection without reopening files
+# last_camera_image_path: data/last_camera_image.png   # default: <data_dir>/last_camera_image.png
 
 # ---- Pick approach / lift / place ----
 approach_distance_m: 0.10
 approach_axis: [0.0, 0.0, 1.0]   # in the GRASP frame
 lift_distance_m: 0.10
 lift_axis: [0.0, 0.0, 1.0]       # in the BASE frame (+Z up)
+
+# ---- Pickup: the grasp DESCENT (grasp-align -> grasp) control mode ----
+# mode: position  -- a stiff moveL to the grasp pose (default; unchanged behaviour).
+#       compliance -- SOFTWARE ADMITTANCE, the SAME spring-mass-damper law as the assembly insert
+#                     (robot/admittance.py): the fingertip yields to contact and springs back toward
+#                     the grasp pose. Params mirror assembly.compliance.
+pickup:
+  mode: position
+  descent_time_s: 2.0            # (compliance) grasp-align -> grasp ramp duration
+  settle_s: 0.5                  # (compliance) hold at the grasp pose after the ramp
+  compliance:
+    enabled: true
+    tare_before: true
+    mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]            # kg, kg*m^2
+    stiffness:     [2000.0, 2000.0, 2000.0, 15.0, 15.0, 15.0]  # N/m (trans), Nm/rad (rot)
+    damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]            # 1 = critically damped
+    selected_axes: [1, 1, 1, 1, 1, 1]                        # which axes comply
+    reference_rate_hz: 125.0
+    lookahead_time_s: 0.1
+    servo_gain: 300.0
+    max_delta_m: 0.05                                        # runaway clamp (translation)
+    max_delta_rad: 0.5
+  force_guard:                   # optional hard backstop during the descent (a trip = stop early); off by default
+    enabled: false
+    max_force_n: 30.0
+    max_torque_nm: 5.0
 place_offset_xyz: [0.050, 0.0, 0.0]
 place_offset_rpy: [0.0, 0.0, 0.0]
 
@@ -168,29 +198,34 @@ gripper:
   speed_counts: 255
   force_counts: 150
 
-# ---- Grasp check (counts). closed_counts is compared to what the gripper REPORTS -- no rad
-# conversion, so the old full_close_rad "TODO: verify me" fudge is gone. ----
+# ---- Grasp check (counts). Position is compared to what the gripper REPORTS -- no rad conversion.
+# These fingertips give THREE closure levels (more obstruction = LESS closed), so SUCCESS is a
+# MIDDLE band, not full closure:
+#   faces (<= faces_max_counts, ~220-223) = cable on the flat faces      -> MISSED
+#   groove (~groove_counts, 225)          = cable seated in the groove   -> OK
+#   empty (>= empty_counts, 228)          = fingers closed on nothing    -> EMPTY
 grasp_check:
   enabled: true
-  closed_counts: 228             # counts at full closure (cable seated in the groove, or empty)
+  groove_counts: 225             # SUCCESS: cable seated in the fingertip groove
+  empty_counts: 228              # full closure on nothing (no cable)
+  faces_max_counts: 223          # <= this: cable on the flat faces (a MISS)
   tolerance_counts: 1
-  detect_empty: false            # gOBJ-based empty detection -- UNVERIFIED on this hardware; see gripper.py
+  detect_empty: true             # 228 vs 225 makes empty reliably separable by POSITION now
   settle_s: 1.0
   max_retries: 2                 # whole scan->grasp attempts (outer loop) if recovery still misses
 
   # ---- Failed-grasp RECOVERY (see skills/pick.py GraspRecovery) ----
-  # The stalled close count tells the failure apart (higher = more closed): ~closed_counts (228) =
-  # seated (success); ~faces_counts (220, the floor) = cable on the flat faces -> reseat by moving
-  # the gripper TOWARD the cable; between them = cable pinched at the fingertip TIPS -> move AWAY.
-  # On a miss: a blind loose->close retry first, then up to max_tries corrective iterations that
-  # open to loose_counts, nudge the arm increment_m along the corrective direction, and re-close.
+  # On a MISS (cable on the flats, <= faces_max_counts): a blind loose->close retry first, then up
+  # to max_tries corrective iterations that open to loose_counts, nudge the arm increment_m TOWARD
+  # the cable (so it drops off the flats into the groove), and re-close.
   recovery:
     enabled: true
     max_tries: 5                 # N corrective iterations after the blind retry
     loose_counts: 215            # loose grip the fingers open to before each reseat / retry
     increment_m: 0.0005          # corrective arm step per iteration (0.5 mm)
-    faces_counts: 220            # the "cable on the flat faces" count floor
-    faces_band_counts: 1         # pos <= faces_counts + this => FACES; higher (but < closed) => TIPS
+    faces_counts: 223            # pos <= faces_counts+band => FACES -> reseat TOWARD the cable
+    faces_band_counts: 0         # these fingertips show only faces (a miss is always <= 223);
+                                 # raise faces_band to re-enable a TIPS (move-away) band if needed
     # toward_cable_axis: [0, 0, -1]   # "toward the cable" in the GRASP frame; default = -approach_axis
                                   # (deeper along the approach). Uncomment + flip the sign if the
                                   # reseat moves the wrong way on hardware.

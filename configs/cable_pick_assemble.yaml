@@ -71,7 +71,7 @@ grasp_tcp_offset:
   xyz: [0.0, 0.0, 0.0]
   rpy: [0.0, 0.0, 0.0]
 fingertip_grasp:
-  xyz: [0.0, -0.01254, 0.186]
+  xyz: [0.0, -0.01254, 0.170]
   rpy: [3.14159, 0.0, -1.5708]
 
 scan:
@@ -115,11 +115,39 @@ scan:
 save_scan_images: true
 data_dir: data
 scan_images_subdir: cable_pick_assemble
+save_last_camera_image: true          # also mirror the latest overlay to a STABLE path, overwritten
+                                      # (atomically) each capture -- keep it open in a viewer to watch
+                                      # the live view + detection without reopening files
+# last_camera_image_path: data/last_camera_image.png   # default: <data_dir>/last_camera_image.png
 
 approach_distance_m: 0.10
 approach_axis: [0.0, 0.0, 1.0]
 lift_distance_m: 0.10
 lift_axis: [0.0, 0.0, 1.0]
+
+# ---- Pickup: the grasp DESCENT control mode (see cable_pick_place.yaml for the full notes) ----
+# mode: position (stiff moveL; default) | compliance (software admittance -- the same law as the
+# assembly insert below; the fingertip yields to contact and springs back toward the grasp pose).
+pickup:
+  mode: position
+  descent_time_s: 2.0
+  settle_s: 0.5
+  compliance:
+    enabled: true
+    tare_before: true
+    mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+    stiffness:     [2000.0, 2000.0, 2000.0, 15.0, 15.0, 15.0]
+    damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    selected_axes: [1, 1, 1, 1, 1, 1]
+    reference_rate_hz: 125.0
+    lookahead_time_s: 0.1
+    servo_gain: 300.0
+    max_delta_m: 0.05
+    max_delta_rad: 0.5
+  force_guard:                   # optional hard backstop during the descent; off by default
+    enabled: false
+    max_force_n: 30.0
+    max_torque_nm: 5.0
 
 gripper:
   port: /dev/ttyUSB0
@@ -128,11 +156,15 @@ gripper:
   speed_counts: 255
   force_counts: 150
 
+# Grasp check (counts): faces (<=faces_max_counts ~220-223) MISSED | groove (~225) OK |
+# empty (>=empty_counts 228) EMPTY. Success is a MIDDLE band -- see cable_pick_place.yaml notes.
 grasp_check:
   enabled: true
-  closed_counts: 228
+  groove_counts: 225             # SUCCESS: cable seated in the fingertip groove
+  empty_counts: 228              # full closure on nothing (no cable)
+  faces_max_counts: 223          # <= this: cable on the flat faces (a MISS)
   tolerance_counts: 1
-  detect_empty: false
+  detect_empty: true             # 228 vs 225 makes empty reliably separable by POSITION now
   settle_s: 1.0
   max_retries: 2                 # whole scan->grasp attempts (outer loop) if recovery still misses
 
@@ -142,8 +174,8 @@ grasp_check:
     max_tries: 5                 # N corrective iterations after the blind retry
     loose_counts: 215            # loose grip the fingers open to before each reseat / retry
     increment_m: 0.0005          # corrective arm step per iteration (0.5 mm)
-    faces_counts: 220            # the "cable on the flat faces" count floor -> reseat TOWARD cable
-    faces_band_counts: 1         # pos <= faces_counts + this => FACES; higher (but < closed) => TIPS
+    faces_counts: 223            # pos <= faces_counts+band => FACES -> reseat TOWARD the cable
+    faces_band_counts: 0         # these fingertips show only faces (a miss is always <= 223)
     # toward_cable_axis: [0, 0, -1]   # GRASP-frame "toward the cable"; default = -approach_axis
 
 speed:

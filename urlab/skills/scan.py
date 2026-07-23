@@ -81,6 +81,11 @@ class ScanConfig:
 
         self.save_images = bool(cfg.get('save_scan_images', True))
         self.images_dir = cfg.get('scan_images_subdir', 'cable_scan')
+        # A STABLE-path copy of the latest overlay, overwritten (atomically) on every capture, so a
+        # viewer left open on it always shows the newest view + detection without reopening files.
+        # Independent of save_scan_images. Path defaults to <data_dir>/last_camera_image.png.
+        self.save_last_image = bool(cfg.get('save_last_camera_image', True))
+        self.last_image_path = cfg.get('last_camera_image_path', None)
 
 
 class CableScanner:
@@ -107,6 +112,9 @@ class CableScanner:
         from datetime import datetime
         self.image_dir = os.path.join(data_root, self.s.images_dir,
                                       datetime.now().strftime('%Y%m%d_%H%M%S'))
+        # Stable path for the always-latest overlay copy (default: <data_dir>/last_camera_image.png).
+        self.last_image_path = self.s.last_image_path or os.path.join(data_root,
+                                                                      'last_camera_image.png')
 
     # ------------------------------------------------------------------ per view
     def _hold_view(self, label):
@@ -190,14 +198,26 @@ class CableScanner:
             self.reconstructor.mark_view(self._last_rec_vid, good)
 
     def _save_overlay(self):
-        if not self.s.save_images or self.detector.last_debug is None:
+        """Save the detection overlay two ways: the per-view timestamped archive file (if
+        save_scan_images) AND a stable-path copy at last_image_path (if save_last_camera_image),
+        overwritten each capture. The stable copy is written to a temp file and atomically renamed,
+        so a viewer left open on it never reads a half-written frame."""
+        dbg = self.detector.last_debug
+        if dbg is None:
             return
         try:
             import cv2
-            os.makedirs(self.image_dir, exist_ok=True)
-            path = os.path.join(self.image_dir, f'view_{self.view_idx:02d}.png')
-            cv2.imwrite(path, self.detector.last_debug)
-            log.info('  saved overlay %s', path)
+            if self.s.save_images:
+                os.makedirs(self.image_dir, exist_ok=True)
+                path = os.path.join(self.image_dir, f'view_{self.view_idx:02d}.png')
+                cv2.imwrite(path, dbg)
+                log.info('  saved overlay %s', path)
+            if self.s.save_last_image:
+                os.makedirs(os.path.dirname(self.last_image_path) or '.', exist_ok=True)
+                root, ext = os.path.splitext(self.last_image_path)
+                tmp = f'{root}.tmp{ext or ".png"}'
+                cv2.imwrite(tmp, dbg)
+                os.replace(tmp, self.last_image_path)   # atomic swap; viewer never sees a partial file
         except Exception as exc:                     # noqa: BLE001 -- saving is best-effort
             log.warning('  could not save overlay: %s', exc)
 

@@ -59,12 +59,72 @@ conda env create -f environment.yml        # run from the repo root; then: conda
 Both read the same `requirements/` files, so conda and venv never drift. Pass a layer name to
 either script (default `all`) for a lighter env, e.g. `./setup-venv.sh core`.
 
-**SAM3 is not installed by any of these** — it runs from your `sam3-abhay` checkout under its own
-venv, because it needs pins this environment must not inherit (`torch==2.4.1+cu121` for the Pascal
-GPU, the gated model weights, the 6 GB memory workaround). Point `sam3.repo_path` at that checkout;
-urlab imports the detector module from it at runtime (`sam3.mode` selects which: `neck`, `junction`,
-or `tip`). See `requirements/perception.txt` for the full
-note.
+**SAM3 is not installed by any of the above**, and it is not a separate process. urlab imports the
+SAM3 detector **in-process** (see the in-process note above), so `torch` and the `sam3` package must
+live in the **same** environment that runs urlab — added *on top of* your urlab env, not in a
+parallel venv. The `### SAM3 setup` steps below are what actually make a cable demo run; the
+`torch==2.4.1+cu121` pin, the gated weights, and the 6 GB memory workaround are why they are kept
+out of `requirements/` (rationale in `requirements/perception.txt`).
+
+### SAM3 setup
+
+The detector geometry lives in your `sam3-abhay` checkout under `scripts/`; at runtime urlab adds
+that `scripts/` dir to `sys.path` (via `sam3.repo_path`) and imports `cable_neck_core` /
+`cable_neck_diameter`, which in turn `import torch` and `from sam3 import build_sam3_image_model`.
+So the env that runs a cable demo needs **both** the `sam3` package importable (`pip install -e`)
+**and** `torch` + the model weights present.
+
+Into your **activated urlab env** (the same `.venv`/conda env the demos run in):
+
+```bash
+# 1. PyTorch. This pin is for the Pascal GTX 1060 (6 GB) -- the last wheels with sm_61 kernels.
+#    Newer GPU: follow sam3-abhay/README.md (torch 2.7+/cu128). No GPU: swap cu121 -> cpu (slow).
+pip install torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cu121
+
+# 2. The sam3 PACKAGE. Its pyproject does NOT pin torch (the pin above is safe) but DOES pin
+#    numpy < 2, so it downgrades numpy and orphans a numpy-2-built scipy -- realign scipy (step 3).
+pip install -e ../sam3-abhay          # = your sam3.repo_path checkout
+# sam3 imports these at module load but omits them from its pyproject (its model_builder pulls in
+# the whole zoo -- image+video+tracking -- so their deps must all resolve, even for image inference):
+pip install einops pycocotools psutil
+
+# 3. Hold numpy/scipy at a matching numpy<2 pair. Without this, scipy imports fail with
+#    "module 'numpy' has no attribute 'long'" -- the whole env is numpy<2 once SAM3 is added.
+pip install "numpy>=1.26,<2" "scipy<1.14"
+
+# 4. Gated checkpoints: request access at https://huggingface.co/facebook/sam3, then log in:
+huggingface-cli login                 # paste an HF token (or: export HF_TOKEN=hf_...)
+```
+
+Verify the import chain before launching the whole demo (arm + camera):
+
+```bash
+python -c "import torch; from sam3 import build_sam3_image_model; \
+           print('sam3 OK', torch.__version__, 'cuda', torch.cuda.is_available())"
+```
+
+Notes:
+
+- **Keep `sam3-abhay` current.** The detector *scripts* come from the checkout, not from pip, so a
+  `git pull` in `sam3-abhay` is how you get new/fixed detectors (e.g. `cable_neck_diameter.py`,
+  which `sam3.mode: junction` and `scan.mode: reconstruction` require). Re-run `pip install -e` only
+  if the `sam3` package itself changes — not for script edits.
+- **`sam3.mode` picks the detector** (`neck` | `junction` | `tip`). `neck`/`tip` need only
+  `cable_neck_core`; `junction` (the default in the cable configs) also needs `cable_neck_diameter`.
+- **sam3 under-declares its runtime deps** — `model_builder` imports the whole model zoo at load, so
+  `einops`, `pycocotools`, and `psutil` (step 2) are all required even for image inference (`triton`
+  is pulled in by the torch wheel). If a later run raises `ModuleNotFoundError` for another package,
+  install just that one — but do **not** install the guarded/lazy/eval-only ones its code also
+  mentions: `xformers` (guarded, falls back to torch SDPA), `decord`/`torchcodec` (video only),
+  `hydra`/`omegaconf` (training + the lazy multiplex builder), `detectron2` (agent/eval — an install
+  nightmare), or `open_clip` (a docstring reference, not a real import). None are reached by
+  `build_sam3_image_model`.
+- **First run** downloads the checkpoint (a few GB) and takes ~30 s to load — the log says
+  "Loading SAM3…".
+- **Docker:** CUDA needs the container started with `--gpus all` (nvidia-container-toolkit),
+  *separate* from the camera's USB passthrough (`-v /dev/bus/usb:/dev/bus/usb`, not `--device
+  /dev/video*` — the pip `pyrealsense2` wheel uses the libusb backend). If the check above prints
+  `cuda False`, add `--gpus all` or install the CPU torch wheel.
 
 ### Robot prerequisites
 
@@ -155,11 +215,16 @@ origin to <5 mm and the axis to <5° on clean synthetic views).
 
 These are physical-calibration items the code cannot settle for you:
 
-- `grasp_check.closed_counts` (228) — confirm against what the gripper reports at full closure.
-  The rad→counts fudge (`full_close_rad`, permanently "TODO: verify me" in the ROS configs) is
-  **gone**: the check now compares to a number the hardware reports directly.
-- `grasp_check.detect_empty` — leave `false` until you have confirmed a seated cable reports
-  `gOBJ=2` and an empty close reports `gOBJ=3` (see `robot/gripper.py`).
+- `grasp_check.groove_counts` / `empty_counts` / `faces_max_counts` (225 / 228 / 223) — the three
+  fingertip closure levels. Confirm each against what the gripper reports: a **seated** cable stops
+  at the groove count (225 — SUCCESS, the middle band, *not* full closure), an **empty** close goes
+  to 228, a cable on the **flat faces** stalls at ≤ 223 (a miss). The rad→counts fudge
+  (`full_close_rad`, permanently "TODO: verify me" in the ROS configs) is **gone**: these compare to
+  numbers the hardware reports directly.
+- `grasp_check.detect_empty` — now **POSITION**-based (228 vs 225 are distinct), so it defaults
+  **on** and is reliable; the old UNVERIFIED gOBJ path is gone.
+- `pickup.mode` — `position` (stiff) by default. Set `compliance` for a compliant grasp descent
+  (software admittance, same law as the assembly insert); validate the params on hardware.
 - `touch.contact_z_offset_m` — tune on the real connector.
 - `assembly.target` — measure by jogging to a good mate and reading the chosen frame off the robot.
 - **hand-eye `rpy`** — the configs carry `[0, 0, 0]` (identity), matching the `dev` branch exactly.

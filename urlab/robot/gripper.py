@@ -213,38 +213,36 @@ class Robotiq2F85:
         return self.go_to(round(counts), label or f'{frac * 100:.0f}% closed')
 
     # ------------------------------------------------------------------ grasp check
-    def grasp_result(self, closed_counts, tolerance=1, detect_empty=False):
-        """Classify a completed close as 'ok' | 'missed' | 'empty'.
+    def grasp_result(self, groove_counts, empty_counts, faces_max_counts, tolerance=1,
+                     detect_empty=True):
+        """Classify a completed close as 'ok' | 'missed' | 'empty' from the finger POSITION.
 
-        The logic is INVERTED from the intuition, so it is worth stating plainly:
+        More obstruction = LESS closed, so the three states order by position:
 
-          * The fingers reaching ~`closed_counts` means they closed FULLY. With the cable seated
-            in the fingertip groove, that is exactly what should happen -- the groove is sized so
-            a seated cable does not block the stroke. So reaching the target is SUCCESS.
-          * Stalling SHORT of it means something is wedged between the fingers outside the groove
-            -- the cable caught on the flat, not in the vee. That is a FAILED grasp, even though
-            the gripper is holding something.
+          * pos <= faces_max_counts (~223)  -- the cable is caught on the flat FACES, not in the
+                                               groove: it props the fingers open. FAILED ('missed').
+          * pos >= empty_counts - tolerance (~228) -- the fingers closed FULLY: nothing is in the
+                                               groove. EMPTY (only when detect_empty).
+          * otherwise (~groove_counts, 225) -- the cable is seated in the groove. SUCCESS ('ok').
 
-        'empty' (detect_empty=True) uses gOBJ, which the ROS action never exposed: fingers that
-        reach the target with NO object detected closed on air. This is the empty-pickup case that
-        was previously undetectable -- but the two "reached the target" cases (seated cable vs.
-        nothing) are distinguished only by whether the cable's own thickness registers as contact,
-        which depends on the groove geometry. UNVERIFIED on your hardware: leave detect_empty off
-        until you have confirmed a seated cable reports gOBJ=2 and an empty close reports gOBJ=3.
-        """
+        Position-based (not gOBJ): with these fingertips a seated cable (225) and an empty close
+        (228) differ by position, so empty is reliably separable -- unlike the previous fingertips
+        where both reached full closure and only the UNVERIFIED gOBJ bit could tell them apart."""
         if self.dry_run:
             return 'ok'
         state = self._read()
         pos, obj = state['pos'], state['obj']
 
-        if pos < closed_counts - tolerance:
-            log.warning('Grasp MISSED: stalled at %d < %d counts -- the cable is between the '
-                        'fingers but not in the fingertip groove.', pos, closed_counts)
+        if pos <= faces_max_counts:
+            log.warning('Grasp MISSED: %d <= %d counts -- the cable is on the fingertip FACES, not '
+                        'in the groove.', pos, faces_max_counts)
             return 'missed'
-        if detect_empty and obj == OBJ_AT_TARGET:
-            log.warning('Grasp EMPTY: reached %d counts with no object detected.', pos)
+        if detect_empty and pos >= empty_counts - tolerance:
+            log.warning('Grasp EMPTY: %d counts -- the fingers closed fully, no cable in the '
+                        'groove.', pos)
             return 'empty'
-        log.info('Grasp OK: %d counts (obj=%d).', pos, obj)
+        log.info('Grasp OK: %d counts (obj=%d) -- cable seated in the groove (~%d).',
+                 pos, obj, groove_counts)
         return 'ok'
 
     def __enter__(self):

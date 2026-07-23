@@ -45,37 +45,50 @@ class GraspGeometry:
 
 
 class GraspCheck:
-    """The 'cable not seated in the fingertip groove' detector, in counts."""
+    """Classify a completed close from the finger position, in counts.
+
+    The current fingertips give THREE distinct closure levels (more obstruction = LESS closed):
+
+        faces (<= faces_max_counts, ~220-223)  cable caught on the flat faces -> MISSED
+        groove (~groove_counts, 225)           cable seated in the fingertip groove -> OK
+        empty (>= empty_counts, 228)           fingers closed fully on nothing -> EMPTY
+
+    So a seated cable STOPS the fingers short of full closure (unlike the previous fingertips, where
+    a seated cable allowed full closure and EMPTY was indistinguishable). Empty is now reliably
+    separable by POSITION (228 vs 225), which is why detect_empty defaults on."""
 
     def __init__(self, cfg):
         gc = cfg.section('grasp_check')
         self.enabled = bool(gc.get('enabled', True))
-        self.closed_counts = int(gc.get('closed_counts', 228))
+        self.groove_counts = int(gc.get('groove_counts', 225))     # SUCCESS: cable in the groove
+        self.empty_counts = int(gc.get('empty_counts', 228))       # full closure on nothing
+        self.faces_max_counts = int(gc.get('faces_max_counts', 223))  # <= this: cable on the faces
         self.tolerance = int(gc.get('tolerance_counts', 1))
-        self.detect_empty = bool(gc.get('detect_empty', False))
+        self.detect_empty = bool(gc.get('detect_empty', True))
         self.max_retries = int(gc.get('max_retries', 2))
         self.settle_s = float(gc.get('settle_s', 1.0))
 
     def evaluate(self, gripper):
-        """'ok' | 'missed' | 'empty'. See gripper.grasp_result for the (inverted) logic: reaching
-        the target is SUCCESS, stalling short is the failure."""
+        """'ok' | 'missed' | 'empty' from the settled finger position."""
         if not self.enabled:
             return 'ok'
         import time
         time.sleep(self.settle_s)
-        return gripper.grasp_result(self.closed_counts, self.tolerance, self.detect_empty)
+        return gripper.grasp_result(self.groove_counts, self.empty_counts, self.faces_max_counts,
+                                    self.tolerance, self.detect_empty)
 
 
 class GraspRecovery:
-    """Failed-grasp recovery for the cable pick. When the fingers stall short of `closed_counts`
-    the cable is between them but NOT seated in the fingertip groove; the stalled COUNT tells the
-    two failure modes apart (higher count = more closed):
+    """Failed-grasp recovery for the cable pick. When the grasp check returns 'missed' the cable is
+    between the fingers but NOT seated in the groove; the stalled COUNT tells the failure mode
+    (see GraspCheck for the bands -- more obstruction = LESS closed):
 
-      * ~`closed_counts` (228)  -- cable in the groove (or empty): SUCCESS, no recovery.
-      * ~`faces_counts` (220)   -- cable on the flat parallel faces, propping the fingers widest
-                                   apart (the count FLOOR): move the gripper TOWARD the cable so it
-                                   drops off the flats into the groove.
-      * between the two         -- cable pinched at the fingertip TIPS: move the gripper AWAY.
+      * faces (<= faces_counts + band, ~220-223) -- cable on the flat parallel faces, propping the
+                                   fingers open: move the gripper TOWARD the cable so it drops off
+                                   the flats into the groove (success ~225).
+      * tips (higher, but short of the groove) -- cable pinched at the fingertip TIPS: move the
+                                   gripper AWAY. The CURRENT fingertips do not show this (a miss is
+                                   always 'faces'); kept configurable for other fingertips.
 
     Recovery is: (1) a BLIND retry -- loose grip then full close, no arm motion, which alone
     reseats a cable that was merely nipped; then (2) up to `max_tries` corrective iterations that
@@ -83,10 +96,7 @@ class GraspRecovery:
     corrective direction, and close again. The correction is along the grasp-frame approach axis
     ('toward the cable' = deeper along the approach) and ACCUMULATES into the grasp target, so a
     successful reseat leaves the corrected pose in geom.T_base_grasp for the lift/place.
-
-    The two failure bands overlap in practice (a tips reading sits just above the faces floor), so
-    `faces_band_counts` sets the split -- tune it on hardware; a misclassification just costs one
-    iteration."""
+    `faces_band_counts` sets the faces/tips split -- tune it on hardware."""
 
     def __init__(self, cfg):
         rc = (cfg.section('grasp_check').get('recovery', {}) or {})
@@ -150,6 +160,85 @@ class GraspRecovery:
         log.error('Grasp still MISSED after the blind retry and %d corrective tries.',
                   self.max_tries)
         return 'missed'
+
+
+def _grasp_descent_compliant(robot, adm, guard, T_start_ftip, T_grasp_ftip, duration,
+                             tare_before=True, settle_s=0.5):
+    """Descend from the current (grasp-align) pose to the grasp pose under SOFTWARE ADMITTANCE
+    (robot/admittance.py) instead of a stiff moveL -- the SAME law the assembly insert uses. The
+    fingertip yields to contact (a slightly misplaced cable, the work surface) and springs back
+    toward the reference grasp pose. Returns True on completion (or an early guard trip = contact);
+    leaves the arm OUT of the servo loop."""
+    T_t0_ft = robot.T_tool0_fingertip
+
+    def ref(T_ft):
+        return T_ft @ inverse(T_t0_ft)                  # fingertip pose -> tool0 servoL reference
+
+    # Tare MID-WARMUP (servo engaged, static) so the guard baseline matches the servo-active reading.
+    tare = (lambda: robot.arm.zero_ft(settle=False)) if tare_before else None
+    adm.reset()
+    adm.warmup(ref(T_start_ftip), tare_fn=tare)         # settle the servo (+ tare) before the guard
+    if guard is not None:
+        guard.reset()
+    log.info('Grasp descent under ADMITTANCE (S=%.0f N/m trans, %.0f Nm/rad rot) over %.1fs%s.',
+             adm.S[0], adm.S[3], duration,
+             '' if guard is None
+             else f', guarded at {guard.max_force:.0f} N / {guard.max_torque:.1f} Nm')
+    try:
+        result = adm.ramp(ref(T_start_ftip), ref(T_grasp_ftip), duration, guard)
+        if result == 'seated':
+            log.info('  contact during the compliant descent -- holding here for the grasp.')
+        else:
+            adm.hold(ref(T_grasp_ftip), settle_s, guard)
+        return True
+    finally:
+        robot.arm.servo_stop()                          # leave the servo loop before the gripper close
+
+
+class GraspController:
+    """Executes the grasp DESCENT (grasp-align -> grasp) in the configured mode:
+
+      * 'position'   -- a stiff moveL to the grasp pose (default; unchanged behaviour).
+      * 'compliance' -- SOFTWARE ADMITTANCE (the same spring-mass-damper law as the assembly
+                        insert): the fingertip yields to contact and springs back toward the grasp
+                        pose. Parameters mirror assembly.compliance, plus an optional force_guard
+                        backstop and the descent duration.
+
+    Reads the `pickup:` config section. The admittance controller (and optional guard) are built
+    lazily on first compliant descent, so a position-mode run never touches the servo layer."""
+
+    def __init__(self, cfg):
+        p = cfg.section('pickup')
+        self.mode = str(p.get('mode', 'position')).lower()
+        self.compliance = p.get('compliance', {}) or {}
+        self.compliance_enabled = bool(self.compliance.get('enabled', True))
+        self.tare_before = bool(self.compliance.get('tare_before', True))
+        self.descent_time_s = float(p.get('descent_time_s', 2.0))
+        self.settle_s = float(p.get('settle_s', 0.5))
+        self._guard_cfg = p.get('force_guard', {}) or {}
+        self._adm = None
+        self._guard = None
+
+    @property
+    def compliant(self):
+        return self.mode == 'compliance' and self.compliance_enabled
+
+    def _lazy_build(self, robot):
+        if self._adm is None:
+            from ..robot import AdmittanceController, ForceGuard
+            self._adm = AdmittanceController(robot.arm, self.compliance)
+            if self._guard_cfg.get('enabled', False):
+                self._guard = ForceGuard(robot.arm, self._guard_cfg)
+
+    def descend(self, robot, geom, label='grasp'):
+        """Move to geom.T_base_grasp in the configured mode (from wherever the arm is -- the
+        grasp-align pose). Returns bool."""
+        if not self.compliant:
+            return robot.move_fingertip(geom.T_base_grasp, label)
+        self._lazy_build(robot)
+        return _grasp_descent_compliant(robot, self._adm, self._guard, robot.fingertip(),
+                                        geom.T_base_grasp, self.descent_time_s, self.tare_before,
+                                        self.settle_s)
 
 
 def log_grasp_delta(robot, T_base_grasp, label):

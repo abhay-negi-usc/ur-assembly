@@ -168,6 +168,7 @@ and caveats.
 | `ur_vision_demo` | `urlab.perception.aruco` | — | a library, not a node |
 | `ur_tf_demo` | `Robot`'s `hand_eye` edge | — | one static transform, not a package |
 | `ur_gripper_bringup` | **not needed** | — | no URDF / controller_manager without ROS |
+| — (new) | `urlab.apps.monitor` | — | **live frame monitor** — read-only, works with pendant freedrive |
 
 ## Layout
 

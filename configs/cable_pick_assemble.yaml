@@ -71,7 +71,7 @@ grasp_tcp_offset:
   xyz: [0.0, 0.0, 0.0]
   rpy: [0.0, 0.0, 0.0]
 fingertip_grasp:
-  xyz: [0.0, -0.01254, 0.170]
+  xyz: [0.0, -0.01254, 0.177]
   rpy: [3.14159, 0.0, -1.5708]
 
 scan:
@@ -129,7 +129,7 @@ lift_axis: [0.0, 0.0, 1.0]
 # mode: position (stiff moveL; default) | compliance (software admittance -- the same law as the
 # assembly insert below; the fingertip yields to contact and springs back toward the grasp pose).
 pickup:
-  mode: position
+  mode: compliance
   descent_time_s: 2.0
   settle_s: 0.5
   compliance:
@@ -171,12 +171,12 @@ grasp_check:
   # ---- Failed-grasp RECOVERY (see skills/pick.py GraspRecovery + cable_pick_place.yaml notes) ----
   recovery:
     enabled: true
-    max_tries: 5                 # N corrective iterations after the blind retry
+    max_tries: 10                # N corrective iterations after the blind retry
     loose_counts: 215            # loose grip the fingers open to before each reseat / retry
     increment_m: 0.0005          # corrective arm step per iteration (0.5 mm)
-    faces_counts: 223            # pos <= faces_counts+band => FACES -> reseat TOWARD the cable
+    faces_counts: 223            # pos <= faces_counts+band => FACES -> reseat AWAY from the cable
     faces_band_counts: 0         # these fingertips show only faces (a miss is always <= 223)
-    # toward_cable_axis: [0, 0, -1]   # GRASP-frame "toward the cable"; default = -approach_axis
+    # toward_cable_axis: [0, 0, -1]   # GRASP-frame "toward the cable" (faces reseats along its NEGATIVE)
 
 speed:
   max_joint_velocity_rad_s: 0.5

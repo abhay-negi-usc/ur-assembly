@@ -320,8 +320,8 @@ def test_grasp_recovery_blind_retry_succeeds():
     assert robot.moves == [], 'blind retry must not move the arm'
 
 
-def test_grasp_recovery_faces_mode_moves_toward_cable():
-    """A faces miss nudges the arm TOWARD the cable (-approach_axis) and reseats at the groove."""
+def test_grasp_recovery_faces_mode_moves_away_from_cable():
+    """A faces miss nudges the arm AWAY from the cable (+approach_axis) and reseats at the groove."""
     from urlab.skills.pick import GraspCheck, GraspGeometry, GraspRecovery
     cfg = _recovery_cfg()
     g = _FakeGripper(on_close=[220, 220, 225])    # miss, blind-retry miss, then reseat succeeds
@@ -330,9 +330,9 @@ def test_grasp_recovery_faces_mode_moves_toward_cable():
     res = GraspRecovery(cfg).grasp_with_recovery(robot, geom, GraspCheck(cfg))
     assert res == 'ok', res
     assert len(robot.moves) == 1, 'exactly one corrective move expected'
-    # approach_axis is +z, so 'toward the cable' is -z in the grasp frame.
-    assert geom.T_base_grasp[2, 3] < 0, f'faces mode should move toward (-z): {geom.T_base_grasp[2,3]}'
-    assert abs(geom.T_base_grasp[2, 3] + 0.0005) < 1e-9
+    # approach_axis is +z, so 'toward the cable' is -z; faces moves AWAY -> +z in the grasp frame.
+    assert geom.T_base_grasp[2, 3] > 0, f'faces mode should move away (+z): {geom.T_base_grasp[2,3]}'
+    assert abs(geom.T_base_grasp[2, 3] - 0.0005) < 1e-9
 
 
 def test_grasp_check_empty_is_not_recovered():

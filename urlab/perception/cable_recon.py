@@ -383,9 +383,12 @@ class CableReconstructor:
 
     def _reproj_rms(self, curve, views):
         """RMS pixel distance of the reconstructed curve, reprojected into every (good) view, from
-        that view's detected skeleton -- the cross-view consistency error the stop rule watches."""
-        sq, n = 0.0, 0
+        that view's detected skeleton -- the cross-view consistency error the stop rule watches.
+        Logs the per-view and overall error EACH time it is computed."""
+        per_view = []
+        sq_all, n_all = 0.0, 0
         for v in views:
+            sq, n = 0.0, 0
             for X in curve:
                 uv = v.project(X)
                 if uv is None:
@@ -393,7 +396,13 @@ class CableReconstructor:
                 d = _point_polyline_dist(uv, v.skel)
                 sq += d * d
                 n += 1
-        return float(np.sqrt(sq / n)) if n else float('inf')
+            per_view.append((v.view, float(np.sqrt(sq / n)) if n else float('inf')))
+            sq_all += sq
+            n_all += n
+        total = float(np.sqrt(sq_all / n_all)) if n_all else float('inf')
+        log.info('  reprojection error: %.2f px RMS over %d view(s) [%s]', total, len(per_view),
+                 ', '.join(f'v{vid}={r:.2f}' for vid, r in per_view))
+        return total
 
     # ------------------------------------------------------------------ visualisation
     def save_plot(self, path, azimuths=(-60, 30), elev=22.0):

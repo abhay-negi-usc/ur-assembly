@@ -28,7 +28,7 @@ import numpy as np
 
 from .. import log as urlog
 from ..transforms import (
-    clamp_pose_delta, inverse, look_at, rotate_about_axis, xyzrpy_to_matrix)
+    clamp_pose_delta, frame_from_axis, inverse, look_at, rotate_about_axis, xyzrpy_to_matrix)
 
 log = urlog.get('scan')
 
@@ -72,6 +72,13 @@ class ScanConfig:
         self.nominal_distance_m = float(ap.get('nominal_distance_m', 0.23))
         self.scale_offsets = bool(ap.get('scale_offsets', True))
         self.recenter = bool(ap.get('recenter', True))
+        # Rate-limit on the vision estimate BETWEEN views. The cable is one physical object, so its
+        # estimated ORIGIN (and AXIS) should barely move view-to-view; a big jump is an outlier
+        # detection. Clamp the per-view change so a single outlier cannot lunge the approach
+        # (steering) or snap the pose. 0 = off. (Independent of the CAMERA's step_m -- this bounds
+        # the ESTIMATE's motion, not the camera's.)
+        self.max_view_delta_m = float(ap.get('max_view_delta_m', 0.0))
+        self.max_view_delta_deg = float(ap.get('max_view_delta_deg', 0.0))
 
         r = s.get('refine', {}) or {}
         self.refine_enabled = bool(r.get('enabled', True))
@@ -109,6 +116,8 @@ class CableScanner:
         self._recon = None                           # last Reconstruction (reconstruction mode)
         self._last_est_vid = 0                       # view id the estimator gave the current frame
         self._last_rec_vid = 0                       # ...and the reconstructor (for good-marking)
+        self._last_origin = None                     # previous vision origin (for the per-view clamp)
+        self._last_axis = None                       # previous connector axis (unit)
         from datetime import datetime
         self.image_dir = os.path.join(data_root, self.s.images_dir,
                                       datetime.now().strftime('%Y%m%d_%H%M%S'))
@@ -320,9 +329,60 @@ class CableScanner:
         spam failed-fit warnings."""
         T_conn = (self.estimator.estimate()
                   if self.good_views >= self.estimator.min_inlier_views else None)
-        P = T_conn[:3, 3] if T_conn is not None else self.estimator.rough_origin()
+        raw_P = T_conn[:3, 3] if T_conn is not None else self.estimator.rough_origin()
+        # Rate-limit the estimate BETWEEN views so a single outlier cannot lunge the approach. The
+        # origin's per-view jump is clamped; when a full pose exists, its axis rotation too, and the
+        # pose is rebuilt from the clamped origin+axis (same convention as the estimator).
+        P = self._rate_limit_origin(raw_P) if raw_P is not None else None
+        if T_conn is not None:
+            axis = self._rate_limit_axis(T_conn[:3, 0])
+            T = np.eye(4)
+            T[:3, :3] = frame_from_axis(axis, self.estimator.up_axis)
+            T[:3, 3] = P
+            T_conn = T
         T_cam0 = self._approach(T_cam0, P)             # step in on ANY detection with an origin
         return T_cam0, self._converged_pose(T_conn)
+
+    def _rate_limit_origin(self, P):
+        """Clamp the vision origin's per-view movement to max_view_delta_m (0 = off). Returns the
+        clamped point and remembers it for the next view."""
+        P = np.asarray(P, dtype=float)
+        m = self.s.max_view_delta_m
+        if m > 0 and self._last_origin is not None:
+            d = P - self._last_origin
+            n = float(np.linalg.norm(d))
+            if n > m:
+                P = self._last_origin + d / n * m
+                log.warning('  vision origin jumped %.0f mm > %.0f mm cap -- clamped (outlier?).',
+                            n * 1000, m * 1000)
+        if m > 0:
+            self._last_origin = P
+        return P
+
+    def _rate_limit_axis(self, axis):
+        """Clamp the connector axis's per-view rotation to max_view_delta_deg (0 = off). Slerps the
+        new axis back toward the previous one when the jump exceeds the cap; near-antiparallel jumps
+        (an axis flip) are rejected outright."""
+        axis = np.asarray(axis, dtype=float)
+        axis = axis / (np.linalg.norm(axis) + 1e-12)
+        deg = self.s.max_view_delta_deg
+        if deg > 0 and self._last_axis is not None:
+            la = self._last_axis
+            ang = float(np.arccos(float(np.clip(np.dot(axis, la), -1.0, 1.0))))
+            cap = np.radians(deg)
+            if ang > cap:
+                s = float(np.sin(ang))
+                if s < 1e-6:
+                    axis = la.copy()                   # ~antiparallel flip -- keep the last axis
+                else:
+                    t = cap / ang
+                    axis = (np.sin((1 - t) * ang) * la + np.sin(t * ang) * axis) / s
+                    axis = axis / (np.linalg.norm(axis) + 1e-12)
+                log.warning('  connector axis jumped %.1f deg > %.1f deg cap -- clamped (outlier?).',
+                            np.degrees(ang), deg)
+        if deg > 0:
+            self._last_axis = axis
+        return axis
 
     def _converged_pose(self, T_conn):
         """The pose to RETURN if the scan has CONVERGED, else None -- mode aware.
@@ -372,6 +432,8 @@ class CableScanner:
         T_cam0 = self.robot.camera()
         self.good_views = 0
         self.view_idx = 0
+        self._last_origin = None
+        self._last_axis = None
         n = len(self.s.offsets)
         log.info('Scanning until the fit CONVERGES (need >= %d good views AND cross-view '
                  'agreement); %d view(s) per pass, up to %d pass(es).',

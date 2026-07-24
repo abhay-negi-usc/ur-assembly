@@ -49,6 +49,8 @@ sam3:
   min_contrast: 0.0                 # drop a junction whose connector/cable diameter ratio is below
                                     # this (a flat profile isn't a real cable->connector step); 0 = off
   work_dim: 1024                    # internal resolution for the diameter tracer
+  overlay_opacity: 0.5              # opacity of the drawn overlay (lines/arrows/dots/mask tint) over
+                                    # the raw image, 0..1 (1 = unchanged). Lower = the cable shows through
 
 # ---- Multi-view fusion (the connector pose estimator) ----
 connector_estimator:
@@ -121,6 +123,12 @@ scan:
     nominal_distance_m: 0.23
     scale_offsets: true          # xyz scales with range; tilts do not (invariant -- see the note)
     recenter: true               # aim the optical axis at the connector every step
+    # Rate-limit on the ESTIMATE between views (the cable is fixed, so its estimate should barely
+    # move view-to-view; a big jump = an outlier). Caps the per-view change in the estimated origin
+    # and axis so one bad detection can't lunge the approach. 0 = off. Bounds the ESTIMATE, not the
+    # camera step_m.
+    max_view_delta_m: 0.10
+    max_view_delta_deg: 45.0
 
   relative_bounds:               # safety clamp on |offset| from the scan-start pose, camera frame
     xyz: [0.08, 0.08, 0.05]

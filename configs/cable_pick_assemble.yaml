@@ -40,9 +40,10 @@ sam3:
   # ---- junction method only ----
   min_contrast: 0.0                 # drop junctions with too weak a connector/cable diameter step; 0 = off
   work_dim: 1024
+  overlay_opacity: 0.5              # opacity of the drawn overlay (lines/arrows/dots/tint), 0..1 (1 = unchanged)
 
 connector_estimator:
-  min_views: 2
+  min_views: 3
   min_inlier_views: 3
   min_parallax_deg: 3.0
   inlier_dist_m: 0.010
@@ -56,7 +57,7 @@ reconstruction:
   min_views: 3
   samples: 32
   max_range_m: 0.80
-  min_support_views: 2
+  min_support_views: 4
   junction_span_m: 0.04
   use_curve_plane_roll: false
   curvature_min_per_m: 5.0
@@ -71,7 +72,7 @@ grasp_tcp_offset:
   xyz: [0.0, 0.0, 0.0]
   rpy: [0.0, 0.0, 0.0]
 fingertip_grasp:
-  xyz: [0.0, -0.01254, 0.177]
+  xyz: [0.0, -0.01254, 0.178]
   rpy: [3.14159, 0.0, -1.5708]
 
 scan:
@@ -90,6 +91,8 @@ scan:
     nominal_distance_m: 0.23
     scale_offsets: true
     recenter: true
+    max_view_delta_m: 0.10        # cap the per-view change in the estimated origin (m); 0 = off
+    max_view_delta_deg: 45.0      # cap the per-view change in the estimated axis (deg); 0 = off
   relative_bounds:
     xyz: [0.08, 0.08, 0.05]
     rpy: [0.35, 0.35, 0.10]
@@ -136,7 +139,7 @@ pickup:
     enabled: true
     tare_before: true
     mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
-    stiffness:     [2000.0, 2000.0, 2000.0, 15.0, 15.0, 15.0]
+    stiffness:     [2000.0, 2000.0, 500.0, 15.0, 15.0, 15.0]
     damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     selected_axes: [1, 1, 1, 1, 1, 1]
     reference_rate_hz: 125.0
@@ -161,7 +164,7 @@ gripper:
 grasp_check:
   enabled: true
   groove_counts: 225             # SUCCESS: cable seated in the fingertip groove
-  empty_counts: 228              # full closure on nothing (no cable)
+  empty_counts: 229              # full closure on nothing (no cable)
   faces_max_counts: 223          # <= this: cable on the flat faces (a MISS)
   tolerance_counts: 1
   detect_empty: true             # 228 vs 225 makes empty reliably separable by POSITION now
@@ -172,12 +175,12 @@ grasp_check:
   recovery:
     enabled: true
     max_tries: 10                # N corrective iterations after the blind retry
-    loose_counts: 215            # loose grip the fingers open to before each reseat / retry
-    increment_m: 0.0005          # corrective arm step per iteration (0.5 mm)
+    loose_counts: 220            # loose grip the fingers open to before each reseat / retry
+    increment_m: 0.001          # corrective arm step per iteration (0.5 mm)
     faces_counts: 223            # pos <= faces_counts+band => FACES -> reseat AWAY from the cable
     faces_counts: 223            # pos <= faces_counts+band => FACES -> reseat AWAY from the cable
     faces_band_counts: 0         # these fingertips show only faces (a miss is always <= 223)
-    # toward_cable_axis: [0, 0, -1]   # GRASP-frame "toward the cable" (faces reseats along its NEGATIVE)
+    toward_cable_axis: [0, 0, -1]   # GRASP-frame "toward the cable" (faces reseats along its NEGATIVE)
     # toward_cable_axis: [0, 0, -1]   # GRASP-frame "toward the cable" (faces reseats along its NEGATIVE)
 
 speed:
@@ -197,7 +200,7 @@ debug: false
 reset:
   home_joints_deg: [90, -135, -135, 0, 90, 0]   # shoulder_pan, lift, elbow, wrist_1, wrist_2, wrist_3
   home_duration_s: 6.0
-  max_force_n: 30.0                              # guard: stop the home move if it hits something
+  max_force_n: 50.0                              # guard: stop the home move if it hits something
   compliance:                                    # admittance params for the compliant home move
     tare_before: true
     mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
@@ -219,8 +222,8 @@ assembly:
   # MEASURE THIS: jog to a good mate and read the chosen frame off the robot, then paste it here.
   target:
     frame: fingertip
-    xyz: [-0.128, -1.086, -0.073]
-    rpy: [0.015, -0.038, -1.601]
+    xyz: [-0.128, -1.087, -0.062]
+    rpy: [0.0386, 0.0230, -1.616]
 
   standoff:
     axis: [-1.0, 0.0, 0.0]

@@ -170,7 +170,12 @@ def _compliant_move(robot, adm, guard, T_start_ftip, T_target_ftip, duration,
     (robot/admittance.py) instead of a stiff moveL -- the SAME law the assembly insert uses. The
     fingertip yields to contact (a misplaced cable, the work surface, a cable that resists the lift)
     and springs back toward the reference. Returns True on completion (or an early guard trip =
-    contact); leaves the arm OUT of the servo loop."""
+    contact); leaves the arm OUT of the servo loop.
+
+    CARTESIAN reference: the tool0 pose is slerped start -> target. This is the straight-line tool
+    path, but near an IK branch boundary / SINGULARITY the servoL Jacobian inverse spikes the joint
+    velocity and the shoulder jerks into the controller's COLLISION-DETECTION protective stop (no
+    real contact). Keep the working region away from singularities (mid-range elbow/wrist)."""
     T_t0_ft = robot.T_tool0_fingertip
 
     def ref(T_ft):

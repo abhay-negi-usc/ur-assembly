@@ -78,6 +78,10 @@ class _Base:
         self.mislabel_overlap = float(s.get('mislabel_overlap', 0.6))
         self.adaptive = bool(s.get('adaptive', True))
         self.confidence_floor = float(s.get('confidence_floor', 0.2))
+        # Opacity of the drawn overlay (lines/arrows/dots/mask tint) over the raw image, 0..1.
+        # 1.0 = the detector's overlay unchanged; lower fades every drawn marker toward the raw
+        # frame so the cable underneath stays visible. Applied in _blend, after the detector renders.
+        self.overlay_opacity = float(np.clip(s.get('overlay_opacity', 1.0), 0.0, 1.0))
         self.dry_run = bool(cfg.get_path('robot.dry_run', False))
         self.last_debug = None
         self.core = None
@@ -107,6 +111,17 @@ class _Base:
     def _pil(self, frame):
         from PIL import Image
         return Image.fromarray(frame.rgb)
+
+    def _blend(self, orig_bgr, vis):
+        """Fade the rendered overlay `vis` toward the raw `orig_bgr` by overlay_opacity (1.0 = the
+        detector's overlay unchanged). Since render_overlay draws everything -- mask tint AND the
+        markers -- on a copy of the image, blending the whole result back is what lowers the marker
+        opacity without touching the sam3-abhay render code."""
+        if vis is None or self.overlay_opacity >= 1.0:
+            return vis
+        import cv2
+        return cv2.addWeighted(vis, self.overlay_opacity,
+                               orig_bgr, 1.0 - self.overlay_opacity, 0.0)
 
 
 class NeckDetector(_Base):
@@ -151,8 +166,10 @@ class NeckDetector(_Base):
     def _overlay(self, frame, res):
         import cv2
         bgr = cv2.cvtColor(frame.rgb, cv2.COLOR_RGB2BGR)
-        return self.core.render_overlay(
-            bgr, res.get('cleaned_cables', []), res.get('conn_masks', []), res.get('necks', []))
+        vis = self.core.render_overlay(
+            bgr.copy(), res.get('cleaned_cables', []), res.get('conn_masks', []),
+            res.get('necks', []))
+        return self._blend(bgr, vis)
 
 
 class JunctionDetector(_Base):
@@ -252,7 +269,8 @@ class JunctionDetector(_Base):
     def _overlay(self, frame, res):
         import cv2
         bgr = cv2.cvtColor(frame.rgb, cv2.COLOR_RGB2BGR)
-        return self.core.render_overlay(bgr, res.get('assembly'), res.get('result'))
+        vis = self.core.render_overlay(bgr.copy(), res.get('assembly'), res.get('result'))
+        return self._blend(bgr, vis)
 
 
 class TipDetector(_Base):
@@ -285,7 +303,8 @@ class TipDetector(_Base):
     def _overlay(self, frame, res):
         import cv2
         bgr = cv2.cvtColor(frame.rgb, cv2.COLOR_RGB2BGR)
-        return self.core.render_tip_overlay(bgr, res)
+        vis = self.core.render_tip_overlay(bgr.copy(), res)
+        return self._blend(bgr, vis)
 
 
 _MODES = {'neck': NeckDetector, 'junction': JunctionDetector, 'tip': TipDetector}

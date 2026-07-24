@@ -280,8 +280,10 @@ class JunctionDetector(_Base):
     @staticmethod
     def _assembly_ends(j, w, h):
         """Both endpoints of the traced assembly as (u, v, yaw), returned (A, B): A the end CLOSER to
-        the image centre, B the FARTHER. yaw points from each tip INTO the assembly (matching the
-        junction/connector frame convention). (None, None) if the trace is too short."""
+        the image centre, B the FARTHER. The direction is the PCA principal axis of a WINDOW of the
+        centreline near each endpoint (a least-squares line over many points, far steadier than a
+        two-point secant tangent), signed to point from the tip INTO the assembly -- matching the
+        junction/connector frame convention. (None, None) if the trace is too short."""
         try:
             path = np.asarray(j['_path'], dtype=float)     # (M,2) small-image (y,x), tip -> tip
             inv = 1.0 / float(j['_scale'])
@@ -291,14 +293,19 @@ class JunctionDetector(_Base):
         if m < 4:
             return None, None
         cx, cy = w / 2.0, h / 2.0
+        span = int(np.clip(0.2 * m, 4, 25))               # window of path points for the PCA
 
-        def endpoint(e, nb):
+        def endpoint(e, seg):
             ey, ex = path[e]
-            iy, ix = path[nb]
-            return (float(ex * inv), float(ey * inv), float(np.arctan2(iy - ey, ix - ex)))
+            c = seg.mean(axis=0)
+            _, _, vt = np.linalg.svd(seg - c, full_matrices=False)
+            major = vt[0]                                  # (dy, dx) principal axis (unsigned)
+            if float(np.dot(major, c - path[e])) < 0:      # point from the tip toward the interior
+                major = -major
+            return (float(ex * inv), float(ey * inv), float(np.arctan2(major[0], major[1])))
 
-        e0 = endpoint(0, min(5, m - 1))
-        e1 = endpoint(m - 1, max(0, m - 6))
+        e0 = endpoint(0, path[0:span + 1])
+        e1 = endpoint(m - 1, path[m - 1 - span:m])
         d0 = (e0[0] - cx) ** 2 + (e0[1] - cy) ** 2
         d1 = (e1[0] - cx) ** 2 + (e1[1] - cy) ** 2
         return (e0, e1) if d0 <= d1 else (e1, e0)          # A = closer to centre, B = farther

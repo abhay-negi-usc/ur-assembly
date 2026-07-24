@@ -493,16 +493,22 @@ class CableScanner:
                     log.info('  cable-end not yet consistent across views -- holding range, '
                              'gathering parallax before moving closer.')
 
-                # Switch trigger: the JUNCTION range (its LOCATION may be wrong far out, but the
-                # range on the cable is roughly right -- good enough to decide "close enough").
-                P_j = self.estimator.rough_origin() if frame.T_base_cam is not None else None
-                if P_j is not None:
-                    dj = float(np.linalg.norm(frame.T_base_cam[:3, 3] - np.asarray(P_j, float)))
+                # Switch trigger: the JUNCTION range from a CONSISTENT junction fit (parallax +
+                # inlier agreement), NOT the ungated rough_origin. rough_origin's DEPTH is the
+                # weakest axis at low parallax (error ~ Z^2/baseline) and reads TOO CLOSE early, so
+                # it switched while the camera was still far. Until the junction fit is consistent,
+                # keep approaching on the cable-end; the depth also sharpens as the camera closes in.
+                T_j = (self.estimator.estimate()
+                       if self.estimator.n_views >= self.estimator.min_inlier_views else None)
+                if T_j is not None and frame.T_base_cam is not None:
+                    dj = float(np.linalg.norm(frame.T_base_cam[:3, 3] - T_j[:3, 3]))
                     log.info('  junction range %.0f mm (switch at %.0f mm).', dj * 1000, switch * 1000)
                     if dj <= switch:
                         log.info('Phase 1 complete: junction within %.0f mm -- switching to junction '
                                  'estimation.', dj * 1000)
                         return True
+                else:
+                    log.info('  junction not yet consistent -- range unknown, not switching.')
         log.warning('Phase 1 swept %d pass(es) without reaching %.0f mm; proceeding to junction '
                     'estimation from here.', self.s.max_passes, switch * 1000)
         return True

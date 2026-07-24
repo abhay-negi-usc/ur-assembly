@@ -479,10 +479,19 @@ class CableScanner:
                 self.end_estimator.add_view(edet, frame.K, frame.T_base_cam, frame.stamp)
                 self.estimator.add_view(jdet, frame.K, frame.T_base_cam, frame.stamp)
 
-                # Steer on the ROBUST endpoint; a closer floor so we can reach the junction switch.
-                P_end = self.end_estimator.rough_origin()
-                if P_end is not None:
-                    T_cam0 = self._approach(T_cam0, P_end, floor=max(0.05, switch - 0.03))
+                # Move closer ONLY once the cable-end is cross-view CONSISTENT -- the estimator's
+                # RANSAC inlier-agreement + parallax gate (estimate(), the SAME consistency the
+                # junction fit requires), not the ungated rough_origin -- so the approach never
+                # lunges toward a one-off / outlier endpoint. Until then, keep sweeping to gather
+                # parallax without stepping in.
+                T_end = (self.end_estimator.estimate()
+                         if self.end_estimator.n_views >= self.end_estimator.min_inlier_views
+                         else None)
+                if T_end is not None:
+                    T_cam0 = self._approach(T_cam0, T_end[:3, 3], floor=max(0.05, switch - 0.03))
+                else:
+                    log.info('  cable-end not yet consistent across views -- holding range, '
+                             'gathering parallax before moving closer.')
 
                 # Switch trigger: the JUNCTION range (its LOCATION may be wrong far out, but the
                 # range on the cable is roughly right -- good enough to decide "close enough").

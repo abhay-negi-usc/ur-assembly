@@ -220,10 +220,12 @@ class JunctionDetector(_Base):
     def detect_both(self, frame):
         """(junction_dets, end_dets) from ONE SAM3 pass -- for the two-phase 'cable_end' scan.
 
-        junction_dets are the usual [(u, v, yaw)] junction detections. end_dets are [(u, v, yaw)] for
-        the CONNECTOR-side ENDPOINT of the traced cable+connector assembly (the extreme tip on the
-        thick side) with the assembly's tangent there -- a robust extreme point to STEER the approach
-        on, while the junction is fused only to measure the range for the phase switch."""
+        junction_dets are the usual [(u, v, yaw)] junction detections. The traced assembly has TWO
+        ends; they are labelled by IMAGE-CENTRE proximity -- 'A' the end CLOSER to the image centre
+        (the one being tracked/approached), 'B' the FARTHER one -- and BOTH are drawn on the overlay
+        so the two-ends failure is visible. end_dets is [(u, v, yaw)] for END A only: Phase 1 steers
+        on A, and because it also requires cross-view consistency, an A that flips between the two
+        ends simply won't agree across views -> no approach (a built-in guard on the ambiguous case)."""
         if self.dry_run:
             return [], []
         res = self.detector.detect(self._pil(frame))
@@ -240,22 +242,25 @@ class JunctionDetector(_Base):
             dx, dy = j['direction']
             jdet = [(float(u), float(v), float(np.arctan2(dy, dx)))]
 
-        end = self._connector_end(j)
-        if end is not None and self.last_debug is not None:
-            self.last_debug = self._draw_end(self.last_debug, *end)
-        log.info('  junction=%d end=%d | cables=%d connectors=%d', len(jdet), 1 if end else 0,
+        h, w = frame.rgb.shape[:2]
+        end_a, end_b = self._assembly_ends(j, w, h)
+        if self.last_debug is not None:
+            if end_a is not None:
+                self._draw_end(self.last_debug, *end_a, label='cable end A', col=(255, 255, 0))
+            if end_b is not None:
+                self._draw_end(self.last_debug, *end_b, label='cable end B', col=(0, 165, 255))
+        log.info('  junction=%d endA=%d endB=%d | cables=%d connectors=%d', len(jdet),
+                 1 if end_a else 0, 1 if end_b else 0,
                  _count(res.get('cables_raw')), _count(res.get('connectors_raw')))
-        return jdet, ([end] if end is not None else [])
+        return jdet, ([end_a] if end_a is not None else [])   # Phase 1 steers on cable end A
 
     @staticmethod
-    def _draw_end(vis, u, v, yaw):
-        """Draw the CABLE-END marker on the overlay -- a dot + arrow + label like the junction's, but
-        in a distinct CYAN so Phase 1's steering target is visible alongside the amber junction.
-        Drawn AFTER the opacity blend, so it stays fully visible."""
+    def _draw_end(vis, u, v, yaw, label='cable end', col=(255, 255, 0)):
+        """Draw a cable-END marker on the overlay -- a dot + arrow + label like the junction's, in
+        `col` (BGR). Drawn AFTER the opacity blend, so it stays fully visible."""
         import cv2
-        h, w = vis.shape[:2]
-        diag = float(np.hypot(w, h))
-        col = (255, 255, 0)                                # cyan (BGR)
+        wh = vis.shape[:2]
+        diag = float(np.hypot(wh[1], wh[0]))
         thick = max(2, int(0.003 * diag))
         r = max(5, int(0.006 * diag))
         p0 = (int(round(u)), int(round(v)))
@@ -264,41 +269,39 @@ class JunctionDetector(_Base):
         cv2.arrowedLine(vis, p0, p1, col, thick, cv2.LINE_AA, tipLength=0.22)
         cv2.circle(vis, p0, r, col, -1, cv2.LINE_AA)
         cv2.circle(vis, p0, r, (0, 0, 0), max(1, thick // 2), cv2.LINE_AA)
-        lbl = 'cable end'
         fscale = 0.0011 * diag
         fthick = max(2, thick // 2)
-        (tw, th), bl = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, fscale, fthick)
+        (tw, th), bl = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, fscale, fthick)
         ox, oy = p0[0] + r + 6, max(th + 6, p0[1] - r)
         cv2.rectangle(vis, (ox - 4, oy - th - 6), (ox + tw + 4, oy + bl), (0, 0, 0), -1)
-        cv2.putText(vis, lbl, (ox, oy), cv2.FONT_HERSHEY_SIMPLEX, fscale, col, fthick, cv2.LINE_AA)
+        cv2.putText(vis, label, (ox, oy), cv2.FONT_HERSHEY_SIMPLEX, fscale, col, fthick, cv2.LINE_AA)
         return vis
 
     @staticmethod
-    def _connector_end(j):
-        """The CONNECTOR-side endpoint of the traced assembly as (u, v, yaw), or None.
-
-        The connector is the THICKER side of the junction; the endpoint is that end of the traced
-        centreline. yaw is the assembly tangent at the tip, pointing INTO the assembly (toward the
-        junction) so the frame convention matches the junction's."""
+    def _assembly_ends(j, w, h):
+        """Both endpoints of the traced assembly as (u, v, yaw), returned (A, B): A the end CLOSER to
+        the image centre, B the FARTHER. yaw points from each tip INTO the assembly (matching the
+        junction/connector frame convention). (None, None) if the trace is too short."""
         try:
-            path = np.asarray(j['_path'], dtype=float)     # (M,2) small-image (y,x), tip A -> tip B
-            dia = np.asarray(j['_dia'], dtype=float)
-            k = int(j['_junction_k'])
+            path = np.asarray(j['_path'], dtype=float)     # (M,2) small-image (y,x), tip -> tip
             inv = 1.0 / float(j['_scale'])
         except (KeyError, TypeError, ValueError):
-            return None
+            return None, None
         m = len(path)
-        if m < 4 or k < 0 or k > m - 1:
-            return None
-        left = float(np.mean(dia[:max(1, k)])) if k > 0 else -np.inf
-        right = float(np.mean(dia[k + 1:])) if k < m - 1 else -np.inf
-        conn_on_right = right >= left
-        e = m - 1 if conn_on_right else 0                  # the connector-side endpoint index
-        nb = int(np.clip(e - 5 if conn_on_right else e + 5, 0, m - 1))   # a point just interior
-        ey, ex = path[e]
-        iy, ix = path[nb]
-        yaw = float(np.arctan2(iy - ey, ix - ex))          # tip -> interior, pixel frame
-        return (float(ex * inv), float(ey * inv), yaw)
+        if m < 4:
+            return None, None
+        cx, cy = w / 2.0, h / 2.0
+
+        def endpoint(e, nb):
+            ey, ex = path[e]
+            iy, ix = path[nb]
+            return (float(ex * inv), float(ey * inv), float(np.arctan2(iy - ey, ix - ex)))
+
+        e0 = endpoint(0, min(5, m - 1))
+        e1 = endpoint(m - 1, max(0, m - 6))
+        d0 = (e0[0] - cx) ** 2 + (e0[1] - cy) ** 2
+        d1 = (e1[0] - cx) ** 2 + (e1[1] - cy) ** 2
+        return (e0, e1) if d0 <= d1 else (e1, e0)          # A = closer to centre, B = farther
 
     def detect_cable(self, frame):
         """The junction PLUS the ordered CABLE-side centreline -- for the reconstruction scan mode.

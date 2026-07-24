@@ -217,6 +217,61 @@ class JunctionDetector(_Base):
                  _count(res.get('cables_raw')), _count(res.get('connectors_raw')))
         return out
 
+    def detect_both(self, frame):
+        """(junction_dets, end_dets) from ONE SAM3 pass -- for the two-phase 'cable_end' scan.
+
+        junction_dets are the usual [(u, v, yaw)] junction detections. end_dets are [(u, v, yaw)] for
+        the CONNECTOR-side ENDPOINT of the traced cable+connector assembly (the extreme tip on the
+        thick side) with the assembly's tangent there -- a robust extreme point to STEER the approach
+        on, while the junction is fused only to measure the range for the phase switch."""
+        if self.dry_run:
+            return [], []
+        res = self.detector.detect(self._pil(frame))
+        self.last_debug = self._overlay(frame, res)
+        j = res.get('result')
+        if j is None:
+            log.info('  no junction/endpoint this view.')
+            return [], []
+
+        jdet = []
+        contrast = float(j.get('contrast', 0.0))
+        if not (self.min_contrast > 0.0 and contrast < self.min_contrast):
+            u, v = j['junction']
+            dx, dy = j['direction']
+            jdet = [(float(u), float(v), float(np.arctan2(dy, dx)))]
+
+        end = self._connector_end(j)
+        log.info('  junction=%d end=%d | cables=%d connectors=%d', len(jdet), 1 if end else 0,
+                 _count(res.get('cables_raw')), _count(res.get('connectors_raw')))
+        return jdet, ([end] if end is not None else [])
+
+    @staticmethod
+    def _connector_end(j):
+        """The CONNECTOR-side endpoint of the traced assembly as (u, v, yaw), or None.
+
+        The connector is the THICKER side of the junction; the endpoint is that end of the traced
+        centreline. yaw is the assembly tangent at the tip, pointing INTO the assembly (toward the
+        junction) so the frame convention matches the junction's."""
+        try:
+            path = np.asarray(j['_path'], dtype=float)     # (M,2) small-image (y,x), tip A -> tip B
+            dia = np.asarray(j['_dia'], dtype=float)
+            k = int(j['_junction_k'])
+            inv = 1.0 / float(j['_scale'])
+        except (KeyError, TypeError, ValueError):
+            return None
+        m = len(path)
+        if m < 4 or k < 0 or k > m - 1:
+            return None
+        left = float(np.mean(dia[:max(1, k)])) if k > 0 else -np.inf
+        right = float(np.mean(dia[k + 1:])) if k < m - 1 else -np.inf
+        conn_on_right = right >= left
+        e = m - 1 if conn_on_right else 0                  # the connector-side endpoint index
+        nb = int(np.clip(e - 5 if conn_on_right else e + 5, 0, m - 1))   # a point just interior
+        ey, ex = path[e]
+        iy, ix = path[nb]
+        yaw = float(np.arctan2(iy - ey, ix - ex))          # tip -> interior, pixel frame
+        return (float(ex * inv), float(ey * inv), yaw)
+
     def detect_cable(self, frame):
         """The junction PLUS the ordered CABLE-side centreline -- for the reconstruction scan mode.
 

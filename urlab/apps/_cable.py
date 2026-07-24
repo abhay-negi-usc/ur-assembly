@@ -29,8 +29,19 @@ def build_scanner(cfg, robot, camera):
                 % cfg.get_path('sam3.mode', 'junction'))
         reconstructor = CableReconstructor(cfg)
 
+    # Two-phase 'cable-end' scan (opt-in): a second estimator triangulates the connector ENDPOINT
+    # that Phase 1 steers on. Needs the junction detector (it exposes the trace via detect_both).
+    end_estimator = None
+    if scan_cfg.cable_end_enabled:
+        if not hasattr(detector, 'detect_both'):
+            raise ValueError(
+                "cable_end.enabled needs the junction detector's endpoint -- set sam3.mode: junction "
+                "(got %r)." % cfg.get_path('sam3.mode', 'junction'))
+        end_estimator = ConnectorEstimator(cfg)
+
     scanner = CableScanner(robot, camera, detector, estimator, scan_cfg,
-                           data_root=cfg.get('data_dir', 'data'), reconstructor=reconstructor)
+                           data_root=cfg.get('data_dir', 'data'), reconstructor=reconstructor,
+                           end_estimator=end_estimator)
     return scanner, detector, estimator
 
 

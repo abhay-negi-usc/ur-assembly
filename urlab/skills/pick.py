@@ -99,7 +99,8 @@ class GraspRecovery:
     `faces_band_counts` sets the faces/tips split -- tune it on hardware."""
 
     def __init__(self, cfg):
-        rc = (cfg.section('grasp_check').get('recovery', {}) or {})
+        gc = cfg.section('grasp_check')
+        rc = (gc.get('recovery', {}) or {})
         self.enabled = bool(rc.get('enabled', True))
         self.max_tries = int(rc.get('max_tries', 5))
         self.loose_counts = int(rc.get('loose_counts', 215))
@@ -107,6 +108,39 @@ class GraspRecovery:
         self.faces_counts = int(rc.get('faces_counts', 220))
         self.faces_band = int(rc.get('faces_band_counts', 1))
         self._toward_cfg = rc.get('toward_cable_axis', None)   # grasp frame; else -approach_axis
+
+        # Optional: save the wrist-camera view at EACH grasp close, labelled with the gripper count
+        # (in the filename and drawn on the image), for correlating the visual grasp state with the
+        # count bands. Written to <data_dir>/<capture_subdir>/<timestamp>/.
+        self.capture_images = bool(gc.get('capture_images', False))
+        self._data_root = cfg.get('data_dir', 'data')
+        self._capture_subdir = gc.get('capture_subdir', 'grasp_images')
+        self._capture_dir = None
+        self._capture_seq = 0
+
+    def _capture_grasp(self, camera, count, tag, result):
+        """Save the wrist-camera frame labelled with the gripper `count` (filename + on-image).
+        Best-effort; a no-op if capture is off or there is no camera."""
+        if not self.capture_images or camera is None or getattr(camera, 'dry_run', False):
+            return
+        try:
+            import os
+            import cv2
+            from datetime import datetime
+            if self._capture_dir is None:
+                self._capture_dir = os.path.join(self._data_root, self._capture_subdir,
+                                                 datetime.now().strftime('%Y%m%d_%H%M%S'))
+            os.makedirs(self._capture_dir, exist_ok=True)
+            img = camera.capture().color.copy()
+            cv2.putText(img, f'{count} counts  {tag}  {result}', (12, 34),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
+            path = os.path.join(self._capture_dir,
+                                f'grasp_{self._capture_seq:03d}_{tag}_{count}counts_{result}.png')
+            cv2.imwrite(path, img)
+            self._capture_seq += 1
+            log.info('  saved grasp image %s', path)
+        except Exception as exc:                       # noqa: BLE001 -- capture is best-effort
+            log.warning('  could not save grasp image: %s', exc)
 
     def _toward(self, geom):
         """Unit 'toward the cable' direction in the GRASP frame: the config override, else the
@@ -120,14 +154,16 @@ class GraspRecovery:
         """'faces' (at/near the count floor) | 'tips' (above it, but short of success)."""
         return 'faces' if pos <= self.faces_counts + self.faces_band else 'tips'
 
-    def grasp_with_recovery(self, robot, geom, check):
+    def grasp_with_recovery(self, robot, geom, check, camera=None):
         """Close, grasp-check, and on a MISS run the blind retry + corrective loop. Returns
         'ok' | 'missed' | 'empty' | 'abort'. Leaves the (possibly corrected) grasp in
-        geom.T_base_grasp."""
+        geom.T_base_grasp. If `camera` is given and grasp_check.capture_images is on, the wrist view
+        is saved (labelled with the gripper count) at each close."""
         g = robot.gripper
         if not g.close('grasp'):
             return 'abort'
         result = check.evaluate(g)
+        self._capture_grasp(camera, g.position(), 'close', result)
         if result != 'missed' or not self.enabled:
             return result
 
@@ -136,6 +172,7 @@ class GraspRecovery:
         if not (g.go_to(self.loose_counts, 'loose grip') and g.close('grasp')):
             return 'abort'
         result = check.evaluate(g)
+        self._capture_grasp(camera, g.position(), 'blind', result)
         if result != 'missed':
             return result
 
@@ -156,6 +193,7 @@ class GraspRecovery:
                     and g.close('grasp')):
                 return 'abort'
             result = check.evaluate(g)
+            self._capture_grasp(camera, g.position(), f'reseat{i + 1}', result)
             if result != 'missed':
                 return result
 

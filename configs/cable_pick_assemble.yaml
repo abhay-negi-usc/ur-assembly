@@ -178,6 +178,7 @@ grasp_check:
   detect_empty: true             # 228 vs 225 makes empty reliably separable by POSITION now
   settle_s: 1.0
   max_retries: 2                 # whole scan->grasp attempts (outer loop) if recovery still misses
+  capture_images: false          # save the wrist view at each grasp close, labelled with the count
 
   # ---- Failed-grasp RECOVERY (see skills/pick.py GraspRecovery + cable_pick_place.yaml notes) ----
   recovery:

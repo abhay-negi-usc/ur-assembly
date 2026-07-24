@@ -46,8 +46,9 @@ def _attempt(cfg, robot, scanner, geom, check, recovery, grasp, confirm):
         return 'abort'
     # Close + grasp-check + recovery: a blind loose->close retry, then mode-directed reseat nudges
     # (see GraspRecovery) instead of a bare close, so a cable on the fingertip flats/tips is
-    # reseated rather than failing the whole scan->grasp attempt.
-    return recovery.grasp_with_recovery(robot, geom, check)
+    # reseated rather than failing the whole scan->grasp attempt. The scanner's wrist camera lets
+    # recovery save count-labelled grasp images when grasp_check.capture_images is on.
+    return recovery.grasp_with_recovery(robot, geom, check, camera=scanner.camera)
 
 
 def build_and_run(cfg, robot, camera, args):

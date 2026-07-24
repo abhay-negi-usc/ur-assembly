@@ -232,6 +232,9 @@ grasp_check:
   detect_empty: true             # 228 vs 225 makes empty reliably separable by POSITION now
   settle_s: 1.0
   max_retries: 2                 # whole scan->grasp attempts (outer loop) if recovery still misses
+  capture_images: false          # save the wrist-camera view at EACH grasp close, labelled with the
+                                 # gripper count (filename + on-image) -> data/grasp_images/<stamp>/,
+                                 # for correlating the visual grasp state with the count bands
 
   # ---- Failed-grasp RECOVERY (see skills/pick.py GraspRecovery) ----
   # On a MISS (cable on the flats, <= faces_max_counts): a blind loose->close retry first, then up

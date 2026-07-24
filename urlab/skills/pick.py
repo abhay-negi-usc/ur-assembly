@@ -164,13 +164,13 @@ class GraspRecovery:
         return 'missed'
 
 
-def _grasp_descent_compliant(robot, adm, guard, T_start_ftip, T_grasp_ftip, duration,
-                             tare_before=True, settle_s=0.5):
-    """Descend from the current (grasp-align) pose to the grasp pose under SOFTWARE ADMITTANCE
+def _compliant_move(robot, adm, guard, T_start_ftip, T_target_ftip, duration,
+                    tare_before=True, settle_s=0.5, what='move'):
+    """Move the fingertip from its CURRENT pose to T_target under SOFTWARE ADMITTANCE
     (robot/admittance.py) instead of a stiff moveL -- the SAME law the assembly insert uses. The
-    fingertip yields to contact (a slightly misplaced cable, the work surface) and springs back
-    toward the reference grasp pose. Returns True on completion (or an early guard trip = contact);
-    leaves the arm OUT of the servo loop."""
+    fingertip yields to contact (a misplaced cable, the work surface, a cable that resists the lift)
+    and springs back toward the reference. Returns True on completion (or an early guard trip =
+    contact); leaves the arm OUT of the servo loop."""
     T_t0_ft = robot.T_tool0_fingertip
 
     def ref(T_ft):
@@ -182,32 +182,37 @@ def _grasp_descent_compliant(robot, adm, guard, T_start_ftip, T_grasp_ftip, dura
     adm.warmup(ref(T_start_ftip), tare_fn=tare)         # settle the servo (+ tare) before the guard
     if guard is not None:
         guard.reset()
-    log.info('Grasp descent under ADMITTANCE (S=%.0f N/m trans, %.0f Nm/rad rot) over %.1fs%s.',
-             adm.S[0], adm.S[3], duration,
+    log.info('%s under ADMITTANCE (S=%.0f N/m trans, %.0f Nm/rad rot) over %.1fs%s.',
+             what, adm.S[0], adm.S[3], duration,
              '' if guard is None
              else f', guarded at {guard.max_force:.0f} N / {guard.max_torque:.1f} Nm')
     try:
-        result = adm.ramp(ref(T_start_ftip), ref(T_grasp_ftip), duration, guard)
+        result = adm.ramp(ref(T_start_ftip), ref(T_target_ftip), duration, guard)
         if result == 'seated':
-            log.info('  contact during the compliant descent -- holding here for the grasp.')
+            log.info('  contact reached -- holding here (compliant).')
         else:
-            adm.hold(ref(T_grasp_ftip), settle_s, guard)
+            adm.hold(ref(T_target_ftip), settle_s, guard)
         return True
     finally:
-        robot.arm.servo_stop()                          # leave the servo loop before the gripper close
+        robot.arm.servo_stop()                          # leave the servo loop before the next step
 
 
 class GraspController:
-    """Executes the grasp DESCENT (grasp-align -> grasp) in the configured mode:
+    """Moves the fingertip in the configured pickup mode -- used for BOTH the grasp DESCENT
+    (grasp-align -> grasp) and the LIFT (grasp -> lift), so they always match:
 
-      * 'position'   -- a stiff moveL to the grasp pose (default; unchanged behaviour).
+      * 'position'   -- a stiff moveL (default; unchanged behaviour).
       * 'compliance' -- SOFTWARE ADMITTANCE (the same spring-mass-damper law as the assembly
-                        insert): the fingertip yields to contact and springs back toward the grasp
-                        pose. Parameters mirror assembly.compliance, plus an optional force_guard
-                        backstop and the descent duration.
+                        insert): the fingertip yields to contact and springs back toward the
+                        reference. Parameters mirror assembly.compliance, plus an optional
+                        force_guard backstop and the ramp duration.
+
+    Keeping the lift in the SAME mode matters: a compliant grasp leaves the arm holding the cable
+    under the admittance law, and a stiff guarded lift then fights the cable's resistance and trips
+    the force guard. A compliant lift yields instead.
 
     Reads the `pickup:` config section. The admittance controller (and optional guard) are built
-    lazily on first compliant descent, so a position-mode run never touches the servo layer."""
+    lazily on first compliant move, so a position-mode run never touches the servo layer."""
 
     def __init__(self, cfg):
         p = cfg.section('pickup')
@@ -232,15 +237,27 @@ class GraspController:
             if self._guard_cfg.get('enabled', False):
                 self._guard = ForceGuard(robot.arm, self._guard_cfg)
 
+    def _to(self, robot, T_target, label, what, position_guard=None):
+        """Move the fingertip to T_target in the configured mode. In POSITION mode, `position_guard`
+        (a callable taking the move thunk) runs it force-guarded; in COMPLIANCE mode the guard is
+        ignored -- the admittance bounds the contact force itself (a stiff guarded move is exactly
+        what trips on the cable's resistance)."""
+        if self.compliant:
+            self._lazy_build(robot)
+            return _compliant_move(robot, self._adm, self._guard, robot.fingertip(), T_target,
+                                   self.descent_time_s, self.tare_before, self.settle_s, what)
+        if position_guard is not None:
+            return position_guard(lambda: robot.move_fingertip(T_target, label))
+        return robot.move_fingertip(T_target, label)
+
     def descend(self, robot, geom, label='grasp'):
-        """Move to geom.T_base_grasp in the configured mode (from wherever the arm is -- the
-        grasp-align pose). Returns bool."""
-        if not self.compliant:
-            return robot.move_fingertip(geom.T_base_grasp, label)
-        self._lazy_build(robot)
-        return _grasp_descent_compliant(robot, self._adm, self._guard, robot.fingertip(),
-                                        geom.T_base_grasp, self.descent_time_s, self.tare_before,
-                                        self.settle_s)
+        """Move to the grasp pose (from wherever the arm is -- the grasp-align pose)."""
+        return self._to(robot, geom.T_base_grasp, label, 'Grasp descent')
+
+    def lift(self, robot, geom, label='lift', position_guard=None):
+        """Lift to geom.lift() in the SAME mode as the descent. `position_guard` guards the
+        position-mode lift only."""
+        return self._to(robot, geom.lift(), label, 'Lift', position_guard=position_guard)
 
 
 def log_grasp_delta(robot, T_base_grasp, label):

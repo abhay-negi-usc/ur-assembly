@@ -105,7 +105,10 @@ def build_and_run(cfg, robot, camera, args):
     ok = False
     try:
         ok = runner.run([
-            ('lift', lambda: _guarded(robot, guard, lambda: robot.move_fingertip(geom.lift(), 'lift'))),
+            # Lift in the SAME mode as the pickup descent. Position mode keeps the force guard (a
+            # trip = collision); compliance mode yields to the cable's resistance instead of tripping.
+            ('lift', lambda: grasp.lift(robot, geom, 'lift',
+                                        position_guard=lambda mv: _guarded(robot, guard, mv))),
             ('move to stand-off',
              lambda: _guarded(robot, guard,
                               lambda: robot.move_fingertip(T_standoff, 'stand-off'))),

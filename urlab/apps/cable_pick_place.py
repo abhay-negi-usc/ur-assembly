@@ -84,7 +84,7 @@ def build_and_run(cfg, robot, camera, args):
     # Place, release, then RESET at the end (open gripper + go home under admittance).
     runner = StepRunner(log, confirm=confirm is not None)
     return runner.run([
-        ('lift', lambda: robot.move_fingertip(geom.lift(), 'lift')),
+        ('lift', lambda: grasp.lift(robot, geom, 'lift')),   # same mode as the pickup descent
         ('move to pre-place', lambda: robot.move_fingertip(geom.pre_place(), 'pre-place')),
         ('move to place', lambda: robot.move_fingertip(geom.place(), 'place')),
         ('open gripper (release)', robot.gripper.open),

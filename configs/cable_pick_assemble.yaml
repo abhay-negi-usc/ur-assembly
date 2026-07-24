@@ -65,6 +65,14 @@ reconstruction:
   min_pose_shift_m: 0.003
 
 connector_frame: connector
+
+# ---- Two-phase 'cable-end' approach (opt-in; see cable_pick_place.yaml for the full note) ----
+# Phase 1 steers on the robust connector ENDPOINT until the junction is within switch_distance_m,
+# then switches to the junction scan. Needs sam3.mode: junction.
+cable_end:
+  enabled: false
+  switch_distance_m: 0.20
+
 connector_grasp:
   xyz: [0.0, 0.0, 0.0]
   rpy: [0.0, 0.0, 0.0]

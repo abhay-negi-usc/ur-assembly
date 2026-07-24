@@ -51,6 +51,14 @@ class ScanConfig:
         rc = rc or {}
         self.recon_max_reproj_px = float(rc.get('max_reproj_error_px', 3.0))
         self.recon_min_pose_shift_m = float(rc.get('min_pose_shift_m', 0.003))
+        # Two-phase 'cable-end' scan (opt-in). Phase 1 STEERS the approach on the robust cable+
+        # connector ENDPOINT (needs sam3.mode: junction, which exposes the trace) while fusing the
+        # junction only to measure its range; it switches to the normal junction/reconstruction scan
+        # (Phase 2) once the junction is within switch_distance_m.
+        ce = cfg.section('cable_end') if hasattr(cfg, 'section') else {}
+        ce = ce or {}
+        self.cable_end_enabled = bool(ce.get('enabled', False))
+        self.cable_end_switch_m = float(ce.get('switch_distance_m', 0.20))
         # A detected view only counts toward the good-view quota (min_good_views, the fit-trust
         # gate before the grasp) if the camera is within this range of the cable -- so the fit is
         # built from CLOSE, low-depth-error views. Detections FARTHER than this are still ingested
@@ -102,12 +110,13 @@ class CableScanner:
     viewpoints; returns T_base_connector or None."""
 
     def __init__(self, robot, camera, detector, estimator, scan_cfg, data_root='data',
-                 reconstructor=None):
+                 reconstructor=None, end_estimator=None):
         self.robot = robot
         self.camera = camera
         self.detector = detector
         self.estimator = estimator
         self.reconstructor = reconstructor           # CableReconstructor, only in 'reconstruction' mode
+        self.end_estimator = end_estimator           # ConnectorEstimator for the cable-end (Phase 1)
         self.mode = scan_cfg.mode
         self.s = scan_cfg
         self.scan_distance = None                    # camera->connector range; unknown until fit
@@ -257,12 +266,14 @@ class CableScanner:
         rpy = np.clip(rpy, -self.s.bounds_rpy, self.s.bounds_rpy)
         return xyz, rpy
 
-    def _approach(self, T_cam0, P):
-        """After a good view: re-centre the cable and step the anchor closer toward the connector
-        origin `P` (a base-frame 3-vector -- from the strict fit if it has converged, else a rough
-        origin). Returns the new anchor (unchanged if there is no origin to aim at yet)."""
+    def _approach(self, T_cam0, P, floor=None):
+        """After a good view: re-centre the cable and step the anchor closer toward the target origin
+        `P` (a base-frame 3-vector). `floor` overrides the approach range floor (Phase 1 steers on
+        the cable-end with a closer floor so it can reach the junction-range switch). Returns the new
+        anchor (unchanged if there is no origin to aim at yet)."""
         if P is None:
             return T_cam0
+        min_d = self.s.min_distance_m if floor is None else float(floor)
 
         P = np.asarray(P, dtype=float)
         C = T_cam0[:3, 3]
@@ -272,15 +283,15 @@ class CableScanner:
             return T_cam0
         self.scan_distance = d
 
-        at_floor = (not self.s.approach_enabled) or (d <= self.s.min_distance_m + 1e-4)
-        d_new = d if at_floor else max(self.s.min_distance_m, d - self.s.step_m)
+        at_floor = (not self.s.approach_enabled) or (d <= min_d + 1e-4)
+        d_new = d if at_floor else max(min_d, d - self.s.step_m)
         C_new = P + v / d * d_new
 
         T_new = look_at(C_new, P, T_cam0) if self.s.recenter else _with_origin(T_cam0, C_new)
         self.scan_distance = d_new
         if at_floor:
             log.info('  at the %.0f mm view floor (%.0f mm) -- holding range.',
-                     self.s.min_distance_m * 1000, d * 1000)
+                     min_d * 1000, d * 1000)
         else:
             log.info('  approach: %.0f -> %.0f mm; offsets now scale x%.2f.',
                      d * 1000, d_new * 1000, d_new / self.s.nominal_distance_m)
@@ -418,6 +429,76 @@ class CableScanner:
 
     # ------------------------------------------------------------------ run
     def scan(self, confirm=None):
+        """Return T_base_connector, or None. In the 'cable_end' mode this first runs Phase 1 (approach
+        steered by the robust cable+connector endpoint, until the junction is within
+        cable_end.switch_distance_m), then Phase 2 (the normal junction/reconstruction convergence
+        scan) from the resulting CLOSE pose. Otherwise it is just Phase 2."""
+        if self.s.cable_end_enabled and self.end_estimator is not None:
+            if not hasattr(self.detector, 'detect_both'):
+                log.error("cable_end scan needs the junction detector (sam3.mode: junction); "
+                          "detector has no detect_both. Running the normal scan.")
+            elif not self._approach_cable_end(confirm):
+                return None
+            else:
+                # Fresh junction fit from the CLOSE views -- drop the far Phase-1 detections.
+                self.estimator.reset()
+                if self.reconstructor is not None:
+                    self.reconstructor.reset()
+        return self._scan_junction(confirm)
+
+    def _approach_cable_end(self, confirm):
+        """Phase 1: STEER the approach on the fused cable+connector ENDPOINT (robust extreme point)
+        while fusing the junction only to measure its range, until the junction is within
+        cable_end.switch_distance_m. Returns True to proceed to Phase 2, False on abort/failure."""
+        import time
+        T_cam0 = self.robot.camera()
+        self.view_idx = 0
+        self.end_estimator.reset()
+        self.estimator.reset()
+        n = len(self.s.offsets)
+        switch = self.s.cable_end_switch_m
+        log.info('Phase 1 (cable-end approach): steering to the CONNECTOR endpoint until the '
+                 'junction is within %.0f mm.', switch * 1000)
+
+        for p in range(self.s.max_passes):
+            for i, (xyz, rpy) in enumerate(self.s.offsets):
+                dxyz, drpy = self._scaled_offset(xyz, rpy)
+                target = clamp_pose_delta(T_cam0, T_cam0 @ xyzrpy_to_matrix(dxyz, drpy),
+                                          self.s.bounds_xyz, self.s.bounds_rpy)
+                self.view_idx += 1
+                label = f'cable-end view {i + 1}/{n} pass {p + 1}'
+                if confirm and not confirm(label):
+                    return False
+                if not self.robot.move_camera(target, label):
+                    return False
+
+                time.sleep(self.s.view_settle_s)
+                frame = self.camera.capture()
+                jdet, edet = self.detector.detect_both(frame)
+                self._save_overlay()
+                self.end_estimator.add_view(edet, frame.K, frame.T_base_cam, frame.stamp)
+                self.estimator.add_view(jdet, frame.K, frame.T_base_cam, frame.stamp)
+
+                # Steer on the ROBUST endpoint; a closer floor so we can reach the junction switch.
+                P_end = self.end_estimator.rough_origin()
+                if P_end is not None:
+                    T_cam0 = self._approach(T_cam0, P_end, floor=max(0.05, switch - 0.03))
+
+                # Switch trigger: the JUNCTION range (its LOCATION may be wrong far out, but the
+                # range on the cable is roughly right -- good enough to decide "close enough").
+                P_j = self.estimator.rough_origin() if frame.T_base_cam is not None else None
+                if P_j is not None:
+                    dj = float(np.linalg.norm(frame.T_base_cam[:3, 3] - np.asarray(P_j, float)))
+                    log.info('  junction range %.0f mm (switch at %.0f mm).', dj * 1000, switch * 1000)
+                    if dj <= switch:
+                        log.info('Phase 1 complete: junction within %.0f mm -- switching to junction '
+                                 'estimation.', dj * 1000)
+                        return True
+        log.warning('Phase 1 swept %d pass(es) without reaching %.0f mm; proceeding to junction '
+                    'estimation from here.', self.s.max_passes, switch * 1000)
+        return True
+
+    def _scan_junction(self, confirm=None):
         """Drive the scan until the connector fit CONVERGES. Returns T_base_connector, or None.
 
         The scan keeps ADDING viewpoints until RANSAC finds an origin consistent across the views

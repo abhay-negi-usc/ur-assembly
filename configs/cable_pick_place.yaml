@@ -85,6 +85,17 @@ reconstruction:
 
 connector_frame: connector
 
+# ---- Two-phase 'cable-end' approach (opt-in) ----
+# Phase 1 STEERS the approach on the robust cable+connector ENDPOINT (the extreme tip on the
+# connector side -- well-conditioned to triangulate, unlike the subtle junction), while fusing the
+# junction only to measure its RANGE. It switches to the normal junction scan (Phase 2) once the
+# junction is within switch_distance_m. Rationale: junction detection is unreliable from far/oblique
+# views (foreshortening false junctions), so approach on the endpoint and only estimate the junction
+# up close. Needs sam3.mode: junction.
+cable_end:
+  enabled: false                  # opt-in; true = run Phase 1 before the junction scan
+  switch_distance_m: 0.20         # switch to junction estimation once the junction is this close
+
 # Offset of the FINGERTIP target from the connector frame (x=axis, z=up, y=side). Identity -> the
 # fingertip lands on the connector frame at grasp.
 connector_grasp:

@@ -40,6 +40,7 @@ sam3:
   # ---- junction method only ----
   min_contrast: 0.0                 # drop junctions with too weak a connector/cable diameter step; 0 = off
   work_dim: 1024
+  overlay_opacity: 0.5              # opacity of the drawn overlay (lines/arrows/dots/tint), 0..1 (1 = unchanged)
 
 connector_estimator:
   min_views: 2
@@ -90,6 +91,8 @@ scan:
     nominal_distance_m: 0.23
     scale_offsets: true
     recenter: true
+    max_view_delta_m: 0.10        # cap the per-view change in the estimated origin (m); 0 = off
+    max_view_delta_deg: 45.0      # cap the per-view change in the estimated axis (deg); 0 = off
   relative_bounds:
     xyz: [0.08, 0.08, 0.05]
     rpy: [0.35, 0.35, 0.10]

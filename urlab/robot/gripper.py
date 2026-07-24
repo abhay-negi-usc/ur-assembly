@@ -152,6 +152,29 @@ class Robotiq2F85:
             time.sleep(0.2)
         raise GripperError('Gripper did not finish activating within 10 s.')
 
+    def clear_fault(self):
+        """Clear a gripper FAULT by RE-ACTIVATING it (clear rACT, then set rACT) -- the only way the
+        Robotiq clears a latched fault. This RE-HOMES the fingers (a full open/close stroke), so any
+        held object is RELEASED. Returns True once re-activated with no fault, False on timeout."""
+        if self.dry_run:
+            self._sim_pos = 0
+            return True
+        log.warning('Clearing gripper fault via re-activation -- the fingers will re-home (any held '
+                    'object is released).')
+        self._write(0x00, 0, 0, 0)                          # clear rACT
+        time.sleep(0.5)
+        self._write(0x01, 0, self.speed, self.force)        # set rACT -> re-activate
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            state = self._read()
+            if state['status'] == 3 and not state['fault']:
+                log.info('Gripper fault cleared; re-activated.')
+                return True
+            time.sleep(0.2)
+        log.error('Gripper did not re-activate / clear the fault within 10 s (fault 0x%02X).',
+                  self._read()['fault'])
+        return False
+
     def disconnect(self):
         if self.client is not None:
             self.client.close()
@@ -162,6 +185,12 @@ class Robotiq2F85:
         if self.dry_run:
             return self._sim_pos
         return self._read()['pos']
+
+    def fault(self):
+        """Current fault code (gFLT); 0 = no fault. A non-zero fault latches until clear_fault()."""
+        if self.dry_run:
+            return 0
+        return self._read()['fault']
 
     def object_detected(self):
         """True if the fingers stalled on something rather than reaching the commanded position."""

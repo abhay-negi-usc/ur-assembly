@@ -70,8 +70,8 @@ connector_frame: connector
 # Phase 1 steers on the robust connector ENDPOINT until the junction is within switch_distance_m,
 # then switches to the junction scan. Needs sam3.mode: junction.
 cable_end:
-  enabled: false
-  switch_distance_m: 0.20
+  enabled: true
+  switch_distance_m: 0.250
 
 connector_grasp:
   xyz: [0.0, 0.0, 0.0]
@@ -207,7 +207,7 @@ debug: false
 # guard stops it, rather than forcing through). The home is a fixed joint config, so a reset always
 # lands in the same known place. ----
 reset:
-  home_joints_deg: [90, -135, -135, 0, 90, 0]   # shoulder_pan, lift, elbow, wrist_1, wrist_2, wrist_3
+  home_joints_deg: [-90, -135, -135, 0, 90, 0]   # shoulder_pan, lift, elbow, wrist_1, wrist_2, wrist_3
   home_duration_s: 6.0
   max_force_n: 50.0                              # guard: stop the home move if it hits something
   compliance:                                    # admittance params for the compliant home move

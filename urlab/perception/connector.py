@@ -153,11 +153,17 @@ class ConnectorEstimator:
             self.good_view_ids.discard(view_id)
 
     def _fuse_history(self):
-        """Detections the FINAL fit should fuse: the good (within-distance) views if any are marked,
-        else everything (so offline/direct use, with no marking, behaves as before)."""
+        """Detections the FINAL fit should fuse: the good (within-distance) views ONCE there are
+        enough of them to fit (>= min_inlier_views), else everything.
+
+        The threshold matters while the camera is still APPROACHING (the cable-end scan starts far,
+        so early views are all "far"/unmarked): switching to the good subset the instant the FIRST
+        close view lands would drop the fit to one view and fail it, stalling the approach at the
+        distance boundary. Staying on all views until enough good ones accumulate avoids that -- and
+        with no marking at all it fuses everything, as before (offline/direct use)."""
         if self.good_view_ids:
             h = [d for d in self.history if d.view in self.good_view_ids]
-            if h:
+            if len({d.view for d in h}) >= self.min_inlier_views:
                 return h
         return self.history
 

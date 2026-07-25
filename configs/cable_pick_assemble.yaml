@@ -20,7 +20,7 @@ tip_frame: tool0
 camera_frame: camera1_color_optical_frame
 
 hand_eye:
-  xyz: [0.0, -0.080, 0.02917] # accounting for plate deformation 
+  xyz: [0.009, -0.080, 0.031] # accounting for plate deformation 
   rpy: [0.0, 0.0, 0.0]
 
 camera:
@@ -47,7 +47,7 @@ connector_estimator:
   min_inlier_views: 3
   min_parallax_deg: 3.0
   inlier_dist_m: 0.010
-  max_range_m: 0.80
+  max_range_m: 0.10
   up_axis: [0.0, 0.0, 1.0]
   workspace_min: [-10.0, -10.0, -10.0]   # matches dev connector_pose_node default (no box)
   workspace_max: [10.0, 10.0, 10.0]
@@ -80,7 +80,7 @@ grasp_tcp_offset:
   xyz: [0.0, 0.0, 0.0]
   rpy: [0.0, 0.0, 0.0]
 fingertip_grasp:
-  xyz: [0.0, -0.01254, 0.178]
+  xyz: [0.0, -0.01254, 0.183]
   rpy: [3.14159, 0.0, -1.5708]
 
 scan:
@@ -162,7 +162,7 @@ pickup:
 
 gripper:
   port: /dev/ttyUSB0
-  open_counts: 0
+  open_counts: 3
   closed_counts: 255
   speed_counts: 255
   force_counts: 150
@@ -171,9 +171,9 @@ gripper:
 # empty (>=empty_counts 228) EMPTY. Success is a MIDDLE band -- see cable_pick_place.yaml notes.
 grasp_check:
   enabled: true
-  groove_counts: 225             # SUCCESS: cable seated in the fingertip groove
-  empty_counts: 229              # full closure on nothing (no cable)
-  faces_max_counts: 223          # <= this: cable on the flat faces (a MISS)
+  groove_counts: 230             # SUCCESS: cable seated in the fingertip groove
+  empty_counts: 235              # full closure on nothing (no cable)
+  faces_max_counts: 228          # <= this: cable on the flat faces (a MISS)
   tolerance_counts: 1
   detect_empty: true             # 228 vs 225 makes empty reliably separable by POSITION now
   settle_s: 1.0
@@ -183,14 +183,12 @@ grasp_check:
   # ---- Failed-grasp RECOVERY (see skills/pick.py GraspRecovery + cable_pick_place.yaml notes) ----
   recovery:
     enabled: true
-    max_tries: 10                # N corrective iterations after the blind retry
-    loose_counts: 220            # loose grip the fingers open to before each reseat / retry
+    max_tries: 25                # N corrective iterations after the blind retry
+    loose_counts: 210            # loose grip the fingers open to before each reseat / retry
     increment_m: 0.001          # corrective arm step per iteration (0.5 mm)
     faces_counts: 223            # pos <= faces_counts+band => FACES -> reseat AWAY from the cable
-    faces_counts: 223            # pos <= faces_counts+band => FACES -> reseat AWAY from the cable
     faces_band_counts: 0         # these fingertips show only faces (a miss is always <= 223)
-    toward_cable_axis: [0, 0, -1]   # GRASP-frame "toward the cable" (faces reseats along its NEGATIVE)
-    # toward_cable_axis: [0, 0, -1]   # GRASP-frame "toward the cable" (faces reseats along its NEGATIVE)
+    toward_cable_axis: [0, 0, +1]   # GRASP-frame "toward the cable" (faces reseats along its NEGATIVE)
 
 speed:
   max_joint_velocity_rad_s: 0.5
@@ -207,7 +205,7 @@ debug: false
 # guard stops it, rather than forcing through). The home is a fixed joint config, so a reset always
 # lands in the same known place. ----
 reset:
-  home_joints_deg: [-90, -135, -135, 0, 90, 0]   # shoulder_pan, lift, elbow, wrist_1, wrist_2, wrist_3
+  home_joints_deg: [-80, -155, -120, 5, 90, 10]   # shoulder_pan, lift, elbow, wrist_1, wrist_2, wrist_3
   home_duration_s: 6.0
   max_force_n: 50.0                              # guard: stop the home move if it hits something
   compliance:                                    # admittance params for the compliant home move
@@ -231,8 +229,8 @@ assembly:
   # MEASURE THIS: jog to a good mate and read the chosen frame off the robot, then paste it here.
   target:
     frame: fingertip
-    xyz: [-0.128, -1.087, -0.062]
-    rpy: [0.0386, 0.0230, -1.616]
+    xyz: [0.1003, 1.0611, -0.1826]
+    rpy: [-0.0127, 0.0089, 1.5964]
 
   standoff:
     axis: [-1.0, 0.0, 0.0]

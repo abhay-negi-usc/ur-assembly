@@ -476,8 +476,19 @@ class CableScanner:
                 frame = self.camera.capture()
                 jdet, edet = self.detector.detect_both(frame)
                 self._save_overlay()
-                self.end_estimator.add_view(edet, frame.K, frame.T_base_cam, frame.stamp)
+                end_vid = self.end_estimator.add_view(edet, frame.K, frame.T_base_cam, frame.stamp)
                 self.estimator.add_view(jdet, frame.K, frame.T_base_cam, frame.stamp)
+
+                # Distance-gate the cable-end fusion (like the junction): fuse only endpoint views
+                # within max_view_distance of the cable-end. Far endpoint views are the noisiest
+                # (depth error ~ Z^2) -- exactly the outliers polluting the fit. rough_origin gives
+                # the range; the estimator stays on ALL views until enough close ones accumulate
+                # (see ConnectorEstimator._fuse_history), so the approach still works from far.
+                P_end_rough = self.end_estimator.rough_origin()
+                if end_vid and P_end_rough is not None and frame.T_base_cam is not None:
+                    d_end = float(np.linalg.norm(frame.T_base_cam[:3, 3]
+                                                 - np.asarray(P_end_rough, dtype=float)))
+                    self.end_estimator.mark_view(end_vid, d_end <= self.s.max_view_distance_m)
 
                 # Move closer ONLY once the cable-end is cross-view CONSISTENT -- the estimator's
                 # RANSAC inlier-agreement + parallax gate (estimate(), the SAME consistency the

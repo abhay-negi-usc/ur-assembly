@@ -60,6 +60,9 @@ connector_estimator:
   ransac_iters: 200
   inlier_dist_m: 0.005
   max_range_m: 0.80
+  reject_dist_m: 0.05             # validation gate: once a confident estimate is established, reject
+                                  # a detection whose ray misses it by more than this (a background
+                                  # cable) so it can't drift the scan off target; 0 = off
   up_axis: [0.0, 0.0, 1.0]         # pins the roll about the axis (NOT a measurement)
   workspace_min: [-10.0, -10.0, -10.0]   # matches dev connector_pose_node default (no box)
   workspace_max: [10.0, 10.0, 10.0]

@@ -118,21 +118,48 @@ class ConnectorEstimator:
         # views (it only needs the direction, and the far early views are what steer the approach
         # in). Empty -> no marking in use (e.g. direct/offline use) -> estimate fuses everything.
         self.good_view_ids = set()
+        # Validation gate (reject_dist_m; 0 = off). Once a CONFIDENT estimate is established, an
+        # incoming detection whose viewing ray misses the estimate origin by more than this is a
+        # DIFFERENT / background cable -- reject it before it enters the history, so it cannot drift
+        # the steered scan off the target (RANSAC resists a lone outlier only when the good cluster
+        # is tight; a noisy junction cluster + the recenter feedback loop can wander otherwise).
+        # Set > inlier_dist_m so genuine refinement passes; < the target<->clutter separation.
+        # `_gate_origin` is the reference; estimate() sets it on success (before that, no gating).
+        self.reject_dist = float(c.get('reject_dist_m', 0.0))
+        self._gate_origin = None
 
     # ------------------------------------------------------------------ ingestion
     def add_view(self, detections, K, T_base_cam, stamp):
-        """Ingest ALL detections from one captured frame.
+        """Ingest one captured frame's detections.
 
         Every detection is kept as a candidate -- there is deliberately no per-frame "pick the
         most likely one" heuristic. An earlier version picked the detection nearest the image
         centre, which latched onto whichever background object happened to be centred and then
         confirmed itself across views. Deciding which is real is RANSAC's job, and it needs the
-        losers to decide against."""
+        losers to decide against.
+
+        EXCEPTION -- the validation gate: once a confident estimate exists (see reject_dist), a
+        detection whose ray misses the established origin by more than reject_dist is rejected here
+        (a background cable), so it never enters the history or steers the next view. A frame whose
+        detections are all gated out consumes no view id (returns 0)."""
         if not detections:
             return 0
-        self._view_id += 1
+        vid = self._view_id + 1
+        kept, rejected = [], 0
         for (u, v, yaw) in detections:
-            self.history.append(Detection(u, v, yaw, K, T_base_cam, self._view_id, stamp))
+            d = Detection(u, v, yaw, K, T_base_cam, vid, stamp)
+            if (self.reject_dist > 0.0 and self._gate_origin is not None
+                    and ray_point_distance(d.C, d.g, self._gate_origin) > self.reject_dist):
+                rejected += 1
+                continue
+            kept.append(d)
+        if rejected:
+            log.info('  gated out %d detection(s) > %.0f mm from the established estimate '
+                     '(likely a background cable).', rejected, self.reject_dist * 1000)
+        if not kept:
+            return 0
+        self._view_id = vid
+        self.history.extend(kept)
         if len(self.history) > self.max_history:
             self.history = self.history[-self.max_history:]
         return self._view_id
@@ -171,6 +198,7 @@ class ConnectorEstimator:
         self.history = []
         self._view_id = 0
         self.good_view_ids = set()
+        self._gate_origin = None
 
     # ------------------------------------------------------------------ fitting
     def _in_workspace(self, P):
@@ -302,6 +330,7 @@ class ConnectorEstimator:
         T = np.eye(4)
         T[:3, :3] = frame_from_axis(axis, self.up_axis)
         T[:3, 3] = P
+        self._gate_origin = P            # establish/update the validation-gate reference
 
         # Conditioning report. sv[-1]/sv[-2] near 1 means the null space is not well separated --
         # the planes are nearly parallel and the axis is poorly determined even though a number

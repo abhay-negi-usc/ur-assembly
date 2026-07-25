@@ -48,6 +48,8 @@ connector_estimator:
   min_parallax_deg: 3.0
   inlier_dist_m: 0.010
   max_range_m: 0.10
+  reject_dist_m: 0.05             # validation gate: reject a detection > this from the established
+                                  # estimate (a background cable), so it can't divert the scan; 0 = off
   up_axis: [0.0, 0.0, 1.0]
   workspace_min: [-10.0, -10.0, -10.0]   # matches dev connector_pose_node default (no box)
   workspace_max: [10.0, 10.0, 10.0]

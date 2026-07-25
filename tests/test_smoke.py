@@ -256,6 +256,43 @@ def test_connector_estimator_fuses_only_marked_good_views():
         f'far unmarked view leaked into the fit: origin {M[:3,3]} vs {P_true}'
 
 
+def test_connector_estimator_validation_gate_rejects_background():
+    """Once a confident estimate is established, a detection of a DIFFERENT (background) cable is
+    gated out of the history; a consistent detection still lands."""
+    from urlab.config import Config
+    from urlab.perception.connector import ConnectorEstimator
+
+    K = np.array([[900.0, 0, 640.0], [0, 900.0, 360.0], [0, 0, 1.0]])
+    P_true = np.array([0.5, 0.0, 0.2])
+    axis = np.array([1.0, 0.0, 0.0])
+    est = ConnectorEstimator(Config({'connector_estimator': {
+        'min_inlier_views': 3, 'min_parallax_deg': 1.0, 'inlier_dist_m': 0.02,
+        'max_range_m': 3.0, 'reject_dist_m': 0.05, 'up_axis': [0, 0, 1]}}))
+
+    def view_of(P, dx):
+        C = np.array([0.5 + dx, 0.0, 0.6])
+        T_bc = T.look_at(C, P, np.eye(4))
+        Rcw = T_bc[:3, :3].T
+        def proj(X):
+            Xc = Rcw @ (X - C)
+            return (K @ (Xc / Xc[2]))[:2]
+        p0, p1 = proj(P), proj(P + 0.03 * axis)
+        return (float(p0[0]), float(p0[1]), float(np.arctan2(*(p1 - p0)[::-1]))), K, T_bc
+
+    for dx in (-0.06, -0.02, 0.02, 0.06):                # establish the estimate on the true cable
+        det, k, tbc = view_of(P_true, dx)
+        est.add_view([det], k, tbc, 0.0)
+    assert est.estimate() is not None                    # confident fit -> gate armed
+    n = est.n_views
+
+    det_bg, k, tbc = view_of(P_true + np.array([0.30, 0.0, 0.0]), 0.0)   # a cable 30 cm away
+    assert est.add_view([det_bg], k, tbc, 0.0) == 0, 'background detection should be gated out'
+    assert est.n_views == n, 'gated detection must not enter the history'
+
+    det_ok, k, tbc = view_of(P_true, 0.0)                # a consistent detection still lands
+    assert est.add_view([det_ok], k, tbc, 0.0) != 0
+
+
 class _FakeGripper:
     """Scripted gripper: each close() reports the next count in `on_close`; go_to sets the count."""
 

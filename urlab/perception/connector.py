@@ -127,6 +127,7 @@ class ConnectorEstimator:
         # `_gate_origin` is the reference; estimate() sets it on success (before that, no gating).
         self.reject_dist = float(c.get('reject_dist_m', 0.0))
         self._gate_origin = None
+        self._last_inlier_views = set()          # views RANSAC last kept (cached for save_plot)
 
     # ------------------------------------------------------------------ ingestion
     def add_view(self, detections, K, T_base_cam, stamp):
@@ -199,6 +200,7 @@ class ConnectorEstimator:
         self._view_id = 0
         self.good_view_ids = set()
         self._gate_origin = None
+        self._last_inlier_views = set()
 
     # ------------------------------------------------------------------ fitting
     def _in_workspace(self, P):
@@ -331,6 +333,7 @@ class ConnectorEstimator:
         T[:3, :3] = frame_from_axis(axis, self.up_axis)
         T[:3, 3] = P
         self._gate_origin = P            # establish/update the validation-gate reference
+        self._last_inlier_views = {d.view for d in inliers}   # cached for save_plot (read-only)
 
         # Conditioning report. sv[-1]/sv[-2] near 1 means the null space is not well separated --
         # the planes are nearly parallel and the axis is poorly determined even though a number
@@ -355,21 +358,34 @@ class ConnectorEstimator:
         coloured by role: the LATEST detection (orange, thick), RANSAC inliers (green), and outliers
         / not-fused views (grey). So you literally watch the rays converge on the estimate as views
         accumulate -- a lone outlier ray stands out, and a poorly-conditioned fit shows as rays that
-        do not meet at a point. Returns True if written, False if there is no usable estimate yet."""
+        do not meet at a point. Returns True if written, False if there is no usable estimate yet.
+
+        READ-ONLY w.r.t. the estimator: it fits FOR THE PLOT, but restores the RANSAC RNG and the
+        validation-gate reference and silences the fit log, so plotting never perturbs the scan's own
+        fit (the RNG is shared, and estimate() moves _gate_origin -- an observer must not)."""
         if not self.history:
             return False
-        T = self.estimate()
-        if T is not None:
-            P = T[:3, 3]
-            _, inliers = self._ransac(self._fuse_history())
-            inlier_views = {d.view for d in inliers}
-        else:                                          # no consistent fit yet -- show rays + rough pt
-            P = self.rough_origin()
-            if P is None:
-                return False
-            T = np.eye(4)
-            T[:3, 3] = P
-            inlier_views = set()
+        import logging
+        rng_state = self._rng.bit_generator.state    # snapshot: estimate()/rough_origin() draw from it
+        gate = self._gate_origin                      # estimate() mutates this
+        prev_level = log.level
+        log.setLevel(logging.ERROR)                   # silence the (duplicate) fit log for the plot
+        try:
+            T = self.estimate()
+            if T is not None:
+                P = T[:3, 3]
+                inlier_views = set(self._last_inlier_views)   # cached by estimate(); no 2nd RANSAC
+            else:                                      # no consistent fit yet -- show rays + rough pt
+                P = self.rough_origin()
+                if P is None:
+                    return False
+                T = np.eye(4)
+                T[:3, 3] = P
+                inlier_views = set()
+        finally:
+            log.setLevel(prev_level)
+            self._rng.bit_generator.state = rng_state   # restore -> the plot changed no RNG state
+            self._gate_origin = gate                    # restore -> the plot moved no gate reference
 
         import matplotlib
         matplotlib.use('Agg')
@@ -417,8 +433,9 @@ class ConnectorEstimator:
 
 
 def _set_equal_cube(ax, pts):
-    """Equal-aspect cube limits centred on the data so the geometry is not distorted, while keeping
-    the base-frame axis DIRECTIONS (the origin is simply offset onto the scene)."""
+    """EQUAL SCALING on all three axes -- 1 m in X == 1 m in Y == 1 m in Z on screen, so the geometry
+    is not distorted. Equal-range cube limits centred on the data (keeping the base-frame axis
+    DIRECTIONS, origin offset onto the scene) PLUS an equal aspect so the box is a true cube."""
     lo, hi = pts.min(axis=0), pts.max(axis=0)
     c = 0.5 * (lo + hi)
     r = max(float(np.max(hi - lo)) * 0.5, 0.02)        # at least a 4 cm cube
@@ -426,9 +443,12 @@ def _set_equal_cube(ax, pts):
     ax.set_ylim(c[1] - r, c[1] + r)
     ax.set_zlim(c[2] - r, c[2] + r)
     try:
-        ax.set_box_aspect((1, 1, 1))
-    except Exception:                                  # noqa: BLE001 -- older matplotlib
-        pass
+        ax.set_aspect('equal')                         # equal DATA scaling (matplotlib >= 3.6)
+    except (ValueError, NotImplementedError):
+        try:
+            ax.set_box_aspect((1, 1, 1))               # cubic box fallback (matplotlib >= 3.3)
+        except Exception:                              # noqa: BLE001 -- older matplotlib
+            pass
 
 
 class ConnectorTracker:

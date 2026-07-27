@@ -27,36 +27,10 @@ import os
 import numpy as np
 
 from .. import log as urlog
-from ..perception.connector import ray_point_distance
 from ..transforms import (
     clamp_pose_delta, frame_from_axis, inverse, look_at, rotate_about_axis, xyzrpy_to_matrix)
 
 log = urlog.get('scan')
-
-
-def _pick_junction(cands, K, T_base_cam, gate_origin):
-    """From several junction candidates (one per visible cable), choose the one to USE, returning
-    (selected, reason):
-      * gate_origin set (the estimate is CONFIDENT) -> the candidate whose viewing ray best AGREES
-        with the estimate origin (smallest ray-point distance) -- stays locked on the tracked cable;
-      * else -> the candidate closest to the IMAGE CENTRE (the framed target).
-    0 or 1 candidate -> nothing to choose."""
-    if not cands:
-        return None, None
-    if len(cands) == 1:
-        return cands[0], 'only'
-    if gate_origin is not None and T_base_cam is not None and K is not None:
-        R, C = T_base_cam[:3, :3], T_base_cam[:3, 3]
-        Kinv = np.linalg.inv(K)
-
-        def ray_dist(c):
-            g = R @ (Kinv @ np.array([c[0], c[1], 1.0]))
-            g = g / (np.linalg.norm(g) + 1e-12)
-            return ray_point_distance(C, g, gate_origin)
-
-        return min(cands, key=ray_dist), 'estimate'
-    cx, cy = (float(K[0, 2]), float(K[1, 2])) if K is not None else (0.0, 0.0)
-    return min(cands, key=lambda c: (c[0] - cx) ** 2 + (c[1] - cy) ** 2), 'centre'
 
 
 class ScanConfig:
@@ -122,6 +96,11 @@ class ScanConfig:
 
         self.save_images = bool(cfg.get('save_scan_images', True))
         self.images_dir = cfg.get('scan_images_subdir', 'cable_scan')
+        # Optionally ALSO save the RAW camera image (no overlay/markers) to a SEPARATE folder, for a
+        # clean record independent of the detection drawing. Off by default; folder defaults to
+        # "<scan_images_subdir>_raw".
+        self.save_raw_images = bool(cfg.get('save_raw_images', False))
+        self.raw_images_subdir = cfg.get('raw_scan_images_subdir', None)
         # A STABLE-path copy of the latest overlay, overwritten (atomically) on every capture, so a
         # viewer left open on it always shows the newest view + detection without reopening files.
         # Independent of save_scan_images. Path defaults to <data_dir>/last_camera_image.png.
@@ -159,8 +138,11 @@ class CableScanner:
         self._last_origin = None                     # previous vision origin (for the per-view clamp)
         self._last_axis = None                       # previous connector axis (unit)
         from datetime import datetime
-        self.image_dir = os.path.join(data_root, self.s.images_dir,
-                                      datetime.now().strftime('%Y%m%d_%H%M%S'))
+        _stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.image_dir = os.path.join(data_root, self.s.images_dir, _stamp)
+        # Raw images (no overlay) go to a SEPARATE folder, same timestamp so they pair up by name.
+        self.raw_image_dir = os.path.join(
+            data_root, self.s.raw_images_subdir or (self.s.images_dir + '_raw'), _stamp)
         # Stable path for the always-latest overlay copy (default: <data_dir>/last_camera_image.png).
         self.last_image_path = self.s.last_image_path or os.path.join(data_root,
                                                                       'last_camera_image.png')
@@ -179,6 +161,7 @@ class CableScanner:
         self._recon = None
         dets = self._detect_and_ingest(frame)        # mode-aware: fuse vs reconstruction
         self._save_overlay()
+        self._save_raw(frame)                        # optional clean copy (no overlay), separate dir
         self._save_junction_plot()                   # fuse-mode 3D rays + cumulative estimate
         if not dets and self.s.require_detection:
             log.warning('  %s: no detection -- not a good view (%d/%d good).',
@@ -237,32 +220,21 @@ class CableScanner:
                 dets, frame.K, frame.T_base_cam, frame.stamp)
             return dets
 
-        dets = self._select_junction_dets(frame)
-        # Ingest ALWAYS (a far detection still steers the approach in via the rough origin).
+        dets = self._detect_junctions(frame)
+        # Ingest ALL candidates -- one junction PER visible cable. RANSAC (scored by DISTINCT VIEWS)
+        # decides which is the real connector; the losers are exactly what it decides against, and
+        # the validation gate rejects the rest once a fit is locked. A far detection also still
+        # steers the approach in via the rough origin.
         self._last_est_vid = self.estimator.add_view(dets, frame.K, frame.T_base_cam, frame.stamp)
         return dets
 
-    def _select_junction_dets(self, frame):
-        """Junction detections to ingest this frame: with the JunctionDetector, one junction PER
-        cable is detected and ONE is selected (estimate-agreement if confident, else image-centre);
-        other detectors (neck/tip) fall back to ingesting all of detect()."""
-        if not hasattr(self.detector, 'detect_junctions'):
-            return self.detector.detect(frame)
-        cands = self.detector.detect_junctions(frame)
-        return self._select_junction(cands, frame.K, frame.T_base_cam)
-
-    def _select_junction(self, cands, K, T_base_cam):
-        """Pick ONE junction from multi-cable candidates (see _pick_junction) and return it as a
-        1- or 0-element detection list ready for add_view."""
-        sel, reason = _pick_junction(cands, K, T_base_cam,
-                                     getattr(self.estimator, '_gate_origin', None))
-        if reason == 'estimate':
-            log.info('  %d junction candidates -- kept the one agreeing with the estimate.',
-                     len(cands))
-        elif reason == 'centre':
-            log.info('  %d junction candidates, estimate not yet confident -- kept the one nearest '
-                     'the image centre.', len(cands))
-        return [sel] if sel is not None else []
+    def _detect_junctions(self, frame):
+        """Every junction detection to ingest this frame -- ONE per visible cable with the
+        JunctionDetector, so RANSAC can arbitrate which is the real connector; or detect()'s output
+        for the neck/tip detectors. All candidates are kept; the scan does NOT pre-pick one."""
+        if hasattr(self.detector, 'detect_junctions'):
+            return self.detector.detect_junctions(frame)
+        return self.detector.detect(frame)
 
     def _mark_good(self, good):
         """Push the good/far decision for the current frame to both estimators, so only close views
@@ -294,6 +266,21 @@ class CableScanner:
                 os.replace(tmp, self.last_image_path)   # atomic swap; viewer never sees a partial file
         except Exception as exc:                     # noqa: BLE001 -- saving is best-effort
             log.warning('  could not save overlay: %s', exc)
+
+    def _save_raw(self, frame):
+        """Optionally save the RAW camera image (no overlay, labels, or markers) to a SEPARATE
+        folder -- a clean record independent of the detection drawing. Paired with the overlay by
+        filename (view_NN.png). Best-effort."""
+        if not self.s.save_raw_images or frame is None or getattr(frame, 'rgb', None) is None:
+            return
+        try:
+            import cv2
+            os.makedirs(self.raw_image_dir, exist_ok=True)
+            path = os.path.join(self.raw_image_dir, f'view_{self.view_idx:02d}.png')
+            cv2.imwrite(path, cv2.cvtColor(frame.rgb, cv2.COLOR_RGB2BGR))
+            log.info('  saved raw image %s', path)
+        except Exception as exc:                     # noqa: BLE001 -- saving is best-effort
+            log.warning('  could not save raw image: %s', exc)
 
     def _save_junction_plot(self):
         """Fuse mode: save the 3D junction-fusion figure (per-view rays + cumulative estimate). One
@@ -552,11 +539,12 @@ class CableScanner:
 
                 time.sleep(self.s.view_settle_s)
                 frame = self.camera.capture()
-                jcands, edet = self.detector.detect_both(frame)
-                jdet = self._select_junction(jcands, frame.K, frame.T_base_cam)   # one per cable -> pick
+                jcands, edet = self.detector.detect_both(frame)   # one junction per visible cable
                 self._save_overlay()
+                self._save_raw(frame)                # optional clean copy (no overlay), separate dir
                 end_vid = self.end_estimator.add_view(edet, frame.K, frame.T_base_cam, frame.stamp)
-                self.estimator.add_view(jdet, frame.K, frame.T_base_cam, frame.stamp)
+                # Ingest ALL cable junctions -- RANSAC decides which is the real connector.
+                self.estimator.add_view(jcands, frame.K, frame.T_base_cam, frame.stamp)
                 self._save_junction_plot()           # 3D rays + cumulative junction estimate
 
                 # Distance-gate the cable-end fusion (like the junction): fuse only endpoint views

@@ -152,8 +152,12 @@ scan:
   # the target so the connector stays framed. tilt = atan(offset / 0.23 m).
   offsets:
     - {xyz: [ 0.000,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
-    - {xyz: [ 0.040,  0.000, 0.00], rpy: [ 0.0000, -0.1722, 0.0]}
-    - {xyz: [ 0.028,  0.028, 0.00], rpy: [ 0.1224, -0.1224, 0.0]}
+    # First two views: PURE TRANSLATION (tilt zeroed). Before a fit exists the range is unknown, so a
+    # tilt authored for the nominal range can OVER-ROTATE and swing the cable out of frame. Pure
+    # translation gives the SAME parallax (rotation adds none) with only a small, bounded off-centre
+    # drift; recenter re-aims exactly from view 3 once >=2 views give a range.
+    - {xyz: [ 0.040,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
+    - {xyz: [ 0.028,  0.028, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
     - {xyz: [ 0.000,  0.040, 0.00], rpy: [ 0.1722,  0.0000, 0.0]}
     - {xyz: [-0.028,  0.028, 0.00], rpy: [ 0.1224,  0.1224, 0.0]}
     - {xyz: [-0.040,  0.000, 0.00], rpy: [ 0.0000,  0.1722, 0.0]}
@@ -174,6 +178,9 @@ scan:
 save_scan_images: true
 data_dir: data
 scan_images_subdir: cable_pick_place
+save_raw_images: true                 # ALSO save the RAW image (no overlay/markers) to a SEPARATE
+                                      # folder: <data_dir>/<scan_images_subdir>_raw/<stamp>/view_NN.png
+# raw_scan_images_subdir: cable_pick_place_raw      # override the raw folder name (default: <subdir>_raw)
 save_last_camera_image: true          # also mirror the latest overlay to a STABLE path, overwritten
                                       # (atomically) each capture -- keep it open in a viewer to watch
                                       # the live view + detection without reopening files

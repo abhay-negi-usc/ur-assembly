@@ -221,8 +221,8 @@ class JunctionDetector(_Base):
         """Junction candidates -- ONE per top_n largest assembly component (the MULTI-CABLE case),
         as [(u, v, yaw), ...]. The stock detect() only ever returns the LARGEST component's junction,
         so a second visible cable's connector is invisible to it; this splits the assembly mask and
-        finds a junction per component. The caller (the scan) SELECTS one -- the candidate agreeing
-        with the current estimate if it is confident, else the one nearest the image centre. Drawn
+        finds a junction per component. ALL candidates are ingested -- RANSAC (in the estimator)
+        decides which is the real connector; the losers are what it decides against. Drawn
         'conn 1/2/...' (numbered per cable) on the overlay."""
         if self.dry_run:
             return []
@@ -231,7 +231,7 @@ class JunctionDetector(_Base):
         cands = self._component_junctions(res.get('assembly'), top_n)
         if self.last_debug is not None:
             h, w = frame.rgb.shape[:2]
-            self._draw_candidates(self.last_debug, cands, w, h)
+            self._overlay_markers(self.last_debug, cands, [], w, h)   # low opacity, small font
         log.info('  junction candidates=%d (top-%d components) | cables=%d connectors=%d',
                  len(cands), top_n, _count(res.get('cables_raw')), _count(res.get('connectors_raw')))
         return cands
@@ -261,29 +261,40 @@ class JunctionDetector(_Base):
             out.append((float(u), float(v), float(np.arctan2(dy, dx))))
         return out
 
+    def _overlay_markers(self, vis, cands, ends, w, h):
+        """Draw ALL of urlab's markers -- the 'conn 1/2/...' junction candidates and any cable-END
+        A/B -- on a COPY and blend back at LOW opacity, so every annotation fades together (it does
+        not obscure the image) and the labels don't clash. `ends` is [(label, col, (u,v,yaw)|None)].
+        The font is kept small on purpose (see _draw_end)."""
+        if vis is None:
+            return
+        layer = vis.copy()
+        self._draw_candidates(layer, cands, w, h)
+        for label, col, end in ends:
+            if end is not None:
+                self._draw_end(layer, end[0], end[1], end[2], label=label, col=col)
+        import cv2
+        a = min(float(self.overlay_opacity), 0.5)      # secondary annotation -> at most half opacity
+        cv2.addWeighted(layer, a, vis, 1.0 - a, 0.0, dst=vis)
+
     def _draw_candidates(self, vis, cands, w, h):
         """Draw junction candidates labelled 'conn 1/2/...' (a per-cable ID, 1 = nearest image
-        centre) so a second cable's connector is visible alongside the primary junction marker.
-        Numbers, NOT letters -- A/B is reserved for the two ENDS of a cable, so the connector of a
-        DIFFERENT cable gets a number. At LOW opacity (secondary annotation): rendered on a copy and
-        blended back, so only the marked pixels fade (the rest of the image is untouched)."""
+        centre) on `vis` so a second cable's connector is visible alongside the primary junction
+        marker. Numbers, NOT letters -- A/B is reserved for the two ENDS of a cable. No blend here;
+        _overlay_markers fades all the markers together."""
         if not cands or vis is None:
             return
         cx, cy = w / 2.0, h / 2.0
         ordered = sorted(cands, key=lambda c: (c[0] - cx) ** 2 + (c[1] - cy) ** 2)
-        layer = vis.copy()
         for idx, c in enumerate(ordered, start=1):     # conn 1, conn 2, ... (cable ID)
-            self._draw_end(layer, c[0], c[1], c[2], label=f'conn {idx}', col=(0, 200, 255))
-        import cv2
-        a = min(float(self.overlay_opacity), 0.5)      # secondary -> at most half opacity
-        cv2.addWeighted(layer, a, vis, 1.0 - a, 0.0, dst=vis)
+            self._draw_end(vis, c[0], c[1], c[2], label=f'conn {idx}', col=(0, 200, 255))
 
     def detect_both(self, frame):
         """(junction_candidates, end_dets) from ONE SAM3 pass -- for the two-phase 'cable_end' scan.
 
         junction_candidates is [(u, v, yaw), ...], ONE per top-N assembly component (the MULTI-CABLE
-        case), drawn 'conn 1/2/...' (numbered per cable); the scan SELECTS one (estimate-agreement if
-        confident, else image-centre). The traced assembly (largest component) has TWO ends, labelled
+        case), drawn 'conn 1/2/...' (numbered per cable); ALL are ingested and RANSAC decides which is
+        the real connector. The traced assembly (largest component) has TWO ends, labelled
         'cable end A/B' by IMAGE-CENTRE proximity -- 'A' the end CLOSER to centre (tracked/approached),
         'B' the FARTHER -- both drawn
         so the two-ends failure is visible. end_dets is [(u, v, yaw)] for END A only: Phase 1 steers
@@ -303,11 +314,9 @@ class JunctionDetector(_Base):
         h, w = frame.rgb.shape[:2]
         end_a, end_b = self._assembly_ends(j, w, h)
         if self.last_debug is not None:
-            self._draw_candidates(self.last_debug, jcands, w, h)
-            if end_a is not None:
-                self._draw_end(self.last_debug, *end_a, label='cable end A', col=(255, 255, 0))
-            if end_b is not None:
-                self._draw_end(self.last_debug, *end_b, label='cable end B', col=(0, 165, 255))
+            self._overlay_markers(self.last_debug, jcands,   # conn 1/2 + cable ends, low opacity
+                                  [('cable end A', (255, 255, 0), end_a),
+                                   ('cable end B', (0, 165, 255), end_b)], w, h)
         log.info('  junction candidates=%d endA=%d endB=%d | cables=%d connectors=%d', len(jcands),
                  1 if end_a else 0, 1 if end_b else 0,
                  _count(res.get('cables_raw')), _count(res.get('connectors_raw')))
@@ -315,24 +324,25 @@ class JunctionDetector(_Base):
 
     @staticmethod
     def _draw_end(vis, u, v, yaw, label='cable end', col=(255, 255, 0)):
-        """Draw a cable-END marker on the overlay -- a dot + arrow + label like the junction's, in
-        `col` (BGR). Drawn AFTER the opacity blend, so it stays fully visible."""
+        """Draw a marker (dot + short arrow + small label) at (u, v) in `col` (BGR). Small font and
+        arrow on purpose -- several of these share the frame, so oversized ones clash. Blended to low
+        opacity by the caller (_overlay_markers), so it does not obscure the image."""
         import cv2
         wh = vis.shape[:2]
         diag = float(np.hypot(wh[1], wh[0]))
-        thick = max(2, int(0.003 * diag))
-        r = max(5, int(0.006 * diag))
+        thick = max(1, int(0.002 * diag))
+        r = max(3, int(0.004 * diag))
         p0 = (int(round(u)), int(round(v)))
-        L = 0.10 * diag
+        L = 0.055 * diag                               # shorter arrow -- less clutter
         p1 = (int(round(u + np.cos(yaw) * L)), int(round(v + np.sin(yaw) * L)))
         cv2.arrowedLine(vis, p0, p1, col, thick, cv2.LINE_AA, tipLength=0.22)
         cv2.circle(vis, p0, r, col, -1, cv2.LINE_AA)
         cv2.circle(vis, p0, r, (0, 0, 0), max(1, thick // 2), cv2.LINE_AA)
-        fscale = 0.0011 * diag
-        fthick = max(2, thick // 2)
+        fscale = 0.00055 * diag                        # ~half the previous size (labels were clashing)
+        fthick = max(1, thick // 2)
         (tw, th), bl = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, fscale, fthick)
-        ox, oy = p0[0] + r + 6, max(th + 6, p0[1] - r)
-        cv2.rectangle(vis, (ox - 4, oy - th - 6), (ox + tw + 4, oy + bl), (0, 0, 0), -1)
+        ox, oy = p0[0] + r + 4, max(th + 4, p0[1] - r)
+        cv2.rectangle(vis, (ox - 3, oy - th - 4), (ox + tw + 3, oy + bl), (0, 0, 0), -1)
         cv2.putText(vis, label, (ox, oy), cv2.FONT_HERSHEY_SIMPLEX, fscale, col, fthick, cv2.LINE_AA)
         return vis
 

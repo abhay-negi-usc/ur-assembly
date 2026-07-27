@@ -221,10 +221,11 @@ class CableScanner:
             return dets
 
         dets = self._detect_junctions(frame)
+        self._seed_connector_gate(dets, frame.K, frame.T_base_cam)   # first view: prime from centre
         # Ingest ALL candidates -- one junction PER visible cable. RANSAC (scored by DISTINCT VIEWS)
         # decides which is the real connector; the losers are exactly what it decides against, and
-        # the validation gate rejects the rest once a fit is locked. A far detection also still
-        # steers the approach in via the rough origin.
+        # the validation gate (seeded above) rejects a background cable from the start. A far
+        # detection also still steers the approach in via the rough origin.
         self._last_est_vid = self.estimator.add_view(dets, frame.K, frame.T_base_cam, frame.stamp)
         return dets
 
@@ -235,6 +236,29 @@ class CableScanner:
         if hasattr(self.detector, 'detect_junctions'):
             return self.detector.detect_junctions(frame)
         return self.detector.detect(frame)
+
+    def _seed_connector_gate(self, dets, K, T_base_cam):
+        """Prime the connector estimator's validation gate from the FRAMED (image-centre) detection
+        on the FIRST view, so a background cable is rejected from the start instead of competing in
+        RANSAC. RANSAC scores by distinct views, so two cables each seen in every view TIE -- it
+        cannot tell them apart, and the early pick (which steers the next view) can land on the
+        background. The user CENTRES the target, so the centre-nearest detection on the first view IS
+        the target; back-project it to a nominal-range 3D anchor and prime the gate. The gate uses
+        PERPENDICULAR ray distance, so the nominal-range depth barely matters -- a different cable's
+        ray still misses the anchor by its lateral offset. estimate() overwrites the anchor with the
+        real fit as soon as it converges."""
+        est = self.estimator
+        if (getattr(est, 'reject_dist', 0.0) <= 0.0 or est._gate_origin is not None
+                or not dets or T_base_cam is None or K is None):
+            return
+        cx, cy = float(K[0, 2]), float(K[1, 2])
+        u, v, _ = min(dets, key=lambda c: (c[0] - cx) ** 2 + (c[1] - cy) ** 2)
+        C = T_base_cam[:3, 3]
+        g = T_base_cam[:3, :3] @ (np.linalg.inv(K) @ np.array([u, v, 1.0]))
+        g = g / (np.linalg.norm(g) + 1e-12)
+        est._gate_origin = C + g * self.s.nominal_distance_m
+        log.info('  seeded the connector gate from the centred detection -- background cables are '
+                 'now gated out of the fit and the steering.')
 
     def _mark_good(self, good):
         """Push the good/far decision for the current frame to both estimators, so only close views
@@ -543,7 +567,9 @@ class CableScanner:
                 self._save_overlay()
                 self._save_raw(frame)                # optional clean copy (no overlay), separate dir
                 end_vid = self.end_estimator.add_view(edet, frame.K, frame.T_base_cam, frame.stamp)
-                # Ingest ALL cable junctions -- RANSAC decides which is the real connector.
+                # Ingest ALL cable junctions -- RANSAC decides which is the real connector, with the
+                # gate seeded from the centred detection so a background cable can't win early.
+                self._seed_connector_gate(jcands, frame.K, frame.T_base_cam)
                 self.estimator.add_view(jcands, frame.K, frame.T_base_cam, frame.stamp)
                 self._save_junction_plot()           # 3D rays + cumulative junction estimate
 

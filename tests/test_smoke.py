@@ -323,6 +323,39 @@ def test_estimator_ransac_picks_real_connector_over_background():
     assert np.linalg.norm(T_fit[:3, 3] - P_real) < 0.02, 'RANSAC should lock onto the real connector'
 
 
+def test_seed_connector_gate_rejects_background_first_view():
+    """Seeding the gate from the centred detection rejects a background cable on the FIRST view --
+    before RANSAC (which ties two equally-seen cables) could steer toward the wrong one."""
+    import types
+    from urlab.config import Config
+    from urlab.perception.connector import ConnectorEstimator
+    from urlab.skills.scan import CableScanner
+
+    K = np.array([[900.0, 0, 640.0], [0, 900.0, 360.0], [0, 0, 1.0]])
+    est = ConnectorEstimator(Config({'connector_estimator': {
+        'min_inlier_views': 3, 'min_parallax_deg': 1.0, 'inlier_dist_m': 0.02,
+        'max_range_m': 3.0, 'reject_dist_m': 0.05, 'up_axis': [0, 0, 1]}}))
+    sc = CableScanner.__new__(CableScanner)
+    sc.estimator = est
+    sc.s = types.SimpleNamespace(nominal_distance_m=0.23)
+
+    C = np.array([0.5, 0.0, 0.6])
+    T_bc = T.look_at(C, np.array([0.5, 0.0, 0.2]), np.eye(4))
+    Rcw = T_bc[:3, :3].T
+
+    def det(P):
+        p = K @ (Rcw @ (np.asarray(P, float) - C))
+        return (float(p[0] / p[2]), float(p[1] / p[2]), 0.0)
+
+    target = det([0.5, 0.0, 0.2])            # projects to the image centre
+    bg = det([0.5, 0.15, 0.2])               # a cable 15 cm to the side
+
+    sc._seed_connector_gate([bg, target], K, T_bc)    # background listed first -> centre pick = target
+    assert est._gate_origin is not None
+    est.add_view([bg, target], K, T_bc, 0.0)          # ingest both this view
+    assert est.n_views == 1 and len(est.history) == 1, 'background must be gated out on view 1'
+
+
 class _FakeGripper:
     """Scripted gripper: each close() reports the next count in `on_close`; go_to sets the count."""
 

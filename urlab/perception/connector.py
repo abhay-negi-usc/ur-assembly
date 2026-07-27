@@ -346,6 +346,33 @@ class ConnectorEstimator:
                  len(inliers), n_inlier_views, max_ang, cond, depth)
         return T
 
+    def fit_readonly(self):
+        """A READ-ONLY fit for OBSERVERS (plots, debug overlays): the strict estimate if it
+        converges, else the rough origin -- computed WITHOUT perturbing the estimator. Restores the
+        shared RANSAC RNG and the validation-gate reference and silences the fit log, so an observer
+        never changes the scan's own fit. Returns (T_or_None, inlier_views, is_rough)."""
+        if not self.history:
+            return None, set(), False
+        import logging
+        rng_state = self._rng.bit_generator.state
+        gate = self._gate_origin
+        prev_level = log.level
+        log.setLevel(logging.ERROR)
+        try:
+            T = self.estimate()
+            if T is not None:
+                return T, set(self._last_inlier_views), False   # cached inliers; no 2nd RANSAC
+            P = self.rough_origin()
+            if P is None:
+                return None, set(), False
+            Tr = np.eye(4)
+            Tr[:3, 3] = P
+            return Tr, set(), True
+        finally:
+            log.setLevel(prev_level)
+            self._rng.bit_generator.state = rng_state       # restore -> observer changed no RNG
+            self._gate_origin = gate                        # restore -> observer moved no gate ref
+
     def save_plot(self, path, azimuths=(-60, 30), elev=22.0):
         """Save a 3D figure (two azimuths, ROBOT BASE-FRAME axes) of the junction FUSION -- the
         fuse-mode analogue of the reconstruction plot. It draws:
@@ -360,32 +387,11 @@ class ConnectorEstimator:
         accumulate -- a lone outlier ray stands out, and a poorly-conditioned fit shows as rays that
         do not meet at a point. Returns True if written, False if there is no usable estimate yet.
 
-        READ-ONLY w.r.t. the estimator: it fits FOR THE PLOT, but restores the RANSAC RNG and the
-        validation-gate reference and silences the fit log, so plotting never perturbs the scan's own
-        fit (the RNG is shared, and estimate() moves _gate_origin -- an observer must not)."""
-        if not self.history:
+        Uses fit_readonly(), so plotting never perturbs the scan's own fit."""
+        T, inlier_views, _ = self.fit_readonly()      # READ-ONLY: no RNG/gate/log side effects
+        if T is None:
             return False
-        import logging
-        rng_state = self._rng.bit_generator.state    # snapshot: estimate()/rough_origin() draw from it
-        gate = self._gate_origin                      # estimate() mutates this
-        prev_level = log.level
-        log.setLevel(logging.ERROR)                   # silence the (duplicate) fit log for the plot
-        try:
-            T = self.estimate()
-            if T is not None:
-                P = T[:3, 3]
-                inlier_views = set(self._last_inlier_views)   # cached by estimate(); no 2nd RANSAC
-            else:                                      # no consistent fit yet -- show rays + rough pt
-                P = self.rough_origin()
-                if P is None:
-                    return False
-                T = np.eye(4)
-                T[:3, 3] = P
-                inlier_views = set()
-        finally:
-            log.setLevel(prev_level)
-            self._rng.bit_generator.state = rng_state   # restore -> the plot changed no RNG state
-            self._gate_origin = gate                    # restore -> the plot moved no gate reference
+        P = T[:3, 3]
 
         import matplotlib
         matplotlib.use('Agg')

@@ -135,6 +135,9 @@ scan_images_subdir: cable_pick_assemble
 save_raw_images: true                 # ALSO save the RAW image (no overlay/markers) to a SEPARATE
                                       # folder: <data_dir>/<scan_images_subdir>_raw/<stamp>/view_NN.png
 # raw_scan_images_subdir: cable_pick_assemble_raw   # override the raw folder name (default: <subdir>_raw)
+overlay_debug: true                   # draw the ALGORITHM'S state on the RAW image (fused estimate +
+                                      # range, per-candidate GATE status kept/rejected, gate anchor)
+                                      # -> <data_dir>/<subdir>_debug/ + <data_dir>/last_debug_overlay.png
 save_last_camera_image: true          # also mirror the latest overlay to a STABLE path, overwritten
                                       # (atomically) each capture -- keep it open in a viewer to watch
                                       # the live view + detection without reopening files

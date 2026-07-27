@@ -27,6 +27,7 @@ import os
 import numpy as np
 
 from .. import log as urlog
+from ..perception.connector import ray_point_distance
 from ..transforms import (
     clamp_pose_delta, frame_from_axis, inverse, look_at, rotate_about_axis, xyzrpy_to_matrix)
 
@@ -111,6 +112,12 @@ class ScanConfig:
         # each view) for live watching. Path defaults to <data_dir>/last_junction_plot.png.
         self.save_junction_plot = bool(cfg.get('save_junction_plot', False))
         self.last_junction_plot_path = cfg.get('last_junction_plot_path', None)
+        # Debug overlay: draw the ALGORITHM'S state (fused estimate, gate anchor, per-candidate gate
+        # status) on the RAW image (separate from the SAM3 overlay), to a SEPARATE folder + stable
+        # live path. On by default -- it's the main tool for seeing which cable is being tracked.
+        self.overlay_debug = bool(cfg.get('overlay_debug', True))
+        self.debug_images_subdir = cfg.get('debug_scan_images_subdir', None)
+        self.last_debug_overlay_path = cfg.get('last_debug_overlay_path', None)
 
 
 class CableScanner:
@@ -143,6 +150,11 @@ class CableScanner:
         # Raw images (no overlay) go to a SEPARATE folder, same timestamp so they pair up by name.
         self.raw_image_dir = os.path.join(
             data_root, self.s.raw_images_subdir or (self.s.images_dir + '_raw'), _stamp)
+        # Debug overlay (algorithm state on the raw image) -- its own folder + stable live path.
+        self.debug_image_dir = os.path.join(
+            data_root, self.s.debug_images_subdir or (self.s.images_dir + '_debug'), _stamp)
+        self.last_debug_overlay_path = self.s.last_debug_overlay_path or os.path.join(
+            data_root, 'last_debug_overlay.png')
         # Stable path for the always-latest overlay copy (default: <data_dir>/last_camera_image.png).
         self.last_image_path = self.s.last_image_path or os.path.join(data_root,
                                                                       'last_camera_image.png')
@@ -162,6 +174,7 @@ class CableScanner:
         dets = self._detect_and_ingest(frame)        # mode-aware: fuse vs reconstruction
         self._save_overlay()
         self._save_raw(frame)                        # optional clean copy (no overlay), separate dir
+        self._save_debug_overlay(frame, dets)        # algorithm state on the RAW image, separate dir
         self._save_junction_plot()                   # fuse-mode 3D rays + cumulative estimate
         if not dets and self.s.require_detection:
             log.warning('  %s: no detection -- not a good view (%d/%d good).',
@@ -305,6 +318,89 @@ class CableScanner:
             log.info('  saved raw image %s', path)
         except Exception as exc:                     # noqa: BLE001 -- saving is best-effort
             log.warning('  could not save raw image: %s', exc)
+
+    def _save_debug_overlay(self, frame, cands):
+        """Draw the ALGORITHM'S state on the RAW image (a clean debug view, separate from the SAM3
+        overlay) and save it to its own folder + a stable live path. Shows, per view:
+          * each junction candidate ('conn N') coloured by its GATE status -- GREEN kept, RED gated
+            out (a background cable) -- so you SEE which cable is accepted vs rejected;
+          * the fused ESTIMATE the scan is actually tracking (green cross + axis, with range and
+            inlier-view count), projected to 2D -- NOT the detector's largest-blob marker;
+          * the validation-gate ANCHOR (cyan diamond);
+          * a legend.
+        Best-effort; needs the camera pose to project the 3D estimate."""
+        if not self.s.overlay_debug or frame is None or getattr(frame, 'rgb', None) is None:
+            return
+        try:
+            import cv2
+            img = cv2.cvtColor(frame.rgb, cv2.COLOR_RGB2BGR)
+            K, T_bc = frame.K, frame.T_base_cam
+            h, w = img.shape[:2]
+
+            def proj(P):
+                if T_bc is None or K is None:
+                    return None
+                Xc = T_bc[:3, :3].T @ (np.asarray(P, float) - T_bc[:3, 3])
+                if Xc[2] <= 1e-6:
+                    return None
+                p = K @ (Xc / Xc[2])
+                return (int(round(float(p[0]))), int(round(float(p[1]))))
+
+            gate = getattr(self.estimator, '_gate_origin', None)
+            reject = float(getattr(self.estimator, 'reject_dist', 0.0))
+            cx, cy = w / 2.0, h / 2.0
+            ordered = sorted(cands, key=lambda c: (c[0] - cx) ** 2 + (c[1] - cy) ** 2)
+            for idx, (u, v, _yaw) in enumerate(ordered, start=1):
+                kept = True
+                if gate is not None and reject > 0.0 and T_bc is not None and K is not None:
+                    g = T_bc[:3, :3] @ (np.linalg.inv(K) @ np.array([u, v, 1.0]))
+                    g = g / (np.linalg.norm(g) + 1e-12)
+                    kept = ray_point_distance(T_bc[:3, 3], g, gate) <= reject
+                col = (0, 220, 0) if kept else (0, 0, 255)     # green kept / red gated out
+                p0 = (int(round(u)), int(round(v)))
+                cv2.circle(img, p0, 9, col, 2, cv2.LINE_AA)
+                tag = f'conn {idx} {"keep" if kept else "GATED"}'
+                cv2.putText(img, tag, (p0[0] + 11, p0[1] + 4), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5, col, 1, cv2.LINE_AA)
+
+            if gate is not None:
+                gp = proj(gate)
+                if gp is not None:
+                    cv2.drawMarker(img, gp, (255, 200, 0), cv2.MARKER_DIAMOND, 16, 2)
+
+            T_est, inl, is_rough = self.estimator.fit_readonly()
+            if T_est is not None:
+                P = T_est[:3, 3]
+                ep = proj(P)
+                if ep is not None:
+                    rng = float(np.linalg.norm(T_bc[:3, 3] - P)) if T_bc is not None else 0.0
+                    cv2.drawMarker(img, ep, (0, 255, 0), cv2.MARKER_CROSS, 24, 2)
+                    ap = proj(P + 0.04 * T_est[:3, 0])
+                    if ap is not None:
+                        cv2.arrowedLine(img, ep, ap, (0, 255, 0), 2, cv2.LINE_AA, tipLength=0.25)
+                    tag = 'rough' if is_rough else 'EST'
+                    cv2.putText(img, f'{tag} {rng * 1000:.0f}mm {len(inl)}v', (ep[0] + 12, ep[1] - 12),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
+
+            legend = ['green cross = fused estimate (steers the scan)',
+                      'green ring = candidate KEPT | red ring = GATED (background)',
+                      'cyan diamond = gate anchor']
+            for i, txt in enumerate(legend):
+                y = 22 + i * 20
+                cv2.putText(img, txt, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
+                cv2.putText(img, txt, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+
+            os.makedirs(os.path.dirname(self.last_debug_overlay_path) or '.', exist_ok=True)
+            root, ext = os.path.splitext(self.last_debug_overlay_path)
+            tmp = f'{root}.tmp{ext or ".png"}'
+            cv2.imwrite(tmp, img)
+            if self.s.save_images:
+                os.makedirs(self.debug_image_dir, exist_ok=True)
+                import shutil
+                shutil.copyfile(tmp, os.path.join(self.debug_image_dir, f'view_{self.view_idx:02d}.png'))
+            os.replace(tmp, self.last_debug_overlay_path)   # atomic swap for the live viewer
+        except Exception as exc:                     # noqa: BLE001 -- debug drawing is best-effort
+            log.warning('  could not save debug overlay: %s', exc)
 
     def _save_junction_plot(self):
         """Fuse mode: save the 3D junction-fusion figure (per-view rays + cumulative estimate). One
@@ -571,6 +667,7 @@ class CableScanner:
                 # gate seeded from the centred detection so a background cable can't win early.
                 self._seed_connector_gate(jcands, frame.K, frame.T_base_cam)
                 self.estimator.add_view(jcands, frame.K, frame.T_base_cam, frame.stamp)
+                self._save_debug_overlay(frame, jcands)   # algorithm state on the RAW image (after ingest)
                 self._save_junction_plot()           # 3D rays + cumulative junction estimate
 
                 # Distance-gate the cable-end fusion (like the junction): fuse only endpoint views

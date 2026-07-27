@@ -20,6 +20,14 @@ def build_scanner(cfg, robot, camera):
     estimator = ConnectorEstimator(cfg)
     scan_cfg = ScanConfig(cfg)
 
+    # Ground-plane manual-select mode: single image, user picks the cable, pose from a known ground
+    # plane (no multi-view fit). Drop-in scanner with the same scan()/reset()/.camera/.estimator API.
+    if scan_cfg.mode == 'ground_plane':
+        from ..skills.ground_pick import GroundPlaneScanner
+        scanner = GroundPlaneScanner(robot, camera, detector, estimator, cfg,
+                                     data_root=cfg.get('data_dir', 'data'))
+        return scanner, detector, estimator
+
     reconstructor = None
     if scan_cfg.mode == 'reconstruction':
         if not hasattr(detector, 'detect_cable'):

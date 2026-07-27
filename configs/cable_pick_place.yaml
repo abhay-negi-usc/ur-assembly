@@ -174,6 +174,9 @@ scan:
 save_scan_images: true
 data_dir: data
 scan_images_subdir: cable_pick_place
+save_raw_images: true                 # ALSO save the RAW image (no overlay/markers) to a SEPARATE
+                                      # folder: <data_dir>/<scan_images_subdir>_raw/<stamp>/view_NN.png
+# raw_scan_images_subdir: cable_pick_place_raw      # override the raw folder name (default: <subdir>_raw)
 save_last_camera_image: true          # also mirror the latest overlay to a STABLE path, overwritten
                                       # (atomically) each capture -- keep it open in a viewer to watch
                                       # the live view + detection without reopening files

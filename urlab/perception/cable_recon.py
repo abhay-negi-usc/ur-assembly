@@ -452,8 +452,9 @@ class CableReconstructor:
 
 
 def _set_equal_cube(ax, pts):
-    """Equal-aspect cube limits centred on the data so the cable is not distorted, while keeping
-    the base-frame axis DIRECTIONS (the origin is simply offset onto the cable)."""
+    """EQUAL SCALING on all three axes -- 1 m in X == 1 m in Y == 1 m in Z on screen, so the cable is
+    not distorted. Equal-range cube limits centred on the data (keeping the base-frame axis
+    DIRECTIONS, origin offset onto the cable) PLUS an equal aspect so the box is a true cube."""
     lo = pts.min(axis=0)
     hi = pts.max(axis=0)
     c = 0.5 * (lo + hi)
@@ -461,3 +462,10 @@ def _set_equal_cube(ax, pts):
     ax.set_xlim(c[0] - r, c[0] + r)
     ax.set_ylim(c[1] - r, c[1] + r)
     ax.set_zlim(c[2] - r, c[2] + r)
+    try:
+        ax.set_aspect('equal')                       # equal DATA scaling (matplotlib >= 3.6)
+    except (ValueError, NotImplementedError):
+        try:
+            ax.set_box_aspect((1, 1, 1))             # cubic box fallback (matplotlib >= 3.3)
+        except Exception:                            # noqa: BLE001 -- older matplotlib
+            pass

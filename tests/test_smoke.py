@@ -293,37 +293,34 @@ def test_connector_estimator_validation_gate_rejects_background():
     assert est.add_view([det_ok], k, tbc, 0.0) != 0
 
 
-def test_pick_junction_estimate_then_centre():
-    """Multi-cable junction selection: agree-with-estimate when confident, else nearest centre."""
-    from urlab.skills.scan import _pick_junction
+def test_estimator_ransac_picks_real_connector_over_background():
+    """Ingest ALL cable junctions each view (one per cable) and let RANSAC decide: the connector
+    seen consistently across views wins; a background cable seen in only one view is outvoted."""
+    from urlab.config import Config
+    from urlab.perception.connector import ConnectorEstimator
 
     K = np.array([[900.0, 0, 640.0], [0, 900.0, 360.0], [0, 0, 1.0]])
-    C = np.array([0.5, 0.0, 0.6])
-    P_target = np.array([0.5, 0.0, 0.2])                 # straight below the camera
-    T_bc = T.look_at(C, P_target, np.eye(4))
-    Rcw = T_bc[:3, :3].T
+    P_real = np.array([0.5, 0.0, 0.2])
+    est = ConnectorEstimator(Config({'connector_estimator': {
+        'min_inlier_views': 3, 'min_parallax_deg': 1.0, 'inlier_dist_m': 0.02,
+        'max_range_m': 3.0, 'up_axis': [0, 0, 1]}}))
 
-    def px(X):
-        Xc = Rcw @ (np.asarray(X, float) - C)
-        return (K @ (Xc / Xc[2]))[:2]
+    def det(P, dx):
+        C = np.array([0.5 + dx, 0.0, 0.6])
+        T_bc = T.look_at(C, P, np.eye(4))
+        Rcw = T_bc[:3, :3].T
+        p = (K @ (Rcw @ (np.asarray(P, float) - C)))[:2] / (Rcw @ (P - C))[2]
+        return (float(p[0]), float(p[1]), 0.0), K, T_bc
 
-    u_t, v_t = px(P_target)                              # target connector projects near centre
-    u_bg, v_bg = px(P_target + np.array([0.25, 0.0, 0.0]))   # a background cable, 25 cm to the side
-    cand_target = (float(u_t), float(v_t), 0.0)
-    cand_bg = (float(u_bg), float(v_bg), 0.0)
+    # Each view sees the REAL connector plus a DIFFERENT phantom (background) point -- both ingested.
+    for i, dx in enumerate((-0.06, -0.02, 0.02, 0.06)):
+        real, k, tbc = det(P_real, dx)
+        phantom, _, _ = det(P_real + np.array([0.0, 0.20 + 0.03 * i, 0.0]), dx)  # inconsistent
+        est.add_view([real, phantom], k, tbc, 0.0)
 
-    # Not confident (no gate origin) -> nearest image centre. The target is centred, so it wins even
-    # when the background candidate is listed first.
-    sel, reason = _pick_junction([cand_bg, cand_target], K, T_bc, None)
-    assert reason == 'centre' and sel == cand_target
-
-    # Confident (gate origin at the target) -> the candidate whose ray agrees, i.e. the target, even
-    # if the background one were nearer centre.
-    sel, reason = _pick_junction([cand_bg, cand_target], K, T_bc, P_target)
-    assert reason == 'estimate' and sel == cand_target
-
-    # A single candidate is passed through unchanged.
-    assert _pick_junction([cand_bg], K, T_bc, P_target) == (cand_bg, 'only')
+    T_fit = est.estimate()
+    assert T_fit is not None
+    assert np.linalg.norm(T_fit[:3, 3] - P_real) < 0.02, 'RANSAC should lock onto the real connector'
 
 
 class _FakeGripper:

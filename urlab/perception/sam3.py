@@ -221,8 +221,8 @@ class JunctionDetector(_Base):
         """Junction candidates -- ONE per top_n largest assembly component (the MULTI-CABLE case),
         as [(u, v, yaw), ...]. The stock detect() only ever returns the LARGEST component's junction,
         so a second visible cable's connector is invisible to it; this splits the assembly mask and
-        finds a junction per component. The caller (the scan) SELECTS one -- the candidate agreeing
-        with the current estimate if it is confident, else the one nearest the image centre. Drawn
+        finds a junction per component. ALL candidates are ingested -- RANSAC (in the estimator)
+        decides which is the real connector; the losers are what it decides against. Drawn
         'conn 1/2/...' (numbered per cable) on the overlay."""
         if self.dry_run:
             return []
@@ -282,8 +282,8 @@ class JunctionDetector(_Base):
         """(junction_candidates, end_dets) from ONE SAM3 pass -- for the two-phase 'cable_end' scan.
 
         junction_candidates is [(u, v, yaw), ...], ONE per top-N assembly component (the MULTI-CABLE
-        case), drawn 'conn 1/2/...' (numbered per cable); the scan SELECTS one (estimate-agreement if
-        confident, else image-centre). The traced assembly (largest component) has TWO ends, labelled
+        case), drawn 'conn 1/2/...' (numbered per cable); ALL are ingested and RANSAC decides which is
+        the real connector. The traced assembly (largest component) has TWO ends, labelled
         'cable end A/B' by IMAGE-CENTRE proximity -- 'A' the end CLOSER to centre (tracked/approached),
         'B' the FARTHER -- both drawn
         so the two-ends failure is visible. end_dets is [(u, v, yaw)] for END A only: Phase 1 steers

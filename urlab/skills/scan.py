@@ -127,6 +127,11 @@ class ScanConfig:
         # Independent of save_scan_images. Path defaults to <data_dir>/last_camera_image.png.
         self.save_last_image = bool(cfg.get('save_last_camera_image', True))
         self.last_image_path = cfg.get('last_camera_image_path', None)
+        # A 3D figure of the junction FUSION (per-view rays + cumulative estimate) -- fuse mode. Like
+        # the overlay it is written per-view (if save_scan_images) AND to a stable path (overwritten
+        # each view) for live watching. Path defaults to <data_dir>/last_junction_plot.png.
+        self.save_junction_plot = bool(cfg.get('save_junction_plot', False))
+        self.last_junction_plot_path = cfg.get('last_junction_plot_path', None)
 
 
 class CableScanner:
@@ -159,6 +164,8 @@ class CableScanner:
         # Stable path for the always-latest overlay copy (default: <data_dir>/last_camera_image.png).
         self.last_image_path = self.s.last_image_path or os.path.join(data_root,
                                                                       'last_camera_image.png')
+        self.last_junction_plot_path = self.s.last_junction_plot_path or os.path.join(
+            data_root, 'last_junction_plot.png')
 
     # ------------------------------------------------------------------ per view
     def _hold_view(self, label):
@@ -172,6 +179,7 @@ class CableScanner:
         self._recon = None
         dets = self._detect_and_ingest(frame)        # mode-aware: fuse vs reconstruction
         self._save_overlay()
+        self._save_junction_plot()                   # fuse-mode 3D rays + cumulative estimate
         if not dets and self.s.require_detection:
             log.warning('  %s: no detection -- not a good view (%d/%d good).',
                         label, self.good_views, self.s.min_good_views)
@@ -286,6 +294,28 @@ class CableScanner:
                 os.replace(tmp, self.last_image_path)   # atomic swap; viewer never sees a partial file
         except Exception as exc:                     # noqa: BLE001 -- saving is best-effort
             log.warning('  could not save overlay: %s', exc)
+
+    def _save_junction_plot(self):
+        """Fuse mode: save the 3D junction-fusion figure (per-view rays + cumulative estimate). One
+        render, copied to the per-view archive (if save_scan_images) and atomically swapped into the
+        stable live path. Best-effort; needs an estimate, so it silently no-ops early on."""
+        if self.mode != 'fuse' or not self.s.save_junction_plot:
+            return
+        try:
+            import shutil
+            os.makedirs(os.path.dirname(self.last_junction_plot_path) or '.', exist_ok=True)
+            root, ext = os.path.splitext(self.last_junction_plot_path)
+            tmp = f'{root}.tmp{ext or ".png"}'
+            if not self.estimator.save_plot(tmp):
+                return                                   # no estimate yet -- nothing to draw
+            if self.s.save_images:
+                os.makedirs(self.image_dir, exist_ok=True)
+                arch = os.path.join(self.image_dir, f'junction_{self.view_idx:02d}.png')
+                shutil.copyfile(tmp, arch)
+                log.info('  saved junction plot %s', arch)
+            os.replace(tmp, self.last_junction_plot_path)   # atomic swap for the live viewer
+        except Exception as exc:                         # noqa: BLE001 -- plotting is best-effort
+            log.warning('  could not save junction plot: %s', exc)
 
     def _save_recon_plot(self):
         """Reconstruction mode: save the 3D cable-points figure next to the overlay (best-effort)."""
@@ -527,6 +557,7 @@ class CableScanner:
                 self._save_overlay()
                 end_vid = self.end_estimator.add_view(edet, frame.K, frame.T_base_cam, frame.stamp)
                 self.estimator.add_view(jdet, frame.K, frame.T_base_cam, frame.stamp)
+                self._save_junction_plot()           # 3D rays + cumulative junction estimate
 
                 # Distance-gate the cable-end fusion (like the junction): fuse only endpoint views
                 # within max_view_distance of the cable-end. Far endpoint views are the noisiest

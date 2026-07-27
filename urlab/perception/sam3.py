@@ -223,7 +223,7 @@ class JunctionDetector(_Base):
         so a second visible cable's connector is invisible to it; this splits the assembly mask and
         finds a junction per component. The caller (the scan) SELECTS one -- the candidate agreeing
         with the current estimate if it is confident, else the one nearest the image centre. Drawn
-        'conn A/B' on the overlay."""
+        'conn 1/2/...' (numbered per cable) on the overlay."""
         if self.dry_run:
             return []
         res = self.detector.detect(self._pil(frame))
@@ -262,20 +262,30 @@ class JunctionDetector(_Base):
         return out
 
     def _draw_candidates(self, vis, cands, w, h):
-        """Draw junction candidates labelled 'conn A/B' (A = nearest image centre) so a second
-        cable's connector is visible in the overlay alongside the primary junction marker."""
+        """Draw junction candidates labelled 'conn 1/2/...' (a per-cable ID, 1 = nearest image
+        centre) so a second cable's connector is visible alongside the primary junction marker.
+        Numbers, NOT letters -- A/B is reserved for the two ENDS of a cable, so the connector of a
+        DIFFERENT cable gets a number. At LOW opacity (secondary annotation): rendered on a copy and
+        blended back, so only the marked pixels fade (the rest of the image is untouched)."""
+        if not cands or vis is None:
+            return
         cx, cy = w / 2.0, h / 2.0
         ordered = sorted(cands, key=lambda c: (c[0] - cx) ** 2 + (c[1] - cy) ** 2)
-        for lbl, c in zip('ABCDEFGH', ordered):
-            self._draw_end(vis, c[0], c[1], c[2], label=f'conn {lbl}', col=(0, 200, 255))
+        layer = vis.copy()
+        for idx, c in enumerate(ordered, start=1):     # conn 1, conn 2, ... (cable ID)
+            self._draw_end(layer, c[0], c[1], c[2], label=f'conn {idx}', col=(0, 200, 255))
+        import cv2
+        a = min(float(self.overlay_opacity), 0.5)      # secondary -> at most half opacity
+        cv2.addWeighted(layer, a, vis, 1.0 - a, 0.0, dst=vis)
 
     def detect_both(self, frame):
         """(junction_candidates, end_dets) from ONE SAM3 pass -- for the two-phase 'cable_end' scan.
 
         junction_candidates is [(u, v, yaw), ...], ONE per top-N assembly component (the MULTI-CABLE
-        case), drawn 'conn A/B'; the scan SELECTS one (estimate-agreement if confident, else
-        image-centre). The traced assembly (largest component) has TWO ends, labelled by IMAGE-CENTRE
-        proximity -- 'A' the end CLOSER to centre (tracked/approached), 'B' the FARTHER -- both drawn
+        case), drawn 'conn 1/2/...' (numbered per cable); the scan SELECTS one (estimate-agreement if
+        confident, else image-centre). The traced assembly (largest component) has TWO ends, labelled
+        'cable end A/B' by IMAGE-CENTRE proximity -- 'A' the end CLOSER to centre (tracked/approached),
+        'B' the FARTHER -- both drawn
         so the two-ends failure is visible. end_dets is [(u, v, yaw)] for END A only: Phase 1 steers
         on A, and because it also requires cross-view consistency, an A that flips between the two
         ends simply won't agree across views -> no approach (a built-in guard on the ambiguous case)."""

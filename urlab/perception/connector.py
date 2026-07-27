@@ -343,6 +343,93 @@ class ConnectorEstimator:
                  len(inliers), n_inlier_views, max_ang, cond, depth)
         return T
 
+    def save_plot(self, path, azimuths=(-60, 30), elev=22.0):
+        """Save a 3D figure (two azimuths, ROBOT BASE-FRAME axes) of the junction FUSION -- the
+        fuse-mode analogue of the reconstruction plot. It draws:
+
+          * every view's back-projected RAY (camera centre -> through the detected junction pixel),
+          * the CUMULATIVE estimate ORIGIN (red star) with its axis triad (x=red into the connector,
+            y=green, z=blue),
+          * the camera centres,
+
+        coloured by role: the LATEST detection (orange, thick), RANSAC inliers (green), and outliers
+        / not-fused views (grey). So you literally watch the rays converge on the estimate as views
+        accumulate -- a lone outlier ray stands out, and a poorly-conditioned fit shows as rays that
+        do not meet at a point. Returns True if written, False if there is no usable estimate yet."""
+        if not self.history:
+            return False
+        T = self.estimate()
+        if T is not None:
+            P = T[:3, 3]
+            _, inliers = self._ransac(self._fuse_history())
+            inlier_views = {d.view for d in inliers}
+        else:                                          # no consistent fit yet -- show rays + rough pt
+            P = self.rough_origin()
+            if P is None:
+                return False
+            T = np.eye(4)
+            T[:3, 3] = P
+            inlier_views = set()
+
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers the 3d projection)
+
+        latest = max((d.view for d in self.history), default=0)
+        pts = np.vstack([np.array([d.C for d in self.history]), P[None, :]])
+        L = 0.03                                       # triad arm length (m)
+
+        fig = plt.figure(figsize=(11.5, 5.2))
+        for i, az in enumerate(azimuths):
+            ax = fig.add_subplot(1, len(azimuths), i + 1, projection='3d')
+            for d in self.history:
+                t = float(np.dot(P - d.C, d.g))        # param of the closest point on the ray to P
+                end = d.C + d.g * max(t, 1e-3)         # draw the ray up to (about) the estimate
+                if d.view == latest:
+                    col, lw, z = '#ff7f0e', 2.6, 5     # latest detection -- orange, thick
+                elif d.view in inlier_views:
+                    col, lw, z = '#2ca02c', 1.1, 3     # RANSAC inlier -- green
+                else:
+                    col, lw, z = '#b8b8b8', 0.8, 2     # outlier / not fused -- grey
+                ax.plot([d.C[0], end[0]], [d.C[1], end[1]], [d.C[2], end[2]],
+                        color=col, lw=lw, zorder=z)
+                ax.scatter([d.C[0]], [d.C[1]], [d.C[2]], color=col, s=10, depthshade=False, zorder=z)
+            ax.scatter([P[0]], [P[1]], [P[2]], color='red', s=55, marker='*', zorder=6)
+            for col, k in zip(('#d62728', '#2ca02c', '#1f77b4'), range(3)):   # x,y,z axis triad
+                v = T[:3, k] * L
+                ax.plot([P[0], P[0] + v[0]], [P[1], P[1] + v[1]], [P[2], P[2] + v[2]],
+                        color=col, lw=2.2, zorder=6)
+            ax.set_xlabel('base X (m)')
+            ax.set_ylabel('base Y (m)')
+            ax.set_zlabel('base Z (m)')
+            ax.set_title(f'azim {az:+.0f} deg')
+            ax.view_init(elev=elev, azim=az)
+            _set_equal_cube(ax, pts)
+        tag = 'estimate' if inlier_views else 'rough -- not yet consistent'
+        fig.suptitle(f'Junction fusion -- {self.n_views} views, {len(inlier_views)} inliers '
+                     f'[{tag}]   (orange=latest, green=inlier, grey=outlier; * = estimate, '
+                     f'RGB triad = axis)')
+        fig.tight_layout()
+        fig.savefig(path, dpi=120)
+        plt.close(fig)
+        return True
+
+
+def _set_equal_cube(ax, pts):
+    """Equal-aspect cube limits centred on the data so the geometry is not distorted, while keeping
+    the base-frame axis DIRECTIONS (the origin is simply offset onto the scene)."""
+    lo, hi = pts.min(axis=0), pts.max(axis=0)
+    c = 0.5 * (lo + hi)
+    r = max(float(np.max(hi - lo)) * 0.5, 0.02)        # at least a 4 cm cube
+    ax.set_xlim(c[0] - r, c[0] + r)
+    ax.set_ylim(c[1] - r, c[1] + r)
+    ax.set_zlim(c[2] - r, c[2] + r)
+    try:
+        ax.set_box_aspect((1, 1, 1))
+    except Exception:                                  # noqa: BLE001 -- older matplotlib
+        pass
+
 
 class ConnectorTracker:
     """Ties a detector to the estimator and publishes the result into the frame graph."""

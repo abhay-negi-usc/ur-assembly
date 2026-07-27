@@ -178,6 +178,9 @@ save_last_camera_image: true          # also mirror the latest overlay to a STAB
                                       # (atomically) each capture -- keep it open in a viewer to watch
                                       # the live view + detection without reopening files
 # last_camera_image_path: data/last_camera_image.png   # default: <data_dir>/last_camera_image.png
+save_junction_plot: true              # also write a 3D plot of the junction FUSION (per-view rays +
+                                      # cumulative estimate) each view, to <data_dir>/last_junction_plot.png
+                                      # (+ per-view archive if save_scan_images); watch it converge live
 
 # ---- Pick approach / lift / place ----
 approach_distance_m: 0.10

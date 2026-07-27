@@ -263,11 +263,19 @@ class JunctionDetector(_Base):
 
     def _draw_candidates(self, vis, cands, w, h):
         """Draw junction candidates labelled 'conn A/B' (A = nearest image centre) so a second
-        cable's connector is visible in the overlay alongside the primary junction marker."""
+        cable's connector is visible alongside the primary junction marker -- at LOW opacity, since
+        this is secondary annotation. Rendered on a copy and blended back, so only the marked pixels
+        fade (the rest of the image is untouched)."""
+        if not cands or vis is None:
+            return
         cx, cy = w / 2.0, h / 2.0
         ordered = sorted(cands, key=lambda c: (c[0] - cx) ** 2 + (c[1] - cy) ** 2)
+        layer = vis.copy()
         for lbl, c in zip('ABCDEFGH', ordered):
-            self._draw_end(vis, c[0], c[1], c[2], label=f'conn {lbl}', col=(0, 200, 255))
+            self._draw_end(layer, c[0], c[1], c[2], label=f'conn {lbl}', col=(0, 200, 255))
+        import cv2
+        a = min(float(self.overlay_opacity), 0.5)      # secondary -> at most half opacity
+        cv2.addWeighted(layer, a, vis, 1.0 - a, 0.0, dst=vis)
 
     def detect_both(self, frame):
         """(junction_candidates, end_dets) from ONE SAM3 pass -- for the two-phase 'cable_end' scan.

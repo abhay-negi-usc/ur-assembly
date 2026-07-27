@@ -11,7 +11,7 @@ one contact pins the height.
 
 from .. import log as urlog
 from ..log import StepRunner
-from ..skills.pick import GraspCheck, GraspGeometry
+from ..skills.pick import GraspCheck, GraspGeometry, GraspImageRecorder
 from ..skills.touch import TouchConfig, TouchProbe
 from ._cable import build_scanner, make_confirm
 from ._runner import run_app
@@ -25,6 +25,7 @@ def build_and_run(cfg, robot, camera, args):
     probe = TouchProbe(robot, tc)
     geom = GraspGeometry(cfg)
     check = GraspCheck(cfg)
+    recorder = GraspImageRecorder(cfg)
     confirm = make_confirm(cfg)
     q_home = robot.arm.q()
     grasp_close = int(cfg.get_path('grasp_check.closed_counts', 228))
@@ -54,25 +55,27 @@ def build_and_run(cfg, robot, camera, args):
     ]):
         return False
 
-    # Grasp with vision x/y/yaw + the TOUCHED z, with the counts-based check + recovery.
-    attempt = 0
-    while True:
-        geom.T_base_grasp = probe.grasp_target(probe.z_touch)
-        if not runner.run([
-            ('move to grasp', lambda: robot.move_fingertip(geom.T_base_grasp, 'grasp')),
-            ('close gripper (grasp)', lambda: robot.gripper.go_to(grasp_close, 'close')),
-        ]):
-            return False
-        if check.evaluate(robot.gripper) == 'ok':
-            break
-        if attempt >= check.max_retries:
-            log.error('Grasp failed on all %d attempts; aborting.', check.max_retries + 1)
-            return False
-        attempt += 1
-        log.warning('Grasp missed -- recovering (attempt %d/%d). z is still known from the touch.',
-                    attempt + 1, check.max_retries + 1)
-        if not (robot.gripper.open('drop') and probe.retract_hover()):
-            return False
+    # Grasp with vision x/y/yaw + the TOUCHED z, with the counts-based check + recovery. Record
+    # wrist images at grasp_check.capture_rate_hz (default 1 Hz) over the grasp/retry loop.
+    with recorder.recording(scanner.camera):
+        attempt = 0
+        while True:
+            geom.T_base_grasp = probe.grasp_target(probe.z_touch)
+            if not runner.run([
+                ('move to grasp', lambda: robot.move_fingertip(geom.T_base_grasp, 'grasp')),
+                ('close gripper (grasp)', lambda: robot.gripper.go_to(grasp_close, 'close')),
+            ]):
+                return False
+            if check.evaluate(robot.gripper) == 'ok':
+                break
+            if attempt >= check.max_retries:
+                log.error('Grasp failed on all %d attempts; aborting.', check.max_retries + 1)
+                return False
+            attempt += 1
+            log.warning('Grasp missed -- recovering (attempt %d/%d). z is still known from the touch.',
+                        attempt + 1, check.max_retries + 1)
+            if not (robot.gripper.open('drop') and probe.retract_hover()):
+                return False
 
     return runner.run([
         ('lift', lambda: robot.move_fingertip(geom.lift(), 'lift')),

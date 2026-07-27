@@ -130,6 +130,8 @@ fingertip_grasp:
 scan:
   # mode: fuse | reconstruction | ground_plane.
   #   ground_plane   -- ONE image, USER picks the cable by number, pose from the ground plane (above).
+  # mode: fuse | reconstruction | ground_plane.
+  #   ground_plane   -- ONE image, USER picks the cable by number, pose from the ground plane (above).
   #   fuse           -- fuse per-view junction detections into the connector pose (default).
   #   reconstruction -- ALSO reconstruct the 3D cable centreline and REFINE the junction pose from
   #                     it (measured axis tilt; optional roll from the cable's osculating plane).
@@ -261,9 +263,10 @@ grasp_check:
   detect_empty: true             # 228 vs 225 makes empty reliably separable by POSITION now
   settle_s: 1.0
   max_retries: 2                 # whole scan->grasp attempts (outer loop) if recovery still misses
-  capture_images: false          # save the wrist-camera view at EACH grasp close, labelled with the
-                                 # gripper count (filename + on-image) -> data/grasp_images/<stamp>/,
-                                 # for correlating the visual grasp state with the count bands
+  capture_images: true           # save wrist images during grasping -> data/grasp_images/<stamp>/:
+                                 # a TIMED record at capture_rate_hz over the descent+close+recovery,
+                                 # PLUS a count-labelled frame at each close (visual vs count bands)
+  capture_rate_hz: 1.0           # rate (Hz) of the timed grasp-image recording
 
   # ---- Failed-grasp RECOVERY (see skills/pick.py GraspRecovery) ----
   # On a MISS (cable on the flats, <= faces_max_counts): a blind loose->close retry first, then up

@@ -13,7 +13,8 @@ from ..log import StepRunner
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import insert as ins
 from ..skills import reset
-from ..skills.pick import GraspCheck, GraspController, GraspGeometry, GraspRecovery, log_grasp_delta
+from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
+                           GraspRecovery, log_grasp_delta)
 from ..transforms import from_cfg
 from ._cable import build_scanner, make_confirm
 from ._runner import run_app
@@ -21,7 +22,7 @@ from ._runner import run_app
 log = urlog.get('cable-assemble')
 
 
-def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm):
+def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder):
     """The cable pick, returning 'ok' | 'missed' | 'empty' | 'abort'."""
     scanner.estimator.reset()
     T_conn_grasp = from_cfg(cfg.section('connector_grasp'))
@@ -33,17 +34,19 @@ def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm):
     geom.T_base_grasp = T_conn @ T_conn_grasp
 
     # Grasp directly from wherever the scan ended (already close to the cable) -- no detour home first.
+    # Record wrist images at grasp_check.capture_rate_hz (default 1 Hz) over the descent + close +
+    # recovery, alongside the count-labelled frames GraspRecovery saves.
     runner = StepRunner(log, confirm=confirm is not None)
-    if not runner.run([
-        ('move to grasp-align', lambda: robot.move_fingertip(geom.pre_grasp(), 'grasp-align')),
-        ('report pre-grasp delta', lambda: log_grasp_delta(robot, geom.T_base_grasp, 'pre-grasp')),
-        ('move to grasp', lambda: grasp.descend(robot, geom, 'grasp')),
-    ]):
-        return 'abort'
-    # Close + grasp-check + recovery (blind retry, then mode-directed reseat nudges) -- see
-    # GraspRecovery -- so a cable on the fingertip flats/tips is reseated, not failed. The scanner's
-    # wrist camera lets recovery save count-labelled grasp images when grasp_check.capture_images.
-    return recovery.grasp_with_recovery(robot, geom, check, camera=scanner.camera)
+    with recorder.recording(scanner.camera):
+        if not runner.run([
+            ('move to grasp-align', lambda: robot.move_fingertip(geom.pre_grasp(), 'grasp-align')),
+            ('report pre-grasp delta', lambda: log_grasp_delta(robot, geom.T_base_grasp, 'pre-grasp')),
+            ('move to grasp', lambda: grasp.descend(robot, geom, 'grasp')),
+        ]):
+            return 'abort'
+        # Close + grasp-check + recovery (blind retry, then mode-directed reseat nudges) -- see
+        # GraspRecovery -- so a cable on the fingertip flats/tips is reseated, not failed.
+        return recovery.grasp_with_recovery(robot, geom, check, camera=scanner.camera)
 
 
 def build_and_run(cfg, robot, camera, args):
@@ -57,6 +60,7 @@ def build_and_run(cfg, robot, camera, args):
     check = GraspCheck(cfg)
     recovery = GraspRecovery(cfg)
     grasp = GraspController(cfg)
+    recorder = GraspImageRecorder(cfg)
     guard = ForceGuard(robot.arm, cfg.get_path('assembly.force_guard', {}))
     confirm = make_confirm(cfg)
 
@@ -68,7 +72,7 @@ def build_and_run(cfg, robot, camera, args):
     # 1. PICK, with grasp-check retry.
     attempt = 0
     while True:
-        result = _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm)
+        result = _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder)
         if result == 'ok':
             break
         if result == 'abort':

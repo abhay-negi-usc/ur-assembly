@@ -112,7 +112,7 @@ class GraspRecovery:
         # Optional: save the wrist-camera view at EACH grasp close, labelled with the gripper count
         # (in the filename and drawn on the image), for correlating the visual grasp state with the
         # count bands. Written to <data_dir>/<capture_subdir>/<timestamp>/.
-        self.capture_images = bool(gc.get('capture_images', False))
+        self.capture_images = bool(gc.get('capture_images', True))
         self._data_root = cfg.get('data_dir', 'data')
         self._capture_subdir = gc.get('capture_subdir', 'grasp_images')
         self._capture_dir = None
@@ -301,6 +301,81 @@ class GraspController:
         """Lift to geom.lift() in the SAME mode as the descent. `position_guard` guards the
         position-mode lift only."""
         return self._to(robot, geom.lift(), label, 'Lift', position_guard=position_guard)
+
+
+class GraspImageRecorder:
+    """Save wrist-camera images at a fixed RATE for the DURATION of a grasp, in a background thread,
+    so the whole approach -> close -> reseat is captured (not just the close events that
+    GraspRecovery labels with the count). Enabled by grasp_check.capture_images (default TRUE) at
+    grasp_check.capture_rate_hz (default 1 Hz); written to <data_dir>/<capture_subdir>/<timestamp>/.
+
+        with recorder.recording(camera):
+            ... grasp motions ...
+    """
+
+    def __init__(self, cfg):
+        gc = cfg.section('grasp_check')
+        self.enabled = bool(gc.get('capture_images', True))
+        self.rate_hz = max(0.1, float(gc.get('capture_rate_hz', 1.0)))
+        self._data_root = cfg.get('data_dir', 'data')
+        self._subdir = gc.get('capture_subdir', 'grasp_images')
+        self._dir = None
+        self._seq = 0
+
+    def recording(self, camera):
+        """Context manager: record at self.rate_hz for the length of the `with` block."""
+        return _GraspRecording(self, camera)
+
+    def _capture(self, camera):
+        """Save one wrist frame; best-effort (a failure never interrupts the grasp)."""
+        try:
+            import os
+            import cv2
+            from datetime import datetime
+            if self._dir is None:
+                self._dir = os.path.join(self._data_root, self._subdir,
+                                         datetime.now().strftime('%Y%m%d_%H%M%S'))
+            os.makedirs(self._dir, exist_ok=True)
+            img = camera.capture().color.copy()
+            cv2.imwrite(os.path.join(self._dir, f'grasp_{self._seq:04d}.png'), img)
+            self._seq += 1
+        except Exception as exc:                       # noqa: BLE001 -- capture is best-effort
+            log.warning('  grasp image capture failed: %s', exc)
+
+
+class _GraspRecording:
+    """Runs GraspImageRecorder._capture at the recorder's rate in a daemon thread for the length of
+    the `with` block. No-op if capture is off / no camera / dry-run."""
+
+    def __init__(self, rec, camera):
+        self._rec = rec
+        self._camera = camera
+        self._stop = None
+        self._thread = None
+
+    def __enter__(self):
+        r = self._rec
+        if not r.enabled or self._camera is None or getattr(self._camera, 'dry_run', False):
+            return self
+        import threading
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        log.info('  recording grasp images at %.1f Hz.', r.rate_hz)
+        return self
+
+    def _loop(self):
+        period = 1.0 / self._rec.rate_hz
+        while not self._stop.is_set():
+            self._rec._capture(self._camera)
+            self._stop.wait(period)
+
+    def __exit__(self, *exc):
+        if self._stop is not None:
+            self._stop.set()
+            if self._thread is not None:
+                self._thread.join(timeout=2.0)
+        return False
 
 
 def log_grasp_delta(robot, T_base_grasp, label):

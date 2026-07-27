@@ -123,6 +123,13 @@ class _Base:
         return cv2.addWeighted(vis, self.overlay_opacity,
                                orig_bgr, 1.0 - self.overlay_opacity, 0.0)
 
+    @staticmethod
+    def _raw_bgr(frame):
+        """The RAW camera image as a fresh BGR array -- the base our markers draw on, so the overlay
+        is raw + markers rather than the SAM3 mask-tinted render."""
+        import cv2
+        return cv2.cvtColor(frame.rgb, cv2.COLOR_RGB2BGR)
+
 
 class NeckDetector(_Base):
     """Cable/connector junction ("neck") detection -- cable_neck_core.NeckDetector."""
@@ -227,7 +234,7 @@ class JunctionDetector(_Base):
         if self.dry_run:
             return []
         res = self.detector.detect(self._pil(frame))
-        self.last_debug = self._overlay(frame, res)
+        self.last_debug = self._raw_bgr(frame)        # markers on the RAW image, not the SAM3 render
         cands = self._component_junctions(res.get('assembly'), top_n)
         if self.last_debug is not None:
             h, w = frame.rgb.shape[:2]
@@ -285,7 +292,7 @@ class JunctionDetector(_Base):
         if self.dry_run:
             return []
         res = self.detector.detect(self._pil(frame))
-        self.last_debug = self._overlay(frame, res)
+        self.last_debug = self._raw_bgr(frame)        # numbered markers on the RAW image, not SAM3
         assembly = res.get('assembly')
         if assembly is None:
             return []
@@ -348,7 +355,7 @@ class JunctionDetector(_Base):
         if self.dry_run:
             return [], []
         res = self.detector.detect(self._pil(frame))
-        self.last_debug = self._overlay(frame, res)
+        self.last_debug = self._raw_bgr(frame)        # markers on the RAW image, not the SAM3 render
         j = res.get('result')
         if j is None:
             log.info('  no junction/endpoint this view.')

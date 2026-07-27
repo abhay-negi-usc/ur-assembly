@@ -99,6 +99,7 @@ fingertip_grasp:
 
 scan:
   # mode: fuse | reconstruction | ground_plane  (see the reconstruction + ground_plane blocks above).
+  # mode: fuse | reconstruction | ground_plane  (see the reconstruction + ground_plane blocks above).
   mode: fuse
   require_detection: true
   min_good_views: 3
@@ -205,7 +206,9 @@ grasp_check:
   detect_empty: true             # 228 vs 225 makes empty reliably separable by POSITION now
   settle_s: 1.0
   max_retries: 2                 # whole scan->grasp attempts (outer loop) if recovery still misses
-  capture_images: false          # save the wrist view at each grasp close, labelled with the count
+  capture_images: true           # save wrist images during grasping: a timed record at
+                                 # capture_rate_hz PLUS a count-labelled frame at each close
+  capture_rate_hz: 1.0           # rate of the timed recording during the descent + close + recovery
 
   # ---- Failed-grasp RECOVERY (see skills/pick.py GraspRecovery + cable_pick_place.yaml notes) ----
   recovery:

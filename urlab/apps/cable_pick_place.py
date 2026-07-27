@@ -11,7 +11,8 @@ fingertip groove and retries the whole scan->grasp sequence.
 from .. import log as urlog
 from ..log import StepRunner
 from ..skills import reset
-from ..skills.pick import GraspCheck, GraspController, GraspGeometry, GraspRecovery, log_grasp_delta
+from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
+                           GraspRecovery, log_grasp_delta)
 from ..transforms import from_cfg, inverse
 from ._cable import build_scanner, make_confirm
 from ._runner import run_app
@@ -19,7 +20,7 @@ from ._runner import run_app
 log = urlog.get('cable-pick-place')
 
 
-def _attempt(cfg, robot, scanner, geom, check, recovery, grasp, confirm):
+def _attempt(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder):
     """One scan->grasp attempt. Returns 'ok' | 'missed' | 'empty' | 'abort'."""
     scanner.estimator.reset()
     T_conn_grasp = from_cfg(cfg.section('connector_grasp'))
@@ -42,13 +43,15 @@ def _attempt(cfg, robot, scanner, geom, check, recovery, grasp, confirm):
         ('move to grasp', lambda: grasp.descend(robot, geom, 'grasp')),
         ('report at-grasp delta', lambda: log_grasp_delta(robot, geom.T_base_grasp, 'at-grasp')),
     ]
-    if not runner.run(steps):
-        return 'abort'
-    # Close + grasp-check + recovery: a blind loose->close retry, then mode-directed reseat nudges
-    # (see GraspRecovery) instead of a bare close, so a cable on the fingertip flats/tips is
-    # reseated rather than failing the whole scan->grasp attempt. The scanner's wrist camera lets
-    # recovery save count-labelled grasp images when grasp_check.capture_images is on.
-    return recovery.grasp_with_recovery(robot, geom, check, camera=scanner.camera)
+    # Record wrist images at grasp_check.capture_rate_hz (default 1 Hz) for the whole descent +
+    # close + recovery -- the timed record, alongside the count-labelled frames GraspRecovery saves.
+    with recorder.recording(scanner.camera):
+        if not runner.run(steps):
+            return 'abort'
+        # Close + grasp-check + recovery: a blind loose->close retry, then mode-directed reseat nudges
+        # (see GraspRecovery) instead of a bare close, so a cable on the fingertip flats/tips is
+        # reseated rather than failing the whole scan->grasp attempt.
+        return recovery.grasp_with_recovery(robot, geom, check, camera=scanner.camera)
 
 
 def build_and_run(cfg, robot, camera, args):
@@ -57,6 +60,7 @@ def build_and_run(cfg, robot, camera, args):
     check = GraspCheck(cfg)
     recovery = GraspRecovery(cfg)
     grasp = GraspController(cfg)
+    recorder = GraspImageRecorder(cfg)
     confirm = make_confirm(cfg)
 
     # RESET at the start: open the gripper and go to the defined HOME pose under admittance, so the
@@ -68,7 +72,7 @@ def build_and_run(cfg, robot, camera, args):
     # Pick, with grasp-check retry.
     attempt = 0
     while True:
-        result = _attempt(cfg, robot, scanner, geom, check, recovery, grasp, confirm)
+        result = _attempt(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder)
         if result == 'ok':
             break
         if result == 'abort':

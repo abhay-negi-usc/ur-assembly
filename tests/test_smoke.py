@@ -293,6 +293,39 @@ def test_connector_estimator_validation_gate_rejects_background():
     assert est.add_view([det_ok], k, tbc, 0.0) != 0
 
 
+def test_pick_junction_estimate_then_centre():
+    """Multi-cable junction selection: agree-with-estimate when confident, else nearest centre."""
+    from urlab.skills.scan import _pick_junction
+
+    K = np.array([[900.0, 0, 640.0], [0, 900.0, 360.0], [0, 0, 1.0]])
+    C = np.array([0.5, 0.0, 0.6])
+    P_target = np.array([0.5, 0.0, 0.2])                 # straight below the camera
+    T_bc = T.look_at(C, P_target, np.eye(4))
+    Rcw = T_bc[:3, :3].T
+
+    def px(X):
+        Xc = Rcw @ (np.asarray(X, float) - C)
+        return (K @ (Xc / Xc[2]))[:2]
+
+    u_t, v_t = px(P_target)                              # target connector projects near centre
+    u_bg, v_bg = px(P_target + np.array([0.25, 0.0, 0.0]))   # a background cable, 25 cm to the side
+    cand_target = (float(u_t), float(v_t), 0.0)
+    cand_bg = (float(u_bg), float(v_bg), 0.0)
+
+    # Not confident (no gate origin) -> nearest image centre. The target is centred, so it wins even
+    # when the background candidate is listed first.
+    sel, reason = _pick_junction([cand_bg, cand_target], K, T_bc, None)
+    assert reason == 'centre' and sel == cand_target
+
+    # Confident (gate origin at the target) -> the candidate whose ray agrees, i.e. the target, even
+    # if the background one were nearer centre.
+    sel, reason = _pick_junction([cand_bg, cand_target], K, T_bc, P_target)
+    assert reason == 'estimate' and sel == cand_target
+
+    # A single candidate is passed through unchanged.
+    assert _pick_junction([cand_bg], K, T_bc, P_target) == (cand_bg, 'only')
+
+
 class _FakeGripper:
     """Scripted gripper: each close() reports the next count in `on_close`; go_to sets the count."""
 

@@ -27,10 +27,36 @@ import os
 import numpy as np
 
 from .. import log as urlog
+from ..perception.connector import ray_point_distance
 from ..transforms import (
     clamp_pose_delta, frame_from_axis, inverse, look_at, rotate_about_axis, xyzrpy_to_matrix)
 
 log = urlog.get('scan')
+
+
+def _pick_junction(cands, K, T_base_cam, gate_origin):
+    """From several junction candidates (one per visible cable), choose the one to USE, returning
+    (selected, reason):
+      * gate_origin set (the estimate is CONFIDENT) -> the candidate whose viewing ray best AGREES
+        with the estimate origin (smallest ray-point distance) -- stays locked on the tracked cable;
+      * else -> the candidate closest to the IMAGE CENTRE (the framed target).
+    0 or 1 candidate -> nothing to choose."""
+    if not cands:
+        return None, None
+    if len(cands) == 1:
+        return cands[0], 'only'
+    if gate_origin is not None and T_base_cam is not None and K is not None:
+        R, C = T_base_cam[:3, :3], T_base_cam[:3, 3]
+        Kinv = np.linalg.inv(K)
+
+        def ray_dist(c):
+            g = R @ (Kinv @ np.array([c[0], c[1], 1.0]))
+            g = g / (np.linalg.norm(g) + 1e-12)
+            return ray_point_distance(C, g, gate_origin)
+
+        return min(cands, key=ray_dist), 'estimate'
+    cx, cy = (float(K[0, 2]), float(K[1, 2])) if K is not None else (0.0, 0.0)
+    return min(cands, key=lambda c: (c[0] - cx) ** 2 + (c[1] - cy) ** 2), 'centre'
 
 
 class ScanConfig:
@@ -203,10 +229,32 @@ class CableScanner:
                 dets, frame.K, frame.T_base_cam, frame.stamp)
             return dets
 
-        dets = self.detector.detect(frame)
+        dets = self._select_junction_dets(frame)
         # Ingest ALWAYS (a far detection still steers the approach in via the rough origin).
         self._last_est_vid = self.estimator.add_view(dets, frame.K, frame.T_base_cam, frame.stamp)
         return dets
+
+    def _select_junction_dets(self, frame):
+        """Junction detections to ingest this frame: with the JunctionDetector, one junction PER
+        cable is detected and ONE is selected (estimate-agreement if confident, else image-centre);
+        other detectors (neck/tip) fall back to ingesting all of detect()."""
+        if not hasattr(self.detector, 'detect_junctions'):
+            return self.detector.detect(frame)
+        cands = self.detector.detect_junctions(frame)
+        return self._select_junction(cands, frame.K, frame.T_base_cam)
+
+    def _select_junction(self, cands, K, T_base_cam):
+        """Pick ONE junction from multi-cable candidates (see _pick_junction) and return it as a
+        1- or 0-element detection list ready for add_view."""
+        sel, reason = _pick_junction(cands, K, T_base_cam,
+                                     getattr(self.estimator, '_gate_origin', None))
+        if reason == 'estimate':
+            log.info('  %d junction candidates -- kept the one agreeing with the estimate.',
+                     len(cands))
+        elif reason == 'centre':
+            log.info('  %d junction candidates, estimate not yet confident -- kept the one nearest '
+                     'the image centre.', len(cands))
+        return [sel] if sel is not None else []
 
     def _mark_good(self, good):
         """Push the good/far decision for the current frame to both estimators, so only close views
@@ -474,7 +522,8 @@ class CableScanner:
 
                 time.sleep(self.s.view_settle_s)
                 frame = self.camera.capture()
-                jdet, edet = self.detector.detect_both(frame)
+                jcands, edet = self.detector.detect_both(frame)
+                jdet = self._select_junction(jcands, frame.K, frame.T_base_cam)   # one per cable -> pick
                 self._save_overlay()
                 end_vid = self.end_estimator.add_view(edet, frame.K, frame.T_base_cam, frame.stamp)
                 self.estimator.add_view(jdet, frame.K, frame.T_base_cam, frame.stamp)

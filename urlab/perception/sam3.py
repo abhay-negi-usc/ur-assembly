@@ -217,12 +217,65 @@ class JunctionDetector(_Base):
                  _count(res.get('cables_raw')), _count(res.get('connectors_raw')))
         return out
 
-    def detect_both(self, frame):
-        """(junction_dets, end_dets) from ONE SAM3 pass -- for the two-phase 'cable_end' scan.
+    def detect_junctions(self, frame, top_n=2):
+        """Junction candidates -- ONE per top_n largest assembly component (the MULTI-CABLE case),
+        as [(u, v, yaw), ...]. The stock detect() only ever returns the LARGEST component's junction,
+        so a second visible cable's connector is invisible to it; this splits the assembly mask and
+        finds a junction per component. The caller (the scan) SELECTS one -- the candidate agreeing
+        with the current estimate if it is confident, else the one nearest the image centre. Drawn
+        'conn A/B' on the overlay."""
+        if self.dry_run:
+            return []
+        res = self.detector.detect(self._pil(frame))
+        self.last_debug = self._overlay(frame, res)
+        cands = self._component_junctions(res.get('assembly'), top_n)
+        if self.last_debug is not None:
+            h, w = frame.rgb.shape[:2]
+            self._draw_candidates(self.last_debug, cands, w, h)
+        log.info('  junction candidates=%d (top-%d components) | cables=%d connectors=%d',
+                 len(cands), top_n, _count(res.get('cables_raw')), _count(res.get('connectors_raw')))
+        return cands
 
-        junction_dets are the usual [(u, v, yaw)] junction detections. The traced assembly has TWO
-        ends; they are labelled by IMAGE-CENTRE proximity -- 'A' the end CLOSER to the image centre
-        (the one being tracked/approached), 'B' the FARTHER one -- and BOTH are drawn on the overlay
+    def _component_junctions(self, assembly, top_n=2):
+        """Junction of each of the top_n largest connected components of the assembly mask, as
+        [(u, v, yaw), ...] ordered largest-first. One SAM3 pass already produced `assembly`; the
+        per-component geometry (compute_junction) is cheap, so re-running it per component is how the
+        multi-cable case gets a junction PER cable rather than only the largest one's."""
+        if assembly is None:
+            return []
+        from scipy import ndimage
+        m = np.asarray(assembly, dtype=bool)
+        lbl, n = ndimage.label(m, structure=np.ones((3, 3), np.uint8))
+        if n == 0:
+            return []
+        sizes = ndimage.sum(m, lbl, index=np.arange(1, n + 1))
+        out = []
+        for i in np.argsort(sizes)[::-1][:max(1, int(top_n))]:
+            j = self.core.compute_junction(lbl == (i + 1), work_dim=self.work_dim)
+            if j is None:
+                continue
+            if self.min_contrast > 0.0 and float(j.get('contrast', 0.0)) < self.min_contrast:
+                continue
+            u, v = j['junction']
+            dx, dy = j['direction']
+            out.append((float(u), float(v), float(np.arctan2(dy, dx))))
+        return out
+
+    def _draw_candidates(self, vis, cands, w, h):
+        """Draw junction candidates labelled 'conn A/B' (A = nearest image centre) so a second
+        cable's connector is visible in the overlay alongside the primary junction marker."""
+        cx, cy = w / 2.0, h / 2.0
+        ordered = sorted(cands, key=lambda c: (c[0] - cx) ** 2 + (c[1] - cy) ** 2)
+        for lbl, c in zip('ABCDEFGH', ordered):
+            self._draw_end(vis, c[0], c[1], c[2], label=f'conn {lbl}', col=(0, 200, 255))
+
+    def detect_both(self, frame):
+        """(junction_candidates, end_dets) from ONE SAM3 pass -- for the two-phase 'cable_end' scan.
+
+        junction_candidates is [(u, v, yaw), ...], ONE per top-N assembly component (the MULTI-CABLE
+        case), drawn 'conn A/B'; the scan SELECTS one (estimate-agreement if confident, else
+        image-centre). The traced assembly (largest component) has TWO ends, labelled by IMAGE-CENTRE
+        proximity -- 'A' the end CLOSER to centre (tracked/approached), 'B' the FARTHER -- both drawn
         so the two-ends failure is visible. end_dets is [(u, v, yaw)] for END A only: Phase 1 steers
         on A, and because it also requires cross-view consistency, an A that flips between the two
         ends simply won't agree across views -> no approach (a built-in guard on the ambiguous case)."""
@@ -235,24 +288,20 @@ class JunctionDetector(_Base):
             log.info('  no junction/endpoint this view.')
             return [], []
 
-        jdet = []
-        contrast = float(j.get('contrast', 0.0))
-        if not (self.min_contrast > 0.0 and contrast < self.min_contrast):
-            u, v = j['junction']
-            dx, dy = j['direction']
-            jdet = [(float(u), float(v), float(np.arctan2(dy, dx)))]
+        jcands = self._component_junctions(res.get('assembly'), top_n=2)
 
         h, w = frame.rgb.shape[:2]
         end_a, end_b = self._assembly_ends(j, w, h)
         if self.last_debug is not None:
+            self._draw_candidates(self.last_debug, jcands, w, h)
             if end_a is not None:
                 self._draw_end(self.last_debug, *end_a, label='cable end A', col=(255, 255, 0))
             if end_b is not None:
                 self._draw_end(self.last_debug, *end_b, label='cable end B', col=(0, 165, 255))
-        log.info('  junction=%d endA=%d endB=%d | cables=%d connectors=%d', len(jdet),
+        log.info('  junction candidates=%d endA=%d endB=%d | cables=%d connectors=%d', len(jcands),
                  1 if end_a else 0, 1 if end_b else 0,
                  _count(res.get('cables_raw')), _count(res.get('connectors_raw')))
-        return jdet, ([end_a] if end_a is not None else [])   # Phase 1 steers on cable end A
+        return jcands, ([end_a] if end_a is not None else [])   # Phase 1 steers on cable end A
 
     @staticmethod
     def _draw_end(vis, u, v, yaw, label='cable end', col=(255, 255, 0)):

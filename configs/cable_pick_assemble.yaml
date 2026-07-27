@@ -99,6 +99,7 @@ fingertip_grasp:
 
 scan:
   # mode: fuse | reconstruction | ground_plane  (see the reconstruction + ground_plane blocks above).
+  # mode: fuse | reconstruction | ground_plane  (see the reconstruction + ground_plane blocks above).
   mode: fuse
   require_detection: true
   min_good_views: 3

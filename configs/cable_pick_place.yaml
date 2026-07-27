@@ -86,6 +86,18 @@ reconstruction:
   max_reproj_error_px: 3.0        # reconstructed curve reprojects within this of every skeleton
   min_pose_shift_m: 0.003         # adding a view moves the junction origin less than this (stable)
 
+# ---- Ground-plane manual-select mode (only used when scan.mode: ground_plane) ----
+# ONE image: every cable's junction is NUMBERED for the user to pick; the pose is then estimated by
+# assuming the cable lies on a plane parallel to the robot XY plane at z_m (base frame), projecting
+# the junction pixel onto it. HEADING = the connector's local direction (the one drawn/labelled),
+# projected to the plane -- robust for a curved cable. At the prompt, "n" takes a new image from a
+# small camera move. Needs sam3.mode: junction; the app then grasps + retries as in the multi-view flow.
+ground_plane:
+  z_m: -0.758             # plane height w.r.t. base_link (from the fingertip-touch calibration)
+  max_cables: 8           # number the largest N cables for selection
+  new_view_translation_m: 0.04   # camera step when the user asks for a new view ('n')
+# labeled_image_path: data/ground_scan_labeled.png   # where the numbered image is written (default shown)
+
 connector_frame: connector
 
 # ---- Two-phase 'cable-end' approach (opt-in) ----
@@ -116,7 +128,8 @@ fingertip_grasp:
 
 # ---- Scan phase ----
 scan:
-  # mode: fuse | reconstruction.
+  # mode: fuse | reconstruction | ground_plane.
+  #   ground_plane   -- ONE image, USER picks the cable by number, pose from the ground plane (above).
   #   fuse           -- fuse per-view junction detections into the connector pose (default).
   #   reconstruction -- ALSO reconstruct the 3D cable centreline and REFINE the junction pose from
   #                     it (measured axis tilt; optional roll from the cable's osculating plane).

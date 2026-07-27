@@ -277,6 +277,51 @@ class JunctionDetector(_Base):
         a = min(float(self.overlay_opacity), 0.5)      # secondary annotation -> at most half opacity
         cv2.addWeighted(layer, a, vis, 1.0 - a, 0.0, dst=vis)
 
+    def detect_all(self, frame, max_cables=8):
+        """For the GROUND-PLANE / manual-select mode: detect EVERY cable's junction AND its ends --
+        one entry per connected component (largest first, up to max_cables) -- and NUMBER them on the
+        overlay so the user can pick the target. Returns
+        [{'junction': (u, v, yaw), 'ends': [(u, v, yaw), ...]}, ...]."""
+        if self.dry_run:
+            return []
+        res = self.detector.detect(self._pil(frame))
+        self.last_debug = self._overlay(frame, res)
+        assembly = res.get('assembly')
+        if assembly is None:
+            return []
+        from scipy import ndimage
+        m = np.asarray(assembly, dtype=bool)
+        lbl, n = ndimage.label(m, structure=np.ones((3, 3), np.uint8))
+        if n == 0:
+            return []
+        sizes = ndimage.sum(m, lbl, index=np.arange(1, n + 1))
+        h, w = frame.rgb.shape[:2]
+        cables = []
+        for i in np.argsort(sizes)[::-1][:max(1, int(max_cables))]:
+            j = self.core.compute_junction(lbl == (i + 1), work_dim=self.work_dim)
+            if j is None:
+                continue
+            if self.min_contrast > 0.0 and float(j.get('contrast', 0.0)) < self.min_contrast:
+                continue
+            u, v = j['junction']
+            dx, dy = j['direction']
+            end_a, end_b = self._assembly_ends(j, w, h)
+            cables.append({'junction': (float(u), float(v), float(np.arctan2(dy, dx))),
+                           'ends': [e for e in (end_a, end_b) if e is not None]})
+        if self.last_debug is not None:
+            self._draw_enumerated(self.last_debug, cables, w, h)
+        log.info('  detect_all: %d cable(s) numbered for selection.', len(cables))
+        return cables
+
+    def _draw_enumerated(self, vis, cables, w, h):
+        """Draw each cable NUMBERED at its junction (#1, #2, ...) plus its ends, so the user can read
+        the numbers and pick a target. Full opacity -- the numbers must be legible."""
+        for i, cab in enumerate(cables, start=1):
+            ju, jv, jyaw = cab['junction']
+            for e in cab['ends']:
+                self._draw_end(vis, e[0], e[1], e[2], label='end', col=(255, 255, 0))
+            self._draw_end(vis, ju, jv, jyaw, label=f'#{i}', col=(0, 255, 0))
+
     def _draw_candidates(self, vis, cands, w, h):
         """Draw junction candidates labelled 'conn 1/2/...' (a per-cable ID, 1 = nearest image
         centre) on `vis` so a second cable's connector is visible alongside the primary junction

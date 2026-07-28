@@ -65,11 +65,17 @@ cables:
     connector_in_holder:      # MEASURE (see banana)
       xyz: [0.0, 0.0, 0.0]
       rpy: [0.0, 0.0, 0.0]
+    connector_in_holder:      # MEASURE (see banana)
+      xyz: [0.0, 0.0, 0.0]
+      rpy: [0.0, 0.0, 0.0]
 
   c13:
     connector: [195, 198]
     cable: 218
     junction_offset_m: 0.0075
+    connector_in_holder:      # MEASURE (see banana)
+      xyz: [0.0, 0.0, 0.0]
+      rpy: [0.0, 0.0, 0.0]
     connector_in_holder:      # MEASURE (see banana)
       xyz: [0.0, 0.0, 0.0]
       rpy: [0.0, 0.0, 0.0]

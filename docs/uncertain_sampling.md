@@ -22,6 +22,15 @@ That one key pulls this connector's **calibration** from `configs/cables.yaml` �
 `connector_in_holder` (the connector's pose in the holder). Add/measure a connector by editing its
 entry under `cables:` in `cables.yaml`; **`banana` is the default and set up there.**
 
+## Which cable/connector is under test
+Set it in `configs/uncertain_sampling.yaml`:
+```yaml
+cable: banana        # or: bnc | c13   (or on the CLI: --set cable=bnc)
+```
+That one key pulls this connector's **calibration** from `configs/cables.yaml` — most importantly
+`connector_in_holder` (the connector's pose in the holder). Add/measure a connector by editing its
+entry under `cables:` in `cables.yaml`; **`banana` is the default and set up there.**
+
 ## Frames & the recorded target
 The connector is held via the holder: **tool0 → `connector_holder` → `connector`**. `connector_holder`
 (the shared holder mount) is in the config; **`connector_in_holder` (per-connector) comes from the
@@ -52,6 +61,8 @@ with the holder).
 | `sampling.num_trials` | how many perturbed insertions |
 | `sampling.chunk_fraction` | fraction of the (resampled) trajectory to execute per trial |
 | `sampling.translational_resolution_m` / `rotational_resolution_deg` | densify the CSV to this spacing |
+| `sampling.uncertainty` | per-DOF uncertainty RANGE — half-widths `[x,y,z (m), r,p,y (deg)]`, drawn once per trial, **in the connector frame** |
+| `sampling.noise` | extra per-waypoint jitter (usually 0), in the connector frame |
 | `sampling.uncertainty` | per-DOF uncertainty RANGE — half-widths `[x,y,z (m), r,p,y (deg)]`, drawn once per trial, **in the connector frame** |
 | `sampling.noise` | extra per-waypoint jitter (usually 0), in the connector frame |
 | `sampling.random_seed` | `0` = nondeterministic; `>0` seeds a dedicated RNG for replayable trials |

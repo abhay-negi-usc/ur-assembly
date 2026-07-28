@@ -7,7 +7,7 @@ robot:
   # Tool payload (gripper + coupler + camera): mass + CoG in the tool0 frame (m). REQUIRED so
   # getActualTCPForce() subtracts the tool weight and reports true EXTERNAL force.
   payload:
-    mass_kg: 0.1
+    mass_kg: 1.0
     cog_m: [0.0, 0.0, 0.0]
 base_frame: base_link
 tip_frame: tool0
@@ -46,7 +46,7 @@ compliance:
   reference_rate_hz: 125.0
   warmup_s: 0.5                 # hold the start pose this long (servo-engage transient decays) before the guard
   tare_before: true            # zero the F/T mid-warmup (servo-active) so the guard baseline is right
-  insert_time_s: 3.0           # time to ramp the perturbed chunk (sets the reference speed)
+  insert_time_s: 15.0           # time to ramp the perturbed chunk (sets the reference speed)
   settle_s: 0.5                # hold at the reached pose after each insert (records the contact wrench)
 
 # Contact watchdog: a trip during insertion = the connector SEATED (stop advancing). NOT armed during
@@ -57,12 +57,12 @@ force_guard:
 
 sampling:
   num_trials: 20
-  chunk_fraction: 0.2            # fraction of the resampled trajectory to execute per trial
+  chunk_fraction: 1.0            # fraction of the resampled trajectory to execute per trial
   translational_resolution_m: 0.001
   rotational_resolution_deg: 1.0
   # UNCERTAINTY RANGE per DOF -- uniform half-widths [x, y, z (m), roll, pitch, yaw (deg)] in the
   # CONNECTOR'S OWN frame. Drawn ONCE per trial (the trial's initial misalignment).
-  uncertainty: [0.010, 0.0, 0.005, 180.0, 30.0, 0.0]   # +/- (10 mm, 0, 5 mm, 180 deg, 30 deg, 0)
+  uncertainty: [0.010, 0.0, 0.005, 0.0, 30.0, 0.0]   # +/- (10 mm, 0, 5 mm, 180 deg, 30 deg, 0)
   noise:       [0.0,   0.0, 0.0,   0.0,   0.0,  0.0]   # extra per-WAYPOINT jitter (usually 0)
   log_decimation: 5             # log every Nth servo cycle (125 Hz / N -> ~25 Hz rows)
   random_seed: 0                # 0 = nondeterministic; >0 seeds a dedicated RNG for reproducible trials

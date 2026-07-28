@@ -38,7 +38,7 @@ import numpy as np
 
 from .. import config as urconfig
 from .. import log as urlog
-from ..transforms import from_cfg, matrix_to_xyzrpy, rtde_to_matrix
+from ..transforms import BASE_LINK_FROM_UR_BASE, from_cfg, matrix_to_xyzrpy, rtde_to_matrix
 
 log = urlog.get('monitor')
 
@@ -151,6 +151,8 @@ def main():
             ft = None
             if args.wrench:
                 ft = np.asarray(rtde_r.getActualTCPForce(), dtype=float)
+                _Rb = BASE_LINK_FROM_UR_BASE[:3, :3]        # UR base -> base_link, as for the poses
+                ft = np.concatenate([_Rb @ ft[:3], _Rb @ ft[3:]])
                 lines.append(f'  wrench: F=[{ft[0]:+6.1f}, {ft[1]:+6.1f}, {ft[2]:+6.1f}] N   '
                              f'T=[{ft[3]:+5.2f}, {ft[4]:+5.2f}, {ft[5]:+5.2f}] Nm')
             gpos = None

@@ -533,33 +533,56 @@ def test_grasp_recovery_gives_up_after_max_tries():
 
 
 def test_admittance_yields_along_external_push():
-    """COMPLIANCE, not resistance: an external push must move the tool ALONG the push. Because
-    getActualTCPForce() reports the REACTION (opposite the push), _step negates it -- this guards
-    against re-inverting that sign, which makes the arm push BACK instead of yielding."""
+    """COMPLIANCE, not resistance: an external push must move the tool ALONG the push, on EVERY
+    axis. A per-axis split (x complies, z opposes) is the signature of a frame error, not a sign
+    error -- a wrong sign inverts all axes together."""
     from urlab.robot.admittance import AdmittanceController
 
     class _FakeArm:
         dry_run = False
 
-        def __init__(self, reaction):
-            self._reaction = np.asarray(reaction, dtype=float)
+        def __init__(self, w):
+            self._w = np.asarray(w, dtype=float)
             self.commanded = None
 
         def wrench(self):
-            return self._reaction                 # getActualTCPForce = REACTION (opposite external push)
+            return self._w                        # EXTERNAL force on the tool, in base_link
 
         def servo_l(self, T, dt, lookahead=0.1, gain=300):
             self.commanded = T
 
-    # A +X external push -> the reported reaction (getActualTCPForce) is -X.
-    arm = _FakeArm([-5.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    adm = AdmittanceController(arm, {'reference_rate_hz': 125.0})
-    adm.reset()
-    T_ref = np.eye(4)                             # tool0 aligned with base (R = I)
-    for _ in range(20):
-        adm._step(T_ref, 1.0 / 125.0)
-    assert adm._delta[0] > 0, 'admittance must yield ALONG the push, not against it (sign error)'
-    assert arm.commanded[0, 3] > 0, 'commanded tool pose must move along the push'
+    T_ref = np.eye(4)                             # tool0 aligned with base_link (R = I)
+    for axis in range(3):
+        push = np.zeros(6)
+        push[axis] = 5.0                          # +5 N along this base_link axis
+        arm = _FakeArm(push)
+        adm = AdmittanceController(arm, {'reference_rate_hz': 125.0})
+        adm.reset()
+        for _ in range(20):
+            adm._step(T_ref, 1.0 / 125.0)
+        assert adm._delta[axis] > 0, f'axis {axis} must yield ALONG the push, not against it'
+        assert arm.commanded[axis, 3] > 0, f'axis {axis}: commanded pose must move along the push'
+
+
+def test_wrench_is_bridged_into_base_link():
+    """getActualTCPForce() speaks UR `base`; the rest of urlab speaks ROS base_link (Rz(pi) apart).
+    arm.wrench() must apply that bridge, or x/y silently come out NEGATED while z is fine -- which
+    inverts exactly SOME of the admittance axes and mislabels the logged wrench columns."""
+    from urlab.robot.arm import URArm
+
+    class _FakeRtdeR:
+        @staticmethod
+        def getActualTCPForce():
+            return [1.0, 2.0, 3.0, 0.4, 0.5, 0.6]     # in UR `base`
+
+    arm = URArm.__new__(URArm)                        # no hardware: exercise wrench() alone
+    arm.dry_run = False
+    arm.rtde_r = _FakeRtdeR()
+    w = arm.wrench()
+    # Rz(pi): (x, y, z) -> (-x, -y, z), applied to BOTH the force and the torque triple.
+    assert np.allclose(w, [-1.0, -2.0, 3.0, -0.4, -0.5, 0.6]), w
+    assert np.isclose(np.linalg.norm(w[:3]), np.linalg.norm([1.0, 2.0, 3.0])), \
+        'a pure rotation must preserve magnitude (so the force guard is unaffected)'
 
 
 if __name__ == '__main__':

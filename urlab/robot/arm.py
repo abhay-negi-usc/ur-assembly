@@ -39,7 +39,7 @@ import numpy as np
 
 from .. import log as urlog
 from ..transforms import (
-    UR_JOINTS, inverse, matrix_to_rtde, rtde_to_matrix, transform_wrench)
+    BASE_LINK_FROM_UR_BASE, UR_JOINTS, inverse, matrix_to_rtde, rtde_to_matrix, transform_wrench)
 
 log = urlog.get('arm')
 
@@ -370,7 +370,14 @@ class URArm:
         return ok
 
     def wrench(self):
-        """TCP wrench [fx, fy, fz, tx, ty, tz] in base_link, tared.
+        """TCP wrench [fx, fy, fz, tx, ty, tz] in ROS base_link, tared.
+
+        getActualTCPForce() reports in the UR `base` frame, which differs from ROS `base_link` by
+        Rz(pi) -- the SAME bridge every pose crosses via rtde_to_matrix. It must be applied here
+        too, or the wrench is silently mixed with base_link poses and its x/y components come out
+        NEGATED while z is fine. That asymmetry is invisible to anything reading a MAGNITUDE (the
+        force guard, force(), torque()) but inverts the compliant axes of the admittance law and
+        mislabels the logged wrench columns. Pure rotation about a shared origin -> no cross term.
 
         NOTE this is the BASE frame, whereas the ROS broadcaster published in tool0_controller.
         Force MAGNITUDE is frame-invariant so the force guards carry over unchanged; TORQUE
@@ -378,7 +385,9 @@ class URArm:
         against the ROS stack needs re-checking. Use wrench_in() to get it in a tool frame."""
         if self.dry_run:
             return np.zeros(6)
-        return np.asarray(self.rtde_r.getActualTCPForce(), dtype=float)
+        w = np.asarray(self.rtde_r.getActualTCPForce(), dtype=float)
+        R = BASE_LINK_FROM_UR_BASE[:3, :3]                   # UR base -> ROS base_link
+        return np.concatenate([R @ w[:3], R @ w[3:]])
 
     def wrench_in(self, T_base_frame):
         """The TCP wrench re-expressed in an arbitrary frame (given as its pose in base_link)."""

@@ -15,13 +15,14 @@ force F holds a steady deflection delta = F / S -- with S = 2000 N/m, 20 N defle
 
     D = damping_ratio * 2 sqrt(M S)         (damping_ratio = 1 -> critically damped)
 
-SIGN. F_ext is the EXTERNAL force ON the tool (what compliance YIELDS to): a push in +x must grow
-delta in +x so the tool moves WITH the push. getActualTCPForce() reports the OPPOSITE sign (the
-reaction the arm exerts on the world), so _step NEGATES it. Without the negation the coupling
-inverts -- the arm drives AGAINST a push (pushes back) and amplifies a phantom force instead of
-relieving it.
+SIGN + FRAME BRIDGE. F_ext is the EXTERNAL force ON the tool (what compliance YIELDS to): a push in
++x must grow delta in +x so the tool moves WITH the push. arm.wrench() already carries that sign --
+but it must also be in ROS base_link, NOT the raw UR `base` that getActualTCPForce() reports (they
+differ by Rz(pi), so x/y come out negated and z does not). arm.wrench() applies that bridge. If it
+is ever dropped, the symptom is the giveaway: SOME axes comply and others push back. A global sign
+error would invert ALL axes together; a per-axis split is always a FRAME error.
 
-FRAME. The law runs in the TOOL0 frame, matching the dev controller. getActualTCPForce() reports
+FRAME. The law runs in the TOOL0 frame, matching the dev controller. arm.wrench() reports
 the wrench at the TCP in BASE axes, so each cycle it is rotated into tool0 (by R^T, R = the tool0
 orientation in base -- a pure rotation, no lever arm, since the wrench is already referenced to the
 TCP = tool0 origin). delta is then a TOOL0-frame displacement -- delta[:3] a translation and
@@ -108,12 +109,8 @@ class AdmittanceController:
     def _step(self, T_ref, dt, on_step=None):
         """Advance the ODE one cycle (in the tool0 frame) and command the compliant pose. `on_step`
         (if given) is called AFTER the servo command each cycle -- a hook for data logging."""
-        R = T_ref[:3, :3]                                   # tool0 orientation in base
-        # F_ext is the EXTERNAL force ON the tool -- what admittance must YIELD to. getActualTCPForce()
-        # reports the OPPOSITE sign (the reaction the arm exerts on the world), so NEGATE it. Verified
-        # by a push-test: with the raw sign the coupling inverts and the arm drives AGAINST a push
-        # (pushes back) instead of complying.
-        wb = -self.arm.wrench()                             # external force on the tool, base axes (tared)
+        R = T_ref[:3, :3]                                   # tool0 orientation in base_link
+        wb = self.arm.wrench()                              # external force ON the tool, base_link (tared)
         w = np.concatenate([R.T @ wb[:3], R.T @ wb[3:]]) * self.selected   # -> tool0 axes
         accel = (w - self.D * self._vel - self.S * self._delta) / self.M
         self._vel += accel * dt

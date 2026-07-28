@@ -243,7 +243,7 @@ class Robotiq2F85:
 
     # ------------------------------------------------------------------ grasp check
     def grasp_result(self, groove_counts, empty_counts, faces_max_counts, tolerance=1,
-                     detect_empty=True):
+                     detect_empty=True, groove_max_counts=None):
         """Classify a completed close as 'ok' | 'missed' | 'empty' from the finger POSITION.
 
         More obstruction = LESS closed, so the three states order by position:
@@ -252,11 +252,15 @@ class Robotiq2F85:
                                                groove: it props the fingers open. FAILED ('missed').
           * pos >= empty_counts - tolerance (~228) -- the fingers closed FULLY: nothing is in the
                                                groove. EMPTY (only when detect_empty).
-          * otherwise (~groove_counts, 225) -- the cable is seated in the groove. SUCCESS ('ok').
+          * pos >  groove_max_counts (but < empty) -- THINNER than the target, so a MISS: e.g. when
+                                               the TARGET is the CONNECTOR, grabbing the thinner CABLE
+                                               stops here. None -> no upper bound (single-object case).
+          * otherwise (~groove_counts) -- the target is seated in the groove. SUCCESS ('ok').
 
-        Position-based (not gOBJ): with these fingertips a seated cable (225) and an empty close
-        (228) differ by position, so empty is reliably separable -- unlike the previous fingertips
-        where both reached full closure and only the UNVERIFIED gOBJ bit could tell them apart."""
+        Position-based (not gOBJ): the object's thickness sets where the fingers stop, so distinct
+        objects (connector vs cable vs empty) are separable by position -- unlike the previous
+        fingertips where several states reached full closure and only the UNVERIFIED gOBJ bit
+        distinguished them. faces_max_counts and groove_max_counts BRACKET the target's band."""
         if self.dry_run:
             return 'ok'
         state = self._read()
@@ -267,10 +271,14 @@ class Robotiq2F85:
                         'in the groove.', pos, faces_max_counts)
             return 'missed'
         if detect_empty and pos >= empty_counts - tolerance:
-            log.warning('Grasp EMPTY: %d counts -- the fingers closed fully, no cable in the '
+            log.warning('Grasp EMPTY: %d counts -- the fingers closed fully, nothing in the '
                         'groove.', pos)
             return 'empty'
-        log.info('Grasp OK: %d counts (obj=%d) -- cable seated in the groove (~%d).',
+        if groove_max_counts is not None and pos > groove_max_counts:
+            log.warning('Grasp MISSED: %d > %d counts -- THINNER than the target (e.g. grabbed the '
+                        'cable, not the connector).', pos, groove_max_counts)
+            return 'missed'
+        log.info('Grasp OK: %d counts (obj=%d) -- seated in the groove (target ~%d).',
                  pos, obj, groove_counts)
         return 'ok'
 

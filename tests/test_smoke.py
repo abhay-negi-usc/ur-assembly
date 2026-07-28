@@ -356,6 +356,54 @@ def test_seed_connector_gate_rejects_background_first_view():
     assert est.n_views == 1 and len(est.history) == 1, 'background must be gated out on view 1'
 
 
+def test_cable_profile_applies_counts():
+    """Selecting a cable overrides the gripper endpoints, grasp-check band, and grasp offset. The
+    grasp TARGET is the CONNECTOR: its range is the success band, the cable count is a miss above it."""
+    from urlab.config import CONFIG_DIR, Config, apply_cable_profile
+
+    cfg = Config({'cable': 'banana', '_config_dir': CONFIG_DIR})
+    apply_cable_profile(cfg)
+    assert cfg.get_path('gripper.open_counts') == 3
+    assert cfg.get_path('gripper.closed_counts') == 231
+    assert cfg.get_path('grasp_check.empty_counts') == 231
+    assert cfg.get_path('grasp_check.connector_counts') == [207, 213]  # SUCCESS band (the connector)
+    assert cfg.get_path('grasp_check.faces_max_counts') == 206         # <= this = miss (too thick)
+    assert cfg.get_path('grasp_check.groove_max_counts') == 213        # > this (< empty) = miss (cable)
+    assert cfg.get_path('grasp_check.groove_counts') == 210            # band midpoint
+    assert cfg.get_path('grasp_check.cable_counts') == 226
+    assert cfg.get_path('connector_grasp.xyz') == [0.0, 0.0, 0.0]      # junction_offset_m = 0
+
+    bnc = Config({'cable': 'bnc', '_config_dir': CONFIG_DIR})
+    apply_cable_profile(bnc)
+    assert bnc.get_path('grasp_check.faces_max_counts') == 196
+    assert bnc.get_path('grasp_check.groove_max_counts') == 206
+
+    # unknown cable -> a clear error; unset -> no-op.
+    try:
+        apply_cable_profile(Config({'cable': 'nope', '_config_dir': CONFIG_DIR}))
+        assert False, 'expected KeyError for an unknown cable'
+    except KeyError:
+        pass
+    assert apply_cable_profile(Config({})).get('gripper') is None
+
+
+def test_grasp_result_connector_band():
+    """With a connector-target band, only the connector range is 'ok'; the cable (thinner) is a miss."""
+    from urlab.robot.gripper import Robotiq2F85
+    g = Robotiq2F85.__new__(Robotiq2F85)
+    g.dry_run = False
+
+    def result(pos):
+        g._read = lambda: {'pos': pos, 'obj': 3}
+        return g.grasp_result(210, 231, 206, tolerance=1, detect_empty=True, groove_max_counts=213)
+
+    assert result(210) == 'ok'        # connector seated (in the band)
+    assert result(207) == 'ok'
+    assert result(226) == 'missed'    # grabbed the CABLE (thinner, above the band)
+    assert result(231) == 'empty'     # closed on nothing
+    assert result(200) == 'missed'    # too thick (below the band)
+
+
 class _FakeGripper:
     """Scripted gripper: each close() reports the next count in `on_close`; go_to sets the count."""
 
@@ -378,11 +426,13 @@ class _FakeGripper:
         return self.pos
 
     def grasp_result(self, groove_counts, empty_counts, faces_max_counts, tolerance=1,
-                     detect_empty=True):
+                     detect_empty=True, groove_max_counts=None):
         if self.pos <= faces_max_counts:
             return 'missed'
         if detect_empty and self.pos >= empty_counts - tolerance:
             return 'empty'
+        if groove_max_counts is not None and self.pos > groove_max_counts:
+            return 'missed'
         return 'ok'
 
 

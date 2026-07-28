@@ -56,11 +56,62 @@ def load(name_or_path, overrides=()):
     cfg['_config_path'] = os.path.abspath(path)
     cfg['_config_dir'] = os.path.dirname(os.path.abspath(path))
 
+    _apply_overrides(cfg, overrides)      # 1st pass: a `--set cable=...` can select the profile
+    apply_cable_profile(cfg)              # override gripper/grasp-check counts for the chosen cable
+    _apply_overrides(cfg, overrides)      # 2nd pass: an explicit `--set` still wins over the profile
+    return cfg
+
+
+def _apply_overrides(cfg, overrides):
     for item in overrides:
         if '=' not in item:
             raise ValueError(f'--set expects key=value, got {item!r}')
         key, _, raw = item.partition('=')
         cfg.set_path(key.strip(), yaml.safe_load(raw))
+
+
+def apply_cable_profile(cfg):
+    """If the config selects a cable (`cable: <name>`), load the cables file (default cables.yaml,
+    resolved next to the config) and OVERRIDE the gripper endpoints + grasp-check counts from that
+    entry -- so one demo config runs any cable by naming it. No-op if `cable` is unset. Schema +
+    the exact key mapping are documented in configs/cables.yaml."""
+    name = cfg.get('cable')
+    if not name:
+        return cfg
+    cables_path = resolve(cfg, cfg.get('cables_file', 'cables.yaml'))
+    if not os.path.isfile(cables_path):
+        raise FileNotFoundError(f'cable {name!r} selected but no cables file at {cables_path!r}')
+    with open(cables_path, 'r') as f:
+        db = yaml.safe_load(f) or {}
+    entry = (db.get('cables') or {}).get(name)
+    if entry is None:
+        have = ', '.join((db.get('cables') or {}).keys()) or '(none)'
+        raise KeyError(f'cable {name!r} not in {cables_path} (have: {have})')
+
+    shared = db.get('gripper') or {}
+    if 'open' in shared:
+        cfg.set_path('gripper.open_counts', int(shared['open']))
+    if 'closed' in shared:                                    # closed on nothing = the empty band
+        cfg.set_path('gripper.closed_counts', int(shared['closed']))
+        cfg.set_path('grasp_check.empty_counts', int(shared['closed']))
+    # The grasp TARGET is the CONNECTOR, so its count range is the SUCCESS band; the cable (thinner,
+    # HIGHER count) is a miss above it, and anything thicker (<= band) is a miss below it.
+    conn = entry.get('connector')
+    if conn:
+        lo, hi = int(min(conn)), int(max(conn))
+        cfg.set_path('grasp_check.connector_counts', [lo, hi])
+        cfg.set_path('grasp_check.groove_counts', (lo + hi) // 2)     # success reference (midpoint)
+        cfg.set_path('grasp_check.faces_max_counts', lo - 1)          # <= this  = miss (too thick)
+        cfg.set_path('grasp_check.groove_max_counts', hi)            # >  this  = miss (the cable)
+    if 'cable' in entry:
+        cfg.set_path('grasp_check.cable_counts', int(entry['cable']))   # reference: cable grab = miss
+    # Fingertip target offset from the junction, POSITIVE along the connector axis (x, toward the
+    # connector's END): connector_grasp is the fingertip pose relative to the connector frame.
+    off = float(entry.get('junction_offset_m', 0.0))
+    cfg.set_path('connector_grasp.xyz', [off, 0.0, 0.0])
+    if entry.get('target_connector_pose'):                    # (future) the assembly target
+        cfg.set_path('assembly.target_connector_pose', entry['target_connector_pose'])
+    cfg['_cable_profile'] = name
     return cfg
 
 

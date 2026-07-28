@@ -1,0 +1,51 @@
+# ============================================================================
+# Per-cable / per-connector parameters.
+#
+# Select the active cable in a demo config with `cable: <name>` (e.g. `cable: banana`), or on the
+# CLI with `--set cable=bnc`. The config loader then OVERRIDES the gripper endpoints, grasp-check
+# counts, and grasp offset from the chosen entry (see urlab/config.py apply_cable_profile). Add a
+# cable by copying an entry. If `cable` is unset, this file is ignored and the demo's own
+# gripper/grasp_check apply.
+#
+# The grasp TARGET is the CONNECTOR. Fingertip positions are gripper COUNTS; more obstruction =
+# LOWER count, so they order:
+#     open (3)  <  connector (the TARGET, thicker)  <  cable (thinner)  <  closed/empty (231)
+# A close that stops in the `connector` range -> connector seated              = grasp SUCCESS
+#                       at the `cable` count (higher, thinner) -> grabbed the cable, not the connector = MISS
+#                       below `connector` (thicker / faces)                     = MISS
+#                       around `closed`                                          = EMPTY
+#
+# Mapping applied to the config:
+#   gripper.open   -> gripper.open_counts
+#   gripper.closed -> gripper.closed_counts  AND  grasp_check.empty_counts
+#   <cable>.connector -> grasp_check success BAND: faces_max_counts = min-1, groove_max_counts = max,
+#                        groove_counts = midpoint; also grasp_check.connector_counts = [min, max]
+#   <cable>.cable     -> grasp_check.cable_counts   (reference; grabbing the cable = a MISS)
+#   <cable>.junction_offset_m -> connector_grasp.xyz = [offset, 0, 0]
+#                        (fingertip target offset from the junction, POSITIVE toward the connector's END)
+#   <cable>.target_connector_pose -> assembly.target_connector_pose   (future)
+# ============================================================================
+
+# Shared gripper endpoints (identical for all cables).
+gripper:
+  open: 3
+  closed: 231            # fully closed on nothing
+
+cables:
+  banana:
+    connector: [207, 213]   # CONNECTOR between the fingertips = grasp SUCCESS (the target)
+    cable: 226              # grabbing the CABLE instead (thinner, higher count) = a MISS
+    junction_offset_m: 0.0  # fingertip target offset from the junction, + toward the connector's END
+    # target_connector_pose:   # (FUTURE) the assembly insertion target for this connector type
+    #   xyz: [0.0, 0.0, 0.0]   #   base_link -> target connector, metres
+    #   rpy: [0.0, 0.0, 0.0]   #   extrinsic XYZ, radians
+
+  bnc:
+    connector: [197, 206]
+    cable: 221
+    junction_offset_m: 0.0
+
+  c13:
+    connector: [195, 198]
+    cable: 218
+    junction_offset_m: 0.0

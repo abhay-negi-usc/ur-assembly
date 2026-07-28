@@ -60,9 +60,11 @@ class GraspCheck:
     def __init__(self, cfg):
         gc = cfg.section('grasp_check')
         self.enabled = bool(gc.get('enabled', True))
-        self.groove_counts = int(gc.get('groove_counts', 225))     # SUCCESS: cable in the groove
+        self.groove_counts = int(gc.get('groove_counts', 225))     # SUCCESS: target in the groove
         self.empty_counts = int(gc.get('empty_counts', 228))       # full closure on nothing
-        self.faces_max_counts = int(gc.get('faces_max_counts', 223))  # <= this: cable on the faces
+        self.faces_max_counts = int(gc.get('faces_max_counts', 223))  # <= this: too thick (faces) -> miss
+        gm = gc.get('groove_max_counts', None)                     # > this (but < empty): too THIN -> miss
+        self.groove_max_counts = int(gm) if gm is not None else None  # (e.g. cable, not the connector)
         self.tolerance = int(gc.get('tolerance_counts', 1))
         self.detect_empty = bool(gc.get('detect_empty', True))
         self.max_retries = int(gc.get('max_retries', 2))
@@ -75,7 +77,7 @@ class GraspCheck:
         import time
         time.sleep(self.settle_s)
         return gripper.grasp_result(self.groove_counts, self.empty_counts, self.faces_max_counts,
-                                    self.tolerance, self.detect_empty)
+                                    self.tolerance, self.detect_empty, self.groove_max_counts)
 
 
 class GraspRecovery:

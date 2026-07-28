@@ -241,6 +241,11 @@ pickup:
 place_offset_xyz: [0.050, 0.0, 0.0]
 place_offset_rpy: [0.0, 0.0, 0.0]
 
+# Cable profile: name a cable from configs/cables.yaml to override the gripper endpoints + the
+# grasp_check counts below with that cable's values (or on the CLI: --set cable=bnc). Unset -> the
+# values written here apply.
+# cable: banana
+
 gripper:
   port: /dev/ttyUSB0
   open_counts: 0

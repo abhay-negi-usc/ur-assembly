@@ -15,6 +15,12 @@ force F holds a steady deflection delta = F / S -- with S = 2000 N/m, 20 N defle
 
     D = damping_ratio * 2 sqrt(M S)         (damping_ratio = 1 -> critically damped)
 
+SIGN. F_ext is the EXTERNAL force ON the tool (what compliance YIELDS to): a push in +x must grow
+delta in +x so the tool moves WITH the push. getActualTCPForce() reports the OPPOSITE sign (the
+reaction the arm exerts on the world), so _step NEGATES it. Without the negation the coupling
+inverts -- the arm drives AGAINST a push (pushes back) and amplifies a phantom force instead of
+relieving it.
+
 FRAME. The law runs in the TOOL0 frame, matching the dev controller. getActualTCPForce() reports
 the wrench at the TCP in BASE axes, so each cycle it is rotated into tool0 (by R^T, R = the tool0
 orientation in base -- a pure rotation, no lever arm, since the wrench is already referenced to the
@@ -99,10 +105,15 @@ class AdmittanceController:
         Delta[:3, 3] = self._delta[:3]
         return T_ref @ Delta
 
-    def _step(self, T_ref, dt):
-        """Advance the ODE one cycle (in the tool0 frame) and command the compliant pose."""
+    def _step(self, T_ref, dt, on_step=None):
+        """Advance the ODE one cycle (in the tool0 frame) and command the compliant pose. `on_step`
+        (if given) is called AFTER the servo command each cycle -- a hook for data logging."""
         R = T_ref[:3, :3]                                   # tool0 orientation in base
-        wb = self.arm.wrench()                              # at the TCP, base axes (tared)
+        # F_ext is the EXTERNAL force ON the tool -- what admittance must YIELD to. getActualTCPForce()
+        # reports the OPPOSITE sign (the reaction the arm exerts on the world), so NEGATE it. Verified
+        # by a push-test: with the raw sign the coupling inverts and the arm drives AGAINST a push
+        # (pushes back) instead of complying.
+        wb = -self.arm.wrench()                             # external force on the tool, base axes (tared)
         w = np.concatenate([R.T @ wb[:3], R.T @ wb[3:]]) * self.selected   # -> tool0 axes
         accel = (w - self.D * self._vel - self.S * self._delta) / self.M
         self._vel += accel * dt
@@ -110,16 +121,19 @@ class AdmittanceController:
         self._delta[:3] = np.clip(self._delta[:3], -self.max_delta, self.max_delta)
         self._delta[3:] = np.clip(self._delta[3:], -self.max_delta_rot, self.max_delta_rot)
         self.arm.servo_l(self._command_pose(T_ref), dt, self.lookahead, self.gain)
+        if on_step is not None:
+            on_step()
 
-    def ramp(self, T_ref_start, T_ref_end, duration, guard=None):
+    def ramp(self, T_ref_start, T_ref_end, duration, guard=None, on_step=None):
         """Ramp the tool0 reference start -> end over `duration` s under admittance. Returns
         'seated' if the guard trips (contact), else 'done'. Integrator state persists across calls,
-        so consecutive ramps form one continuous compliant motion."""
+        so consecutive ramps form one continuous compliant motion. `on_step` (if given) is called
+        once per servo cycle -- used by data-collection callers to log at the servo rate."""
         from ..transforms import slerp_matrix
         dt = 1.0 / self.rate
         steps = max(1, int(duration * self.rate))
         for k in range(1, steps + 1):
-            self._step(slerp_matrix(T_ref_start, T_ref_end, k / steps), dt)
+            self._step(slerp_matrix(T_ref_start, T_ref_end, k / steps), dt, on_step)
             if guard is not None and guard.check():
                 return 'seated'
         return 'done'
@@ -148,9 +162,9 @@ class AdmittanceController:
                 return 'seated'
         return 'done'
 
-    def hold(self, T_ref, seconds, guard=None):
+    def hold(self, T_ref, seconds, guard=None, on_step=None):
         """Hold the reference for `seconds` under admittance (let the mate settle / keep yielding)."""
-        return self.ramp(T_ref, T_ref, seconds, guard)
+        return self.ramp(T_ref, T_ref, seconds, guard, on_step)
 
     def stop(self):
         self.arm.servo_stop()

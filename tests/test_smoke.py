@@ -532,6 +532,36 @@ def test_grasp_recovery_gives_up_after_max_tries():
     assert len(robot.moves) == 3, 'exactly max_tries corrective moves'
 
 
+def test_admittance_yields_along_external_push():
+    """COMPLIANCE, not resistance: an external push must move the tool ALONG the push. Because
+    getActualTCPForce() reports the REACTION (opposite the push), _step negates it -- this guards
+    against re-inverting that sign, which makes the arm push BACK instead of yielding."""
+    from urlab.robot.admittance import AdmittanceController
+
+    class _FakeArm:
+        dry_run = False
+
+        def __init__(self, reaction):
+            self._reaction = np.asarray(reaction, dtype=float)
+            self.commanded = None
+
+        def wrench(self):
+            return self._reaction                 # getActualTCPForce = REACTION (opposite external push)
+
+        def servo_l(self, T, dt, lookahead=0.1, gain=300):
+            self.commanded = T
+
+    # A +X external push -> the reported reaction (getActualTCPForce) is -X.
+    arm = _FakeArm([-5.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    adm = AdmittanceController(arm, {'reference_rate_hz': 125.0})
+    adm.reset()
+    T_ref = np.eye(4)                             # tool0 aligned with base (R = I)
+    for _ in range(20):
+        adm._step(T_ref, 1.0 / 125.0)
+    assert adm._delta[0] > 0, 'admittance must yield ALONG the push, not against it (sign error)'
+    assert arm.commanded[0, 3] > 0, 'commanded tool pose must move along the push'
+
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     failed = 0

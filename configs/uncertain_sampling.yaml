@@ -34,7 +34,24 @@ standoff_axis: [-1.0, 0.0, 0.0]   # assembly is a direct -X -> 0 insertion (conn
 trajectory_csv: assembly_trajectory.csv
 trajectory_angles_deg: false
 
-admittance:
+# COMPLIANCE (software admittance): the arm FOLLOWS the assembly trajectory (position reference) and
+# YIELDS to contact via a virtual spring-mass-damper with finite restoring stiffness, springing back
+# toward the reference when contact eases. This is NOT forceMode (pure force control -- no stiffness,
+# it floats off the path). Runs in the TOOL0 frame over servoL. See urlab/robot/admittance.py.
+compliance:
+  mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]              # virtual inertia [kg / kg*m^2]
+  stiffness:     [2000.0, 2000.0, 2000.0, 15.0, 15.0, 15.0]  # restoring spring [N/m, Nm/rad] (20 N -> 10 mm)
+  damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]              # 1 = critically damped
+  selected_axes: [1, 1, 1, 1, 1, 1]                          # which TOOL0 axes yield to contact
+  reference_rate_hz: 125.0
+  warmup_s: 0.5                 # hold the start pose this long (servo-engage transient decays) before the guard
+  tare_before: true            # zero the F/T mid-warmup (servo-active) so the guard baseline is right
+  insert_time_s: 3.0           # time to ramp the perturbed chunk (sets the reference speed)
+  settle_s: 0.5                # hold at the reached pose after each insert (records the contact wrench)
+
+# Contact watchdog: a trip during insertion = the connector SEATED (stop advancing). NOT armed during
+# retract (a seated part is already over the limit; a guarded retract would block itself).
+force_guard:
   max_force_n: 30.0
   max_torque_nm: 8.0
 
@@ -47,8 +64,7 @@ sampling:
   # CONNECTOR'S OWN frame. Drawn ONCE per trial (the trial's initial misalignment).
   uncertainty: [0.010, 0.0, 0.005, 180.0, 30.0, 0.0]   # +/- (10 mm, 0, 5 mm, 180 deg, 30 deg, 0)
   noise:       [0.0,   0.0, 0.0,   0.0,   0.0,  0.0]   # extra per-WAYPOINT jitter (usually 0)
-  closest_pose_rot_weight_mm_per_deg: 1.0
-  max_force_n: 30.0
+  log_decimation: 5             # log every Nth servo cycle (125 Hz / N -> ~25 Hz rows)
   random_seed: 0                # 0 = nondeterministic; >0 seeds a dedicated RNG for reproducible trials
   csv_path: data/uncertain_assembly_sampling/uncertain_assembly_log.csv
 

@@ -1,13 +1,24 @@
 # uncertain_sampling — perturbed-insertion data collection (held connector)
 
 A **data-collection** run: repeatedly drive a PERTURBED **connector** into the mate under
-compliance, logging each sample, then disassemble along the ideal path and repeat. Produces a CSV
-for studying how a misaligned connector behaves during insertion.
+compliance, logging each sample, then retract and repeat. Produces a CSV for studying how a
+misaligned connector behaves during insertion.
 
 ```
-resample the ideal trajectory -> for each trial: tare, perturb (connector frame), drive in
-(compliant, guarded, LOGGING), snap to the closest ideal pose, disassemble -> write the CSV
+for each trial: perturb (connector frame) -> move to the perturbed start (stiff, free space) ->
+follow the path under ADMITTANCE (logging at the servo rate, guarded) -> settle -> retract -> CSV
 ```
+
+## Control — compliance (admittance), NOT force control
+The insertion runs under **software admittance** (`urlab/robot/admittance.py`): the arm **follows the
+assembly trajectory** as a position reference *and* **yields to contact** through a virtual
+spring-mass-damper with **finite restoring stiffness**, springing back toward the reference when
+contact eases. This is deliberately **not** UR `forceMode` — that is pure force control with **no
+stiffness**, so it floats freely off the trajectory (the drift this design replaces). The free-space
+moves (approach the stand-off, move to each trial's perturbed start) stay **stiff position control**;
+only the contact phase is compliant. A `force_guard` trip during insertion means the connector
+**seated**; the retract runs **un-guarded** (a seated part is already over the limit, so a guarded
+retract would block the motion that frees it).
 
 ```bash
 python -m urlab.apps.uncertain_sampling [--dry-run]
@@ -63,10 +74,14 @@ with the holder).
 | `sampling.translational_resolution_m` / `rotational_resolution_deg` | densify the CSV to this spacing |
 | `sampling.uncertainty` | per-DOF uncertainty RANGE — half-widths `[x,y,z (m), r,p,y (deg)]`, drawn once per trial, **in the connector frame** |
 | `sampling.noise` | extra per-waypoint jitter (usually 0), in the connector frame |
-| `sampling.uncertainty` | per-DOF uncertainty RANGE — half-widths `[x,y,z (m), r,p,y (deg)]`, drawn once per trial, **in the connector frame** |
-| `sampling.noise` | extra per-waypoint jitter (usually 0), in the connector frame |
+| `sampling.log_decimation` | log every Nth servo cycle (125 Hz / N ≈ rows/s); `5` ≈ 25 Hz |
 | `sampling.random_seed` | `0` = nondeterministic; `>0` seeds a dedicated RNG for replayable trials |
 | `sampling.csv_path` | output stem; a `<cable>/` subfolder is inserted and a `_YYYYmmdd_HHMMSS` appended, so runs are grouped by cable and unique |
+| `compliance.stiffness` / `mass` / `damping_ratio` | the admittance spring-mass-damper (per TOOL0 axis); `stiffness` sets deflection-per-force (`2000 N/m` → 20 N ≈ 10 mm) |
+| `compliance.selected_axes` | which TOOL0 axes yield to contact (`[1,1,1,1,1,1]` = all) |
+| `compliance.insert_time_s` / `settle_s` / `warmup_s` | ramp time for the chunk (reference speed) / settle-at-target / servo warm-up |
+| `compliance.tare_before` | zero the F/T mid-warmup (servo-active) so the guard baseline is correct |
+| `force_guard.max_force_n` / `max_torque_nm` | contact limit; a trip during insertion = the connector **seated** |
 
 ## Output columns (per sample)
 `trial`, `timestamp`, then:

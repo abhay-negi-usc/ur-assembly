@@ -188,27 +188,17 @@ pickup:
     max_force_n: 30.0
     max_torque_nm: 5.0
 
-# Cable profile: name a cable from configs/cables.yaml to override the gripper endpoints + the
-# grasp_check counts below with that cable's values (or on the CLI: --set cable=bnc). Unset -> the
-# values written here apply.
-# cable: banana
+# The GRIPPER (port + endpoints/speed/force) and the grasp-check COUNTS come SOLELY from
+# configs/cables.yaml for the named cable -- there is no `gripper:` block or count here anymore.
+# Set the cable (REQUIRED), or override on the CLI with --set cable=bnc. Names: see cables.yaml.
+cable: banana
 
-gripper:
-  port: /dev/ttyUSB0
-  open_counts: 3
-  closed_counts: 255
-  speed_counts: 255
-  force_counts: 150
-
-# Grasp check (counts): faces (<=faces_max_counts ~220-223) MISSED | groove (~225) OK |
-# empty (>=empty_counts 228) EMPTY. Success is a MIDDLE band -- see cable_pick_place.yaml notes.
+# Grasp-check BEHAVIOR (the count BAND is set from the cable profile: connector = success, cable =
+# miss, closed = empty). See gripper.grasp_result / cables.yaml for the band.
 grasp_check:
   enabled: true
-  groove_counts: 230             # SUCCESS: cable seated in the fingertip groove
-  empty_counts: 235              # full closure on nothing (no cable)
-  faces_max_counts: 228          # <= this: cable on the flat faces (a MISS)
   tolerance_counts: 1
-  detect_empty: true             # 228 vs 225 makes empty reliably separable by POSITION now
+  detect_empty: true
   settle_s: 1.0
   max_retries: 2                 # whole scan->grasp attempts (outer loop) if recovery still misses
   capture_images: true           # save wrist images during grasping: a timed record at

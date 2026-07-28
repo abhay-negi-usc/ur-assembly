@@ -88,12 +88,18 @@ def apply_cable_profile(cfg):
         have = ', '.join((db.get('cables') or {}).keys()) or '(none)'
         raise KeyError(f'cable {name!r} not in {cables_path} (have: {have})')
 
-    shared = db.get('gripper') or {}
+    shared = db.get('gripper') or {}                          # gripper params live SOLELY here now
+    if 'port' in shared:
+        cfg.set_path('gripper.port', shared['port'])
     if 'open' in shared:
         cfg.set_path('gripper.open_counts', int(shared['open']))
     if 'closed' in shared:                                    # closed on nothing = the empty band
         cfg.set_path('gripper.closed_counts', int(shared['closed']))
         cfg.set_path('grasp_check.empty_counts', int(shared['closed']))
+    if 'speed' in shared:
+        cfg.set_path('gripper.speed_counts', int(shared['speed']))
+    if 'force' in shared:
+        cfg.set_path('gripper.force_counts', int(shared['force']))
     # The grasp TARGET is the CONNECTOR, so its count range is the SUCCESS band; the cable (thinner,
     # HIGHER count) is a miss above it, and anything thicker (<= band) is a miss below it.
     conn = entry.get('connector')

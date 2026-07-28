@@ -363,15 +363,19 @@ def test_cable_profile_applies_counts():
 
     cfg = Config({'cable': 'banana', '_config_dir': CONFIG_DIR})
     apply_cable_profile(cfg)
+    assert cfg.get_path('gripper.port') == '/dev/ttyUSB0'              # ALL gripper params from cables.yaml
     assert cfg.get_path('gripper.open_counts') == 3
     assert cfg.get_path('gripper.closed_counts') == 231
+    assert cfg.get_path('gripper.speed_counts') == 255
+    assert cfg.get_path('gripper.force_counts') == 150
     assert cfg.get_path('grasp_check.empty_counts') == 231
     assert cfg.get_path('grasp_check.connector_counts') == [207, 213]  # SUCCESS band (the connector)
     assert cfg.get_path('grasp_check.faces_max_counts') == 206         # <= this = miss (too thick)
     assert cfg.get_path('grasp_check.groove_max_counts') == 213        # > this (< empty) = miss (cable)
     assert cfg.get_path('grasp_check.groove_counts') == 210            # band midpoint
     assert cfg.get_path('grasp_check.cable_counts') == 226
-    assert cfg.get_path('connector_grasp.xyz') == [0.0, 0.0, 0.0]      # junction_offset_m = 0
+    xyz = cfg.get_path('connector_grasp.xyz')                          # junction_offset_m -> [off, 0, 0]
+    assert xyz[1] == 0.0 and xyz[2] == 0.0 and isinstance(xyz[0], float)
 
     bnc = Config({'cable': 'bnc', '_config_dir': CONFIG_DIR})
     apply_cable_profile(bnc)

@@ -16,7 +16,7 @@
 #                       around `closed`                                          = EMPTY
 #
 # Mapping applied to the config:
-#   gripper.open   -> gripper.open_counts
+#   gripper.port/open/closed/speed/force -> gripper.port / *_counts
 #   gripper.closed -> gripper.closed_counts  AND  grasp_check.empty_counts
 #   <cable>.connector -> grasp_check success BAND: faces_max_counts = min-1, groove_max_counts = max,
 #                        groove_counts = midpoint; also grasp_check.connector_counts = [min, max]
@@ -26,10 +26,14 @@
 #   <cable>.target_connector_pose -> assembly.target_connector_pose   (future)
 # ============================================================================
 
-# Shared gripper endpoints (identical for all cables).
+# Gripper hardware + endpoints (identical for all cables). These live SOLELY here now -- the cable
+# demo configs no longer carry a `gripper:` block; a selected `cable:` supplies all of it.
 gripper:
+  port: /dev/ttyUSB0
   open: 3
   closed: 231            # fully closed on nothing
+  speed: 255
+  force: 150
 
 cables:
   banana:

@@ -4,7 +4,7 @@ Reimplements the ros2_control admittance_controller the dev branch used, so ther
 finite RESTORING STIFFNESS again (forceMode has none -- it is pure force control and yields
 freely). No controller to install, load, switch, or parameterise: this is a plain servo loop.
 
-THE LAW, per axis, in the BASE frame:
+THE LAW, per axis (the frame it RUNS in is tool0 -- see FRAME below):
 
     F_ext = M x'' + D x' + S (x - x_d)      =>     x'' = M^-1 ( F_ext - D x' - S (x - x_d) )
 
@@ -22,10 +22,10 @@ differ by Rz(pi), so x/y come out negated and z does not). arm.wrench() applies 
 is ever dropped, the symptom is the giveaway: SOME axes comply and others push back. A global sign
 error would invert ALL axes together; a per-axis split is always a FRAME error.
 
-FRAME. The law runs in the TOOL0 frame, matching the dev controller. arm.wrench() reports
-the wrench at the TCP in BASE axes, so each cycle it is rotated into tool0 (by R^T, R = the tool0
-orientation in base -- a pure rotation, no lever arm, since the wrench is already referenced to the
-TCP = tool0 origin). delta is then a TOOL0-frame displacement -- delta[:3] a translation and
+FRAME. The law runs in the TOOL0 frame, matching the dev controller. arm.wrench() reports the
+wrench at the TCP in ROS base_link axes (never say just "base" here -- that ambiguity IS the bug
+above), so each cycle it is rotated into tool0 (by R^T, R = the tool0 orientation in base_link -- a
+pure rotation, no lever arm, since the wrench is already referenced to the TCP = tool0 origin). delta is then a TOOL0-frame displacement -- delta[:3] a translation and
 delta[3:] a rotation vector about the TOOL axes -- and it is applied to the reference by
 POST-multiplying: T_cmd = T_ref @ Delta. So "z compliant" means yielding along the tool's own z
 wherever the tool points, which is what an insertion wants.

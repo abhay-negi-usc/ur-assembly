@@ -21,7 +21,7 @@ Three changes did more than relocate code; they deleted whole failure classes:
 | Concern | ROS | Here | What went away |
 |---|---|---|---|
 | **IK** | MoveIt KDL, a local solver → random-seed retries on error -31 | `getInverseKinematics(pose, qnear)` — the controller's **analytic** solver | The retry loop; IK either has a solution or it doesn't, and you get the branch nearest where you are. |
-| **Compliance** | `admittance_controller` loaded inactive, parameterised over a service, **activated** (which deactivated the JTC and caused a joint-0 velocity fault, patched with a reference-holding dance) | `forceMode()` — a mode of the running controller | The controller install, the switch, the reference streaming, and `_hold_reference` entirely. |
+| **Compliance** | `admittance_controller` loaded inactive, parameterised over a service, **activated** (which deactivated the JTC and caused a joint-0 velocity fault, patched with a reference-holding dance) | **software admittance** over `servoL` (`robot/admittance.py`) — the same spring-mass-damper law, as a plain servo loop. `forceMode()` is used only where free-floating *is* the goal (`admittance_hold`): it has **no restoring stiffness**, so it cannot track a trajectory. | The controller install, the switch, the reference streaming, and `_hold_reference` entirely. |
 | **Staleness** | tf2's 10 s cache expired slowly-republished transforms; "fixed" three times by widening `tf_cache_s` | `FrameGraph` keeps the latest transform forever; the **caller** states a `max_age` | The class of bug where a good estimate fails to look up because a buffer dropped it. |
 
 The connector fusion also became simpler: SAM3 runs **in-process**, so a detection is captured,
@@ -202,6 +202,12 @@ expressed the same sharing through a four-deep inheritance chain
 - **`tool0`** is the pendant all-zeros TCP — **not** `flange` (which is ~90° twisted).
 - RTDE speaks the **UR `base`** frame (a 180° Z turn from ROS `base_link`) and **axis-angle**
   rotation vectors; both conversions are confined to `transforms.rtde_to_matrix` / `matrix_to_rtde`.
+- **The `Rz(π)` base bridge applies to WRENCHES too, not just poses** — `arm.wrench()` applies it, so
+  everything downstream is `base_link`. Miss it on a new RTDE value and `x`/`y` come out **negated**
+  while `z` looks fine. Anything reading a *magnitude* (the force guard, `force()`, `torque()`) is
+  blind to it, so it stays hidden until something reads *components* — which is exactly how it
+  reached hardware once already. **Symptom key: some axes wrong ⇒ FRAME error; all axes wrong ⇒ SIGN
+  error.** A global sign flip can never fix a per-axis split.
 
 ## Tests
 

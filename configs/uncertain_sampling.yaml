@@ -1,6 +1,8 @@
 # Uncertain-assembly sampling (data collection). Repeatedly drive a PERTURBED part into the mate
-# under compliance, logging commanded/actual poses + wrench, then disassemble and repeat.
-# Ported from ur_uncertain_assembly_sampling. Compliance is UR forceMode.
+# under compliance, logging commanded/actual poses + wrench, then retract and repeat.
+# Ported from ur_uncertain_assembly_sampling. Compliance is SOFTWARE ADMITTANCE (see `compliance:`
+# below and urlab/robot/admittance.py) -- NOT forceMode, which has no restoring stiffness and
+# floats off the trajectory.
 robot:
   ip: 192.168.125.2
   dry_run: false
@@ -62,7 +64,7 @@ sampling:
   rotational_resolution_deg: 1.0
   # UNCERTAINTY RANGE per DOF -- uniform half-widths [x, y, z (m), roll, pitch, yaw (deg)] in the
   # CONNECTOR'S OWN frame. Drawn ONCE per trial (the trial's initial misalignment).
-  uncertainty: [0.010, 0.0, 0.005, 0.0, 30.0, 0.0]   # +/- (10 mm, 0, 5 mm, 180 deg, 30 deg, 0)
+  uncertainty: [0.010, 0.0, 0.005, 0.0, 30.0, 0.0]   # +/- (10 mm, 0, 5 mm, 0, 30 deg, 0)
   noise:       [0.0,   0.0, 0.0,   0.0,   0.0,  0.0]   # extra per-WAYPOINT jitter (usually 0)
   log_decimation: 5             # log every Nth servo cycle (125 Hz / N -> ~25 Hz rows)
   random_seed: 0                # 0 = nondeterministic; >0 seeds a dedicated RNG for reproducible trials

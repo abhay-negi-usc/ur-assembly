@@ -87,8 +87,12 @@ with the holder).
 `trial`, `timestamp`, then:
 - **`tool0_base_*`** — raw tool0 pose in base_link (x, y, z, quat, yaw/pitch/roll deg),
 - **`connector_target_*`** — the connector's DEVIATION from the ideal mate (identity at a perfect mate),
-- **`wrench_base_*`** — the contact wrench as recorded (`getActualTCPForce`, base_link),
+- **`wrench_base_*`** — the contact wrench in **ROS `base_link`** (`getActualTCPForce`, bridged out of
+  the UR `base` frame by `arm.wrench()` — see the README conventions),
 - **`wrench_connector_*`** — that wrench re-expressed in the connector frame.
+
+> **Data note.** Logs recorded before the `base_link` wrench bridge landed have their `wrench_*`
+> **x and y components negated** (z is unaffected). Re-collect them, or flip those two columns.
 
 `trial` increments each time the assembly trajectory is performed. The perturbation RNG is separate
 from everything else, so a seeded run is reproducible.

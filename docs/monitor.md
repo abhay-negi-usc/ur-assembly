@@ -41,7 +41,7 @@ Config: any demo config (for `robot.ip` + the frame offsets); defaults to `cable
 | `--robot-ip <ip>` | override `robot.ip` |
 | `--rate <hz>` | refresh rate (default 10) |
 | `--freedrive` | enable **software** freedrive (`teachMode`) — needs **Remote Control**; drive by hand without the pendant button |
-| `--wrench` | also show the TCP wrench (**uncompensated** — reads the tool weight, since read-only can't set the payload) |
+| `--wrench` | also show the TCP wrench in **`base_link`** (same frame as the poses above), (**uncompensated** — reads the tool weight, since read-only can't set the payload) |
 | `--gripper` | also show gripper position in counts (opens the Modbus port; activates the gripper only if not already active) |
 | `--csv <path>` | append `t`, joints, every frame, and (if enabled) wrench/gripper to a CSV |
 | `--once` | print one sample and exit |

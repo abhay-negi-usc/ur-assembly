@@ -14,12 +14,20 @@ CONVENTIONS -- get these wrong and everything else is silently wrong:
   * quaternions are [x, y, z, w] (scipy's order, and the old tf_transformations' order).
 
   * RTDE speaks a different dialect on BOTH counts, so the two conversions below are the only
-    places where robot poses cross into urlab:
+    places where robot POSES cross into urlab:
       - rotation as an axis-angle ROTATION VECTOR, not rpy   -> rtde_to_matrix / matrix_to_rtde
       - translations in the UR `base` frame, not ROS `base_link`, which differ by a 180 deg
         turn about Z                                          -> BASE_LINK_FROM_UR_BASE
     Keeping both conversions here (and nowhere else) is what lets the rest of the library --
     and every config value measured in base_link under the ROS stack -- stay unchanged.
+
+    POSES ARE NOT THE ONLY THING THAT CROSSES. Any VECTOR quantity RTDE reports is in the UR
+    `base` frame too and needs BASE_LINK_FROM_UR_BASE applied. The one that exists today is the
+    TCP WRENCH (getActualTCPForce) -- bridged in robot/arm.py `wrench()`, not here, because it is
+    read straight off the RTDE receive interface. This description used to say "poses" and stop
+    there, and the wrench was consequently shipped un-bridged: its x/y arrived NEGATED while z was
+    fine, which silently inverted half the axes of the admittance law. If you add another RTDE
+    vector (velocity, acceleration, an external force estimate), bridge it and list it here.
 """
 
 import numpy as np

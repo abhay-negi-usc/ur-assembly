@@ -30,7 +30,7 @@ from .. import config as urconfig
 from .. import log as urlog
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import trajectory as traj
-from ..transforms import from_cfg, inverse, translation_matrix
+from ..transforms import from_cfg, inverse, pose_error, translation_matrix
 from ._runner import run_app
 
 log = urlog.get('uncertain-sampling')
@@ -73,6 +73,19 @@ def build_and_run(cfg, robot, camera, args):
     num_trials = int(s.get('num_trials', 20))
     log.info('%d ideal rows -> %d dense; chunk = %d waypoints; %d trials.',
              len(mats), len(dense), k, num_trials)
+    log.info('Compliant reference limited to %.1f mm/s / %.1f deg/s.',
+             float(cfg.get_path('speed.max_cartesian_translation_mm_s', 3.5)),
+             float(cfg.get_path('speed.max_cartesian_rotation_deg_s', 5.0)))
+
+    # WHICH error source the trial perturbation models. Validated here so a typo fails before the
+    # arm moves, not on the first trial. See trajectory.perturb for the physics of each.
+    perturb_frame = str(s.get('perturb_frame', 'connector')).lower()
+    if perturb_frame not in traj.PERTURB_FRAMES:
+        log.error('sampling.perturb_frame %r must be one of %s.', perturb_frame, traj.PERTURB_FRAMES)
+        return False
+    log.info("Perturbing in the %s frame (%s), UNIFORM over +/- %s.", perturb_frame,
+             'in-hand pose error' if perturb_frame != 'target' else 'target/socket pose error',
+             s.get('uncertainty', s.get('bias', [])))
 
     csv_path = s.get('csv_path', 'data/uncertain_assembly_sampling/log.csv')
     cable = cfg.get('cable')
@@ -92,8 +105,21 @@ def build_and_run(cfg, robot, camera, args):
     adm = AdmittanceController(robot.arm, cfg.section('compliance'))
     guard = ForceGuard(robot.arm, cfg.section('force_guard'))
     tare = (lambda: robot.arm.zero_ft(settle=False)) if bool(cfg.get_path('compliance.tare_before', True)) else None
-    insert_time = float(cfg.get_path('compliance.insert_time_s', 3.0))
     settle_s = float(cfg.get_path('compliance.settle_s', 0.5))
+
+    # CARTESIAN SPEED LIMITS for the compliant reference (mm/s, deg/s). Each ramp segment is given
+    # the time its own geometry needs, so the reference never exceeds either limit -- rather than a
+    # fixed total time, which silently changes speed whenever the path length or resolution changes.
+    v_mm_s = float(cfg.get_path('speed.max_cartesian_translation_mm_s', 3.5))
+    w_deg_s = float(cfg.get_path('speed.max_cartesian_rotation_deg_s', 5.0))
+    min_seg_s = 1.0 / adm.rate                       # never below one servo cycle
+
+    def seg_time(A, B):
+        """Seconds for the reference to go A -> B without exceeding either cartesian limit."""
+        lin_m, ang_rad = pose_error(A, B)
+        t_lin = (lin_m * 1000.0 / v_mm_s) if v_mm_s > 0 else 0.0
+        t_ang = (np.degrees(ang_rad) / w_deg_s) if w_deg_s > 0 else 0.0
+        return max(t_lin, t_ang, min_seg_s)
     decim = max(1, int(s.get('log_decimation', 5)))        # log every Nth servo cycle (125 Hz / N)
     q_home = robot.arm.q()
 
@@ -112,12 +138,13 @@ def build_and_run(cfg, robot, camera, args):
     try:
         for trial in range(1, num_trials + 1):
             log.info('--- trial %d/%d ---', trial, num_trials)
-            # Perturb the chunk in the CONNECTOR's own frame: `uncertainty` (per-DOF half-widths) is
-            # the trial's misalignment (one draw); `noise` adds per-waypoint jitter (usually 0). The
-            # tool0 references that place the connector along the perturbed path:
+            # `uncertainty` (per-DOF half-widths) is the trial's misalignment, drawn ONCE, UNIFORMLY
+            # over +/- each half-width; `noise` adds per-waypoint jitter (usually 0). `perturb_frame`
+            # picks the ERROR SOURCE being modelled -- 'connector' = in-hand pose error (default),
+            # 'target' = socket pose error. See trajectory.perturb.
             perturbed = traj.perturb(dense[:k],
                                      s.get('uncertainty', s.get('bias', [0.001, 0.001, 0, 1, 1, 1])),
-                                     s.get('noise', [0] * 6), rng, frame='connector')
+                                     s.get('noise', [0] * 6), rng, frame=perturb_frame)
             refs = [traj.tool0_at(T_base_targetobj, p, T_tool0_held) for p in perturbed]
 
             # Move to the perturbed START under position control (free space) -- this REALIZES the
@@ -140,10 +167,10 @@ def build_and_run(cfg, robot, camera, args):
             adm.reset()
             adm.warmup(refs[0], tare_fn=tare)          # engage servo + tare before the guard is armed
             guard.reset()
-            seg_t = insert_time / max(1, len(refs) - 1)
             last_ref, reached = refs[0], 0
             for i in range(1, len(refs)):
-                res = adm.ramp(refs[i - 1], refs[i], seg_t, guard, on_step=log_cb)
+                res = adm.ramp(refs[i - 1], refs[i], seg_time(refs[i - 1], refs[i]),
+                               guard, on_step=log_cb)
                 last_ref, reached = refs[i], i
                 if res == 'seated':
                     log.info('Contact limit reached at waypoint %d/%d -- connector SEATED.', i, len(refs) - 1)
@@ -155,7 +182,7 @@ def build_and_run(cfg, robot, camera, args):
             # would block the very motion that frees it (see ForceGuard.disable()).
             prev = last_ref
             for idx in range(reached, -1, -1):
-                adm.ramp(prev, refs[idx], seg_t, guard=None)
+                adm.ramp(prev, refs[idx], seg_time(prev, refs[idx]), guard=None)
                 prev = refs[idx]
             adm.stop()
             fout.flush()

@@ -48,8 +48,9 @@ compliance:
   reference_rate_hz: 125.0
   warmup_s: 0.5                 # hold the start pose this long (servo-engage transient decays) before the guard
   tare_before: true            # zero the F/T mid-warmup (servo-active) so the guard baseline is right
-  insert_time_s: 15.0           # time to ramp the perturbed chunk (sets the reference speed)
   settle_s: 0.5                # hold at the reached pose after each insert (records the contact wrench)
+  # NOTE the compliant reference SPEED is set by speed.max_cartesian_* below (mm/s, deg/s), not by a
+  # total time -- so changing the path length or the resample resolution no longer changes the speed.
 
 # Contact watchdog: a trip during insertion = the connector SEATED (stop advancing). NOT armed during
 # retract (a seated part is already over the limit; a guarded retract would block itself).
@@ -62,8 +63,17 @@ sampling:
   chunk_fraction: 1.0            # fraction of the resampled trajectory to execute per trial
   translational_resolution_m: 0.001
   rotational_resolution_deg: 1.0
-  # UNCERTAINTY RANGE per DOF -- uniform half-widths [x, y, z (m), roll, pitch, yaw (deg)] in the
-  # CONNECTOR'S OWN frame. Drawn ONCE per trial (the trial's initial misalignment).
+  # WHICH ERROR SOURCE the perturbation models:
+  #   connector = IN-HAND pose error -- the part is held wrong in the gripper (bias along the PART's
+  #               axes). The robot still runs its NOMINAL motion, so travel stays along the target's
+  #               axis and the part rides through the insertion tilted/offset.
+  #   target    = SOCKET pose error -- the robot's belief about the mate is wrong (bias along the
+  #               TARGET's axes). The whole approach is rigidly misaimed and the part drives in
+  #               along its OWN rotated axis.
+  perturb_frame: connector
+  # UNCERTAINTY RANGE per DOF -- half-widths [x, y, z (m), roll, pitch, yaw (deg)] in the frame
+  # selected above. Drawn ONCE per trial (the trial's initial misalignment), UNIFORM and INDEPENDENT
+  # per DOF over [-half_width, +half_width]. These are HARD limits -- never exceeded (not Gaussian).
   uncertainty: [0.010, 0.0, 0.005, 0.0, 30.0, 0.0]   # +/- (10 mm, 0, 5 mm, 0, 30 deg, 0)
   noise:       [0.0,   0.0, 0.0,   0.0,   0.0,  0.0]   # extra per-WAYPOINT jitter (usually 0)
   log_decimation: 5             # log every Nth servo cycle (125 Hz / N -> ~25 Hz rows)
@@ -73,6 +83,11 @@ sampling:
 speed:
   max_joint_velocity_rad_s: 0.5
   joint_acceleration_rad_s2: 1.0
+  # CARTESIAN limits for the COMPLIANT reference (the admittance insert + retract). Each ramp
+  # segment gets the time its own geometry needs, so neither limit is exceeded.
+  # 50 mm of insertion at 3.5 mm/s ~= 14 s. Set either to 0 to disable that limit.
+  max_cartesian_translation_mm_s: 3.5
+  max_cartesian_rotation_deg_s: 5.0
 
 move_timeout_s: 120.0
 settle_s: 0.2

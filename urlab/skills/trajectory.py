@@ -90,14 +90,33 @@ def random_delta(bounds, rng):
     return xyzrpy_to_matrix(t, r)
 
 
-def perturb(dense, bias_bounds, noise_bounds, rng, frame='target'):
+PERTURB_FRAMES = ('connector', 'held', 'target')
+
+
+def perturb(dense, bias_bounds, noise_bounds, rng, frame='connector'):
     """The dense poses with a bias (ONE draw for the whole trial -- a systematic offset) plus noise
     (a fresh draw per waypoint -- jitter).
 
-    frame='target' (default): perturbed[i] = bias @ noise_i @ dense[i] -- in the TARGET-OBJECT frame
-        (LEFT multiply). A rotational bias then also translates the part by (R_bias - I) @ p.
-    frame='held' (or 'connector'): perturbed[i] = dense[i] @ bias @ noise_i -- in the HELD PART's OWN
-        frame (RIGHT multiply), so the half-widths [x,y,z,r,p,y] are along the PART's axes."""
+    WHICH FRAME the bias acts in is a choice of ERROR SOURCE, and the two model different physics:
+
+    frame='connector' (or 'held', the default): perturbed[i] = dense[i] @ bias @ noise_i
+        (RIGHT multiply, per waypoint). This is IN-HAND POSE ERROR -- the part is held wrong in the
+        gripper by `bias`, expressed along the PART's own axes. The robot still executes its NOMINAL
+        motion (it does not know the grasp is off), so the travel direction stays along the TARGET's
+        axis while the part rides through the insertion tilted/offset. A pitch bias tilts the part,
+        it does NOT rotate the approach direction -- that is correct here, not a bug.
+
+    frame='target': perturbed[i] = bias @ noise_i @ dense[i] (LEFT multiply). This is TARGET / SOCKET
+        POSE ERROR -- the robot's belief about where the mate is, is wrong by `bias`, expressed along
+        the TARGET's axes. The whole approach is rigidly misaimed, so the part drives in along its
+        OWN (rotated) axis and a rotational bias also translates it by (R_bias - I) @ p.
+        (The trajectory's last row is the identity mate, so this is already the rigid,
+        mate-anchored misalignment -- anchor @ bias @ anchor^-1 with anchor = I.)
+
+    Both reach a DIFFERENT path but the same class of endpoint, so pick by the error you mean to
+    study; uncertain_sampling exposes it as `sampling.perturb_frame`."""
+    if frame not in PERTURB_FRAMES:
+        raise ValueError(f'perturb frame {frame!r} must be one of {PERTURB_FRAMES}')
     bias = random_delta(bias_bounds, rng)
     if frame in ('held', 'connector'):
         return [c @ bias @ random_delta(noise_bounds, rng) for c in dense]

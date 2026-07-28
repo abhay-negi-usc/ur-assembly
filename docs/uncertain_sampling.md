@@ -57,6 +57,30 @@ connector** (`T_targetconn_conn`); its **last row must be identity** (connector 
 at the mate). It is a direct **−X insertion**: the connector backs off along the target's −X and
 drives to 0 (`standoff_axis: [-1, 0, 0]`).
 
+## How the perturbation is applied — `sampling.perturb_frame`
+Which frame the bias acts in selects **which error source you are studying**. Both are legitimate;
+pick the one you mean.
+
+| `perturb_frame` | formula | models | effect of a 30° pitch bias |
+|---|---|---|---|
+| **`connector`** (default, also `held`) | `ideal[i] · bias` | **In-hand pose error** — the part is held wrong in the gripper; bias is along the **part's** axes. The robot doesn't know, so it runs its **nominal** motion. | Part is tilted 30°; **travel stays along the target's axis** and the part rides in crooked. |
+| **`target`** | `bias · ideal[i]` | **Socket/target pose error** — the robot's belief about the mate is wrong; bias is along the **target's** axes. The whole approach is rigidly misaimed. | Part is tilted 30° **and travel rotates 30°** onto the part's own axis. |
+
+Both tilt the part identically — **only the travel direction distinguishes them**, which is why the
+regression test asserts travel direction rather than the endpoint.
+
+## How the uncertainty is sampled
+**Uniform, independent per DOF, with hard limits.** Each value in `sampling.uncertainty` is a
+**half-width**, not a standard deviation: DOF *i* is drawn `U(−half_widthᵢ, +half_widthᵢ)`, once per
+trial. Draws are zero-centred, fill the range, and **never exceed it** — a `0` entry means that DOF
+never moves. `sampling.noise` is drawn the same way, but freshly per waypoint.
+
+> Reading these as σ would be badly wrong: ~32% of Gaussian draws fall outside ±σ, and a 30° σ would
+> produce occasional 90°+ misalignments. There is no tail here — `±30°` means exactly that.
+
+Rotations are applied as **extrinsic XYZ** rpy (the repo-wide convention). `sampling.random_seed > 0`
+seeds a dedicated RNG so a run replays exactly.
+
 **To calibrate `connector_in_holder` for a connector:** hold it in the holder, hand-guide, and read
 `base_link <- connector` vs `base_link <- connector_holder` off the monitor; paste the relative pose
 into that cable's `connector_in_holder` in `cables.yaml`. Identity = unmeasured (connector coincides
@@ -72,14 +96,16 @@ with the holder).
 | `sampling.num_trials` | how many perturbed insertions |
 | `sampling.chunk_fraction` | fraction of the (resampled) trajectory to execute per trial |
 | `sampling.translational_resolution_m` / `rotational_resolution_deg` | densify the CSV to this spacing |
-| `sampling.uncertainty` | per-DOF uncertainty RANGE — half-widths `[x,y,z (m), r,p,y (deg)]`, drawn once per trial, **in the connector frame** |
-| `sampling.noise` | extra per-waypoint jitter (usually 0), in the connector frame |
+| `sampling.perturb_frame` | `connector` (in-hand pose error, default) or `target` (socket pose error) — see above |
+| `sampling.uncertainty` | per-DOF **uniform half-widths** `[x,y,z (m), r,p,y (deg)]`, drawn once per trial in the frame above. Hard limits, not σ |
+| `sampling.noise` | extra jitter, drawn the same way but **per waypoint** (usually 0) |
 | `sampling.log_decimation` | log every Nth servo cycle (125 Hz / N ≈ rows/s); `5` ≈ 25 Hz |
 | `sampling.random_seed` | `0` = nondeterministic; `>0` seeds a dedicated RNG for replayable trials |
 | `sampling.csv_path` | output stem; a `<cable>/` subfolder is inserted and a `_YYYYmmdd_HHMMSS` appended, so runs are grouped by cable and unique |
 | `compliance.stiffness` / `mass` / `damping_ratio` | the admittance spring-mass-damper (per TOOL0 axis); `stiffness` sets deflection-per-force (`2000 N/m` → 20 N ≈ 10 mm) |
 | `compliance.selected_axes` | which TOOL0 axes yield to contact (`[1,1,1,1,1,1]` = all) |
-| `compliance.insert_time_s` / `settle_s` / `warmup_s` | ramp time for the chunk (reference speed) / settle-at-target / servo warm-up |
+| `compliance.settle_s` / `warmup_s` | settle-at-target after each insert / servo warm-up before the guard arms |
+| `speed.max_cartesian_translation_mm_s` / `max_cartesian_rotation_deg_s` | **cartesian speed limits for the compliant reference** (insert *and* retract), in mm/s and deg/s. Each ramp segment gets the time its own geometry needs, so neither limit is exceeded; `0` disables that limit |
 | `compliance.tare_before` | zero the F/T mid-warmup (servo-active) so the guard baseline is correct |
 | `force_guard.max_force_n` / `max_torque_nm` | contact limit; a trip during insertion = the connector **seated** |
 

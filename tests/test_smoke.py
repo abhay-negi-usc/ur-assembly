@@ -564,6 +564,73 @@ def test_admittance_yields_along_external_push():
         assert arm.commanded[axis, 3] > 0, f'axis {axis}: commanded pose must move along the push'
 
 
+def test_perturb_frames_model_different_error_sources():
+    """The two perturb frames are physically different and must stay distinguishable.
+
+    'connector' = IN-HAND error: the robot runs its nominal motion, so a pitch bias tilts the PART
+    but leaves TRAVEL along the target's axis. 'target' = SOCKET error: the whole approach is
+    rigidly misaimed, so travel rotates onto the part's OWN axis. Both tilt the part identically --
+    only the travel direction tells them apart, which is why it is asserted here."""
+    from urlab.skills.trajectory import perturb
+    from urlab.transforms import xyzrpy_to_matrix
+
+    # Ideal path: -5 cm -> 0 along the target's X, identity rotation (mate = last row = identity).
+    dense = [xyzrpy_to_matrix([-s, 0, 0], [0, 0, 0]) for s in np.linspace(0.05, 0.0, 6)]
+    pitch = 30.0
+    bias = [0.0, 0.0, 0.0, 0.0, pitch, 0.0]
+
+    class _FixedRng:                       # a deterministic 'uniform' -> always the +half-width
+        @staticmethod
+        def uniform(lo, hi, n):
+            return np.ones(n)
+
+    def travel_dir(path):
+        v = path[-1][:3, 3] - path[0][:3, 3]
+        return v / np.linalg.norm(v)
+
+    own_axis = xyzrpy_to_matrix([0, 0, 0], np.radians([0, pitch, 0]))[:3, 0]
+
+    in_hand = perturb(dense, bias, [0.0] * 6, _FixedRng(), frame='connector')
+    assert np.allclose(travel_dir(in_hand), [1.0, 0.0, 0.0], atol=1e-9), \
+        'in-hand error must leave travel on the TARGET axis (the robot moves nominally)'
+    assert np.allclose(in_hand[-1][:3, :3], xyzrpy_to_matrix([0, 0, 0], np.radians([0, pitch, 0]))[:3, :3]), \
+        'the part itself must still be tilted by the bias'
+
+    socket = perturb(dense, bias, [0.0] * 6, _FixedRng(), frame='target')
+    assert np.allclose(travel_dir(socket), own_axis, atol=1e-9), \
+        "socket error must rotate travel onto the part's OWN axis"
+
+    # 'held' is an alias for 'connector'; an unknown frame must fail loudly, not silently pick one.
+    assert np.allclose(perturb(dense, bias, [0.0] * 6, _FixedRng(), frame='held'), in_hand)
+    try:
+        perturb(dense, bias, [0.0] * 6, _FixedRng(), frame='base')
+        assert False, 'expected ValueError for an unknown perturb frame'
+    except ValueError:
+        pass
+
+
+def test_uncertainty_is_uniform_within_hard_limits():
+    """The per-DOF `uncertainty` values are UNIFORM half-widths, not sigmas: draws fill the range
+    and NEVER exceed it. A Gaussian reading of these numbers would put ~32% of trials outside."""
+    from urlab.skills.trajectory import random_delta
+    from urlab.transforms import matrix_to_xyzrpy
+
+    bounds = [0.010, 0.0, 0.005, 0.0, 30.0, 0.0]
+    rng = np.random.default_rng(3)
+    draws = []
+    for _ in range(4000):
+        xyz, rpy = matrix_to_xyzrpy(random_delta(bounds, rng))
+        draws.append(np.concatenate([xyz, np.degrees(rpy)]))
+    d = np.abs(np.asarray(draws))
+    hw = np.array(bounds)
+    assert np.all(d <= hw + 1e-9), 'a draw exceeded its half-width -- these are HARD limits'
+    for i in (0, 2, 4):                    # the three active DOFs should fill their range
+        assert d[:, i].max() > 0.97 * hw[i], f'DOF {i} never approached its limit'
+        assert abs(np.mean(np.asarray(draws)[:, i])) < 0.06 * hw[i], f'DOF {i} not zero-centred'
+    for i in (1, 3, 5):                    # zero half-width -> exactly zero, never jitter
+        assert np.all(d[:, i] == 0.0), f'DOF {i} has half-width 0 and must never move'
+
+
 def test_wrench_is_bridged_into_base_link():
     """getActualTCPForce() speaks UR `base`; the rest of urlab speaks ROS base_link (Rz(pi) apart).
     arm.wrench() must apply that bridge, or x/y silently come out NEGATED while z is fine -- which

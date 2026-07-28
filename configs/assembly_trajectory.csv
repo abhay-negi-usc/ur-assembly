@@ -1,12 +1,12 @@
-# Assembly trajectory: HELD-OBJECT poses w.r.t. the TARGET object (T_targetobj_held).
+# Assembly trajectory: CONNECTOR poses w.r.t. the TARGET CONNECTOR (T_targetconn_conn).
 # Columns: x,y,z,roll,pitch,yaw   (meters, radians unless trajectory_angles_deg: true)
-# Execution order top -> bottom. The LAST row is the assembled state (it anchors the target frame
-# to the polled assembled_pose). This example: the held object approaches the target along the
-# target +Z, 5 cm -> 0 (assembled = held-object frame coincides with the target-object frame).
+# Execution order top -> bottom. The LAST row is the assembled state and MUST be identity
+# (the connector coincides with the target connector). This is a direct -X insertion: the
+# connector backs off along the target's -X, 5 cm -> 0 (assembled = connector == target connector).
 x,y,z,roll,pitch,yaw
-0.0,0.0,0.050,0.0,0.0,0.0
-0.0,0.0,0.035,0.0,0.0,0.0
-0.0,0.0,0.020,0.0,0.0,0.0
-0.0,0.0,0.010,0.0,0.0,0.0
-0.0,0.0,0.005,0.0,0.0,0.0
-0.0,0.0,0.000,0.0,0.0,0.0
+-0.050,0.0,0.0,0.0,0.0,0.0
+-0.035,0.0,0.0,0.0,0.0,0.0
+-0.020,0.0,0.0,0.0,0.0,0.0
+-0.010,0.0,0.0,0.0,0.0,0.0
+-0.005,0.0,0.0,0.0,0.0,0.0
+0.0,0.0,0.0,0.0,0.0,0.0

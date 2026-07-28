@@ -376,6 +376,10 @@ def test_cable_profile_applies_counts():
     assert cfg.get_path('grasp_check.cable_counts') == 225
     xyz = cfg.get_path('connector_grasp.xyz')                          # junction_offset_m -> [off, 0, 0]
     assert xyz[1] == 0.0 and xyz[2] == 0.0 and isinstance(xyz[0], float)
+    assert cfg.get_path('connector_in_holder.xyz') is not None         # held-connector calibration applied
+    assert cfg.get_path('connector_in_holder.rpy') is not None
+    assert cfg.get_path('connector_holder_target.xyz') == [0.10037, 1.06109, -0.18463]  # recorded mate (per-cable)
+    assert cfg.get_path('connector_holder_target.rpy') is not None
 
     bnc = Config({'cable': 'bnc', '_config_dir': CONFIG_DIR})
     apply_cable_profile(bnc)

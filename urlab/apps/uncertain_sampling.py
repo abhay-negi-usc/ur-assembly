@@ -54,6 +54,9 @@ def build_and_run(cfg, robot, camera, args):
     T_base_connector_target = T_base_holder_target @ T_holder_connector   # ideal assembled connector
     T_base_assembled = T_base_holder_target @ inverse(T_tool0_holder)     # assembled tool0 pose
     csv_in = urconfig.resolve(cfg, cfg.get('trajectory_csv', 'assembly_trajectory.csv'))
+    # The trajectory rows are the CONNECTOR w.r.t. the TARGET CONNECTOR (last row = identity = the
+    # mate; a direct -X -> 0 insertion). With an identity last row, anchor_target reduces to
+    # T_base_targetobj = T_base_connector_target, so each row directly places the connector.
     mats = traj.load_csv(csv_in, angles_deg=bool(cfg.get('trajectory_angles_deg', False)))
     T_base_targetobj = traj.anchor_target(T_base_assembled, T_tool0_held, mats[-1])
 
@@ -63,7 +66,12 @@ def build_and_run(cfg, robot, camera, args):
     log.info('%d ideal rows -> %d dense; chunk = %d waypoints; %d trials.',
              len(mats), len(dense), k, int(s.get('num_trials', 20)))
 
-    out_path = _timestamped(cfg, s.get('csv_path', 'data/uncertain_assembly_sampling/log.csv'))
+    csv_path = s.get('csv_path', 'data/uncertain_assembly_sampling/log.csv')
+    cable = cfg.get('cable')
+    if cable:                                    # group each run under a subfolder named by the cable
+        head, tail = os.path.split(csv_path)
+        csv_path = os.path.join(head, str(cable), tail)
+    out_path = _timestamped(cfg, csv_path)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     fout = open(out_path, 'w', newline='')
     import csv as _csv
@@ -96,8 +104,10 @@ def build_and_run(cfg, robot, camera, args):
         for trial in range(1, int(s.get('num_trials', 20)) + 1):
             log.info('--- trial %d/%d ---', trial, int(s.get('num_trials', 20)))
             robot.arm.zero_ft()
-            # Perturb in the CONNECTOR's own frame (half-widths along the connector's axes).
-            perturbed = traj.perturb(dense[:k], s.get('bias', [0.001, 0.001, 0, 1, 1, 1]),
+            # Perturb in the CONNECTOR's own frame: `uncertainty` (per-DOF half-widths) is the
+            # trial's misalignment (one draw); `noise` adds per-waypoint jitter (usually 0).
+            perturbed = traj.perturb(dense[:k],
+                                     s.get('uncertainty', s.get('bias', [0.001, 0.001, 0, 1, 1, 1])),
                                      s.get('noise', [0] * 6), rng, frame='connector')
             for pose_held in perturbed:
                 if robot.arm.force() >= max_force:

@@ -115,6 +115,12 @@ def apply_cable_profile(cfg):
     # connector's END): connector_grasp is the fingertip pose relative to the connector frame.
     off = float(entry.get('junction_offset_m', 0.0))
     cfg.set_path('connector_grasp.xyz', [off, 0.0, 0.0])
+    # Held-connector calibration (connector_holder -> connector) for the assembly / uncertain_sampling.
+    if entry.get('connector_in_holder'):
+        cfg.set_path('connector_in_holder', entry['connector_in_holder'])
+    # Recorded assembly target for the connector_holder (per-cable) for uncertain_sampling.
+    if entry.get('connector_holder_target'):
+        cfg.set_path('connector_holder_target', entry['connector_holder_target'])
     if entry.get('target_connector_pose'):                    # (future) the assembly target
         cfg.set_path('assembly.target_connector_pose', entry['target_connector_pose'])
     cfg['_cable_profile'] = name

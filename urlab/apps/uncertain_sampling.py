@@ -11,8 +11,14 @@ logged sample is: trial, timestamp, raw tool0-wrt-base, the connector's DEVIATIO
 mate (identity at a perfect mate), and the contact wrench BOTH as recorded (base_link) and
 re-expressed in the connector frame.
 
-    resample the ideal trajectory -> for each trial: tare, perturb (connector frame), drive in
-    (compliant, guarded, LOGGING), snap to the closest ideal pose, disassemble -> write the CSV.
+CONTROL is COMPLIANCE (software admittance, robot/admittance.py), NOT forceMode. The arm FOLLOWS the
+(perturbed) assembly trajectory as a position reference and YIELDS to contact through a virtual
+spring-mass-damper with finite restoring stiffness, springing back toward the reference when contact
+eases. forceMode is pure force control -- no stiffness -- so it floats freely off the path; that is
+the drift this replaces.
+
+    for each trial: perturb (connector frame), move to the perturbed start (stiff, free space),
+    follow the path under ADMITTANCE (LOGGING at the servo rate, guarded), settle, retract -> CSV.
 """
 
 import os
@@ -22,6 +28,7 @@ import numpy as np
 
 from .. import config as urconfig
 from .. import log as urlog
+from ..robot import AdmittanceController, ForceGuard
 from ..skills import trajectory as traj
 from ..transforms import from_cfg, inverse, translation_matrix
 from ._runner import run_app
@@ -62,9 +69,10 @@ def build_and_run(cfg, robot, camera, args):
 
     dense = traj.resample(mats, float(s.get('translational_resolution_m', 0.001)),
                           float(s.get('rotational_resolution_deg', 1.0)))
-    k = max(1, int(np.ceil(float(s.get('chunk_fraction', 0.2)) * len(dense))))
+    k = max(2, int(np.ceil(float(s.get('chunk_fraction', 0.2)) * len(dense))))   # >=2 for a ramp
+    num_trials = int(s.get('num_trials', 20))
     log.info('%d ideal rows -> %d dense; chunk = %d waypoints; %d trials.',
-             len(mats), len(dense), k, int(s.get('num_trials', 20)))
+             len(mats), len(dense), k, num_trials)
 
     csv_path = s.get('csv_path', 'data/uncertain_assembly_sampling/log.csv')
     cable = cfg.get('cable')
@@ -79,62 +87,84 @@ def build_and_run(cfg, robot, camera, args):
     writer.writerow(_HEADER)
     log.info('Logging to %s', out_path)
 
-    limits = [0.05] * 3 + [0.17] * 3
-    max_force = float(s.get('max_force_n', cfg.get_path('admittance.max_force_n', 30.0)))
+    # COMPLIANCE = software admittance (follows the reference, yields to contact, springs back). The
+    # ForceGuard trips at the contact limit -> the connector SEATED. See robot/admittance.py.
+    adm = AdmittanceController(robot.arm, cfg.section('compliance'))
+    guard = ForceGuard(robot.arm, cfg.section('force_guard'))
+    tare = (lambda: robot.arm.zero_ft(settle=False)) if bool(cfg.get_path('compliance.tare_before', True)) else None
+    insert_time = float(cfg.get_path('compliance.insert_time_s', 3.0))
+    settle_s = float(cfg.get_path('compliance.settle_s', 0.5))
+    decim = max(1, int(s.get('log_decimation', 5)))        # log every Nth servo cycle (125 Hz / N)
     q_home = robot.arm.q()
-    seed_q = q_home
 
-    # Traverse to the stand-off and the first dense pose under position control (the ROS comment is
-    # explicit: streaming these as compliant references exceeds joint velocity limits).
-    standoff_axis = np.asarray(cfg.get('standoff_axis', [0, 0, 1]), dtype=float)
+    # Approach the stand-off under position control (free space, stiff). The stand-off backs off the
+    # mate along standoff_axis; the per-trial perturbed start is reached from here each trial.
+    standoff_axis = np.asarray(cfg.get('standoff_axis', [-1, 0, 0]), dtype=float)
     T_standoff_held = translation_matrix(standoff_axis * float(cfg.get('standoff_distance_m', 0.2))) \
         @ mats[-1]
-    for pose in (traj.tool0_at(T_base_targetobj, T_standoff_held, T_tool0_held),
-                 traj.tool0_at(T_base_targetobj, dense[0], T_tool0_held)):
-        q = robot.arm.ik(pose, seed_q)
-        if q is None or not robot.arm.move_j(q, label='approach'):
-            fout.close()
-            return False
-        seed_q = q
+    q = robot.arm.ik(traj.tool0_at(T_base_targetobj, T_standoff_held, T_tool0_held), q_home)
+    if q is None or not robot.arm.move_j(q, label='approach standoff'):
+        fout.close()
+        return False
+    seed_q = q
 
     ok = True
     try:
-        robot.arm.force_mode(traj.tool0_at(T_base_targetobj, mats[-1], T_tool0_held),
-                             [1, 1, 1, 1, 1, 1], [0.0] * 6, limits)
-        for trial in range(1, int(s.get('num_trials', 20)) + 1):
-            log.info('--- trial %d/%d ---', trial, int(s.get('num_trials', 20)))
-            robot.arm.zero_ft()
-            # Perturb in the CONNECTOR's own frame: `uncertainty` (per-DOF half-widths) is the
-            # trial's misalignment (one draw); `noise` adds per-waypoint jitter (usually 0).
+        for trial in range(1, num_trials + 1):
+            log.info('--- trial %d/%d ---', trial, num_trials)
+            # Perturb the chunk in the CONNECTOR's own frame: `uncertainty` (per-DOF half-widths) is
+            # the trial's misalignment (one draw); `noise` adds per-waypoint jitter (usually 0). The
+            # tool0 references that place the connector along the perturbed path:
             perturbed = traj.perturb(dense[:k],
                                      s.get('uncertainty', s.get('bias', [0.001, 0.001, 0, 1, 1, 1])),
                                      s.get('noise', [0] * 6), rng, frame='connector')
-            for pose_held in perturbed:
-                if robot.arm.force() >= max_force:
+            refs = [traj.tool0_at(T_base_targetobj, p, T_tool0_held) for p in perturbed]
+
+            # Move to the perturbed START under position control (free space) -- this REALIZES the
+            # known misalignment; admittance then takes over for the contact phase.
+            q = robot.arm.ik(refs[0], seed_q)
+            if q is None or not robot.arm.move_j(q, label='approach perturbed start'):
+                log.warning('IK/approach failed for the perturbed start; skipping trial %d.', trial)
+                continue
+            seed_q = q
+
+            # Follow the perturbed path under ADMITTANCE, logging at the servo rate. A guard trip =
+            # the connector seated (stop advancing).
+            cnt = [0]
+
+            def log_cb(_cnt=cnt, _trial=trial):
+                _cnt[0] += 1
+                if _cnt[0] % decim == 0:
+                    _log_row(writer, robot, _trial, T_base_connector_target, T_tool0_held)
+
+            adm.reset()
+            adm.warmup(refs[0], tare_fn=tare)          # engage servo + tare before the guard is armed
+            guard.reset()
+            seg_t = insert_time / max(1, len(refs) - 1)
+            last_ref, reached = refs[0], 0
+            for i in range(1, len(refs)):
+                res = adm.ramp(refs[i - 1], refs[i], seg_t, guard, on_step=log_cb)
+                last_ref, reached = refs[i], i
+                if res == 'seated':
+                    log.info('Contact limit reached at waypoint %d/%d -- connector SEATED.', i, len(refs) - 1)
                     break
-                q = robot.arm.ik(traj.tool0_at(T_base_targetobj, pose_held, T_tool0_held), seed_q)
-                if q is None:
-                    log.warning('IK failed mid-chunk; ending this trial early.')
-                    break
-                robot.arm.move_j(q, label='insert')
-                seed_q = q
-                _log_row(writer, robot, trial, T_base_connector_target, T_tool0_held)
-            # Snap to the closest ideal pose, then disassemble along the ideal path.
-            actual_held = inverse(T_base_targetobj) @ robot.tool0() @ T_tool0_held
-            j_close = traj.closest_index(actual_held, dense,
-                                         float(s.get('closest_pose_rot_weight_mm_per_deg', 1.0)))
-            for idx in range(j_close, -1, -1):
-                q = robot.arm.ik(traj.tool0_at(T_base_targetobj, dense[idx], T_tool0_held), seed_q)
-                if q is not None:
-                    robot.arm.move_j(q, label='disassemble')
-                    seed_q = q
+            adm.hold(last_ref, settle_s, guard, on_step=log_cb)   # settle (records the contact wrench)
+
+            # Retract along the SAME perturbed path (back out the way it came in). The guard is NOT
+            # armed here: a seated/jammed connector is already over the limit, so a guarded retract
+            # would block the very motion that frees it (see ForceGuard.disable()).
+            prev = last_ref
+            for idx in range(reached, -1, -1):
+                adm.ramp(prev, refs[idx], seg_t, guard=None)
+                prev = refs[idx]
+            adm.stop()
             fout.flush()
             os.fsync(fout.fileno())
     except Exception:                              # noqa: BLE001
         ok = False
         log.exception('Sampling error:')
     finally:
-        robot.arm.end_force_mode()
+        robot.arm.servo_stop()
         fout.close()
     if ok:
         robot.arm.move_j(q_home, label='home')

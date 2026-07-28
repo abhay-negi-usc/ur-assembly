@@ -46,6 +46,7 @@ class GroundPlaneScanner:
         self.plane_z = float(gp.get('z_m', -0.758))
         self.max_cables = int(gp.get('max_cables', 8))
         self.new_view_delta = float(gp.get('new_view_translation_m', 0.04))   # 'n' camera step
+        self.z_step = float(gp.get('z_step_m', 0.05))       # 'z' step toward the cable (optical +z)
         self._dir_px = 24.0                 # pixels along the connector direction, to project a heading
         self._selection = None              # cached target junction (base frame); persists across retries
         self._base_view = None              # camera pose at scan start, for new-view nudges
@@ -56,6 +57,11 @@ class GroundPlaneScanner:
         self.image_dir = os.path.join(data_root, gp.get('images_subdir', 'ground_scan'), stamp)
         self.labeled_path = gp.get('labeled_image_path', None) or os.path.join(
             data_root, 'ground_scan_labeled.png')
+        # Mirror the numbered selection image to the SHARED live path too (last_camera_image), so a
+        # viewer left open there -- as with the multi-view scan -- shows the ground-scan labelling.
+        self.save_last_image = bool(cfg.get('save_last_camera_image', True))
+        self.last_image_path = cfg.get('last_camera_image_path', None) or os.path.join(
+            data_root, 'last_camera_image.png')
 
     def reset(self):
         """No-op: keep the user's cable selection across grasp retries (they pick once per run)."""
@@ -80,11 +86,14 @@ class GroundPlaneScanner:
             cables = self.detector.detect_all(frame, self.max_cables)
             self._save_labeled()
             projected = self._project_all(cables, frame)
-            choice = self._prompt(len(cables))            # int index | 'new' | None
+            choice = self._prompt(len(cables))            # int index | 'new' | 'closer' | None
             if choice is None:
                 return None
             if choice == 'new':
                 self._nudge_view()
+                continue
+            if choice == 'closer':
+                self._move_toward_cable()
                 continue
             if projected[choice] is None:
                 print('  that cable could not be projected onto the plane -- pick another or "n".')
@@ -161,14 +170,16 @@ class GroundPlaneScanner:
 
     # ------------------------------------------------------------------ user interaction
     def _prompt(self, n):
-        """Ask for the target cable number (1..n), 'n' for a new view, or 'q' to abort.
-        Returns a 0-based index, the string 'new', or None."""
+        """Ask for the target cable number (1..n), 'n' for a new view, 'z' to move toward the cable,
+        or 'q' to abort. Returns a 0-based index, 'new', 'closer', or None."""
+        zmm = self.z_step * 1000
         if n == 0:
             print(f'\n[ground_plane] NO cable detected in this view -- see {self.labeled_path}')
-            print('Enter "n" for a NEW view (small camera move), or "q" to abort:')
+            print(f'Enter "n" for a NEW view, "z" to move {zmm:.0f} mm toward the cable, or "q":')
         else:
             print(f'\n[ground_plane] {n} cable(s) detected -- see {self.labeled_path}')
-            print(f'Enter the target connector NUMBER (1-{n}), "n" for a new view, or "q" to abort:')
+            print(f'Enter the target NUMBER (1-{n}), "n" for a new view, "z" to move {zmm:.0f} mm '
+                  'closer, or "q":')
         while True:
             try:
                 raw = input('target #> ').strip().lower()
@@ -178,14 +189,16 @@ class GroundPlaneScanner:
                 return None
             if raw in ('n', 'new', 'view'):
                 return 'new'
+            if raw in ('z', 'closer', 'down'):
+                return 'closer'
             try:
                 idx = int(raw) - 1
             except ValueError:
-                print(f'  enter a number 1-{n}, "n" for a new view, or "q".')
+                print(f'  enter a number 1-{n}, "n" (new view), "z" (closer), or "q".')
                 continue
             if 0 <= idx < n:
                 return idx
-            print(f'  out of range -- enter 1-{n} (or "n"/"q").')
+            print(f'  out of range -- enter 1-{n} (or "n"/"z"/"q").')
 
     def _nudge_view(self):
         """Move the camera a small translation (cycling N/E/S/W around the start pose) for a fresh
@@ -202,20 +215,40 @@ class GroundPlaneScanner:
                  (off * 1000).round(0))
         self.robot.move_camera(T, 'ground-plane new view')
 
+    def _move_toward_cable(self):
+        """Move the camera z_step TOWARD the cable, along its optical axis (+optical z = forward, the
+        view direction), for a closer look. Re-anchors the new-view ring at the closer pose."""
+        if self.robot is None:
+            return
+        T = self.robot.camera().copy()
+        T[:3, 3] = T[:3, 3] + self.z_step * T[:3, 2]        # +optical z -> toward what the camera sees
+        log.info('  moving %.0f mm toward the cable (closer view).', self.z_step * 1000)
+        if self.robot.move_camera(T, 'ground-plane move toward cable'):
+            self._base_view = self.robot.camera().copy()
+
     def _save_labeled(self):
-        """Write the NUMBERED overlay (for the user to read) to a stable path + a per-run archive."""
+        """Write the NUMBERED overlay (for the user to read) to the ground-scan path, a per-run
+        archive, AND the shared last_camera_image live path so any open viewer shows it."""
         dbg = getattr(self.detector, 'last_debug', None)
         if dbg is None:
             return
         try:
             import cv2
-            os.makedirs(os.path.dirname(self.labeled_path) or '.', exist_ok=True)
-            root, ext = os.path.splitext(self.labeled_path)
-            tmp = f'{root}.tmp{ext or ".png"}'
-            cv2.imwrite(tmp, dbg)
-            os.replace(tmp, self.labeled_path)
+            self._atomic_write(dbg, self.labeled_path)
+            if self.save_last_image:
+                self._atomic_write(dbg, self.last_image_path)      # mirror to the shared live path
             os.makedirs(self.image_dir, exist_ok=True)
             cv2.imwrite(os.path.join(self.image_dir, f'view_{self._nudge_i:02d}.png'), dbg)
             log.info('  saved the numbered selection image %s', self.labeled_path)
         except Exception as exc:                     # noqa: BLE001 -- saving is best-effort
             log.warning('  could not save the labelled image: %s', exc)
+
+    @staticmethod
+    def _atomic_write(img, path):
+        """Write `img` to `path` via a temp file + rename, so a viewer never reads a partial frame."""
+        import cv2
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        root, ext = os.path.splitext(path)
+        tmp = f'{root}.tmp{ext or ".png"}'
+        cv2.imwrite(tmp, img)
+        os.replace(tmp, path)

@@ -426,6 +426,10 @@ class _FakeGripper:
         self.pos = int(counts)
         return True
 
+    def open(self, label='open'):
+        self.pos = 3
+        return True
+
     def position(self):
         return self.pos
 
@@ -451,75 +455,77 @@ class _FakeRobot:
 
 
 def _recovery_cfg(**recovery):
+    """A connector-target grasp_check: connector band [207,213] = success, cable 226 / closed 231
+    are the two miss states."""
     from urlab.config import Config
     return Config({
-        'approach_axis': [0.0, 0.0, 1.0], 'approach_distance_m': 0.10,
-        'grasp_check': {'enabled': True, 'groove_counts': 225, 'empty_counts': 228,
-                        'faces_max_counts': 223, 'tolerance_counts': 1, 'detect_empty': True,
+        'grasp_check': {'enabled': True, 'connector_counts': [207, 213], 'cable_counts': 226,
+                        'empty_counts': 231, 'faces_max_counts': 206, 'groove_max_counts': 213,
+                        'groove_counts': 210, 'tolerance_counts': 1, 'detect_empty': True,
                         'settle_s': 0.0,
-                        'recovery': {'enabled': True, 'increment_m': 0.0005, 'loose_counts': 215,
-                                     'faces_counts': 223, 'faces_band_counts': 0, **recovery}}})
+                        'recovery': {'enabled': True, 'finger_width_m': 0.02278,
+                                     'cable_shift_fraction': 0.8, 'empty_drop_m': 0.003, **recovery}}})
 
 
-def test_grasp_recovery_blind_retry_succeeds():
-    """A miss that the blind loose->close retry fixes returns 'ok' with NO arm motion. Success is
-    now the GROOVE count (225), not full closure."""
+def test_grasp_recovery_connector_success():
+    """A close in the connector band is 'ok' with NO arm motion."""
     from urlab.skills.pick import GraspCheck, GraspGeometry, GraspRecovery
     cfg = _recovery_cfg()
-    g = _FakeGripper(on_close=[220, 225])         # faces miss, then the blind retry seats it (groove)
+    g = _FakeGripper(on_close=[210])              # inside [207, 213]
     robot = _FakeRobot(g)
-    rec = GraspRecovery(cfg)
-    res = rec.grasp_with_recovery(robot, GraspGeometry(cfg), GraspCheck(cfg))
+    res = GraspRecovery(cfg).grasp_with_recovery(robot, GraspGeometry(cfg), GraspCheck(cfg))
     assert res == 'ok', res
-    assert robot.moves == [], 'blind retry must not move the arm'
+    assert robot.moves == []
 
 
-def test_grasp_recovery_faces_mode_moves_away_from_cable():
-    """A faces miss nudges the arm AWAY from the cable (+approach_axis) and reseats at the groove."""
+def test_grasp_recovery_cable_shifts_toward_connector():
+    """A CABLE grab (226) opens, shifts +x by 0.8*finger_width toward the connector end, and reseats."""
     from urlab.skills.pick import GraspCheck, GraspGeometry, GraspRecovery
     cfg = _recovery_cfg()
-    g = _FakeGripper(on_close=[220, 220, 225])    # miss, blind-retry miss, then reseat succeeds
+    g = _FakeGripper(on_close=[226, 210])         # cable, then the +x reseat seats the connector
     robot = _FakeRobot(g)
     geom = GraspGeometry(cfg)
     res = GraspRecovery(cfg).grasp_with_recovery(robot, geom, GraspCheck(cfg))
     assert res == 'ok', res
-    assert len(robot.moves) == 1, 'exactly one corrective move expected'
-    # approach_axis is +z, so 'toward the cable' is -z; faces moves AWAY -> +z in the grasp frame.
-    assert geom.T_base_grasp[2, 3] > 0, f'faces mode should move away (+z): {geom.T_base_grasp[2,3]}'
-    assert abs(geom.T_base_grasp[2, 3] - 0.0005) < 1e-9
+    assert len(robot.moves) == 1
+    assert abs(geom.T_base_grasp[0, 3] - 0.8 * 0.02278) < 1e-9    # +x only
+    assert abs(geom.T_base_grasp[1, 3]) < 1e-12 and abs(geom.T_base_grasp[2, 3]) < 1e-12
 
 
-def test_grasp_check_empty_is_not_recovered():
-    """A full-closure count (228) is EMPTY -- returned straight through, no reseat attempts."""
+def test_grasp_recovery_empty_drops_toward_ground():
+    """An EMPTY close (231) opens, drops 3 mm in -z (toward the object), and reseats."""
     from urlab.skills.pick import GraspCheck, GraspGeometry, GraspRecovery
     cfg = _recovery_cfg()
-    g = _FakeGripper(on_close=[228])              # closed fully on nothing
+    g = _FakeGripper(on_close=[231, 210])         # empty, then the -z reseat seats the connector
+    robot = _FakeRobot(g)
+    geom = GraspGeometry(cfg)
+    res = GraspRecovery(cfg).grasp_with_recovery(robot, geom, GraspCheck(cfg))
+    assert res == 'ok', res
+    assert len(robot.moves) == 1
+    assert abs(geom.T_base_grasp[2, 3] - (-0.003)) < 1e-9         # -z only
+    assert abs(geom.T_base_grasp[0, 3]) < 1e-12
+
+
+def test_grasp_recovery_unexpected_is_blind_retry():
+    """A count that is neither connector/cable/closed (218) opens + retries with NO move."""
+    from urlab.skills.pick import GraspCheck, GraspGeometry, GraspRecovery
+    cfg = _recovery_cfg()
+    g = _FakeGripper(on_close=[218, 210])         # between connector(213) and cable(226) -> blind, then ok
     robot = _FakeRobot(g)
     res = GraspRecovery(cfg).grasp_with_recovery(robot, GraspGeometry(cfg), GraspCheck(cfg))
-    assert res == 'empty', res
-    assert robot.moves == [], 'empty is not reseated -- there is no cable to reseat'
-
-
-def test_grasp_recovery_classify_directions():
-    """The faces/tips classifier and the 'toward the cable' direction (kept for other fingertips)."""
-    from urlab.skills.pick import GraspGeometry, GraspRecovery
-    cfg = _recovery_cfg(faces_counts=220, faces_band_counts=1)   # re-enable a tips band
-    rec = GraspRecovery(cfg)
-    assert rec._classify(220) == 'faces' and rec._classify(221) == 'faces'
-    assert rec._classify(224) == 'tips'
-    toward = rec._toward(GraspGeometry(cfg))     # approach_axis +z -> toward the cable is -z
-    assert toward[2] < 0
+    assert res == 'ok', res
+    assert robot.moves == []
 
 
 def test_grasp_recovery_gives_up_after_max_tries():
-    """A grasp that never seats returns 'missed' after the blind retry + max_tries corrections."""
+    """A grasp that never seats returns 'missed' after exactly max_tries reseats."""
     from urlab.skills.pick import GraspCheck, GraspGeometry, GraspRecovery
     cfg = _recovery_cfg(max_tries=3)
-    g = _FakeGripper(on_close=[220])              # always a faces miss
+    g = _FakeGripper(on_close=[226])              # always the cable
     robot = _FakeRobot(g)
     res = GraspRecovery(cfg).grasp_with_recovery(robot, GraspGeometry(cfg), GraspCheck(cfg))
     assert res == 'missed', res
-    assert len(robot.moves) == 3, 'should attempt exactly max_tries corrective moves'
+    assert len(robot.moves) == 3, 'exactly max_tries corrective moves'
 
 
 if __name__ == '__main__':

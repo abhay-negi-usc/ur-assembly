@@ -81,35 +81,41 @@ class GraspCheck:
 
 
 class GraspRecovery:
-    """Failed-grasp recovery for the cable pick. When the grasp check returns 'missed' the cable is
-    between the fingers but NOT seated in the groove; the stalled COUNT tells the failure mode
-    (see GraspCheck for the bands -- more obstruction = LESS closed):
+    """Failed-grasp recovery for the CONNECTOR pick, classified purely by the stalled finger COUNT
+    (more obstruction = LESS closed). The grasp target is the connector; the count after a close
+    says what is between the fingers, and each state maps to a DIRECTED reseat in the junction frame
+    (x = connector axis toward the connector's END; z = up, so -z = toward the ground):
 
-      * faces (<= faces_counts + band, ~220-223) -- cable on the flat parallel faces, propping the
-                                   fingers open: move the gripper AWAY from the cable so it settles
-                                   off the flats into the groove (success ~225).
-      * tips (higher, but short of the groove) -- cable pinched at the fingertip TIPS: move the
-                                   gripper TOWARD it. The CURRENT fingertips do not show this (a miss
-                                   is always 'faces'); kept configurable for other fingertips.
+      * CONNECTOR band  -> the connector is seated: SUCCESS.
+      * CABLE (within tolerance of cable_counts) -> grabbed the thinner cable: open, shift
+                           cable_shift_fraction * finger_width in +x (toward the connector end), retry.
+      * CLOSED (within tolerance of the closed/empty position) -> nothing grasped: open, drop
+                           empty_drop_m in -z (toward the object on the ground), retry.
+      * anything else    -> unexpected: open + blind retry (no move).
 
-    Recovery is: (1) a BLIND retry -- loose grip then full close, no arm motion, which alone
-    reseats a cable that was merely nipped; then (2) up to `max_tries` corrective iterations that
-    classify the mode, open to the loose grip, nudge the arm `increment_m` (default 0.5 mm) in the
-    corrective direction, and close again. The correction is along the grasp-frame approach axis
-    ('toward the cable' = deeper along the approach) and ACCUMULATES into the grasp target, so a
-    successful reseat leaves the corrected pose in geom.T_base_grasp for the lift/place.
-    `faces_band_counts` sets the faces/tips split -- tune it on hardware."""
+    The reseat ACCUMULATES into geom.T_base_grasp, so a successful reseat leaves the corrected pose
+    for the lift/place. (The old faces/tips reseat is gone.)"""
 
     def __init__(self, cfg):
         gc = cfg.section('grasp_check')
         rc = (gc.get('recovery', {}) or {})
         self.enabled = bool(rc.get('enabled', True))
         self.max_tries = int(rc.get('max_tries', 5))
-        self.loose_counts = int(rc.get('loose_counts', 215))
-        self.increment_m = float(rc.get('increment_m', 0.0005))
-        self.faces_counts = int(rc.get('faces_counts', 220))
-        self.faces_band = int(rc.get('faces_band_counts', 1))
-        self._toward_cfg = rc.get('toward_cable_axis', None)   # grasp frame; else -approach_axis
+        fw = float(rc.get('finger_width_m', 0.02278))
+        self.cable_shift = float(rc.get('cable_shift_fraction', 0.8)) * fw   # +x reseat for a cable grab
+        self.empty_drop = float(rc.get('empty_drop_m', 0.003))              # -z reseat for an empty close
+
+        # Count bands (from the grasp_check block, set per-cable by apply_cable_profile): the CONNECTOR
+        # range is success, cable_counts / the closed position are the two miss states.
+        conn = gc.get('connector_counts') or []
+        self.connector_lo = int(min(conn)) if conn else int(gc.get('faces_max_counts', 223)) + 1
+        self.connector_hi = (int(max(conn)) if conn
+                             else int(gc.get('groove_max_counts', gc.get('groove_counts', 225))))
+        cc = gc.get('cable_counts')
+        self.cable_counts = int(cc) if cc is not None else None
+        self.closed_counts = int(gc.get('empty_counts', 228))
+        self.tol = int(gc.get('tolerance_counts', 1))
+        self.settle_s = float(gc.get('settle_s', 1.0))
 
         # Optional: save the wrist-camera view at EACH grasp close, labelled with the gripper count
         # (in the filename and drawn on the image), for correlating the visual grasp state with the
@@ -144,63 +150,56 @@ class GraspRecovery:
         except Exception as exc:                       # noqa: BLE001 -- capture is best-effort
             log.warning('  could not save grasp image: %s', exc)
 
-    def _toward(self, geom):
-        """Unit 'toward the cable' direction in the GRASP frame: the config override, else the
-        negated approach axis (continuing the approach = deeper onto the cable)."""
-        v = (np.asarray(self._toward_cfg, dtype=float) if self._toward_cfg is not None
-             else -np.asarray(geom.approach_axis, dtype=float))
-        n = float(np.linalg.norm(v))
-        return v / n if n > 1e-9 else np.array([0.0, 0.0, -1.0])
-
-    def _classify(self, pos):
-        """'faces' (at/near the count floor) | 'tips' (above it, but short of success)."""
-        return 'faces' if pos <= self.faces_counts + self.faces_band else 'tips'
-
     def grasp_with_recovery(self, robot, geom, check, camera=None):
-        """Close, grasp-check, and on a MISS run the blind retry + corrective loop. Returns
-        'ok' | 'missed' | 'empty' | 'abort'. Leaves the (possibly corrected) grasp in
-        geom.T_base_grasp. If `camera` is given and grasp_check.capture_images is on, the wrist view
-        is saved (labelled with the gripper count) at each close."""
+        """Close, classify by the finger COUNT, and on a miss reseat in the DIRECTED way for that
+        count and retry -- up to max_tries. Returns 'ok' | 'missed' | 'abort'. Leaves the (possibly
+        corrected) grasp in geom.T_base_grasp. If `camera` is given and grasp_check.capture_images is
+        on, the wrist view is saved (labelled with the count) at each close."""
+        import time
         g = robot.gripper
-        if not g.close('grasp'):
-            return 'abort'
-        result = check.evaluate(g)
-        self._capture_grasp(camera, g.position(), 'close', result)
-        if result != 'missed' or not self.enabled:
-            return result
-
-        # 1. Blind retry: loose grip, then full close -- no arm motion.
-        log.warning('Grasp missed at %d counts -- blind retry (loose grip -> close).', g.position())
-        if not (g.go_to(self.loose_counts, 'loose grip') and g.close('grasp')):
-            return 'abort'
-        result = check.evaluate(g)
-        self._capture_grasp(camera, g.position(), 'blind', result)
-        if result != 'missed':
-            return result
-
-        # 2. Mode-directed corrective loop.
-        toward = self._toward(geom)
-        for i in range(self.max_tries):
-            pos = g.position()
-            mode = self._classify(pos)
-            # faces (cable on the flats) -> move AWAY from the cable so it settles into the groove;
-            # tips -> move TOWARD it.
-            direction = -toward if mode == 'faces' else toward
-            geom.T_base_grasp = geom.T_base_grasp @ translation_matrix(direction * self.increment_m)
-            log.warning('Recovery %d/%d: %s mode (%d counts) -- reseat %.1f mm %s the cable.',
-                        i + 1, self.max_tries, mode, pos, self.increment_m * 1000,
-                        'away from' if mode == 'faces' else 'toward')
-            if not (g.go_to(self.loose_counts, 'loose grip')
-                    and robot.move_fingertip(geom.T_base_grasp, f'reseat ({mode})')
-                    and g.close('grasp')):
+        tries = self.max_tries if self.enabled else 0
+        for attempt in range(tries + 1):
+            if not g.close('grasp'):
                 return 'abort'
-            result = check.evaluate(g)
-            self._capture_grasp(camera, g.position(), f'reseat{i + 1}', result)
-            if result != 'missed':
-                return result
+            time.sleep(self.settle_s)
+            pos = g.position()
+            tag = 'grasp' if attempt == 0 else f'reseat{attempt}'
 
-        log.error('Grasp still MISSED after the blind retry and %d corrective tries.',
-                  self.max_tries)
+            if self.connector_lo <= pos <= self.connector_hi:      # connector seated -> success
+                log.info('Grasp OK: %d counts in the connector band [%d, %d].',
+                         pos, self.connector_lo, self.connector_hi)
+                self._capture_grasp(camera, pos, tag, 'ok')
+                return 'ok'
+            if attempt >= tries:                                    # out of retries
+                self._capture_grasp(camera, pos, tag, 'missed')
+                break
+
+            if self.cable_counts is not None and abs(pos - self.cable_counts) <= self.tol:
+                log.warning('Grabbed the CABLE (%d ~ %d) -- open, shift %.1f mm +x toward the '
+                            'connector end, retry.', pos, self.cable_counts, self.cable_shift * 1000)
+                self._capture_grasp(camera, pos, tag, 'cable')
+                delta = translation_matrix([self.cable_shift, 0.0, 0.0])   # +x = toward connector end
+                reseat = 'reseat +x (toward connector)'
+            elif abs(pos - self.closed_counts) <= self.tol:
+                log.warning('EMPTY close (%d ~ closed %d) -- open, drop %.1f mm -z toward the '
+                            'object, retry.', pos, self.closed_counts, self.empty_drop * 1000)
+                self._capture_grasp(camera, pos, tag, 'empty')
+                delta = translation_matrix([0.0, 0.0, -self.empty_drop])   # -z = toward the ground
+                reseat = 'reseat -z (toward ground)'
+            else:                                                   # not connector/cable/closed
+                log.warning('Grasp count %d is not connector/cable/closed -- open + blind retry.', pos)
+                self._capture_grasp(camera, pos, tag, 'other')
+                delta = None
+                reseat = 'blind retry'
+
+            if not g.open('reposition'):
+                return 'abort'
+            if delta is not None:
+                geom.T_base_grasp = geom.T_base_grasp @ delta       # ACCUMULATE the correction
+                if not robot.move_fingertip(geom.T_base_grasp, reseat):
+                    return 'abort'
+
+        log.error('Grasp not seated in the connector band after %d tries.', self.max_tries)
         return 'missed'
 
 

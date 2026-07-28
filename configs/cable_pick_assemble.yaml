@@ -70,12 +70,14 @@ reconstruction:
 # ONE image: every cable's junction is NUMBERED for the user to pick; the pose is then estimated by
 # assuming the cable lies on a plane parallel to the robot XY plane at z_m (base frame), projecting
 # the junction pixel onto it. HEADING = the connector's local direction (the one drawn/labelled),
-# projected to the plane -- robust for a curved cable. At the prompt, "n" takes a new image from a
-# small camera move. Needs sam3.mode: junction; the app then grasps + retries as in the multi-view flow.
+# projected to the plane -- robust for a curved cable. At the prompt: "n" takes a new image from a
+# small lateral move, "z" moves the camera toward the cable (closer view). Needs sam3.mode: junction;
+# the app then grasps + retries as in the multi-view flow.
 ground_plane:
   z_m: -0.758             # plane height w.r.t. base_link (from the fingertip-touch calibration)
   max_cables: 8           # number the largest N cables for selection
-  new_view_translation_m: 0.04   # camera step when the user asks for a new view ('n')
+  new_view_translation_m: 0.04   # lateral camera step for a new view ('n')
+  z_step_m: 0.05          # camera step TOWARD the cable for a closer view ('z')
 # labeled_image_path: data/ground_scan_labeled.png   # where the numbered image is written (default shown)
 
 connector_frame: connector
@@ -100,7 +102,7 @@ fingertip_grasp:
 scan:
   # mode: fuse | reconstruction | ground_plane  (see the reconstruction + ground_plane blocks above).
   # mode: fuse | reconstruction | ground_plane  (see the reconstruction + ground_plane blocks above).
-  mode: fuse
+  mode: ground_plane             # DEFAULT: single-image, user-selected cable, ground-plane pose
   require_detection: true
   min_good_views: 3
   max_passes: 3
@@ -205,15 +207,14 @@ grasp_check:
                                  # capture_rate_hz PLUS a count-labelled frame at each close
   capture_rate_hz: 1.0           # rate of the timed recording during the descent + close + recovery
 
-  # ---- Failed-grasp RECOVERY (see skills/pick.py GraspRecovery + cable_pick_place.yaml notes) ----
+  # ---- Failed-grasp RECOVERY (see skills/pick.py GraspRecovery). Position-based, junction frame:
+  # CABLE grabbed -> shift +x (toward the connector end); EMPTY close -> drop -z (toward the ground). ----
   recovery:
     enabled: true
-    max_tries: 25                # N corrective iterations after the blind retry
-    loose_counts: 210            # loose grip the fingers open to before each reseat / retry
-    increment_m: 0.001          # corrective arm step per iteration (0.5 mm)
-    faces_counts: 223            # pos <= faces_counts+band => FACES -> reseat AWAY from the cable
-    faces_band_counts: 0         # these fingertips show only faces (a miss is always <= 223)
-    toward_cable_axis: [0, 0, +1]   # GRASP-frame "toward the cable" (faces reseats along its NEGATIVE)
+    max_tries: 25                # corrective retries before reporting a miss
+    finger_width_m: 0.02278      # fingertip width; the cable-grab shift is a fraction of this
+    cable_shift_fraction: 0.8    # CABLE grabbed -> shift this * finger_width in +x, then retry
+    empty_drop_m: 0.003          # EMPTY close  -> drop this in -z (toward the object), then retry
 
 speed:
   max_joint_velocity_rad_s: 0.5

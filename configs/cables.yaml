@@ -23,6 +23,8 @@
 #   <cable>.cable     -> grasp_check.cable_counts   (reference; grabbing the cable = a MISS)
 #   <cable>.junction_offset_m -> connector_grasp.xyz = [offset, 0, 0]
 #                        (fingertip target offset from the junction, POSITIVE toward the connector's END)
+#   <cable>.connector_in_holder -> connector_in_holder  (the held connector's pose wrt connector_holder;
+#                        used by uncertain_sampling as the connector frame)
 #   <cable>.target_connector_pose -> assembly.target_connector_pose   (future)
 # ============================================================================
 
@@ -40,6 +42,13 @@ cables:
     connector: [207, 213]   # CONNECTOR between the fingertips = grasp SUCCESS (the target)
     cable: 225              # grabbing the CABLE instead (thinner, higher count) = a MISS
     junction_offset_m: 0.010  # fingertip target offset from the junction, + toward the connector's END
+    # Assembly CALIBRATION: this connector's pose wrt connector_holder (connector_holder -> connector),
+    # used by uncertain_sampling as the held connector frame. MEASURE per connector: hold the connector
+    # in the holder, hand-guide, and read base_link<-connector vs connector_holder off the monitor.
+    # Identity = unmeasured (connector coincides with connector_holder).
+    connector_in_holder:
+      xyz: [0.0, 0.0, 0.0]
+      rpy: [0.0, 0.0, 0.0]
     # target_connector_pose:   # (FUTURE) the assembly insertion target for this connector type
     #   xyz: [0.0, 0.0, 0.0]   #   base_link -> target connector, metres
     #   rpy: [0.0, 0.0, 0.0]   #   extrinsic XYZ, radians
@@ -48,8 +57,14 @@ cables:
     connector: [197, 206]
     cable: 221
     junction_offset_m: 0.0070
+    connector_in_holder:      # MEASURE (see banana)
+      xyz: [0.0, 0.0, 0.0]
+      rpy: [0.0, 0.0, 0.0]
 
   c13:
     connector: [195, 198]
     cable: 218
     junction_offset_m: 0.0075
+    connector_in_holder:      # MEASURE (see banana)
+      xyz: [0.0, 0.0, 0.0]
+      rpy: [0.0, 0.0, 0.0]

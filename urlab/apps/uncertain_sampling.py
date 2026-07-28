@@ -96,8 +96,10 @@ def build_and_run(cfg, robot, camera, args):
         for trial in range(1, int(s.get('num_trials', 20)) + 1):
             log.info('--- trial %d/%d ---', trial, int(s.get('num_trials', 20)))
             robot.arm.zero_ft()
-            # Perturb in the CONNECTOR's own frame (half-widths along the connector's axes).
-            perturbed = traj.perturb(dense[:k], s.get('bias', [0.001, 0.001, 0, 1, 1, 1]),
+            # Perturb in the CONNECTOR's own frame: `uncertainty` (per-DOF half-widths) is the
+            # trial's misalignment (one draw); `noise` adds per-waypoint jitter (usually 0).
+            perturbed = traj.perturb(dense[:k],
+                                     s.get('uncertainty', s.get('bias', [0.001, 0.001, 0, 1, 1, 1])),
                                      s.get('noise', [0] * 6), rng, frame='connector')
             for pose_held in perturbed:
                 if robot.arm.force() >= max_force:

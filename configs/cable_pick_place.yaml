@@ -134,11 +134,8 @@ connector_holder:
   xyz: [0.0, -0.045, 0.010]
   rpy: [3.14159, 0.0, -1.5708]
 
-# The held CONNECTOR, relative to connector_holder (connector_holder -> connector). Identity until
-# measured. This is the held connector frame for the assembly / uncertain-sampling; shown in monitor.
-connector_in_holder:
-  xyz: [0.0, 0.0, 0.0]
-  rpy: [0.0, 0.0, 0.0]
+# The held CONNECTOR frame (connector_holder -> connector) -- connector_in_holder -- is supplied by
+# the cable profile (configs/cables.yaml) for the selected `cable:`. Shown live in the monitor.
 
 # ---- Scan phase ----
 scan:

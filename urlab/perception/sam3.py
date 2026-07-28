@@ -403,8 +403,8 @@ class JunctionDetector(_Base):
         """Both endpoints of the traced assembly as (u, v, yaw), returned (A, B): A the end CLOSER to
         the image centre, B the FARTHER. The direction is the PCA principal axis of a WINDOW of the
         centreline near each endpoint (a least-squares line over many points, far steadier than a
-        two-point secant tangent), signed to point from the tip INTO the assembly -- matching the
-        junction/connector frame convention. (None, None) if the trace is too short."""
+        two-point secant tangent), signed to point OUTWARD -- from the interior toward the tip, i.e.
+        out of the cable/connector END. (None, None) if the trace is too short."""
         try:
             path = np.asarray(j['_path'], dtype=float)     # (M,2) small-image (y,x), tip -> tip
             inv = 1.0 / float(j['_scale'])
@@ -421,7 +421,7 @@ class JunctionDetector(_Base):
             c = seg.mean(axis=0)
             _, _, vt = np.linalg.svd(seg - c, full_matrices=False)
             major = vt[0]                                  # (dy, dx) principal axis (unsigned)
-            if float(np.dot(major, c - path[e])) < 0:      # point from the tip toward the interior
+            if float(np.dot(major, path[e] - c)) < 0:      # point from the interior OUT toward the tip
                 major = -major
             return (float(ex * inv), float(ey * inv), float(np.arctan2(major[0], major[1])))
 

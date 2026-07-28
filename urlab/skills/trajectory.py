@@ -90,13 +90,17 @@ def random_delta(bounds, rng):
     return xyzrpy_to_matrix(t, r)
 
 
-def perturb(dense, bias_bounds, noise_bounds, rng):
-    """perturbed[i] = bias @ noise_i @ dense[i], in the TARGET-OBJECT frame.
+def perturb(dense, bias_bounds, noise_bounds, rng, frame='target'):
+    """The dense poses with a bias (ONE draw for the whole trial -- a systematic offset) plus noise
+    (a fresh draw per waypoint -- jitter).
 
-    bias is ONE draw for the whole trial (a systematic offset); noise is a fresh draw per waypoint
-    (jitter). Both act about the target origin, so a rotational bias also translates the part by
-    (R_bias - I) @ p -- replicate exactly if you want data matching the ROS runs."""
+    frame='target' (default): perturbed[i] = bias @ noise_i @ dense[i] -- in the TARGET-OBJECT frame
+        (LEFT multiply). A rotational bias then also translates the part by (R_bias - I) @ p.
+    frame='held' (or 'connector'): perturbed[i] = dense[i] @ bias @ noise_i -- in the HELD PART's OWN
+        frame (RIGHT multiply), so the half-widths [x,y,z,r,p,y] are along the PART's axes."""
     bias = random_delta(bias_bounds, rng)
+    if frame in ('held', 'connector'):
+        return [c @ bias @ random_delta(noise_bounds, rng) for c in dense]
     return [bias @ random_delta(noise_bounds, rng) @ c for c in dense]
 
 

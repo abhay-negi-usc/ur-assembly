@@ -49,6 +49,18 @@ class Robot:
         self.frames.set_static(self.tip_frame, 'grasp', self.T_tool0_grasp)
         self.frames.set_static(self.tip_frame, 'fingertip', self.T_tool0_fingertip)
 
+        # Connector holder: another tool0-attached frame (the holder that presents the connector).
+        # +X aligns with tool0 -Y, +Z with tool0 -Z (see connector_holder in the config).
+        self.T_tool0_connector_holder = from_cfg(cfg.section('connector_holder'))
+        self.frames.set_static(self.tip_frame, 'connector_holder', self.T_tool0_connector_holder)
+
+        # Connector held IN the holder (connector_holder -> connector); identity until measured. This
+        # is the physically-held connector used by the assembly / uncertain-sampling (cf. insert.py's
+        # 'connector' target frame), distinct from the perception's detected 'connector'.
+        self.T_connector_holder_connector = from_cfg(cfg.section('connector_in_holder'))
+        self.T_tool0_connector = self.T_tool0_connector_holder @ self.T_connector_holder_connector
+        self.frames.set_static('connector_holder', 'connector', self.T_connector_holder_connector)
+
     # ------------------------------------------------------------------ poses
     def tool0(self):
         return self.arm.tcp_pose()
@@ -62,6 +74,13 @@ class Robot:
 
     def grasp_tcp(self):
         return self.arm.tcp_pose() @ self.T_tool0_grasp
+
+    def connector_holder(self):
+        return self.arm.tcp_pose() @ self.T_tool0_connector_holder
+
+    def connector(self):
+        """The held connector's pose in base_link (tool0 -> connector_holder -> connector)."""
+        return self.arm.tcp_pose() @ self.T_tool0_connector
 
     # ------------------------------------------------------------------ moves
     def move_tool0(self, T, label='move'):

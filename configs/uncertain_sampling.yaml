@@ -12,12 +12,19 @@ robot:
 base_frame: base_link
 tip_frame: tool0
 
-assembled_pose:
+# ---- Held connector, via the connector holder (tool0 -> connector_holder -> connector) ----
+connector_holder:
+  xyz: [0.0, -0.045, 0.010]
+  rpy: [3.14159, 0.0, -1.5708]   # +X -> tool0 -Y, +Z -> tool0 -Z
+connector_in_holder:             # connector_holder -> connector; identity until measured
+  xyz: [0.0, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
+
+# The recorded ASSEMBLY TARGET for the connector_holder (base_link -> connector_holder at the mate),
+# read off the monitor after hand-guiding to a good mate. The connector target = this @ connector_in_holder.
+connector_holder_target:
   xyz: [-0.103, -1.048, -0.068]
   rpy: [-3.129, -0.011, -3.139]
-held_object_pose:
-  xyz: [0.0, -0.089, 0.010]
-  rpy: [-1.5708, 0.0, 0.0]
 
 standoff_distance_m: 0.200
 standoff_axis: [0.0, 0.0, 1.0]
@@ -33,7 +40,8 @@ sampling:
   chunk_fraction: 0.2            # fraction of the resampled trajectory to execute per trial
   translational_resolution_m: 0.001
   rotational_resolution_deg: 1.0
-  # Per-dimension half-widths [x, y, z (m), roll, pitch, yaw (deg)] of the uniform perturbation.
+  # Per-dimension half-widths [x, y, z (m), roll, pitch, yaw (deg)] of the uniform perturbation,
+  # applied in the CONNECTOR'S OWN frame (its axes).
   bias:  [0.001, 0.001, 0.000, 1.0, 1.0, 1.0]   # ONE draw per trial (systematic offset)
   noise: [0.0,   0.0,   0.0,   0.0, 0.0, 0.0]   # fresh draw per waypoint (jitter)
   closest_pose_rot_weight_mm_per_deg: 1.0

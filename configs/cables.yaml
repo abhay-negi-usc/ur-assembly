@@ -31,14 +31,14 @@
 gripper:
   port: /dev/ttyUSB0
   open: 3
-  closed: 231            # fully closed on nothing
+  closed: 228            # fully closed on nothing
   speed: 255
   force: 150
 
 cables:
   banana:
     connector: [207, 213]   # CONNECTOR between the fingertips = grasp SUCCESS (the target)
-    cable: 226              # grabbing the CABLE instead (thinner, higher count) = a MISS
+    cable: 225              # grabbing the CABLE instead (thinner, higher count) = a MISS
     junction_offset_m: 0.010  # fingertip target offset from the junction, + toward the connector's END
     # target_connector_pose:   # (FUTURE) the assembly insertion target for this connector type
     #   xyz: [0.0, 0.0, 0.0]   #   base_link -> target connector, metres

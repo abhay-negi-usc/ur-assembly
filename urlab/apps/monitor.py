@@ -16,10 +16,11 @@ Remote Control because they DRIVE the arm.)
 
 Every frame is in base_link, built from the SAME config sections the demos use, so what you read
 here is exactly what a demo would command:
-    tool0     -- the flange (the all-zeros pendant TCP; getActualTCPPose is this pose)
-    fingertip -- fingertip_grasp   (tool0 -> fingertip)
-    camera    -- hand_eye          (tool0 -> camera)
-    grasp     -- grasp_tcp_offset  (tool0 -> grasp TCP)
+    tool0            -- the flange (the all-zeros pendant TCP; getActualTCPPose is this pose)
+    fingertip        -- fingertip_grasp    (tool0 -> fingertip)
+    camera           -- hand_eye           (tool0 -> camera)
+    grasp            -- grasp_tcp_offset   (tool0 -> grasp TCP)
+    connector_holder -- connector_holder   (tool0 -> connector_holder; only if configured)
 Poses print as xyz (mm) + rpy (deg, EXTRINSIC XYZ). This is the tool to MEASURE the config values
 the README's hardware checklist leaves open (assembly.target, a grasp pose, etc.): jog to the spot,
 read the frame off here, paste it in.
@@ -45,12 +46,17 @@ log = urlog.get('monitor')
 def _frames(cfg):
     """{name: T_tool0_frame} for every tool0-attached frame, from the same config sections the
     Robot facade uses (robot/robot.py)."""
-    return {
+    frames = {
         'tool0': np.eye(4),
         'fingertip': from_cfg(cfg.section('fingertip_grasp')),
         'camera': from_cfg(cfg.section('hand_eye')),
         'grasp': from_cfg(cfg.section('grasp_tcp_offset')),
     }
+    if cfg.get('connector_holder'):                    # tool0 -> connector_holder (-> connector)
+        T_holder = from_cfg(cfg.section('connector_holder'))
+        frames['connector_holder'] = T_holder
+        frames['connector'] = T_holder @ from_cfg(cfg.section('connector_in_holder'))
+    return frames
 
 
 def _fmt(T):
@@ -140,7 +146,7 @@ def main():
             lines = ['joints (deg): [' + ', '.join(f'{v:+7.2f}' for v in q) + ']']
             for name, T_t0 in frames.items():
                 label = cam_name if name == 'camera' else name
-                lines.append(f'  {base} <- {label:12s}: {_fmt(T_base_tool0 @ T_t0)}')
+                lines.append(f'  {base} <- {label:16s}: {_fmt(T_base_tool0 @ T_t0)}')
 
             ft = None
             if args.wrench:

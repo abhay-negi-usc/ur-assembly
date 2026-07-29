@@ -99,6 +99,7 @@ def build_and_run(cfg, robot, camera, args):
     log.info('%d ideal rows -> %d dense; chunk = %d waypoints; %d trials (%s sampling%s).',
              len(mats), len(dense), k, num_trials, mode.upper(),
              ' -- trial count derived from the grid' if grid is not None else '')
+
     # WHICH error source the trial perturbation models. Validated here so a typo fails before the
     # arm moves, not on the first trial. See trajectory.perturb for the physics of each.
     perturb_frame = str(s.get('perturb_frame', 'connector')).lower()
@@ -140,6 +141,7 @@ def build_and_run(cfg, robot, camera, args):
     rv_mm_s = float(cfg.get_path('speed.retract_translation_mm_s', v_mm_s))
     rw_deg_s = float(cfg.get_path('speed.retract_rotation_deg_s', w_deg_s))
     retract_m = float(cfg.get('retract_distance_m', 0.05))   # straight back along the connector's -X
+    retract_m = float(cfg.get('retract_distance_m', 0.05))   # straight back along the connector's -X
     min_seg_s = 1.0 / adm.rate                       # never below one servo cycle
 
     def seg_time(A, B, v=None, w=None):
@@ -161,7 +163,14 @@ def build_and_run(cfg, robot, camera, args):
     # along standoff_axis (a TARGET-frame direction) -- so it is always CLEAR of the path start.
     # Measuring it from the MATE instead would let a stand-off shorter than the trajectory's first
     # row land INSIDE the path, which is not a stand-off at all.
+    # Approach the stand-off under position control (free space, stiff). The stand-off is measured
+    # from the START of the assembly trajectory (mats[0]), backed off a further standoff_distance_m
+    # along standoff_axis (a TARGET-frame direction) -- so it is always CLEAR of the path start.
+    # Measuring it from the MATE instead would let a stand-off shorter than the trajectory's first
+    # row land INSIDE the path, which is not a stand-off at all.
     standoff_axis = np.asarray(cfg.get('standoff_axis', [-1, 0, 0]), dtype=float)
+    T_standoff_held = translation_matrix(standoff_axis * float(cfg.get('standoff_distance_m', 0.05))) \
+        @ mats[0]
     T_standoff_held = translation_matrix(standoff_axis * float(cfg.get('standoff_distance_m', 0.05))) \
         @ mats[0]
     q = robot.arm.ik(traj.tool0_at(T_base_targetobj, T_standoff_held, T_tool0_held), q_home)
@@ -172,6 +181,7 @@ def build_and_run(cfg, robot, camera, args):
 
     ok = True
     try:
+        durations = []
         durations = []
         for trial in range(1, num_trials + 1):
             log.info('--- trial %d/%d ---', trial, num_trials)
@@ -208,9 +218,11 @@ def build_and_run(cfg, robot, camera, args):
             adm.warmup(refs[0], tare_fn=tare)          # engage servo + tare before the guard is armed
             guard.reset()
             last_ref = refs[0]
+            last_ref = refs[0]
             for i in range(1, len(refs)):
                 res = adm.ramp(refs[i - 1], refs[i], seg_time(refs[i - 1], refs[i]),
                                guard, on_step=log_cb)
+                last_ref = refs[i]
                 last_ref = refs[i]
                 if res == 'seated':
                     log.info('Contact limit reached at waypoint %d/%d -- connector SEATED.', i, len(refs) - 1)
@@ -244,6 +256,33 @@ def build_and_run(cfg, robot, camera, args):
         robot.arm.move_j(q_home, label='home')
         log.info('Sampling complete: %s', out_path)
     return ok
+
+
+def _fmt_dur(seconds):
+    """A duration as h:mm:ss / m:ss -- for the per-trial ETA."""
+    seconds = int(max(0.0, seconds))
+    h, rem = divmod(seconds, 3600)
+    m, sec = divmod(rem, 60)
+    return f'{h}:{m:02d}:{sec:02d}' if h else f'{m}:{sec:02d}'
+
+
+def _clock(seconds_from_now):
+    """Wall-clock time the run is expected to finish (HH:MM:SS)."""
+    from datetime import datetime, timedelta
+    return (datetime.now() + timedelta(seconds=max(0.0, seconds_from_now))).strftime('%H:%M:%S')
+
+
+def _retract_ref(T_ref, T_tool0_held, distance_m):
+    """The tool0 reference that backs the HELD PART straight out along ITS OWN -X by `distance_m`.
+
+    ASSUMES LINEAR (PEG-IN-HOLE) ASSEMBLY: the mate is a single-axis insertion along the connector's
+    +X, so the escape is simply the reverse translation along that same axis. Expressed in the
+    CONNECTOR's frame (right-multiply), so it follows the part's ACTUAL, perturbed orientation --
+    a tilted connector backs out along its own axis, not the target's.
+
+    `distance_m` is used as a magnitude: a negative value would drive INTO the socket."""
+    back = translation_matrix([-abs(float(distance_m)), 0.0, 0.0])
+    return T_ref @ T_tool0_held @ back @ inverse(T_tool0_held)
 
 
 def _fmt_dur(seconds):

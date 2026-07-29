@@ -111,7 +111,7 @@ speed:
   # These are position-controlled and contact-free, so they need not crawl; the joint cap is what
   # actually binds on a reorient (25 deg/s -> a 60 deg swing takes ~2.4 s).
   max_joint_velocity_deg_s: 100.0        # deg/s (the _rad_s spelling is still accepted)
-  joint_acceleration_rad_s2: 1.0
+  joint_acceleration_rad_s2: 5.0
   max_cartesian_velocity_m_s: 0.25      # was unset -> silently defaulted to this; now explicit
   # CARTESIAN limits for the COMPLIANT reference. Each ramp segment gets the time its own geometry
   # needs, so neither limit is exceeded. Set any to 0 to disable that limit.

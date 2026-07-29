@@ -169,14 +169,50 @@ trial 4/9 took 31.2 s | mean cycle 30.8 s | 5 left, ETA 2:34 (done ~14:21:07)
 
 ## Output columns (per sample)
 `trial`, `timestamp`, then:
-- **`tool0_base_*`** — raw tool0 pose in base_link (x, y, z, quat, yaw/pitch/roll deg),
-- **`connector_target_*`** — the connector's DEVIATION from the ideal mate (identity at a perfect mate),
+- **`tool0_base_*`** — raw tool0 pose in base_link (`x_mm, y_mm, z_mm`, quat, yaw/pitch/roll deg),
+- **`connector_target_*`** — the connector's DEVIATION from the ideal mate, same field set (identity
+  at a perfect mate),
 - **`wrench_base_*`** — the contact wrench in **ROS `base_link`** (`getActualTCPForce`, bridged out of
   the UR `base` frame by `arm.wrench()` — see the README conventions),
 - **`wrench_connector_*`** — that wrench re-expressed in the connector frame.
 
+**Units are in the column names.** Translations are logged in **millimetres** (`_mm`), rotations in
+**degrees** (`_deg`); quaternion components are dimensionless and wrenches are **N / Nm**. The
+library itself works in metres throughout — the conversion happens only at the logging boundary
+(`_pose_fields_mm`), so nothing upstream is affected.
+
 `trial` increments each time the assembly trajectory is performed. The perturbation RNG is separate
 from everything else, so a seeded run is reproducible.
 
-> **Data note.** Logs recorded before the `base_link` wrench bridge landed have their `wrench_*`
-> **x and y components negated** (z is unaffected). Re-collect them, or flip those two columns.
+> **Data notes — older logs.**
+> - Logs written **before translations moved to mm** have un-suffixed `x`/`y`/`z` **in metres**.
+>   `contact_manifold.py` skips them by name rather than silently mixing metres with millimetres; to
+>   reuse one, scale x/y/z by 1000 and rename to `*_mm`.
+> - Logs recorded before the `base_link` wrench bridge landed have their `wrench_*` **x and y
+>   components negated** (z is unaffected). Re-collect, or flip those two columns.
+
+## Building the contact manifold
+`analysis/contact_manifold.py` concatenates a set of runs into one CSV of just the **frame-invariant**
+pair — `connector_target_*` (the misalignment) and `wrench_connector_*` (the response along the
+part's own axes):
+
+```bash
+python analysis/contact_manifold.py data/uncertain_assembly_sampling/banana
+#  -> banana_connector_contact_manifold.csv
+```
+
+Because both column groups are relative to the connector and its target, runs recorded on different
+days at different socket positions concatenate directly. The cell-specific `tool0_base_*` and
+`wrench_base_*` columns are deliberately dropped. The cable name is taken from the `<cable>/`
+directory the sampler writes into (override with `--cable`); mixing cables is an error rather than a
+silent merge.
+
+| flag | effect |
+|---|---|
+| `--min-force N` | keep only samples with `|f| >= N` in the connector frame — drops the free-space approach, leaving actual contact |
+| `--with-source` | prepend `source_file` and `trial` for provenance |
+| `--out-dir` / `--out` | where to write (default: beside the inputs) |
+
+Rebuilds are **idempotent** — an existing `*_contact_manifold.csv` is skipped when sweeping a
+directory, so re-running can't read its own output back in and double every sample. Logs in an older
+column format are skipped with a warning rather than failing the batch.

@@ -597,6 +597,84 @@ def test_retract_backs_out_along_the_connector_axis():
     assert np.allclose(_retract_ref(T_ref, T_tool0_held, -d), out)
 
 
+def _write_log(path, rows, cols=None):
+    """A minimal uncertain_sampling log: the manifold columns plus some cell-specific ones."""
+    import csv as _csv
+    from analysis.contact_manifold import MANIFOLD_COLS
+    cols = cols if cols is not None else (['trial', 'timestamp'] + MANIFOLD_COLS + ['tool0_base_x_mm'])
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', newline='') as fh:
+        w = _csv.writer(fh)
+        w.writerow(cols)
+        for r in rows:
+            w.writerow([r.get(c, 0.0) for c in cols])
+
+
+def test_contact_manifold_extracts_and_concatenates():
+    """The manifold keeps ONLY the frame-invariant pair (connector-wrt-target pose + wrench in the
+    connector frame) and concatenates runs. Cell-specific columns must not leak in."""
+    import csv as _csv
+    import shutil
+    import tempfile
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from analysis.contact_manifold import MANIFOLD_COLS, build, expand_inputs, infer_cable
+
+    tmp = tempfile.mkdtemp()
+    try:
+        d = os.path.join(tmp, 'banana')
+        _write_log(os.path.join(d, 'run_a.csv'),
+                   [{'trial': 1, 'connector_target_x_mm': 1.0, 'wrench_connector_fx': 3.0,
+                     'tool0_base_x_mm': 999.0}] * 3)
+        _write_log(os.path.join(d, 'run_b.csv'),
+                   [{'trial': 1, 'connector_target_x_mm': 2.0, 'wrench_connector_fx': 0.1}] * 2)
+
+        paths = expand_inputs([d])
+        assert len(paths) == 2, paths
+        assert infer_cable(paths)[0] == 'banana'
+
+        out = os.path.join(tmp, 'banana_connector_contact_manifold.csv')
+        assert build(paths, out) == 5, 'all rows from both runs'
+        with open(out, newline='') as fh:
+            recs = list(_csv.DictReader(fh))
+        assert list(recs[0]) == MANIFOLD_COLS, 'exactly the manifold columns, in order'
+        assert 'tool0_base_x_mm' not in recs[0], 'cell-specific columns must NOT leak in'
+        assert len(recs) == 5
+
+        # A force filter keeps only contact samples (|f| >= threshold).
+        assert build(paths, out, min_force=1.0) == 3
+
+        # An older-format log is SKIPPED, not fatal -- the rest of the batch still builds.
+        _write_log(os.path.join(d, 'old.csv'), [{'held_target_x': 1.0}], cols=['held_target_x'])
+        assert build(expand_inputs([d]), out) == 5, 'stale file skipped, good files still written'
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_contact_manifold_never_ingests_its_own_output():
+    """A rebuild must be IDEMPOTENT. The manifold lands beside its inputs and shares their columns,
+    so a directory sweep that picked it up would silently DOUBLE every sample on each re-run."""
+    import shutil
+    import tempfile
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from analysis.contact_manifold import build, expand_inputs
+
+    tmp = tempfile.mkdtemp()
+    try:
+        d = os.path.join(tmp, 'banana')
+        _write_log(os.path.join(d, 'run_a.csv'), [{'connector_target_x_mm': 1.0}] * 4)
+        out = os.path.join(d, 'banana_connector_contact_manifold.csv')
+
+        assert build(expand_inputs([d]), out) == 4
+        assert build(expand_inputs([d]), out) == 4, 'rebuild doubled the data (self-ingestion)'
+        assert out not in expand_inputs([d]), 'sweep must exclude existing manifolds'
+        # Naming one explicitly is still allowed (deliberately merging manifolds).
+        assert expand_inputs([out]) == [out]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_pose_block_accepts_monitor_units():
     """Calibration poses are pasted off the monitor, which prints mm/deg. `xyz_mm`/`rpy_deg` convert
     to the repo-standard m/rad; the unit lives in the KEY so it cannot be confused. Mixing both units

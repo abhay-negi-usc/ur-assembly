@@ -39,7 +39,10 @@ from ._runner import run_app
 
 log = urlog.get('uncertain-sampling')
 
-_POSE = ('x', 'y', 'z', 'qx', 'qy', 'qz', 'qw', 'yaw_deg', 'pitch_deg', 'roll_deg')
+# Column suffixes. Every dimensional field carries its UNIT in the name: translation in MILLIMETRES
+# (the logs are read by hand and mm is the unit the monitor and the calibrations use), rotation in
+# degrees. Quaternion components are dimensionless. Forces stay N / Nm.
+_POSE = ('x_mm', 'y_mm', 'z_mm', 'qx', 'qy', 'qz', 'qw', 'yaw_deg', 'pitch_deg', 'roll_deg')
 _WRENCH = ('fx', 'fy', 'fz', 'tx', 'ty', 'tz')
 _HEADER = (['trial', 'timestamp']
            + [f'tool0_base_{s}' for s in _POSE]            # raw tool0 wrt base
@@ -258,17 +261,28 @@ def _retract_ref(T_ref, T_tool0_held, distance_m):
     return T_ref @ T_tool0_held @ back @ inverse(T_tool0_held)
 
 
+def _pose_fields_mm(T):
+    """traj.pose_fields with the TRANSLATION converted to MILLIMETRES.
+
+    The library works in metres throughout; the conversion happens here, at the logging boundary
+    only, so the CSV reads in mm (matching the `_mm` column names) while nothing upstream changes."""
+    f = traj.pose_fields(T)                        # [x, y, z (m), qx..qw, yaw, pitch, roll (deg)]
+    return [f[0] * 1000.0, f[1] * 1000.0, f[2] * 1000.0] + f[3:]
+
+
 def _log_row(writer, robot, trial, T_base_connector_target, T_tool0_connector):
     """One sample: raw tool0 (base), the connector's deviation from the ideal mate, and the contact
-    wrench both AS RECORDED (base_link) and re-expressed in the CONNECTOR frame."""
+    wrench both AS RECORDED (base_link) and re-expressed in the CONNECTOR frame.
+
+    Translations are logged in mm (see _pose_fields_mm); wrenches stay N / Nm."""
     T_base_tool0 = robot.tool0()
     T_base_connector = T_base_tool0 @ T_tool0_connector
     connector_wrt_target = inverse(T_base_connector_target) @ T_base_connector   # identity at the mate
     w_base = np.asarray(robot.arm.wrench(), dtype=float)          # tared, bridged into base_link
     w_connector = np.asarray(robot.arm.wrench_in(T_base_connector), dtype=float)
     writer.writerow([trial, time.time()]
-                    + traj.pose_fields(T_base_tool0)
-                    + traj.pose_fields(connector_wrt_target)
+                    + _pose_fields_mm(T_base_tool0)
+                    + _pose_fields_mm(connector_wrt_target)
                     + list(w_base) + list(w_connector))
 
 

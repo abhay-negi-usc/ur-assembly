@@ -11,8 +11,11 @@ hard the compliance pressed, direction on the contact geometry), then scaled so 
 distance mixes pose and wrench with user-controlled weights. Call these M (manifold) and V
 (validation).
 
-PERTURBATION. Per validation trial, y_true = the trial's rows. The user names the perturbed
-DIMENSIONS; the trial's initial pose T_t_ctrue (first row) defines the offset
+PERTURBATION. An OBSERVATION is one trial by default, or `trials_per_observation` consecutive
+trials taken together (group trials that share one physical offset -- e.g. one grasp, several
+insertions -- so more data constrains the same unknown; the SAME offset is applied to every trial
+in the group). y_true = the observation's rows. The user names the perturbed DIMENSIONS; the
+observation's initial pose T_t_ctrue (first row) defines the offset
 T_ctrue_coffset = inv(T_t_ctrue) @ T_zeroed, where T_zeroed equals the initial pose with the
 perturbed dims set to ZERO (unperturbed dims unchanged). theta := the initial pose's perturbed-dim
 values -- exactly what the offset hides. Every observation is then perturbed the same way,
@@ -92,7 +95,12 @@ CONFIG = {
 
     # ---- run control --------------------------------------------------------------------
     'trials': None,                          # None = all trials; else e.g. [1, 2, 5]
-    'max_points_per_trial': 250,             # stride-subsample big trials (speed); None = all
+    # An OBSERVATION = this many consecutive trials taken together as one ICP problem. The SAME
+    # offset (zeroed dims of the GROUP's first pose) is applied to every trial in the group -- so
+    # group trials that share one physical offset (e.g. one grasp, several insertions): more data
+    # constraining the same unknown. 1 = one observation per trial (the default behaviour).
+    'trials_per_observation': 1,
+    'max_points_per_observation': 250,       # stride-subsample big observations (speed); None = all
     'dpi': 110,
 }
 
@@ -180,12 +188,13 @@ def solve_trial(vec6, w6, tree, M12, cfg, rng):
     idx = [DIMS.index(d) for d in dims]
     s_rot = float(cfg['scaling_constant_deg_to_mm'])
 
-    cap = cfg['max_points_per_trial']
+    cap = cfg['max_points_per_observation']
     if cap and len(vec6) > cap:                       # stride keeps the trajectory shape
         stride = int(np.ceil(len(vec6) / cap))
         vec6, w6 = vec6[::stride], w6[::stride]
 
-    # The hidden offset: zero the perturbed dims of the INITIAL pose, keep the rest.
+    # The hidden offset: zero the perturbed dims of the observation's FIRST pose, keep the rest.
+    # For a multi-trial observation this SAME offset is applied to every trial in the group.
     p0 = vec6[0].copy()
     theta_true = p0[idx].copy()
     zeroed = p0.copy()
@@ -284,14 +293,15 @@ def plot_trial(trial, r, out_png, cfg):
 
     ax = axes[-1]
     it_r = np.arange(1, r['res_hist'].shape[1] + 1)
-    for g in range(r['res_hist'].shape[0]):
-        ax.plot(it_r, r['res_hist'][g], color=C_GUESS, alpha=0.07, lw=1.0, zorder=2)
-    ax.plot(it_r, r['res_hist'][inl].mean(axis=0), color=C_CONSENSUS, lw=2.4, zorder=3)
-    ax.set_ylim(bottom=0.0)
+    res = np.maximum(r['res_hist'], 1e-6)             # floor so an exact-zero residual still draws
+    for g in range(res.shape[0]):
+        ax.plot(it_r, res[g], color=C_GUESS, alpha=0.07, lw=1.0, zorder=2)
+    ax.plot(it_r, res[inl].mean(axis=0), color=C_CONSENSUS, lw=2.4, zorder=3)
+    ax.set_yscale('log')                              # residuals span orders of magnitude
     ax.set_ylabel('mean NN residual [mm-eq]')
     ax.set_xlabel('ICP iteration')
 
-    fig.suptitle(f'trial {trial} -- ICP recovery of {", ".join(dims)}', y=0.995)
+    fig.suptitle(f'trial(s) {trial} -- ICP recovery of {", ".join(dims)}', y=0.995)
     fig.tight_layout()
     fig.savefig(out_png, dpi=cfg['dpi'])
     plt.close(fig)
@@ -322,20 +332,27 @@ def main(cfg=CONFIG):
     trials = sorted(set(Vtrial.tolist()))
     if cfg['trials'] is not None:
         trials = [t for t in trials if t in set(cfg['trials'])]
-    print(f'validation: {len(Vv6)} rows, {len(trials)} trial(s) ({cfg["validation_csv"]})')
+    # Group consecutive trials into OBSERVATIONS: each group is solved as ONE ICP problem, with the
+    # SAME hidden offset applied to every trial in it (last group may be short).
+    per_obs = max(1, int(cfg.get('trials_per_observation', 1)))
+    groups = [trials[i:i + per_obs] for i in range(0, len(trials), per_obs)]
+    print(f'validation: {len(Vv6)} rows, {len(trials)} trial(s) -> {len(groups)} observation(s) '
+          f'of up to {per_obs} trial(s) ({cfg["validation_csv"]})')
     print(f'perturbing {cfg["perturb_dims"]}; {cfg["num_initial_guesses"]} guesses x '
           f'{cfg["icp_iterations"]} iterations, RANSAC tol {cfg["ransac_tol"]}\n')
 
     rows = []
-    for t in trials:
-        sel = Vtrial == t
+    for obs, group in enumerate(groups, start=1):
+        sel = np.isin(Vtrial, group)
+        label = f'{group[0]}' if len(group) == 1 else f'{group[0]}-{group[-1]}'
         if sel.sum() < 5:
-            print(f'trial {t}: only {int(sel.sum())} rows -- skipped')
+            print(f'observation {obs} (trials {label}): only {int(sel.sum())} rows -- skipped')
             continue
         r = solve_trial(Vv6[sel], Vw6[sel], tree, M12, cfg, rng)
-        plot_trial(t, r, os.path.join(out_dir, f'trial_{t:03d}_errors.png'), cfg)
+        plot_trial(label, r, os.path.join(out_dir, f'obs_{obs:03d}_trials_{label}_errors.png'), cfg)
 
-        row = {'trial': t, 'n_points': r['n_points'],
+        row = {'observation': obs, 'trials': label, 'n_trials': len(group),
+               'n_points': r['n_points'],
                'ransac_inliers': int(r['inliers'].sum()),
                'final_residual_mm_eq': r['final_residual']}
         for j, d in enumerate(r['dims']):
@@ -345,7 +362,8 @@ def main(cfg=CONFIG):
             row[f'abs_error_{d}'] = abs(r['error'][j])
         rows.append(row)
         err = ', '.join(f'{d}: {e:+.3f}' for d, e in zip(r['dims'], r['error']))
-        print(f'trial {t}: inliers {int(r["inliers"].sum())}/{len(r["inliers"])}  error [{err}]')
+        print(f'observation {obs} (trials {label}): inliers '
+              f'{int(r["inliers"].sum())}/{len(r["inliers"])}  error [{err}]')
 
     if not rows:
         sys.exit('no trials processed')
@@ -355,7 +373,7 @@ def main(cfg=CONFIG):
 
     print(f'\nmean |error| per dim: ' + ', '.join(
         f'{d}: {df[f"abs_error_{d}"].mean():.3f}' for d in cfg['perturb_dims']))
-    print(f'{len(rows)} trial(s) -> {csv_out}')
+    print(f'{len(rows)} observation(s) -> {csv_out}')
     print(f'figures + config.json in {out_dir}')
     return out_dir
 

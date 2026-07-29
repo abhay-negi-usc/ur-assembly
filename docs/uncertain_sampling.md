@@ -224,7 +224,9 @@ localise a misaligned connector. Both CSVs are reduced to a common mm-equivalent
 their scaling constants). Per validation trial, the chosen `perturb_dims` of the initial pose are
 zeroed (a hidden rigid offset applied to every observation, wrench left as recorded), then
 multi-start **ICP** (matching across all 12 dims, correcting only the perturbed dims) with
-**residual-gated RANSAC** aggregation recovers the offset. Edit the `CONFIG` dict at the top and run:
+**residual-gated RANSAC** aggregation recovers the offset. `trials_per_observation` groups
+consecutive trials into one observation with one shared offset (use when they share a physical
+offset — e.g. one grasp, several insertions). Edit the `CONFIG` dict at the top and run:
 
 ```bash
 python analysis/manifold_icp_validation.py

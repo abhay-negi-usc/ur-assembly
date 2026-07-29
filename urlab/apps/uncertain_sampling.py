@@ -1,26 +1,23 @@
 """Uncertain-assembly sampling -- data collection for a HELD CONNECTOR.
 
 Repeatedly drive a PERTURBED connector into the mate under compliance, logging each sample, then
-disassemble along the ideal path and repeat. The connector is held via the connector_holder frame
-(tool0 -> connector_holder -> connector); the assembly TARGET is recorded for the connector_holder
-(hand-guide to a good mate, read it off the monitor), and the connector target = that @ the
-holder->connector offset.
+retract and repeat. The connector is held via the connector_holder frame (tool0 -> connector_holder
+-> connector); the assembly TARGET is recorded for the connector_holder (hand-guide to a good mate,
+read it off the monitor), and the connector target = that @ the holder->connector offset.
 
-Per-trial the perturbation is drawn in the CONNECTOR's OWN frame (half-widths along its axes). Each
-logged sample is: trial, timestamp, raw tool0-wrt-base, the connector's DEVIATION from the ideal
-mate (identity at a perfect mate), and the contact wrench BOTH as recorded (base_link) and
+Each logged sample is: trial, timestamp, raw tool0-wrt-base, the connector's DEVIATION from the
+ideal mate (identity at a perfect mate), and the contact wrench BOTH as recorded (base_link) and
 re-expressed in the connector frame.
 
 CONTROL is COMPLIANCE (software admittance, robot/admittance.py), NOT forceMode. The arm FOLLOWS the
 (perturbed) assembly trajectory as a position reference and YIELDS to contact through a virtual
 spring-mass-damper with finite restoring stiffness, springing back toward the reference when contact
-eases. forceMode is pure force control -- no stiffness -- so it floats freely off the path; that is
-the drift this replaces.
+eases. forceMode is pure force control -- no stiffness -- so it floats freely off the path.
 
 ASSUMPTION -- LINEAR (PEG-IN-HOLE) ASSEMBLY. The mate is taken to be a single-axis insertion along
 the connector's +X: the trajectory is a straight -X -> 0 approach, and the escape is simply the
-reverse translation along that same axis (`retract_distance_m` back along the connector's OWN -X,
-so a perturbed part backs out along its own axis, not the target's). Nothing here handles a curved,
+reverse translation along that same axis (`retract_distance_m` back along the connector's OWN -X, so
+a perturbed part backs out along its own axis, not the target's). Nothing here handles a curved,
 multi-axis, or twist-to-lock mate -- those would need a real reverse-path retract.
 
     for each trial: perturb (connector frame), move to the perturbed start (stiff, free space),
@@ -45,8 +42,8 @@ log = urlog.get('uncertain-sampling')
 _POSE = ('x', 'y', 'z', 'qx', 'qy', 'qz', 'qw', 'yaw_deg', 'pitch_deg', 'roll_deg')
 _WRENCH = ('fx', 'fy', 'fz', 'tx', 'ty', 'tz')
 _HEADER = (['trial', 'timestamp']
-           + [f'tool0_base_{s}' for s in _POSE]           # raw tool0 wrt base
-           + [f'connector_target_{s}' for s in _POSE]     # connector deviation from the ideal mate
+           + [f'tool0_base_{s}' for s in _POSE]            # raw tool0 wrt base
+           + [f'connector_target_{s}' for s in _POSE]      # connector deviation from the ideal mate
            + [f'wrench_base_{s}' for s in _WRENCH]         # wrench as recorded (base_link)
            + [f'wrench_connector_{s}' for s in _WRENCH])   # wrench re-expressed in the connector frame
 
@@ -67,10 +64,11 @@ def build_and_run(cfg, robot, camera, args):
     T_base_holder_target = from_cfg(cfg.section('connector_holder_target'))
     T_base_connector_target = T_base_holder_target @ T_holder_connector   # ideal assembled connector
     T_base_assembled = T_base_holder_target @ inverse(T_tool0_holder)     # assembled tool0 pose
-    csv_in = urconfig.resolve(cfg, cfg.get('trajectory_csv', 'assembly_trajectory.csv'))
+
     # The trajectory rows are the CONNECTOR w.r.t. the TARGET CONNECTOR (last row = identity = the
     # mate; a direct -X -> 0 insertion). With an identity last row, anchor_target reduces to
     # T_base_targetobj = T_base_connector_target, so each row directly places the connector.
+    csv_in = urconfig.resolve(cfg, cfg.get('trajectory_csv', 'assembly_trajectory.csv'))
     mats = traj.load_csv(csv_in, angles_deg=bool(cfg.get('trajectory_angles_deg', False)))
     T_base_targetobj = traj.anchor_target(T_base_assembled, T_tool0_held, mats[-1])
 
@@ -127,21 +125,20 @@ def build_and_run(cfg, robot, camera, args):
     # ForceGuard trips at the contact limit -> the connector SEATED. See robot/admittance.py.
     adm = AdmittanceController(robot.arm, cfg.section('compliance'))
     guard = ForceGuard(robot.arm, cfg.section('force_guard'))
-    tare = (lambda: robot.arm.zero_ft(settle=False)) if bool(cfg.get_path('compliance.tare_before', True)) else None
+    tare = (lambda: robot.arm.zero_ft(settle=False)) \
+        if bool(cfg.get_path('compliance.tare_before', True)) else None
     settle_s = float(cfg.get_path('compliance.settle_s', 0.5))
 
     # CARTESIAN SPEED LIMITS for the compliant reference (mm/s, deg/s). Each ramp segment is given
     # the time its own geometry needs, so the reference never exceeds either limit -- rather than a
     # fixed total time, which silently changes speed whenever the path length or resolution changes.
+    # The RETRACT gets its own (faster) limits: it is a free-space escape with no contact expected.
     v_mm_s = float(cfg.get_path('speed.max_cartesian_translation_mm_s', 3.5))
     w_deg_s = float(cfg.get_path('speed.max_cartesian_rotation_deg_s', 5.0))
-    # The RETRACT gets its own (faster) limits: it is a free-space escape along a path just proven
-    # clear, with no contact expected -- there is no reason to back out at insertion speed. Default
-    # to the insert limits if unset, so behaviour only changes when these are configured.
     rv_mm_s = float(cfg.get_path('speed.retract_translation_mm_s', v_mm_s))
     rw_deg_s = float(cfg.get_path('speed.retract_rotation_deg_s', w_deg_s))
     retract_m = float(cfg.get('retract_distance_m', 0.05))   # straight back along the connector's -X
-    min_seg_s = 1.0 / adm.rate                       # never below one servo cycle
+    min_seg_s = 1.0 / adm.rate                               # never below one servo cycle
 
     def seg_time(A, B, v=None, w=None):
         """Seconds for the reference to go A -> B without exceeding either cartesian limit."""
@@ -162,23 +159,9 @@ def build_and_run(cfg, robot, camera, args):
     # along standoff_axis (a TARGET-frame direction) -- so it is always CLEAR of the path start.
     # Measuring it from the MATE instead would let a stand-off shorter than the trajectory's first
     # row land INSIDE the path, which is not a stand-off at all.
-    # Approach the stand-off under position control (free space, stiff). The stand-off is measured
-    # from the START of the assembly trajectory (mats[0]), backed off a further standoff_distance_m
-    # along standoff_axis (a TARGET-frame direction) -- so it is always CLEAR of the path start.
-    # Measuring it from the MATE instead would let a stand-off shorter than the trajectory's first
-    # row land INSIDE the path, which is not a stand-off at all.
-    # Approach the stand-off under position control (free space, stiff). The stand-off is measured
-    # from the START of the assembly trajectory (mats[0]), backed off a further standoff_distance_m
-    # along standoff_axis (a TARGET-frame direction) -- so it is always CLEAR of the path start.
-    # Measuring it from the MATE instead would let a stand-off shorter than the trajectory's first
-    # row land INSIDE the path, which is not a stand-off at all.
     standoff_axis = np.asarray(cfg.get('standoff_axis', [-1, 0, 0]), dtype=float)
-    T_standoff_held = translation_matrix(standoff_axis * float(cfg.get('standoff_distance_m', 0.05))) \
-        @ mats[0]
-    T_standoff_held = translation_matrix(standoff_axis * float(cfg.get('standoff_distance_m', 0.05))) \
-        @ mats[0]
-    T_standoff_held = translation_matrix(standoff_axis * float(cfg.get('standoff_distance_m', 0.05))) \
-        @ mats[0]
+    T_standoff_held = translation_matrix(
+        standoff_axis * float(cfg.get('standoff_distance_m', 0.05))) @ mats[0]
     q = robot.arm.ik(traj.tool0_at(T_base_targetobj, T_standoff_held, T_tool0_held), q_home)
     if q is None or not robot.arm.move_j(q, label='approach standoff'):
         fout.close()
@@ -228,7 +211,8 @@ def build_and_run(cfg, robot, camera, args):
                                guard, on_step=log_cb)
                 last_ref = refs[i]
                 if res == 'seated':
-                    log.info('Contact limit reached at waypoint %d/%d -- connector SEATED.', i, len(refs) - 1)
+                    log.info('Contact limit reached at waypoint %d/%d -- connector SEATED.',
+                             i, len(refs) - 1)
                     break
             adm.hold(last_ref, settle_s, guard, on_step=log_cb)   # settle (records the contact wrench)
 
@@ -261,74 +245,6 @@ def build_and_run(cfg, robot, camera, args):
     return ok
 
 
-def _fmt_dur(seconds):
-    """A duration as h:mm:ss / m:ss -- for the per-trial ETA."""
-    seconds = int(max(0.0, seconds))
-    h, rem = divmod(seconds, 3600)
-    m, sec = divmod(rem, 60)
-    return f'{h}:{m:02d}:{sec:02d}' if h else f'{m}:{sec:02d}'
-
-
-def _clock(seconds_from_now):
-    """Wall-clock time the run is expected to finish (HH:MM:SS)."""
-    from datetime import datetime, timedelta
-    return (datetime.now() + timedelta(seconds=max(0.0, seconds_from_now))).strftime('%H:%M:%S')
-
-
-def _retract_ref(T_ref, T_tool0_held, distance_m):
-    """The tool0 reference that backs the HELD PART straight out along ITS OWN -X by `distance_m`.
-
-    ASSUMES LINEAR (PEG-IN-HOLE) ASSEMBLY: the mate is a single-axis insertion along the connector's
-    +X, so the escape is simply the reverse translation along that same axis. Expressed in the
-    CONNECTOR's frame (right-multiply), so it follows the part's ACTUAL, perturbed orientation --
-    a tilted connector backs out along its own axis, not the target's.
-
-    `distance_m` is used as a magnitude: a negative value would drive INTO the socket."""
-    back = translation_matrix([-abs(float(distance_m)), 0.0, 0.0])
-    return T_ref @ T_tool0_held @ back @ inverse(T_tool0_held)
-
-
-def _fmt_dur(seconds):
-    """A duration as h:mm:ss / m:ss -- for the per-trial ETA."""
-    seconds = int(max(0.0, seconds))
-    h, rem = divmod(seconds, 3600)
-    m, sec = divmod(rem, 60)
-    return f'{h}:{m:02d}:{sec:02d}' if h else f'{m}:{sec:02d}'
-
-
-def _clock(seconds_from_now):
-    """Wall-clock time the run is expected to finish (HH:MM:SS)."""
-    from datetime import datetime, timedelta
-    return (datetime.now() + timedelta(seconds=max(0.0, seconds_from_now))).strftime('%H:%M:%S')
-
-
-def _retract_ref(T_ref, T_tool0_held, distance_m):
-    """The tool0 reference that backs the HELD PART straight out along ITS OWN -X by `distance_m`.
-
-    ASSUMES LINEAR (PEG-IN-HOLE) ASSEMBLY: the mate is a single-axis insertion along the connector's
-    +X, so the escape is simply the reverse translation along that same axis. Expressed in the
-    CONNECTOR's frame (right-multiply), so it follows the part's ACTUAL, perturbed orientation --
-    a tilted connector backs out along its own axis, not the target's.
-
-    `distance_m` is used as a magnitude: a negative value would drive INTO the socket."""
-    back = translation_matrix([-abs(float(distance_m)), 0.0, 0.0])
-    return T_ref @ T_tool0_held @ back @ inverse(T_tool0_held)
-
-
-def _fmt_dur(seconds):
-    """A duration as h:mm:ss / m:ss -- for the per-trial ETA."""
-    seconds = int(max(0.0, seconds))
-    h, rem = divmod(seconds, 3600)
-    m, sec = divmod(rem, 60)
-    return f'{h}:{m:02d}:{sec:02d}' if h else f'{m}:{sec:02d}'
-
-
-def _clock(seconds_from_now):
-    """Wall-clock time the run is expected to finish (HH:MM:SS)."""
-    from datetime import datetime, timedelta
-    return (datetime.now() + timedelta(seconds=max(0.0, seconds_from_now))).strftime('%H:%M:%S')
-
-
 def _retract_ref(T_ref, T_tool0_held, distance_m):
     """The tool0 reference that backs the HELD PART straight out along ITS OWN -X by `distance_m`.
 
@@ -348,12 +264,26 @@ def _log_row(writer, robot, trial, T_base_connector_target, T_tool0_connector):
     T_base_tool0 = robot.tool0()
     T_base_connector = T_base_tool0 @ T_tool0_connector
     connector_wrt_target = inverse(T_base_connector_target) @ T_base_connector   # identity at the mate
-    w_base = np.asarray(robot.arm.wrench(), dtype=float)          # getActualTCPForce -> base_link
+    w_base = np.asarray(robot.arm.wrench(), dtype=float)          # tared, bridged into base_link
     w_connector = np.asarray(robot.arm.wrench_in(T_base_connector), dtype=float)
     writer.writerow([trial, time.time()]
                     + traj.pose_fields(T_base_tool0)
                     + traj.pose_fields(connector_wrt_target)
                     + list(w_base) + list(w_connector))
+
+
+def _fmt_dur(seconds):
+    """A duration as h:mm:ss / m:ss -- for the per-trial ETA."""
+    seconds = int(max(0.0, seconds))
+    h, rem = divmod(seconds, 3600)
+    m, sec = divmod(rem, 60)
+    return f'{h}:{m:02d}:{sec:02d}' if h else f'{m}:{sec:02d}'
+
+
+def _clock(seconds_from_now):
+    """Wall-clock time the run is expected to finish (HH:MM:SS)."""
+    from datetime import datetime, timedelta
+    return (datetime.now() + timedelta(seconds=max(0.0, seconds_from_now))).strftime('%H:%M:%S')
 
 
 def _timestamped(cfg, path):

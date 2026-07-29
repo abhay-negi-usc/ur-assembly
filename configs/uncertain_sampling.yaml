@@ -39,7 +39,20 @@ connector_holder:
 # the assembly trajectory (its first row), backed off a further standoff_distance_m along
 # standoff_axis -- so it is always clear of the path, whatever the trajectory's first row is.
 standoff_distance_m: 0.010        # 10 mm beyond the trajectory start
+# ASSUMPTION: LINEAR (PEG-IN-HOLE) ASSEMBLY -- the mate is a single-axis insertion along the
+# connector's +X. The trajectory is a straight -X -> 0 approach and the retract is the reverse
+# translation along that same axis. A curved / multi-axis / twist-to-lock mate is NOT supported.
+
+# Stand-off: the free-space pose approached ONCE before the trial loop. Measured from the START of
+# the assembly trajectory (its first row), backed off a further standoff_distance_m along
+# standoff_axis -- so it is always clear of the path, whatever the trajectory's first row is.
+standoff_distance_m: 0.010        # 10 mm beyond the trajectory start
 standoff_axis: [-1.0, 0.0, 0.0]   # assembly is a direct -X -> 0 insertion (connector backs off along -X)
+
+# RETRACT: after each trial, back straight out along the CONNECTOR's OWN -X by this distance, from
+# wherever the insert stopped. In the connector frame, so a perturbed (tilted) part retreats along
+# its own axis rather than the target's. Speed comes from speed.retract_* below.
+retract_distance_m: 0.050
 
 # RETRACT: after each trial, back straight out along the CONNECTOR's OWN -X by this distance, from
 # wherever the insert stopped. In the connector frame, so a perturbed (tilted) part retreats along
@@ -56,6 +69,8 @@ compliance:
   mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]              # virtual inertia [kg / kg*m^2]
   stiffness:     [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]     # restoring spring [N/m, Nm/rad] (10 N -> 20 mm)
   damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]        # 1 = critically damped; 10 = heavily OVERdamped
+  stiffness:     [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]     # restoring spring [N/m, Nm/rad] (10 N -> 20 mm)
+  damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]        # 1 = critically damped; 10 = heavily OVERdamped
   selected_axes: [1, 1, 1, 1, 1, 1]                          # which TOOL0 axes yield to contact
   reference_rate_hz: 125.0
   warmup_s: 0.1                 # hold the start pose this long (servo-engage transient decays) before the guard
@@ -67,6 +82,7 @@ compliance:
 # Contact watchdog: a trip during insertion = the connector SEATED (stop advancing). NOT armed during
 # retract (a seated part is already over the limit; a guarded retract would block itself).
 force_guard:
+  max_force_n: 10.0
   max_force_n: 10.0
   max_torque_nm: 8.0
 

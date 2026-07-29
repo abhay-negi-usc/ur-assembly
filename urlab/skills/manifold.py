@@ -171,6 +171,8 @@ class ManifoldEstimator:
         free = np.zeros(6, dtype=bool)
         free[idx] = True
         res_hist = np.zeros((G, K))
+        theta_hist = np.zeros((G, K + 1, len(idx)))       # correction params per iteration (physical)
+        theta_hist[:, 0] = g6[:, idx]
         for k in range(K):
             C = np.einsum('nij,gjk->gnik', Y, T_corr)
             pts = scaled12(vec6_from_mats(C), w6, self.s_rot)
@@ -183,6 +185,7 @@ class ManifoldEstimator:
             delta6[:, 3:] = delta12[:, 3:6] / max(self.s_rot, 1e-12)
             delta6[:, ~free] = 0.0
             T_corr = T_corr @ mats_from_vec6(delta6 * self.step_gain)
+            theta_hist[:, k + 1] = vec6_from_mats(T_corr)[:, idx]
 
         # Residual-gated RANSAC over the final corrections (distance in mm-equivalent space).
         corr6 = vec6_from_mats(T_corr)                        # (G, 6) physical
@@ -213,5 +216,8 @@ class ManifoldEstimator:
             'inliers': int(best.sum()), 'guesses': G,
             'final_residual': float(res_hist[best, -1].mean()),
             'n_observations': len(vec6),
+            # Per-iteration histories (all guesses) for convergence plots: correction params in
+            # physical mm/deg on estimate_dims, the mean NN residual, and the RANSAC inlier mask.
+            'theta_hist': theta_hist, 'res_hist': res_hist, 'inlier_mask': best,
         }
         return mats_from_vec6(theta), info

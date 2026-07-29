@@ -11,7 +11,7 @@ me" -- is gone. `closed_counts: 228` is now compared against a number the grippe
 import numpy as np
 
 from .. import log as urlog
-from ..transforms import fmt_delta, inverse, translation_matrix
+from ..transforms import fmt_delta, inverse, pose_error, translation_matrix
 
 log = urlog.get('pick')
 
@@ -265,6 +265,11 @@ class GraspController:
         self.compliance_enabled = bool(self.compliance.get('enabled', True))
         self.tare_before = bool(self.compliance.get('tare_before', True))
         self.descent_time_s = float(p.get('descent_time_s', 2.0))
+        # SPEED-based pacing (preferred): when either limit is set, the ramp duration is derived
+        # from the ACTUAL distance -- so the touchdown speed no longer changes silently when
+        # approach_distance_m does. descent_time_s is the legacy fallback when both are absent.
+        self.descent_v_mm_s = p.get('descent_translation_mm_s')
+        self.descent_w_deg_s = p.get('descent_rotation_deg_s')
         self.settle_s = float(p.get('settle_s', 0.5))
         self._guard_cfg = p.get('force_guard', {}) or {}
         self._adm = None
@@ -281,6 +286,19 @@ class GraspController:
             if self._guard_cfg.get('enabled', False):
                 self._guard = ForceGuard(robot.arm, self._guard_cfg)
 
+    def _duration(self, T_from, T_to):
+        """Ramp seconds for a compliant move: distance / the configured SPEED limits (whichever of
+        translation/rotation needs longer), or the legacy fixed descent_time_s when no speed is
+        configured. Floored at 0.1 s so a zero-length move still ramps sanely."""
+        if self.descent_v_mm_s is None and self.descent_w_deg_s is None:
+            return self.descent_time_s
+        lin_m, ang_rad = pose_error(T_from, T_to)
+        v = float(self.descent_v_mm_s or 0.0)
+        w = float(self.descent_w_deg_s or 0.0)
+        t_lin = (lin_m * 1000.0 / v) if v > 0 else 0.0
+        t_ang = (np.degrees(ang_rad) / w) if w > 0 else 0.0
+        return max(t_lin, t_ang, 0.1)
+
     def _to(self, robot, T_target, label, what, position_guard=None):
         """Move the fingertip to T_target in the configured mode. In POSITION mode, `position_guard`
         (a callable taking the move thunk) runs it force-guarded; in COMPLIANCE mode the guard is
@@ -288,8 +306,10 @@ class GraspController:
         what trips on the cable's resistance)."""
         if self.compliant:
             self._lazy_build(robot)
-            return _compliant_move(robot, self._adm, self._guard, robot.fingertip(), T_target,
-                                   self.descent_time_s, self.tare_before, self.settle_s, what)
+            T_start = robot.fingertip()
+            return _compliant_move(robot, self._adm, self._guard, T_start, T_target,
+                                   self._duration(T_start, T_target), self.tare_before,
+                                   self.settle_s, what)
         if position_guard is not None:
             return position_guard(lambda: robot.move_fingertip(T_target, label))
         return robot.move_fingertip(T_target, label)

@@ -37,7 +37,6 @@ from .. import config as urconfig
 from .. import log as urlog
 from ..log import StepRunner
 from ..robot import AdmittanceController, ForceGuard
-from ..skills import insert as ins
 from ..skills import reset
 from ..skills import trajectory as traj
 from ..skills.manifold import FORCE_COLS, ManifoldEstimator, POSE_COLS, TORQUE_COLS
@@ -74,6 +73,52 @@ def _save_observations(path, rows):
         w = _csv.writer(fh)
         w.writerow(POSE_COLS + FORCE_COLS + TORQUE_COLS)
         w.writerows(rows)
+
+
+def _plot_estimate(path, dims, info):
+    """Per-attempt convergence figure, same layout as analysis/manifold_icp_validation: one panel
+    per estimated dim (correction vs ICP iteration -- every guess faint, RANSAC consensus bold,
+    dashed zero) plus the log-scale NN residual. BEST-EFFORT: a plotting problem (e.g. seaborn not
+    installed on the robot box) is logged and skipped, never allowed to kill a hardware run."""
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+
+        th, inl = info['theta_hist'], info['inlier_mask']
+        res = np.maximum(info['res_hist'], 1e-6)
+        sns.set_theme(style='whitegrid')
+        fig, axes = plt.subplots(len(dims) + 1, 1, figsize=(9.0, 2.6 * (len(dims) + 1)),
+                                 sharex=True)
+        axes = np.atleast_1d(axes)
+        it = np.arange(th.shape[1])
+        for j, (ax, dim) in enumerate(zip(axes[:-1], dims)):
+            unit = 'deg' if dim.endswith('_deg') else 'mm'
+            ax.axhline(0.0, ls='--', lw=1.0, color='#888888', zorder=1)
+            for g in range(th.shape[0]):
+                ax.plot(it, th[g, :, j], color='#4C72B0', alpha=0.07, lw=1.0, zorder=2)
+            ax.plot(it, th[inl, :, j].mean(axis=0), color='#DD8452', lw=2.4, zorder=3)
+            lim = max(float(np.abs(th[..., j]).max()), 1e-3) * 1.05
+            ax.set_ylim(-lim, lim)
+            ax.set_ylabel(f'{dim} corr [{unit}]')
+            ax.set_title(f'correction[{dim}] = {info["theta_corr"][dim]:+.3f} {unit}',
+                         fontsize=10, loc='left')
+        ax = axes[-1]
+        it_r = np.arange(1, res.shape[1] + 1)
+        for g in range(res.shape[0]):
+            ax.plot(it_r, res[g], color='#4C72B0', alpha=0.07, lw=1.0, zorder=2)
+        ax.plot(it_r, res[inl].mean(axis=0), color='#DD8452', lw=2.4, zorder=3)
+        ax.set_yscale('log')
+        ax.set_ylabel('mean NN residual [mm-eq]')
+        ax.set_xlabel('ICP iteration')
+        fig.suptitle(f'belief correction ({info["inliers"]}/{info["guesses"]} inliers, '
+                     f'residual {info["final_residual"]:.3f})', y=0.995)
+        fig.tight_layout()
+        fig.savefig(path, dpi=110)
+        plt.close(fig)
+    except Exception as exc:                       # noqa: BLE001 -- plotting is never fatal
+        log.warning('estimate plot skipped (%s)', exc)
 
 
 def build_and_run(cfg, robot, camera, args):
@@ -131,10 +176,12 @@ def build_and_run(cfg, robot, camera, args):
     tol_rot_rad = np.radians(float(tol.get('rot_deg', 3.0)))
     max_attempts = int(a.get('max_attempts', 5))
 
-    out_dir = os.path.join(cfg.get('data_dir', 'data'), 'cable_pick_estimate_assemble',
-                           datetime.now().strftime('%Y%m%d_%H%M%S'))
+    # Every run gets its own EXPERIMENT subdirectory: per-attempt observation CSVs, per-attempt
+    # convergence plots, and estimates.csv.
+    out_dir = os.path.join(cfg.get('data_dir', 'data'), 'experiments',
+                           f'cable_pick_estimate_assemble_{datetime.now():%Y%m%d_%H%M%S}')
     os.makedirs(out_dir, exist_ok=True)
-    log.info('Run folder: %s', out_dir)
+    log.info('Experiment folder: %s', out_dir)
 
     # ---- RESET + PICK (identical to cable_pick_assemble) ----
     if not reset.reset_robot(robot, cfg, 'start reset'):
@@ -176,6 +223,18 @@ def build_and_run(cfg, robot, camera, args):
         return False
     seed_q = q
 
+    # UNCONDITIONAL pause at the stand-off (like the reset gate): the next motion drives the held
+    # part into contact, so a human confirms the scene is ready -- regardless of confirm_each_step.
+    if not robot.arm.dry_run:
+        try:
+            answer = input('\n[stand-off] Ready to ASSEMBLE (contact ahead). '
+                           'Enter to continue (q to abort): ')
+        except EOFError:
+            answer = ''
+        if answer.strip().lower() in ('q', 'quit', 'n', 'no'):
+            log.info('Aborted at the stand-off by the user.')
+            return False
+
     # ---- The assemble / check / retract / estimate loop ----
     est_rows, success = [], False
     try:
@@ -215,17 +274,32 @@ def build_and_run(cfg, robot, camera, args):
                     break
             adm.hold(last_ref, settle_s, guard, on_step=log_cb)
 
-            # CHECK: believed connector pose vs the target. Compliance deflection makes a wrong
-            # belief show up here as a real position/rotation error.
+            # CHECK: the kinematic numbers are computed and logged for the record (compliance
+            # deflection makes a wrong belief show as a real error here), but the SUCCESS DECISION
+            # is the OPERATOR's -- they can see the physical mate; the numbers only see the belief.
+            # A dry run has no operator, so it falls back to the tolerance check.
             T_conn_now = robot.tool0() @ T_tool0_conn
             lin, ang = pose_error(T_conn_now, T_base_tconn)
-            log.info('check: connector vs target: %.2f mm, %.2f deg (tol %.2f mm, %.2f deg)',
-                     lin * 1000, np.degrees(ang), tol_pos_m * 1000, np.degrees(tol_rot_rad))
+            log.info('check: believed connector vs target: %.2f mm, %.2f deg (reference tol '
+                     '%.2f mm, %.2f deg)', lin * 1000, np.degrees(ang),
+                     tol_pos_m * 1000, np.degrees(tol_rot_rad))
             _save_observations(os.path.join(out_dir, f'attempt_{it:02d}_observations.csv'), obs)
 
             row = {'attempt': it, 'n_observations': len(obs),
-                   'check_pos_mm': lin * 1000.0, 'check_rot_deg': float(np.degrees(ang)),
-                   'success': lin <= tol_pos_m and ang <= tol_rot_rad}
+                   'check_pos_mm': lin * 1000.0, 'check_rot_deg': float(np.degrees(ang))}
+            if robot.arm.dry_run:
+                row['success'] = bool(lin <= tol_pos_m and ang <= tol_rot_rad)
+            else:
+                try:
+                    ans = input(f'[check attempt {it}] Was the assembly SUCCESSFUL? '
+                                '(y = done / Enter = retry / q = abort): ').strip().lower()
+                except EOFError:
+                    ans = ''
+                if ans in ('q', 'quit'):
+                    log.info('Aborted at the check by the user.')
+                    est_rows.append(row)
+                    return False
+                row['success'] = ans in ('y', 'yes')
             if row['success']:
                 est_rows.append(row)
                 log.info('Within tolerance -- ASSEMBLY COMPLETE on attempt %d.', it)
@@ -257,6 +331,8 @@ def build_and_run(cfg, robot, camera, args):
                      {k: round(v, 3) for k, v in info['theta_corr'].items()},
                      info['inliers'], info['guesses'], info['final_residual'],
                      info['n_observations'])
+            _plot_estimate(os.path.join(out_dir, f'attempt_{it:02d}_estimate.png'),
+                           estimator.estimate_dims, info)
             T_ftip_conn = T_ftip_conn @ _corr_to_m(T_corr_mm)     # believed @ corr ~= true
             row.update({f'corr_{k}': v for k, v in info['theta_corr'].items()})
             row.update({'icp_inliers': info['inliers'], 'icp_residual': info['final_residual']})
@@ -274,10 +350,18 @@ def build_and_run(cfg, robot, camera, args):
     if not success:
         return False
 
-    # ---- Release + escape + reset, as in cable_pick_assemble ----
-    ic = ins.InsertConfig(cfg) if cfg.get_path('assembly.retract') else None
-    ok = runner.run([('open gripper (release)', robot.gripper.open)]
-                    + ([('retract', lambda: ins.retract(robot, ic))] if ic else []))
+    # ---- Release, escape along the CONNECTOR's OWN -X (peg-in-hole -- the direction comes from
+    # the connector frame at the mate, executed as a pure world translation), then reset. ----
+    d_out = float(a.get('release_retract_distance_m', 0.08))
+    T_conn_final = robot.tool0() @ T_tool0_conn
+    back = -T_conn_final[:3, 0] * d_out                   # connector -X, in base coordinates
+
+    def release_escape():
+        T_new = translation_matrix(back) @ robot.tool0()
+        return _guarded(robot, guard, lambda: robot.arm.move_l(T_new, label='retract (connector -X)'))
+
+    ok = runner.run([('open gripper (release)', robot.gripper.open),
+                     ('retract (connector -X)', release_escape)])
     return ok and reset.reset_robot(robot, cfg, 'end reset')
 
 

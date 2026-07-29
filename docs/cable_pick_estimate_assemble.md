@@ -11,22 +11,30 @@ carries in-hand error — and it corrects that estimate from touch, between atte
         assemble   admittance-follow the trajectory (same law as uncertain_sampling),
                    collecting observations (believed connector-wrt-target pose + wrench
                    in the believed connector frame)
-        check      believed connector pose vs target, within success_tolerance? -> done
+        check      the believed-vs-target numbers are logged; the OPERATOR decides success
+                   at a prompt (y = done / Enter = retry / q = abort); --dry-run falls back
+                   to success_tolerance
         retract    straight back along the connector's own -X (peg-in-hole assumption)
         estimate   ICP of the observations against the CONTACT MANIFOLD
                    (urlab/skills/manifold.py -- the same algorithm validated offline by
                    analysis/manifold_icp_validation.py)
         update     T_fingertip_connector <- T_fingertip_connector @ T_corr
         realign    recompute the trajectory references from the new estimate
--> release -> retract steps -> end reset
+-> release -> retract along the connector's own -X -> end reset
 ```
 
 ```bash
 python -m urlab.apps.cable_pick_estimate_assemble
 ```
 
-## Why the check can be trusted
-The check compares the **believed** connector pose to the target — but under admittance a wrong
+## The check
+After each attempt the believed-vs-target error is computed and logged, but **success is the
+operator's call** at the prompt (y / Enter = retry / q) — the operator can see the physical mate,
+the numbers only see the belief; `success_tolerance` is the printed reference and the `--dry-run`
+fallback. There is also an **unconditional pause at the stand-off** before the first contact,
+regardless of `confirm_each_step`.
+
+The kinematic numbers are still trustworthy context: the check compares the **believed** connector pose to the target — but under admittance a wrong
 belief cannot fake success. If the part jams short of the mate, the arm deflects off its reference,
 the actual tool0 (and therefore the believed connector pose) lags the target, and the check fails.
 The failed attempt's observations are exactly the data the estimator needs.
@@ -52,7 +60,8 @@ it — multi-start ICP across the 12-D pose+wrench space, correction restricted 
 |---|---|
 | `assembly.target_connector` | the known mate pose for the CONNECTOR (base_link, m/rad) |
 | `assembly.max_attempts` | assemble→estimate loop budget |
-| `assembly.success_tolerance.pos_mm / rot_deg` | believed-pose-vs-target check after each attempt |
+| `assembly.success_tolerance.pos_mm / rot_deg` | reference numbers at the check prompt; automatic decision only in `--dry-run` |
+| `assembly.release_retract_distance_m` | post-release escape along the **connector's own −X** (never a base-frame axis) |
 | `assembly.retract_distance_m` | between-attempt escape along the connector's own −X |
 | `assembly.log_decimation` | observation every Nth servo cycle |
 | `estimation.manifold_csv` | the contact manifold for this connector |
@@ -62,10 +71,21 @@ it — multi-start ICP across the 12-D pose+wrench space, correction restricted 
 | `estimation.*` (scalings, ICP, RANSAC, `residual_gate`) | same meanings as `analysis/manifold_icp_validation.py` |
 
 ## Output
-A run folder `data/cable_pick_estimate_assemble/<timestamp>/` with per-attempt observation CSVs
-(manifold-compatible columns: `connector_target_*` in mm/deg + `wrench_connector_*`) and
-`estimates.csv` — per attempt: the check errors, the estimated correction per dim, ICP inliers and
-residual, and the success flag.
+An experiment folder `data/experiments/cable_pick_estimate_assemble_<timestamp>/` with, per attempt:
+- `attempt_NN_observations.csv` — manifold-compatible columns (`connector_target_*` mm/deg +
+  `wrench_connector_*`),
+- `attempt_NN_estimate.png` — the ICP convergence figure (same layout as
+  `analysis/manifold_icp_validation`: per-dim correction, guesses faint, RANSAC consensus bold,
+  dashed zero, log-scale residual). Plotting is best-effort — a missing seaborn is logged, never fatal,
+- `estimates.csv` — check errors, per-dim corrections, ICP inliers/residual, success flag.
+
+## Speeds — no time-based motion
+Every motion in this app is paced by an explicit config limit, never a fixed duration: free-space
+`moveJ` by `speed.max_joint_velocity_deg_s` / `joint_acceleration_rad_s2` / `max_cartesian_velocity_m_s`;
+the pickup descent + lift by `pickup.descent_translation_mm_s` / `descent_rotation_deg_s` (ramp time
+derived from the actual distance); the compliant insert and between-attempt retract by
+`speed.max_cartesian_*` / `speed.retract_*` (mm/s, deg/s); the reset home is a guarded position
+`moveJ` under the same caps.
 
 ## Cautions
 - **Linear (peg-in-hole) assembly assumed** — same as uncertain_sampling; no curved or twist mates.

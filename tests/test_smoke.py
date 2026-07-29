@@ -675,6 +675,29 @@ def test_contact_manifold_never_ingests_its_own_output():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_grasp_descent_is_speed_paced():
+    """pickup.descent_translation_mm_s / _rotation_deg_s derive the compliant ramp duration from
+    the ACTUAL distance -- so touchdown speed no longer changes silently with approach_distance_m.
+    With neither set, the legacy fixed descent_time_s still applies."""
+    from urlab.config import Config
+    from urlab.skills.pick import GraspController
+
+    g = GraspController(Config({'pickup': {'mode': 'compliance',
+                                           'descent_translation_mm_s': 50.0,
+                                           'descent_rotation_deg_s': 30.0}}))
+    A = np.eye(4)
+    B = T.translation_matrix([0.0, 0.0, -0.10])           # 100 mm descent
+    assert np.isclose(g._duration(A, B), 2.0), '100 mm at 50 mm/s must take 2 s'
+    C = T.xyzrpy_to_matrix([0, 0, 0], [0, np.radians(60.0), 0])
+    assert np.isclose(g._duration(A, C), 2.0), '60 deg at 30 deg/s must take 2 s'
+    both = T.translation_matrix([0, 0, -0.05]) @ C        # 1 s of travel, 2 s of rotation
+    assert np.isclose(g._duration(A, both), 2.0), 'the slower axis must set the duration'
+    assert g._duration(A, A) == 0.1, 'zero-length move floors at 0.1 s'
+
+    legacy = GraspController(Config({'pickup': {'mode': 'compliance', 'descent_time_s': 3.0}}))
+    assert legacy._duration(A, B) == 3.0, 'no speed keys -> the legacy fixed duration'
+
+
 def test_manifold_estimator_recovers_belief_error():
     """skills/manifold: observations whose POSE columns carry a rigid belief error (right-multiplied,
     like an in-hand grasp error) but whose WRENCH is the true contact signature must yield a

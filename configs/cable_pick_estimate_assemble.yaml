@@ -125,7 +125,10 @@ lift_axis: [0.0, 0.0, 1.0]
 
 pickup:
   mode: compliance
-  descent_time_s: 2.0
+  # SPEED-based pacing (no time-based motion in this app): the ramp duration is derived from the
+  # ACTUAL distance, so the touchdown speed never changes silently with approach_distance_m.
+  descent_translation_mm_s: 100.0
+  descent_rotation_deg_s: 60.0
   settle_s: 0.5
   compliance:
     enabled: true
@@ -164,15 +167,17 @@ grasp_check:
 
 speed:
   # FREE-SPACE moves (moveJ). For short realign hops the ACCELERATION binds, not the cap.
-  max_joint_velocity_deg_s: 100.0
-  joint_acceleration_rad_s2: 5.0
-  max_cartesian_velocity_m_s: 0.25
+  # NOTE: 120 deg/s is the UR10e base/shoulder joint HARDWARE limit -- a nominal 2x (200) would
+  # just fault/clamp at the controller, so the cap stops at the hardware ceiling.
+  max_joint_velocity_deg_s: 120.0
+  joint_acceleration_rad_s2: 10.0
+  max_cartesian_velocity_m_s: 0.5
   # CARTESIAN limits for the COMPLIANT reference (mm/s, deg/s). INSERT = the contact phase;
   # RETRACT = the between-attempts escape (still compliant, un-guarded).
-  max_cartesian_translation_mm_s: 10.0
-  max_cartesian_rotation_deg_s: 30.0
-  retract_translation_mm_s: 100.0
-  retract_rotation_deg_s: 50.0
+  max_cartesian_translation_mm_s: 20.0
+  max_cartesian_rotation_deg_s: 60.0
+  retract_translation_mm_s: 200.0
+  retract_rotation_deg_s: 100.0
 
 move_timeout_s: 60.0
 settle_s: 0.5
@@ -181,7 +186,7 @@ debug: false
 
 reset:
   home_joints_deg: [-80, -155, -120, 5, 90, 10]
-  home_duration_s: 6.0
+  # (the home move is a guarded position moveJ, paced by the speed caps above -- no duration key)
   max_force_n: 50.0
   compliance:
     tare_before: true
@@ -221,9 +226,10 @@ assembly:
   # The loop: assemble -> check -> retract -> estimate -> realign, at most this many attempts.
   max_attempts: 5
 
-  # SUCCESS check after each attempt: believed connector pose vs the target. Under admittance a
-  # wrong in-hand belief cannot fake this -- contact deflects the arm off the reference, so a
-  # jammed part reads as a real position error here.
+  # After each attempt the believed-pose-vs-target numbers are LOGGED for the record, but SUCCESS
+  # IS THE OPERATOR'S CALL at the prompt (y = done / Enter = retry / q = abort) -- the operator can
+  # see the physical mate; the numbers only see the belief. These tolerances are the reference
+  # printed next to the numbers, and the automatic fallback for --dry-run (no operator).
   success_tolerance:
     pos_mm: 2.0
     rot_deg: 3.0
@@ -251,12 +257,10 @@ assembly:
     max_force_n: 10.0
     max_torque_nm: 8.0
 
-  # AFTER SUCCESS: release, then escape with these steps (frame 'base' = fixed world directions).
-  retract:
-    frame: base
-    steps:
-      - xyz: [-0.08,  0.00,  0.00]   # straight back out of the mate
-      - xyz: [ 0.00,  0.00,  0.15]   # then up and clear
+  # AFTER SUCCESS: release, then back the fingertip out along the CONNECTOR's OWN -X by this
+  # distance (peg-in-hole -- the escape direction follows the mated part, never a base-frame axis).
+  # The end reset then takes the arm home.
+  release_retract_distance_m: 0.080
 
 # ===================================================================================================
 # ESTIMATION -- the contact-manifold ICP (urlab/skills/manifold.py; validated offline by

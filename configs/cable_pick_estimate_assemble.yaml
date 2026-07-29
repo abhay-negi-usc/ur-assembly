@@ -1,0 +1,299 @@
+# Cable PICK + ESTIMATE-while-ASSEMBLE. The PICK half is identical to cable_pick_assemble.yaml.
+# The assembly half runs a loop of: assemble (admittance, observing) -> check -> retract ->
+# ESTIMATE the in-hand belief error against the CONTACT MANIFOLD (ICP) -> update + realign.
+# See docs/cable_pick_estimate_assemble.md and urlab/skills/manifold.py.
+#
+# ASSUMPTION: LINEAR (PEG-IN-HOLE) ASSEMBLY -- single-axis insertion along the connector's +X;
+# the retract between attempts is the reverse translation along that same axis.
+
+robot:
+  ip: 192.168.125.2
+  dry_run: false
+  payload:
+    mass_kg: 1.3
+    cog_m: [-0.026, 0.028, 0.030]
+base_frame: base_link
+tip_frame: tool0
+camera_frame: camera1_color_optical_frame
+
+hand_eye:
+  xyz: [-0.009, -0.080, 0.031] # accounting for plate deformation
+  rpy: [0.0, 0.0, 0.0]
+
+camera:
+  serial_no: "218622272137"
+  width: 1280
+  height: 720
+  fps: 15                          # D405 max at 1280x720 is 15 fps
+
+sam3:
+  repo_path: /abhay_ws/sam3-abhay
+  mode: junction
+  cable_prompt: cable
+  connector_prompt: connector
+  adaptive: true
+  confidence_floor: 0.2
+  min_contrast: 0.0
+  work_dim: 1024
+  overlay_opacity: 0.5
+
+connector_estimator:
+  min_views: 3
+  min_inlier_views: 3
+  min_parallax_deg: 3.0
+  inlier_dist_m: 0.010
+  max_range_m: 0.10
+  reject_dist_m: 0.05
+  up_axis: [0.0, 0.0, 1.0]
+  workspace_min: [-10.0, -10.0, -10.0]
+  workspace_max: [10.0, 10.0, 10.0]
+
+# ---- Ground-plane manual-select scan (the default scan.mode) ----
+ground_plane:
+  z_m: -0.758
+  max_cables: 8
+  new_view_translation_m: 0.04
+  z_step_m: 0.05
+
+connector_frame: connector
+
+cable_end:
+  enabled: true
+  switch_distance_m: 0.250
+
+connector_grasp:
+  xyz: [0.0, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
+grasp_tcp_offset:
+  xyz: [0.0, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
+fingertip_grasp:
+  xyz: [0.0, -0.01254, 0.183]
+  rpy: [3.14159, 0.0, -1.5708]
+
+connector_holder:
+  xyz: [0.0, -0.045, 0.010]
+  rpy: [3.14159, 0.0, -1.5708]
+
+scan:
+  mode: ground_plane
+  require_detection: true
+  min_good_views: 3
+  max_passes: 3
+  view_settle_s: 0.5
+  max_view_distance_m: 0.250
+  approach:
+    enabled: true
+    step_m: 0.250
+    min_distance_m: 0.250
+    nominal_distance_m: 0.23
+    scale_offsets: true
+    recenter: true
+    max_view_delta_m: 0.10
+    max_view_delta_deg: 45.0
+  relative_bounds:
+    xyz: [0.08, 0.08, 0.05]
+    rpy: [0.35, 0.35, 0.10]
+  offsets:
+    - {xyz: [ 0.000,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
+    - {xyz: [ 0.040,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
+    - {xyz: [ 0.028,  0.028, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
+    - {xyz: [ 0.000,  0.040, 0.00], rpy: [ 0.1722,  0.0000, 0.0]}
+    - {xyz: [-0.028,  0.028, 0.00], rpy: [ 0.1224,  0.1224, 0.0]}
+    - {xyz: [-0.040,  0.000, 0.00], rpy: [ 0.0000,  0.1722, 0.0]}
+    - {xyz: [-0.028, -0.028, 0.00], rpy: [-0.1224,  0.1224, 0.0]}
+    - {xyz: [ 0.000, -0.040, 0.00], rpy: [-0.1722,  0.0000, 0.0]}
+    - {xyz: [ 0.028, -0.028, 0.00], rpy: [-0.1224, -0.1224, 0.0]}
+  refine:
+    enabled: true
+    orbit_deg: [12.0, -12.0, 20.0, -20.0]
+    max_orbit_deg: 25.0
+    min_height_m: 0.12
+
+save_scan_images: true
+data_dir: data
+scan_images_subdir: cable_pick_estimate_assemble
+save_raw_images: true
+overlay_debug: true
+save_last_camera_image: true
+save_junction_plot: true
+
+approach_distance_m: 0.10
+approach_axis: [0.0, 0.0, 1.0]
+lift_distance_m: 0.10
+lift_axis: [0.0, 0.0, 1.0]
+
+pickup:
+  mode: compliance
+  descent_time_s: 2.0
+  settle_s: 0.5
+  compliance:
+    enabled: true
+    tare_before: true
+    mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+    stiffness:     [2000.0, 2000.0, 500.0, 15.0, 15.0, 15.0]
+    damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    selected_axes: [1, 1, 1, 1, 1, 1]
+    reference_rate_hz: 125.0
+    lookahead_time_s: 0.1
+    servo_gain: 300.0
+    max_delta_m: 0.05
+    max_delta_rad: 0.5
+  force_guard:
+    enabled: false
+    max_force_n: 30.0
+    max_torque_nm: 5.0
+
+# Gripper endpoints + grasp-check counts come SOLELY from configs/cables.yaml for this cable.
+cable: banana
+
+grasp_check:
+  enabled: true
+  tolerance_counts: 1
+  detect_empty: true
+  settle_s: 1.0
+  max_retries: 2
+  capture_images: true
+  capture_rate_hz: 1.0
+  recovery:
+    enabled: true
+    max_tries: 25
+    finger_width_m: 0.02278
+    cable_shift_fraction: 0.8
+    empty_drop_m: 0.003
+
+speed:
+  # FREE-SPACE moves (moveJ). For short realign hops the ACCELERATION binds, not the cap.
+  max_joint_velocity_deg_s: 100.0
+  joint_acceleration_rad_s2: 5.0
+  max_cartesian_velocity_m_s: 0.25
+  # CARTESIAN limits for the COMPLIANT reference (mm/s, deg/s). INSERT = the contact phase;
+  # RETRACT = the between-attempts escape (still compliant, un-guarded).
+  max_cartesian_translation_mm_s: 10.0
+  max_cartesian_rotation_deg_s: 30.0
+  retract_translation_mm_s: 100.0
+  retract_rotation_deg_s: 50.0
+
+move_timeout_s: 60.0
+settle_s: 0.5
+confirm_each_step: true
+debug: false
+
+reset:
+  home_joints_deg: [-80, -155, -120, 5, 90, 10]
+  home_duration_s: 6.0
+  max_force_n: 50.0
+  compliance:
+    tare_before: true
+    mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+    stiffness:     [2000.0, 2000.0, 2000.0, 15.0, 15.0, 15.0]
+    damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    selected_axes: [1, 1, 1, 1, 1, 1]
+    reference_rate_hz: 125.0
+    max_delta_m: 0.05
+    max_delta_rad: 0.5
+
+# ===================================================================================================
+# ASSEMBLY -- the estimate-while-assemble loop
+# ===================================================================================================
+assembly:
+  # The KNOWN target: where the CONNECTOR must end up (base_link; m / rad, extrinsic XYZ).
+  # MEASURE: jog/hand-guide to a good mate holding the part, read the connector frame off the
+  # monitor, convert mm/deg -> m/rad (or paste the tool0-derived values).
+  target_connector:
+    xyz: [0.0903, 1.0727, -0.1816]
+    rpy: [-0.0124, 0.0021, 1.5487]
+
+  # The ideal insertion path: CONNECTOR w.r.t. the TARGET connector, last row = identity (the mate).
+  trajectory_csv: assembly_trajectory.csv
+  trajectory_angles_deg: false
+  translational_resolution_m: 0.001
+  rotational_resolution_deg: 1.0
+
+  # Stand-off beyond the trajectory START (target-connector frame), approached once after the lift.
+  standoff:
+    axis: [-1.0, 0.0, 0.0]
+    distance_m: 0.010
+
+  # Between attempts: back out along the CONNECTOR's OWN -X from wherever the insert stopped.
+  retract_distance_m: 0.050
+
+  # The loop: assemble -> check -> retract -> estimate -> realign, at most this many attempts.
+  max_attempts: 5
+
+  # SUCCESS check after each attempt: believed connector pose vs the target. Under admittance a
+  # wrong in-hand belief cannot fake this -- contact deflects the arm off the reference, so a
+  # jammed part reads as a real position error here.
+  success_tolerance:
+    pos_mm: 2.0
+    rot_deg: 3.0
+
+  log_decimation: 5              # observation every Nth servo cycle (125 Hz / N)
+
+  # COMPLIANCE (software admittance) for the insertion -- same law as uncertain_sampling.
+  compliance:
+    enabled: true
+    tare_before: true
+    mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+    stiffness:     [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
+    damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+    selected_axes: [1, 1, 1, 1, 1, 1]
+    reference_rate_hz: 125.0
+    warmup_s: 0.1
+    settle_s: 0.5
+    lookahead_time_s: 0.1
+    servo_gain: 300.0
+    max_delta_m: 0.05
+    max_delta_rad: 0.5
+
+  force_guard:
+    enabled: true
+    max_force_n: 10.0
+    max_torque_nm: 8.0
+
+  # AFTER SUCCESS: release, then escape with these steps (frame 'base' = fixed world directions).
+  retract:
+    frame: base
+    steps:
+      - xyz: [-0.08,  0.00,  0.00]   # straight back out of the mate
+      - xyz: [ 0.00,  0.00,  0.15]   # then up and clear
+
+# ===================================================================================================
+# ESTIMATION -- the contact-manifold ICP (urlab/skills/manifold.py; validated offline by
+# analysis/manifold_icp_validation.py -- keep the scaling constants consistent with what validated)
+# ===================================================================================================
+estimation:
+  # The contact manifold for THIS connector type (built by analysis/contact_manifold.py).
+  manifold_csv: data/uncertain_assembly_sampling/banana/banana_connector_contact_manifold.csv
+
+  # Optional override of the initial in-hand estimate (fingertip -> connector, m / rad).
+  # Default (absent): the grasp geometry, inv(connector_grasp).
+  # initial_connector_in_fingertip:
+  #   xyz: [0.0, 0.0, 0.0]
+  #   rpy: [0.0, 0.0, 0.0]
+
+  # The common mm-equivalent 12-D space (weights of the nearest-neighbour match).
+  scaling_constant_deg_to_mm: 1.0
+  scaling_constant_unit_force_to_mm: 10.0
+  scaling_constant_unit_torque_to_mm: 100.0
+  min_force_n: 0.5               # observations/manifold rows below this |f| carry no contact info
+  min_observations: 20           # skip estimation (keep the old belief) with fewer contact samples
+
+  # WHICH belief dims to correct (the dims the grasp can be wrong in).
+  estimate_dims: [x_mm, z_mm, pitch_deg]
+
+  # ICP / RANSAC (same meanings as analysis/manifold_icp_validation.py).
+  icp_iterations: 50
+  num_initial_guesses: 100
+  init_guess_range:
+    x_mm: 5.0
+    y_mm: 5.0
+    z_mm: 5.0
+    roll_deg: 15.0
+    pitch_deg: 15.0
+    yaw_deg: 15.0
+  step_gain: 1.5
+  ransac_iters: 200
+  ransac_tol: 1.0
+  residual_gate: 1.5             # drop guesses whose final residual > gate x best before voting
+  random_seed: 0

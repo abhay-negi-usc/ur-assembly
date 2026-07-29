@@ -675,6 +675,58 @@ def test_contact_manifold_never_ingests_its_own_output():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_manifold_estimator_recovers_belief_error():
+    """skills/manifold: observations whose POSE columns carry a rigid belief error (right-multiplied,
+    like an in-hand grasp error) but whose WRENCH is the true contact signature must yield a
+    correction T_corr with believed @ T_corr ~= true -- i.e. D @ T_corr ~= identity."""
+    import csv as _csv
+    import shutil
+    import tempfile
+
+    from urlab.skills.manifold import (FORCE_COLS, POSE_COLS, TORQUE_COLS, ManifoldEstimator,
+                                       mats_from_vec6, vec6_from_mats)
+
+    tmp = tempfile.mkdtemp()
+    try:
+        # Manifold: one linear -X insertion at the TRUE pose (z=0, p=0), constant contact direction.
+        u_f, u_t = np.array([0.6, 0.0, -0.8]), np.array([0.0, 1.0, 0.0])
+        rows = []
+        for x in np.linspace(-20.0, 0.0, 80):
+            rows.append([x, 0.0, 0.0, 0.0, 0.0, 0.0] + list(5.0 * u_f) + list(0.5 * u_t))
+        path = os.path.join(tmp, 'manifold.csv')
+        with open(path, 'w', newline='') as fh:
+            w = _csv.writer(fh)
+            w.writerow(POSE_COLS + FORCE_COLS + TORQUE_COLS)
+            w.writerows(rows)
+
+        est = ManifoldEstimator({'manifold_csv': path, 'estimate_dims': ['z_mm', 'pitch_deg'],
+                                 'icp_iterations': 10, 'num_initial_guesses': 30,
+                                 'random_seed': 5})
+
+        # Believed observations = true poses right-multiplied by the hidden belief error D. D is
+        # built as the inverse of an in-dims transform so the exact correction LIVES in the free
+        # dims (an arbitrary trans+rot D has a small coupled x-component, e.g. 2.5*sin(6 deg), that
+        # a z+pitch-only correction cannot express -- by design, not a defect).
+        true6 = np.array([r[:6] for r in rows])[::2]
+        D = T.inverse(mats_from_vec6([0.0, 0.0, -2.5, 0.0, 6.0, 0.0]))
+        obs6 = vec6_from_mats(mats_from_vec6(true6) @ D)
+        f_raw = np.tile(5.0 * u_f, (len(obs6), 1))
+        tau_raw = np.tile(0.5 * u_t, (len(obs6), 1))
+
+        vec6, w6 = est.prepare_observations(obs6, f_raw, tau_raw)
+        T_corr, info = est.estimate(vec6, w6)
+        assert T_corr is not None, info
+        undone = vec6_from_mats(D @ T_corr)               # perfect correction -> identity
+        assert np.all(np.abs(undone) < 0.2), f'D @ T_corr != I: {np.round(undone, 3)}'
+        assert info['final_residual'] < 0.5, info
+
+        # Too few observations must SKIP (None + reason), never guess from thin data.
+        none_corr, reason = est.estimate(vec6[:3], w6[:3])
+        assert none_corr is None and 'observations' in reason
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_pose_block_accepts_monitor_units():
     """Calibration poses are pasted off the monitor, which prints mm/deg. `xyz_mm`/`rpy_deg` convert
     to the repo-standard m/rad; the unit lives in the KEY so it cannot be confused. Mixing both units

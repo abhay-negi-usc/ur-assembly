@@ -27,6 +27,11 @@
 #                        used by uncertain_sampling as the connector frame)
 #   <cable>.connector_holder_target -> connector_holder_target  (recorded base->connector_holder at the
 #                        mate; used by uncertain_sampling as the assembly target)
+#
+# POSE UNITS. Pose blocks here (connector_in_holder, connector_holder_target) may be written in
+# MONITOR UNITS -- `xyz_mm` (mm) + `rpy_deg` (deg) -- so a reading can be pasted straight off the
+# monitor with no conversion. `xyz`/`rpy` (m/rad, the repo-wide convention) still work. The unit is
+# in the KEY NAME so the two can never be confused; setting both for one triple is an error.
 #   <cable>.target_connector_pose -> assembly.target_connector_pose   (future)
 # ============================================================================
 
@@ -54,9 +59,10 @@ cables:
     # Recorded ASSEMBLY TARGET for the connector_holder (base_link -> connector_holder at the mate),
     # read off the monitor after hand-guiding to a good mate. PER-CABLE (each socket is elsewhere).
     # Used by uncertain_sampling; the connector target = this @ connector_in_holder.
+    # In MONITOR UNITS (mm, deg) -- paste straight from the monitor line, no conversion.
     connector_holder_target:
-      xyz: [0.10037, 1.06109, -0.18463]              # [+100.37, +1061.09, -184.63] mm
-      rpy: [0.0085521, -0.0041888, 1.5472477]        # [+0.49, -0.24, +88.66] deg
+      xyz_mm:  [90.71, 1073.48, -184.20]
+      rpy_deg: [-0.7900, -0.2500, 88.9200]
 
   bnc:
     connector: [197, 206]
@@ -65,9 +71,9 @@ cables:
     connector_in_holder:      # MEASURE (see banana)
       xyz: [0.0, 0.0, 0.0]
       rpy: [0.0, 0.0, 0.0]
-    connector_in_holder:      # MEASURE (see banana)
-      xyz: [0.0, 0.0, 0.0]
-      rpy: [0.0, 0.0, 0.0]
+    # connector_holder_target:   # RECORD off the monitor (mm, deg) before running uncertain_sampling
+    #   xyz_mm:  [0.0, 0.0, 0.0]
+    #   rpy_deg: [0.0, 0.0, 0.0]
 
   c13:
     connector: [195, 198]
@@ -76,6 +82,6 @@ cables:
     connector_in_holder:      # MEASURE (see banana)
       xyz: [0.0, 0.0, 0.0]
       rpy: [0.0, 0.0, 0.0]
-    connector_in_holder:      # MEASURE (see banana)
-      xyz: [0.0, 0.0, 0.0]
-      rpy: [0.0, 0.0, 0.0]
+    # connector_holder_target:   # RECORD off the monitor (mm, deg) before running uncertain_sampling
+    #   xyz_mm:  [0.0, 0.0, 0.0]
+    #   rpy_deg: [0.0, 0.0, 0.0]

@@ -7,6 +7,7 @@ conventions (the thing most likely to be silently wrong), the FrameGraph stalene
 config loader, and the connector-fusion geometry against a synthetic ground truth.
 """
 
+import math
 import os
 import sys
 
@@ -378,8 +379,12 @@ def test_cable_profile_applies_counts():
     assert xyz[1] == 0.0 and xyz[2] == 0.0 and isinstance(xyz[0], float)
     assert cfg.get_path('connector_in_holder.xyz') is not None         # held-connector calibration applied
     assert cfg.get_path('connector_in_holder.rpy') is not None
-    assert cfg.get_path('connector_holder_target.xyz') == [0.10037, 1.06109, -0.18463]  # recorded mate (per-cable)
-    assert cfg.get_path('connector_holder_target.rpy') is not None
+    # The recorded mate is per-cable and gets RE-MEASURED, so assert the UNIT CONVERSION (mm/deg ->
+    # m/rad), not the calibration values themselves.
+    tgt = cfg.get_path('connector_holder_target')
+    assert set(tgt) == {'xyz', 'rpy'}, 'xyz_mm/rpy_deg must be converted away, not passed through'
+    assert all(abs(v) < 10.0 for v in tgt['xyz']), 'xyz must be METRES (mm would be ~1000x)'
+    assert all(abs(v) <= math.pi + 1e-9 for v in tgt['rpy']), 'rpy must be RADIANS (deg would be >pi)'
 
     bnc = Config({'cable': 'bnc', '_config_dir': CONFIG_DIR})
     apply_cable_profile(bnc)
@@ -562,6 +567,29 @@ def test_admittance_yields_along_external_push():
             adm._step(T_ref, 1.0 / 125.0)
         assert adm._delta[axis] > 0, f'axis {axis} must yield ALONG the push, not against it'
         assert arm.commanded[axis, 3] > 0, f'axis {axis}: commanded pose must move along the push'
+
+
+def test_pose_block_accepts_monitor_units():
+    """Calibration poses are pasted off the monitor, which prints mm/deg. `xyz_mm`/`rpy_deg` convert
+    to the repo-standard m/rad; the unit lives in the KEY so it cannot be confused. Mixing both units
+    for one triple must RAISE -- silently preferring one turns 90 mm into 90 m."""
+    from urlab.config import _pose_si
+
+    got = _pose_si({'xyz_mm': [90.71, 1073.48, -184.20], 'rpy_deg': [-0.79, -0.25, 88.92]})
+    assert np.allclose(got['xyz'], [0.09071, 1.07348, -0.18420])
+    assert np.allclose(got['rpy'], np.radians([-0.79, -0.25, 88.92]))
+    assert 'xyz_mm' not in got and 'rpy_deg' not in got, 'the mm/deg keys must be consumed'
+
+    si = {'xyz': [0.1, 0.0, 0.0], 'rpy': [0.0, 0.0, 1.5]}      # m/rad still works unchanged
+    assert _pose_si(si) == si
+    assert _pose_si({}) == {} and _pose_si(None) == {}
+
+    for bad in ({'xyz': [0, 0, 0], 'xyz_mm': [0, 0, 0]}, {'rpy': [0, 0, 0], 'rpy_deg': [0, 0, 0]}):
+        try:
+            _pose_si(bad)
+            assert False, f'expected ValueError for mixed units: {bad}'
+        except ValueError:
+            pass
 
 
 def test_perturb_frames_model_different_error_sources():

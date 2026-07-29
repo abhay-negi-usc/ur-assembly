@@ -31,7 +31,7 @@ connector_holder:
 # profile above -- see `connector_holder_target` under this cable in configs/cables.yaml. The
 # connector target = this @ connector_in_holder.
 
-standoff_distance_m: 0.200
+standoff_distance_m: 0.010
 standoff_axis: [-1.0, 0.0, 0.0]   # assembly is a direct -X -> 0 insertion (connector backs off along -X)
 trajectory_csv: assembly_trajectory.csv
 trajectory_angles_deg: false
@@ -42,13 +42,13 @@ trajectory_angles_deg: false
 # it floats off the path). Runs in the TOOL0 frame over servoL. See urlab/robot/admittance.py.
 compliance:
   mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]              # virtual inertia [kg / kg*m^2]
-  stiffness:     [2000.0, 2000.0, 2000.0, 15.0, 15.0, 15.0]  # restoring spring [N/m, Nm/rad] (20 N -> 10 mm)
-  damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]              # 1 = critically damped
+  stiffness:     [3000.0, 3000.0, 3000.0, 30.0, 30.0, 30.0]  # restoring spring [N/m, Nm/rad] (20 N -> 10 mm)
+  damping_ratio: [1.2, 1.2, 1.2, 1.2, 1.2, 1.2]              # 1 = critically damped
   selected_axes: [1, 1, 1, 1, 1, 1]                          # which TOOL0 axes yield to contact
   reference_rate_hz: 125.0
-  warmup_s: 0.5                 # hold the start pose this long (servo-engage transient decays) before the guard
+  warmup_s: 0.1                 # hold the start pose this long (servo-engage transient decays) before the guard
   tare_before: true            # zero the F/T mid-warmup (servo-active) so the guard baseline is right
-  settle_s: 0.5                # hold at the reached pose after each insert (records the contact wrench)
+  settle_s: 5.0                # hold at the reached pose after each insert (records the contact wrench)
   # NOTE the compliant reference SPEED is set by speed.max_cartesian_* below (mm/s, deg/s), not by a
   # total time -- so changing the path length or the resample resolution no longer changes the speed.
 
@@ -59,7 +59,7 @@ force_guard:
   max_torque_nm: 8.0
 
 sampling:
-  num_trials: 20
+  num_trials: 10_000
   chunk_fraction: 1.0            # fraction of the resampled trajectory to execute per trial
   translational_resolution_m: 0.001
   rotational_resolution_deg: 1.0
@@ -74,20 +74,29 @@ sampling:
   # UNCERTAINTY RANGE per DOF -- half-widths [x, y, z (m), roll, pitch, yaw (deg)] in the frame
   # selected above. Drawn ONCE per trial (the trial's initial misalignment), UNIFORM and INDEPENDENT
   # per DOF over [-half_width, +half_width]. These are HARD limits -- never exceeded (not Gaussian).
-  uncertainty: [0.010, 0.0, 0.005, 0.0, 30.0, 0.0]   # +/- (10 mm, 0, 5 mm, 0, 30 deg, 0)
-  noise:       [0.0,   0.0, 0.0,   0.0,   0.0,  0.0]   # extra per-WAYPOINT jitter (usually 0)
+  uncertainty: [0.0, 0.0, 0.005, 0.0, 30.0, 0.0]   # +/- (10 mm, 0, 5 mm, 0, 30 deg, 0)
+  noise:       [0.003,   0.003, 0.003,   0.051,   0.051,  0.051]   # extra per-WAYPOINT jitter (usually 0)
   log_decimation: 5             # log every Nth servo cycle (125 Hz / N -> ~25 Hz rows)
   random_seed: 0                # 0 = nondeterministic; >0 seeds a dedicated RNG for reproducible trials
   csv_path: data/uncertain_assembly_sampling/uncertain_assembly_log.csv
 
 speed:
-  max_joint_velocity_rad_s: 0.5
+  # FREE-SPACE moves (moveJ: the approach to the stand-off and the reorient to each trial's start).
+  # These are position-controlled and contact-free, so they need not crawl; the joint cap is what
+  # actually binds on a reorient (0.5 rad/s ~= 29 deg/s -> a 60 deg swing takes ~2 s).
+  max_joint_velocity_rad_s: 10.0
   joint_acceleration_rad_s2: 1.0
-  # CARTESIAN limits for the COMPLIANT reference (the admittance insert + retract). Each ramp
-  # segment gets the time its own geometry needs, so neither limit is exceeded.
-  # 50 mm of insertion at 3.5 mm/s ~= 14 s. Set either to 0 to disable that limit.
-  max_cartesian_translation_mm_s: 3.5
+  max_cartesian_velocity_m_s: 0.25      # was unset -> silently defaulted to this; now explicit
+  # CARTESIAN limits for the COMPLIANT reference. Each ramp segment gets the time its own geometry
+  # needs, so neither limit is exceeded. Set any to 0 to disable that limit.
+  # INSERT -- the contact phase. 50 mm at 3.5 mm/s ~= 14 s.
+  max_cartesian_translation_mm_s: 5.0
   max_cartesian_rotation_deg_s: 5.0
+  # RETRACT -- free-space escape back along a path just proven clear, so it need NOT run at the
+  # insertion speed (that made backing out cost the same ~14 s as the insert). Still compliant, so
+  # it yields if it does catch. Omit these to fall back to the insert limits.
+  retract_translation_mm_s: 10.0        # 50 mm in ~2.5 s
+  retract_rotation_deg_s: 10.0
 
 move_timeout_s: 120.0
 settle_s: 0.2

@@ -73,10 +73,6 @@ def build_and_run(cfg, robot, camera, args):
     num_trials = int(s.get('num_trials', 20))
     log.info('%d ideal rows -> %d dense; chunk = %d waypoints; %d trials.',
              len(mats), len(dense), k, num_trials)
-    log.info('Compliant reference limited to %.1f mm/s / %.1f deg/s.',
-             float(cfg.get_path('speed.max_cartesian_translation_mm_s', 3.5)),
-             float(cfg.get_path('speed.max_cartesian_rotation_deg_s', 5.0)))
-
     # WHICH error source the trial perturbation models. Validated here so a typo fails before the
     # arm moves, not on the first trial. See trajectory.perturb for the physics of each.
     perturb_frame = str(s.get('perturb_frame', 'connector')).lower()
@@ -112,14 +108,24 @@ def build_and_run(cfg, robot, camera, args):
     # fixed total time, which silently changes speed whenever the path length or resolution changes.
     v_mm_s = float(cfg.get_path('speed.max_cartesian_translation_mm_s', 3.5))
     w_deg_s = float(cfg.get_path('speed.max_cartesian_rotation_deg_s', 5.0))
+    # The RETRACT gets its own (faster) limits: it is a free-space escape along a path just proven
+    # clear, with no contact expected -- there is no reason to back out at insertion speed. Default
+    # to the insert limits if unset, so behaviour only changes when these are configured.
+    rv_mm_s = float(cfg.get_path('speed.retract_translation_mm_s', v_mm_s))
+    rw_deg_s = float(cfg.get_path('speed.retract_rotation_deg_s', w_deg_s))
     min_seg_s = 1.0 / adm.rate                       # never below one servo cycle
 
-    def seg_time(A, B):
+    def seg_time(A, B, v=None, w=None):
         """Seconds for the reference to go A -> B without exceeding either cartesian limit."""
+        v = v_mm_s if v is None else v
+        w = w_deg_s if w is None else w
         lin_m, ang_rad = pose_error(A, B)
-        t_lin = (lin_m * 1000.0 / v_mm_s) if v_mm_s > 0 else 0.0
-        t_ang = (np.degrees(ang_rad) / w_deg_s) if w_deg_s > 0 else 0.0
+        t_lin = (lin_m * 1000.0 / v) if v > 0 else 0.0
+        t_ang = (np.degrees(ang_rad) / w) if w > 0 else 0.0
         return max(t_lin, t_ang, min_seg_s)
+
+    log.info('Compliant reference: INSERT %.1f mm/s / %.1f deg/s, RETRACT %.1f mm/s / %.1f deg/s.',
+             v_mm_s, w_deg_s, rv_mm_s, rw_deg_s)
     decim = max(1, int(s.get('log_decimation', 5)))        # log every Nth servo cycle (125 Hz / N)
     q_home = robot.arm.q()
 
@@ -182,7 +188,7 @@ def build_and_run(cfg, robot, camera, args):
             # would block the very motion that frees it (see ForceGuard.disable()).
             prev = last_ref
             for idx in range(reached, -1, -1):
-                adm.ramp(prev, refs[idx], seg_time(prev, refs[idx]), guard=None)
+                adm.ramp(prev, refs[idx], seg_time(prev, refs[idx], rv_mm_s, rw_deg_s), guard=None)
                 prev = refs[idx]
             adm.stop()
             fout.flush()

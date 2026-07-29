@@ -4,9 +4,8 @@
 # (the connector coincides with the target connector). This is a direct -X insertion: the
 # connector backs off along the target's -X, 5 cm -> 0 (assembled = connector == target connector).
 x,y,z,roll,pitch,yaw
--0.050,0.0,0.0,0.0,0.0,0.0
--0.035,0.0,0.0,0.0,0.0,0.0
 -0.020,0.0,0.0,0.0,0.0,0.0
+-0.015,0.0,0.0,0.0,0.0,0.0
 -0.010,0.0,0.0,0.0,0.0,0.0
 -0.005,0.0,0.0,0.0,0.0,0.0
 0.0,0.0,0.0,0.0,0.0,0.0

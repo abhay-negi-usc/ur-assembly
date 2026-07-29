@@ -48,7 +48,17 @@ The connector is held via the holder: **tool0 → `connector_holder` → `connec
 `cable:` profile above**. Both frames are shown live in the `monitor`. The **assembly target is
 recorded for the `connector_holder`** and is **per-cable, in `cables.yaml`**: hand-guide to a good
 mate, read `base_link <- connector_holder` off the monitor, and paste it into that cable's
-`connector_holder_target` in `cables.yaml`. The connector target is then
+`connector_holder_target` in `cables.yaml` — **in the monitor's own units**, using the `xyz_mm` /
+`rpy_deg` keys, so there is nothing to convert by hand:
+
+```yaml
+connector_holder_target:
+  xyz_mm:  [90.71, 1073.48, -184.20]     # straight off the monitor line
+  rpy_deg: [-0.79, -0.25, 88.92]
+```
+
+(`xyz`/`rpy` in m/rad still work. The unit is in the **key name**, so the two can't be confused;
+setting both for one triple raises rather than silently picking one.) The connector target is then
 `connector_holder_target · (holder→connector)`, and the assembled tool0 pose + the anchoring
 fall out automatically (last trajectory row ↦ the assembled pose).
 
@@ -105,7 +115,9 @@ with the holder).
 | `compliance.stiffness` / `mass` / `damping_ratio` | the admittance spring-mass-damper (per TOOL0 axis); `stiffness` sets deflection-per-force (`2000 N/m` → 20 N ≈ 10 mm) |
 | `compliance.selected_axes` | which TOOL0 axes yield to contact (`[1,1,1,1,1,1]` = all) |
 | `compliance.settle_s` / `warmup_s` | settle-at-target after each insert / servo warm-up before the guard arms |
-| `speed.max_cartesian_translation_mm_s` / `max_cartesian_rotation_deg_s` | **cartesian speed limits for the compliant reference** (insert *and* retract), in mm/s and deg/s. Each ramp segment gets the time its own geometry needs, so neither limit is exceeded; `0` disables that limit |
+| `speed.max_cartesian_translation_mm_s` / `max_cartesian_rotation_deg_s` | **cartesian speed limits for the compliant INSERT** (the contact phase), mm/s and deg/s. Each ramp segment gets the time its own geometry needs, so neither limit is exceeded; `0` disables that limit |
+| `speed.retract_translation_mm_s` / `retract_rotation_deg_s` | same, for the **RETRACT** — free-space escape, so it need not crawl at insertion speed. Omit to fall back to the insert limits |
+| `speed.max_joint_velocity_rad_s` / `max_cartesian_velocity_m_s` | the **free-space** `moveJ` caps (stand-off approach, per-trial reorient). The joint cap usually binds on a reorient |
 | `compliance.tare_before` | zero the F/T mid-warmup (servo-active) so the guard baseline is correct |
 | `force_guard.max_force_n` / `max_torque_nm` | contact limit; a trip during insertion = the connector **seated** |
 

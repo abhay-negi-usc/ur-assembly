@@ -70,6 +70,28 @@ def _apply_overrides(cfg, overrides):
         cfg.set_path(key.strip(), yaml.safe_load(raw))
 
 
+def _pose_si(pose):
+    """A cables.yaml pose block -> the repo-standard {xyz: m, rpy: rad} that from_cfg expects.
+
+    Calibration poses are read straight off the `monitor`, which prints mm and deg -- so they may be
+    written in those units, with the unit IN THE KEY NAME so it can never be mistaken for the m/rad
+    convention used everywhere else:
+
+        xyz_mm: [90.71, 1073.48, -184.20]      rpy_deg: [-0.79, -0.25, 88.92]
+
+    `xyz`/`rpy` (m/rad) are still accepted. Specifying BOTH units for one axis triple is an error --
+    silently preferring one would turn a 90 mm offset into 90 m, or 88 deg into 88 rad."""
+    import math
+
+    p = dict(pose or {})
+    for si, alt, scale in (('xyz', 'xyz_mm', 1e-3), ('rpy', 'rpy_deg', math.pi / 180.0)):
+        if alt in p:
+            if si in p:
+                raise ValueError(f'pose block sets both {si!r} and {alt!r}; use one unit, not both')
+            p[si] = [float(v) * scale for v in p.pop(alt)]
+    return p
+
+
 def apply_cable_profile(cfg):
     """If the config selects a cable (`cable: <name>`), load the cables file (default cables.yaml,
     resolved next to the config) and OVERRIDE the gripper endpoints + grasp-check counts from that
@@ -117,10 +139,10 @@ def apply_cable_profile(cfg):
     cfg.set_path('connector_grasp.xyz', [off, 0.0, 0.0])
     # Held-connector calibration (connector_holder -> connector) for the assembly / uncertain_sampling.
     if entry.get('connector_in_holder'):
-        cfg.set_path('connector_in_holder', entry['connector_in_holder'])
+        cfg.set_path('connector_in_holder', _pose_si(entry['connector_in_holder']))
     # Recorded assembly target for the connector_holder (per-cable) for uncertain_sampling.
     if entry.get('connector_holder_target'):
-        cfg.set_path('connector_holder_target', entry['connector_holder_target'])
+        cfg.set_path('connector_holder_target', _pose_si(entry['connector_holder_target']))
     if entry.get('target_connector_pose'):                    # (future) the assembly target
         cfg.set_path('assembly.target_connector_pose', entry['target_connector_pose'])
     cfg['_cable_profile'] = name

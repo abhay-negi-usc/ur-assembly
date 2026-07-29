@@ -216,3 +216,20 @@ silent merge.
 Rebuilds are **idempotent** — an existing `*_contact_manifold.csv` is skipped when sweeping a
 directory, so re-running can't read its own output back in and double every sample. Logs in an older
 column format are skipped with a warning rather than failing the batch.
+
+## Validating the manifold — ICP offset recovery
+`analysis/manifold_icp_validation.py` checks whether the manifold carries enough information to
+localise a misaligned connector. Both CSVs are reduced to a common mm-equivalent 12-D space
+(translation as-is; rotation × `scaling_constant_deg_to_mm`; **unit-normalized** force/torque ×
+their scaling constants). Per validation trial, the chosen `perturb_dims` of the initial pose are
+zeroed (a hidden rigid offset applied to every observation, wrench left as recorded), then
+multi-start **ICP** (matching across all 12 dims, correcting only the perturbed dims) with
+**residual-gated RANSAC** aggregation recovers the offset. Edit the `CONFIG` dict at the top and run:
+
+```bash
+python analysis/manifold_icp_validation.py
+```
+
+Output: a timestamped folder under `analysis/` with per-trial figures (per-dim error + NN residual
+vs iteration; every guess faint, consensus bold, dashed zero), a results CSV (per-trial true
+offsets, estimates, signed + absolute errors), and `config.json` for provenance.

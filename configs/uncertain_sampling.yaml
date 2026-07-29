@@ -31,8 +31,20 @@ connector_holder:
 # profile above -- see `connector_holder_target` under this cable in configs/cables.yaml. The
 # connector target = this @ connector_in_holder.
 
-standoff_distance_m: 0.010
+# ASSUMPTION: LINEAR (PEG-IN-HOLE) ASSEMBLY -- the mate is a single-axis insertion along the
+# connector's +X. The trajectory is a straight -X -> 0 approach and the retract is the reverse
+# translation along that same axis. A curved / multi-axis / twist-to-lock mate is NOT supported.
+
+# Stand-off: the free-space pose approached ONCE before the trial loop. Measured from the START of
+# the assembly trajectory (its first row), backed off a further standoff_distance_m along
+# standoff_axis -- so it is always clear of the path, whatever the trajectory's first row is.
+standoff_distance_m: 0.010        # 10 mm beyond the trajectory start
 standoff_axis: [-1.0, 0.0, 0.0]   # assembly is a direct -X -> 0 insertion (connector backs off along -X)
+
+# RETRACT: after each trial, back straight out along the CONNECTOR's OWN -X by this distance, from
+# wherever the insert stopped. In the connector frame, so a perturbed (tilted) part retreats along
+# its own axis rather than the target's. Speed comes from speed.retract_* below.
+retract_distance_m: 0.050
 trajectory_csv: assembly_trajectory.csv
 trajectory_angles_deg: false
 
@@ -42,8 +54,8 @@ trajectory_angles_deg: false
 # it floats off the path). Runs in the TOOL0 frame over servoL. See urlab/robot/admittance.py.
 compliance:
   mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]              # virtual inertia [kg / kg*m^2]
-  stiffness:     [3000.0, 3000.0, 3000.0, 30.0, 30.0, 30.0]  # restoring spring [N/m, Nm/rad] (20 N -> 10 mm)
-  damping_ratio: [1.2, 1.2, 1.2, 1.2, 1.2, 1.2]              # 1 = critically damped
+  stiffness:     [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]     # restoring spring [N/m, Nm/rad] (10 N -> 20 mm)
+  damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]        # 1 = critically damped; 10 = heavily OVERdamped
   selected_axes: [1, 1, 1, 1, 1, 1]                          # which TOOL0 axes yield to contact
   reference_rate_hz: 125.0
   warmup_s: 0.1                 # hold the start pose this long (servo-engage transient decays) before the guard
@@ -55,7 +67,7 @@ compliance:
 # Contact watchdog: a trip during insertion = the connector SEATED (stop advancing). NOT armed during
 # retract (a seated part is already over the limit; a guarded retract would block itself).
 force_guard:
-  max_force_n: 30.0
+  max_force_n: 10.0
   max_torque_nm: 8.0
 
 sampling:
@@ -71,11 +83,25 @@ sampling:
   #               TARGET's axes). The whole approach is rigidly misaimed and the part drives in
   #               along its OWN rotated axis.
   perturb_frame: connector
-  # UNCERTAINTY RANGE per DOF -- half-widths [x, y, z (m), roll, pitch, yaw (deg)] in the frame
-  # selected above. Drawn ONCE per trial (the trial's initial misalignment), UNIFORM and INDEPENDENT
-  # per DOF over [-half_width, +half_width]. These are HARD limits -- never exceeded (not Gaussian).
-  uncertainty: [0.0, 0.0, 0.005, 0.0, 30.0, 0.0]   # +/- (10 mm, 0, 5 mm, 0, 30 deg, 0)
-  noise:       [0.003,   0.003, 0.003,   0.051,   0.051,  0.051]   # extra per-WAYPOINT jitter (usually 0)
+  # HOW the trial misalignments are chosen:
+  #   random = uniform draw inside the bounds below, `num_trials` times.
+  #   grid   = sweep EVERY combination of the per-DOF grid values at `grid_resolution`; exhaustive
+  #            and deterministic, and NUM_TRIALS IS DERIVED FROM IT (`num_trials` is then ignored).
+  mode: random
+  # Grid step per DOF, same order/units as the bounds. Only DOFs whose lower != upper are stepped (a
+  # degenerate DOF contributes a single value), so all-zero DOFs cost nothing. The step is nudged so
+  # both endpoints are hit exactly. Here: z in {-5, 0, +5} mm  x  pitch in {-15, 0, +15} deg = 9 trials.
+  grid_resolution: [0.0, 0.0, 0.005, 0.0, 15.0, 0.0]
+  # UNCERTAINTY RANGE per DOF, as ABSOLUTE LOWER/UPPER bounds [x, y, z (m), roll, pitch, yaw (deg)]
+  # in the frame selected above -- NOT half-widths, so a range need not be centred on zero.
+  # Applied ONCE per trial (the trial's initial misalignment). HARD limits, never exceeded.
+  uncertainty:
+    lower: [0.0, 0.0, -0.005, 0.0, -15.0, 0.0]   # -5 mm in z, -15 deg in pitch
+    upper: [0.0, 0.0,  0.005, 0.0,  15.0, 0.0]   # +5 mm in z, +15 deg in pitch
+  # Extra per-WAYPOINT jitter, drawn the same way (usually all zero).
+  noise:
+    lower: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    upper: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   log_decimation: 5             # log every Nth servo cycle (125 Hz / N -> ~25 Hz rows)
   random_seed: 0                # 0 = nondeterministic; >0 seeds a dedicated RNG for reproducible trials
   csv_path: data/uncertain_assembly_sampling/uncertain_assembly_log.csv
@@ -83,15 +109,15 @@ sampling:
 speed:
   # FREE-SPACE moves (moveJ: the approach to the stand-off and the reorient to each trial's start).
   # These are position-controlled and contact-free, so they need not crawl; the joint cap is what
-  # actually binds on a reorient (0.5 rad/s ~= 29 deg/s -> a 60 deg swing takes ~2 s).
-  max_joint_velocity_rad_s: 10.0
+  # actually binds on a reorient (25 deg/s -> a 60 deg swing takes ~2.4 s).
+  max_joint_velocity_deg_s: 25.0        # deg/s (the _rad_s spelling is still accepted)
   joint_acceleration_rad_s2: 1.0
   max_cartesian_velocity_m_s: 0.25      # was unset -> silently defaulted to this; now explicit
   # CARTESIAN limits for the COMPLIANT reference. Each ramp segment gets the time its own geometry
   # needs, so neither limit is exceeded. Set any to 0 to disable that limit.
-  # INSERT -- the contact phase. 50 mm at 3.5 mm/s ~= 14 s.
-  max_cartesian_translation_mm_s: 5.0
-  max_cartesian_rotation_deg_s: 5.0
+  # INSERT -- the contact phase.
+  max_cartesian_translation_mm_s: 10.0
+  max_cartesian_rotation_deg_s: 30.0
   # RETRACT -- free-space escape back along a path just proven clear, so it need NOT run at the
   # insertion speed (that made backing out cost the same ~14 s as the insert). Still compliant, so
   # it yields if it does catch. Omit these to fall back to the insert limits.

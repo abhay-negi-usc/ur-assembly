@@ -60,7 +60,11 @@ class URArm:
         # Speed caps. Applied directly as RTDE limits, so these are HARD ceilings, not the
         # average-velocity bounds the old duration-based scheme produced.
         speed = cfg.section('speed')
-        self.max_joint_vel = float(speed.get('max_joint_velocity_rad_s', 0.0)) or 1.05
+        # Joint cap may be given in deg/s (unit in the key name, matching the cartesian mm/s / deg/s
+        # limits) or rad/s. deg/s wins if both are set -- it is the more explicit spelling.
+        self.max_joint_vel = (np.radians(float(speed['max_joint_velocity_deg_s']))
+                              if speed.get('max_joint_velocity_deg_s') is not None
+                              else float(speed.get('max_joint_velocity_rad_s', 0.0)) or 1.05)
         self.max_cart_vel = float(speed.get('max_cartesian_velocity_m_s', 0.0)) or 0.25
         self.joint_accel = float(speed.get('joint_acceleration_rad_s2', 1.2))
         self.cart_accel = float(speed.get('cartesian_acceleration_m_s2', 0.5))

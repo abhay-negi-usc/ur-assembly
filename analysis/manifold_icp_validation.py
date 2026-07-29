@@ -59,38 +59,38 @@ import seaborn as sns                       # noqa: E402
 CONFIG = {
     # ---- what & where -------------------------------------------------------------------
     'cable': 'banana',                       # connector type (names the results CSV)
-    'manifold_csv': r'data/uncertain_assembly_sampling/banana/banana_connector_contact_manifold.csv',
-    'validation_csv': r'data/uncertain_assembly_sampling/banana/validation_log.csv',
+    'manifold_csv': r'/abhay_ws/ur-assembly/configs/data/uncertain_assembly_sampling/banana/uncertain_assembly_log_20260729_153535.csv',
+    'validation_csv': r'/abhay_ws/ur-assembly/configs/data/uncertain_assembly_sampling/banana/uncertain_assembly_log_20260729_180802.csv',
     'output_root': 'analysis',               # a timestamped run folder is created under this
 
     # ---- normalization & scaling (the common Nx12 space) --------------------------------
     # Translation stays in mm. Rotation deg -> mm-equivalent. Force/torque are unit vectors
     # scaled to mm-equivalent. These weights decide what "nearest" means in the 12-D match.
     'scaling_constant_deg_to_mm': 1.0,
-    'scaling_constant_unit_force_to_mm': 0.1,
-    'scaling_constant_unit_torque_to_mm': 0.1,
+    'scaling_constant_unit_force_to_mm': 10.0,
+    'scaling_constant_unit_torque_to_mm': 100.0,
     'min_force_n': None,                     # drop rows with |f| < this N BEFORE normalizing
                                              # (None keeps all; zero-force rows keep a zero f_hat)
 
     # ---- perturbation -------------------------------------------------------------------
     # Dims of the initial connector pose to ZERO (the hidden offset ICP must recover).
     # Any subset of: x_mm y_mm z_mm roll_deg pitch_deg yaw_deg
-    'perturb_dims': ['z_mm', 'pitch_deg'],
+    'perturb_dims': ['x_mm', 'z_mm', 'pitch_deg'],
 
     # ---- ICP / RANSAC -------------------------------------------------------------------
-    'icp_iterations': 10,
+    'icp_iterations': 50,
     'num_initial_guesses': 100,              # guess 0 is always the identity (no correction)
     'init_guess_range': {                    # uniform +/- range for the initial correction guesses
         'x_mm': 5.0, 'y_mm': 5.0, 'z_mm': 5.0,
         'roll_deg': 15.0, 'pitch_deg': 15.0, 'yaw_deg': 15.0,
     },
-    'step_gain': 1.0,                        # fraction of the mean NN delta applied per iteration
+    'step_gain': 1.5,                        # fraction of the mean NN delta applied per iteration
     'ransac_iters': 200,
     'ransac_tol': 1.0,                       # inlier radius around a candidate, mm-equivalent
     # Before RANSAC votes, drop guesses whose FINAL residual exceeds gate x the best guess's --
     # a wrong local minimum can attract MANY guesses (a big cluster), but its alignment stays
     # visibly worse, so residual is the tie-breaker vote-counting alone does not have.
-    'residual_gate': 1.5,                    # None disables the gate
+    'residual_gate': None,                    # None disables the gate
     'random_seed': 0,                        # 0 = nondeterministic
 
     # ---- run control --------------------------------------------------------------------
@@ -100,7 +100,7 @@ CONFIG = {
     # group trials that share one physical offset (e.g. one grasp, several insertions): more data
     # constraining the same unknown. 1 = one observation per trial (the default behaviour).
     'trials_per_observation': 1,
-    'max_points_per_observation': 250,       # stride-subsample big observations (speed); None = all
+    'max_points_per_observation': None,       # stride-subsample big observations (speed); None = all
     'dpi': 110,
 }
 

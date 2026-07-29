@@ -1,0 +1,290 @@
+"""Cable pick, then ESTIMATE-while-ASSEMBLING -- cable_pick_assemble + the contact manifold.
+
+The PICK is exactly the cable_pick_assemble pipeline (scan, grasp, check, recovery). The assembly
+differs: the robot KNOWS the target connector pose (`assembly.target_connector`) and holds an
+ESTIMATE of the connector-in-hand (fingertip -> connector, initialised from the grasp geometry),
+but that estimate carries in-hand error. Each attempt runs the assembly trajectory under software
+admittance exactly like uncertain_sampling -- following the (believed) path, yielding to contact,
+LOGGING observations (believed connector-wrt-target pose + wrench in the believed connector frame).
+
+    [pick] -> lift -> stand-off ->
+        LOOP (max assembly.max_attempts):
+            assemble (admittance, guarded, observing)
+            check    (believed connector pose vs target, success_tolerance)
+              -> within tolerance: release, retract, done
+            retract  (linear, back along the connector's own -X -- peg-in-hole assumption)
+            estimate (ICP of the observations against the CONTACT MANIFOLD -- skills/manifold.py,
+                      the same algorithm analysis/manifold_icp_validation.py validates offline)
+            update   (T_fingertip_connector <- T_fingertip_connector @ T_corr)
+            realign  (recompute the trajectory references from the new estimate)
+
+WHY THE CHECK WORKS: the check uses the BELIEVED pose, but under admittance a wrong belief cannot
+fake success -- if the part jams short of the mate, the arm DEFLECTS off the reference, the actual
+tool0 (and therefore the believed connector pose) lags the target, and the check fails. The failed
+attempt's observations are exactly what the manifold estimator needs to correct the belief.
+
+Units: robot poses are metres/radians (repo convention); the manifold space is mm/deg -- the
+conversions happen only at the observation/correction boundary in this file.
+"""
+
+import csv as _csv
+import os
+from datetime import datetime
+
+import numpy as np
+
+from .. import config as urconfig
+from .. import log as urlog
+from ..log import StepRunner
+from ..robot import AdmittanceController, ForceGuard
+from ..skills import insert as ins
+from ..skills import reset
+from ..skills import trajectory as traj
+from ..skills.manifold import FORCE_COLS, ManifoldEstimator, POSE_COLS, TORQUE_COLS
+from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
+                           GraspRecovery)
+from ..transforms import from_cfg, inverse, matrix_to_xyzrpy, pose_error, translation_matrix
+from ._cable import build_scanner, make_confirm
+from ._runner import run_app
+from .cable_pick_assemble import _guarded, _pick
+from .uncertain_sampling import _retract_ref
+
+log = urlog.get('cable-est-assemble')
+
+
+def _corr_to_m(T_corr_mm):
+    """The estimator's correction (translation in mm) -> a metre-based transform."""
+    T = np.array(T_corr_mm, dtype=float)
+    T[:3, 3] /= 1000.0
+    return T
+
+
+def _observe(robot, T_tool0_conn, T_base_tconn):
+    """One observation row: believed connector-wrt-target [mm, deg 6-vec] + raw wrench in the
+    believed connector frame [N, Nm]."""
+    T_base_conn = robot.tool0() @ T_tool0_conn
+    rel = inverse(T_base_tconn) @ T_base_conn
+    xyz, rpy = matrix_to_xyzrpy(rel)
+    w = robot.arm.wrench_in(T_base_conn)
+    return list(xyz * 1000.0) + list(np.degrees(rpy)) + list(w)
+
+
+def _save_observations(path, rows):
+    with open(path, 'w', newline='') as fh:
+        w = _csv.writer(fh)
+        w.writerow(POSE_COLS + FORCE_COLS + TORQUE_COLS)
+        w.writerows(rows)
+
+
+def build_and_run(cfg, robot, camera, args):
+    a = cfg.section('assembly')
+
+    # Build the ESTIMATOR first -- a missing/stale manifold CSV must fail before the robot moves.
+    estimator = ManifoldEstimator(cfg.section('estimation'))
+
+    scanner, _detector, _estimator = build_scanner(cfg, robot, camera)
+    geom = GraspGeometry(cfg)
+    check = GraspCheck(cfg)
+    recovery = GraspRecovery(cfg)
+    grasp = GraspController(cfg)
+    recorder = GraspImageRecorder(cfg)
+    guard = ForceGuard(robot.arm, a.get('force_guard', {}))
+    adm = AdmittanceController(robot.arm, a.get('compliance', {}))
+    confirm = make_confirm(cfg)
+
+    # ---- Known target + trajectory (connector w.r.t. TARGET connector; last row = the mate) ----
+    T_base_tconn = from_cfg(a.get('target_connector', {}))
+    csv_in = urconfig.resolve(cfg, a.get('trajectory_csv', 'assembly_trajectory.csv'))
+    mats = traj.load_csv(csv_in, angles_deg=bool(a.get('trajectory_angles_deg', False)))
+    if float(np.abs(mats[-1] - np.eye(4)).max()) > 1e-6:
+        log.warning('trajectory last row is not identity -- rows are still applied relative to '
+                    'assembly.target_connector.')
+    dense = traj.resample(mats, float(a.get('translational_resolution_m', 0.001)),
+                          float(a.get('rotational_resolution_deg', 1.0)))
+
+    # ---- The in-hand ESTIMATE (fingertip -> connector). Grasp geometry is the initial belief:
+    # at grasp the fingertip is commanded to connector @ connector_grasp, so ftip->conn = its
+    # inverse. estimation.initial_connector_in_fingertip (m/rad) overrides it when set. ----
+    init = cfg.get_path('estimation.initial_connector_in_fingertip')
+    T_ftip_conn = from_cfg(init) if init else inverse(from_cfg(cfg.section('connector_grasp')))
+
+    # ---- Speeds for the compliant reference (same convention as uncertain_sampling) ----
+    v_mm_s = float(cfg.get_path('speed.max_cartesian_translation_mm_s', 3.5))
+    w_deg_s = float(cfg.get_path('speed.max_cartesian_rotation_deg_s', 5.0))
+    rv_mm_s = float(cfg.get_path('speed.retract_translation_mm_s', v_mm_s))
+    rw_deg_s = float(cfg.get_path('speed.retract_rotation_deg_s', w_deg_s))
+    min_seg_s = 1.0 / adm.rate
+
+    def seg_time(A, B, v=v_mm_s, w=w_deg_s):
+        lin_m, ang_rad = pose_error(A, B)
+        t_lin = (lin_m * 1000.0 / v) if v > 0 else 0.0
+        t_ang = (np.degrees(ang_rad) / w) if w > 0 else 0.0
+        return max(t_lin, t_ang, min_seg_s)
+
+    comp = a.get('compliance', {}) or {}
+    settle_s = float(comp.get('settle_s', 0.5))
+    tare = (lambda: robot.arm.zero_ft(settle=False)) if bool(comp.get('tare_before', True)) else None
+    retract_m = float(a.get('retract_distance_m', 0.05))
+    decim = max(1, int(a.get('log_decimation', 5)))
+    tol = a.get('success_tolerance', {}) or {}
+    tol_pos_m = float(tol.get('pos_mm', 2.0)) / 1000.0
+    tol_rot_rad = np.radians(float(tol.get('rot_deg', 3.0)))
+    max_attempts = int(a.get('max_attempts', 5))
+
+    out_dir = os.path.join(cfg.get('data_dir', 'data'), 'cable_pick_estimate_assemble',
+                           datetime.now().strftime('%Y%m%d_%H%M%S'))
+    os.makedirs(out_dir, exist_ok=True)
+    log.info('Run folder: %s', out_dir)
+
+    # ---- RESET + PICK (identical to cable_pick_assemble) ----
+    if not reset.reset_robot(robot, cfg, 'start reset'):
+        return False
+    q_home = robot.arm.q()
+    attempt = 0
+    while True:
+        result = _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder)
+        if result == 'ok':
+            break
+        if result == 'abort':
+            return False
+        if attempt >= check.max_retries:
+            log.error('Grasp failed on all %d attempts; aborting.', check.max_retries + 1)
+            return False
+        attempt += 1
+        log.warning('Grasp %s -- recovering (attempt %d/%d).',
+                    result, attempt + 1, check.max_retries + 1)
+        if not (robot.gripper.open('drop') and robot.arm.move_j(q_home, label='home')):
+            return False
+
+    # ---- Lift, then approach the stand-off (beyond the trajectory START, target frame) ----
+    runner = StepRunner(log, confirm=confirm is not None)
+    if not runner.run([('lift', lambda: grasp.lift(robot, geom, 'lift',
+                                                   position_guard=lambda mv: _guarded(robot, guard, mv)))]):
+        return False
+
+    standoff_axis = np.asarray((a.get('standoff', {}) or {}).get('axis', [-1, 0, 0]), dtype=float)
+    standoff_m = float((a.get('standoff', {}) or {}).get('distance_m', 0.01))
+    T_standoff_row = translation_matrix(standoff_axis * standoff_m) @ mats[0]
+
+    def tool0_ref(row, T_tool0_conn):
+        return T_base_tconn @ row @ inverse(T_tool0_conn)
+
+    seed_q = robot.arm.q()
+    T_tool0_conn = robot.T_tool0_fingertip @ T_ftip_conn
+    q = robot.arm.ik(tool0_ref(T_standoff_row, T_tool0_conn), seed_q)
+    if q is None or not _guarded(robot, guard, lambda: robot.arm.move_j(q, label='stand-off')):
+        return False
+    seed_q = q
+
+    # ---- The assemble / check / retract / estimate loop ----
+    est_rows, success = [], False
+    try:
+        for it in range(1, max_attempts + 1):
+            T_tool0_conn = robot.T_tool0_fingertip @ T_ftip_conn
+            e_xyz, e_rpy = matrix_to_xyzrpy(T_ftip_conn)
+            log.info('--- attempt %d/%d --- in-hand estimate xyz=%s mm rpy=%s deg', it, max_attempts,
+                     np.round(e_xyz * 1000, 2).tolist(), np.round(np.degrees(e_rpy), 2).tolist())
+            refs = [tool0_ref(row, T_tool0_conn) for row in dense]
+
+            # Realign with the START of the (re-estimated) trajectory -- stiff, free space, guarded.
+            q = robot.arm.ik(refs[0], seed_q)
+            if q is None or not _guarded(robot, guard,
+                                         lambda: robot.arm.move_j(q, label=f'align start {it}')):
+                log.error('Could not reach the trajectory start; aborting.')
+                return False
+            seed_q = q
+
+            # ASSEMBLE under admittance, collecting observations (same law as uncertain_sampling).
+            obs, cnt = [], [0]
+
+            def log_cb(_obs=obs, _cnt=cnt, _Ttc=T_tool0_conn):
+                _cnt[0] += 1
+                if _cnt[0] % decim == 0:
+                    _obs.append(_observe(robot, _Ttc, T_base_tconn))
+
+            adm.reset()
+            adm.warmup(refs[0], tare_fn=tare)
+            guard.reset()
+            last_ref = refs[0]
+            for i in range(1, len(refs)):
+                res = adm.ramp(refs[i - 1], refs[i], seg_time(refs[i - 1], refs[i]),
+                               guard, on_step=log_cb)
+                last_ref = refs[i]
+                if res == 'seated':
+                    log.info('Contact limit at waypoint %d/%d -- stopped advancing.', i, len(refs) - 1)
+                    break
+            adm.hold(last_ref, settle_s, guard, on_step=log_cb)
+
+            # CHECK: believed connector pose vs the target. Compliance deflection makes a wrong
+            # belief show up here as a real position/rotation error.
+            T_conn_now = robot.tool0() @ T_tool0_conn
+            lin, ang = pose_error(T_conn_now, T_base_tconn)
+            log.info('check: connector vs target: %.2f mm, %.2f deg (tol %.2f mm, %.2f deg)',
+                     lin * 1000, np.degrees(ang), tol_pos_m * 1000, np.degrees(tol_rot_rad))
+            _save_observations(os.path.join(out_dir, f'attempt_{it:02d}_observations.csv'), obs)
+
+            row = {'attempt': it, 'n_observations': len(obs),
+                   'check_pos_mm': lin * 1000.0, 'check_rot_deg': float(np.degrees(ang)),
+                   'success': lin <= tol_pos_m and ang <= tol_rot_rad}
+            if row['success']:
+                est_rows.append(row)
+                log.info('Within tolerance -- ASSEMBLY COMPLETE on attempt %d.', it)
+                success = True
+                break
+
+            # RETRACT: linear escape along the connector's own -X (compliant, un-guarded).
+            T_out = _retract_ref(last_ref, T_tool0_conn, retract_m)
+            adm.ramp(last_ref, T_out, seg_time(last_ref, T_out, rv_mm_s, rw_deg_s), guard=None)
+            robot.arm.servo_stop()
+
+            if it == max_attempts:
+                est_rows.append(row)
+                log.error('Attempt limit reached (%d) without a successful mate.', max_attempts)
+                break
+
+            # ESTIMATE the belief error from this attempt's observations, against the manifold.
+            obs_arr = np.asarray(obs, dtype=float)
+            vec6, w6 = estimator.prepare_observations(obs_arr[:, :6], obs_arr[:, 6:9],
+                                                      obs_arr[:, 9:12]) if len(obs) else \
+                (np.zeros((0, 6)), np.zeros((0, 6)))
+            T_corr_mm, info = estimator.estimate(vec6, w6)
+            if T_corr_mm is None:
+                log.warning('Estimation skipped (%s) -- retrying with the UNCHANGED estimate.', info)
+                row['estimate'] = f'skipped: {info}'
+                est_rows.append(row)
+                continue
+            log.info('estimated belief correction: %s  (inliers %d/%d, residual %.3f, %d obs)',
+                     {k: round(v, 3) for k, v in info['theta_corr'].items()},
+                     info['inliers'], info['guesses'], info['final_residual'],
+                     info['n_observations'])
+            T_ftip_conn = T_ftip_conn @ _corr_to_m(T_corr_mm)     # believed @ corr ~= true
+            row.update({f'corr_{k}': v for k, v in info['theta_corr'].items()})
+            row.update({'icp_inliers': info['inliers'], 'icp_residual': info['final_residual']})
+            est_rows.append(row)
+    finally:
+        robot.arm.servo_stop()
+        if est_rows:
+            keys = sorted({k for r in est_rows for k in r}, key=str)
+            with open(os.path.join(out_dir, 'estimates.csv'), 'w', newline='') as fh:
+                w = _csv.DictWriter(fh, fieldnames=keys)
+                w.writeheader()
+                w.writerows(est_rows)
+            log.info('Per-attempt log: %s', os.path.join(out_dir, 'estimates.csv'))
+
+    if not success:
+        return False
+
+    # ---- Release + escape + reset, as in cable_pick_assemble ----
+    ic = ins.InsertConfig(cfg) if cfg.get_path('assembly.retract') else None
+    ok = runner.run([('open gripper (release)', robot.gripper.open)]
+                    + ([('retract', lambda: ins.retract(robot, ic))] if ic else []))
+    return ok and reset.reset_robot(robot, cfg, 'end reset')
+
+
+def main():
+    run_app('Cable pick + estimate-while-assemble (contact-manifold ICP)',
+            'cable_pick_estimate_assemble', build_and_run, needs_camera=True)
+
+
+if __name__ == '__main__':
+    main()

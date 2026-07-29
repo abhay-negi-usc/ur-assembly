@@ -61,8 +61,8 @@ cables:
     # Used by uncertain_sampling; the connector target = this @ connector_in_holder.
     # In MONITOR UNITS (mm, deg) -- paste straight from the monitor line, no conversion.
     connector_holder_target:
-      xyz_mm:  [90.71, 1073.48, -184.20]
-      rpy_deg: [-0.7900, -0.2500, 88.9200]
+      xyz_mm:  [90.26, 1072.67, -181.61]
+      rpy_deg: [-0.71, 0.12, 88.73]
 
   bnc:
     connector: [197, 206]

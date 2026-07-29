@@ -6,8 +6,14 @@ misaligned connector behaves during insertion.
 
 ```
 for each trial: perturb (connector frame) -> move to the perturbed start (stiff, free space) ->
-follow the path under ADMITTANCE (logging at the servo rate, guarded) -> settle -> retract -> CSV
+follow the path under ADMITTANCE (logging at the servo rate, guarded) -> settle ->
+retract straight back along the connector's -X -> CSV
 ```
+
+> **Assumption: linear (peg-in-hole) assembly.** The mate is taken to be a single-axis insertion
+> along the connector's **+X** — the trajectory is a straight −X → 0 approach and the retract is the
+> reverse translation along that same axis. A curved, multi-axis, or twist-to-lock mate is **not**
+> supported and would need a true reverse-path retract.
 
 ## Control — compliance (admittance), NOT force control
 The insertion runs under **software admittance** (`urlab/robot/admittance.py`): the arm **follows the
@@ -80,16 +86,43 @@ Both tilt the part identically — **only the travel direction distinguishes the
 regression test asserts travel direction rather than the endpoint.
 
 ## How the uncertainty is sampled
-**Uniform, independent per DOF, with hard limits.** Each value in `sampling.uncertainty` is a
-**half-width**, not a standard deviation: DOF *i* is drawn `U(−half_widthᵢ, +half_widthᵢ)`, once per
-trial. Draws are zero-centred, fill the range, and **never exceed it** — a `0` entry means that DOF
-never moves. `sampling.noise` is drawn the same way, but freshly per waypoint.
+The range is **absolute lower/upper bounds per DOF** — not half-widths — so it need not be centred
+on zero (a connector that always sags can be given `[-4, -1]` mm):
 
-> Reading these as σ would be badly wrong: ~32% of Gaussian draws fall outside ±σ, and a 30° σ would
-> produce occasional 90°+ misalignments. There is no tail here — `±30°` means exactly that.
+```yaml
+uncertainty:
+  lower: [0.0, 0.0, -0.005, 0.0, -15.0, 0.0]    # x,y,z in m; roll,pitch,yaw in deg
+  upper: [0.0, 0.0,  0.005, 0.0,  15.0, 0.0]
+```
 
-Rotations are applied as **extrinsic XYZ** rpy (the repo-wide convention). `sampling.random_seed > 0`
-seeds a dedicated RNG so a run replays exactly.
+`sampling.mode` picks how points inside that box are chosen:
+
+| `mode` | behaviour |
+|---|---|
+| **`random`** (default) | uniform draw inside the bounds, independently per DOF, once per trial, `num_trials` times. **Hard limits** — never exceeded, no tail (these are *not* σ). |
+| **`grid`** | **ordered, exhaustive sweep** of every combination of the per-DOF grid values at `grid_resolution`. Deterministic, each point visited exactly once, **and `num_trials` is derived from the grid** (the configured `num_trials` is ignored). |
+
+Grid order is the Cartesian product with the **last axis varying fastest**; DOFs whose `lower ==
+upper` contribute a single value, so all-zero DOFs cost nothing. The step is nudged so **both
+endpoints are hit exactly** — a range that isn't a whole multiple of the step won't silently drop its
+upper end. A DOF that spans a range with `grid_resolution: 0` is a loud error, not a silent single
+point. With the shipped config (z ±5 mm step 5 mm, pitch ±15° step 15°) that's **9 trials**:
+
+```
+(-5mm,-15°) (-5mm,0°) (-5mm,+15°) (0,-15°) (0,0°) (0,+15°) (+5mm,-15°) (+5mm,0°) (+5mm,+15°)
+```
+
+`sampling.noise` uses the same lower/upper form, drawn freshly per waypoint. Rotations are applied as
+**extrinsic XYZ** rpy (the repo-wide convention). `sampling.random_seed > 0` seeds a dedicated RNG so
+a `random` run replays exactly; `grid` is reproducible by construction.
+
+## Progress reporting
+Every trial logs its own duration, the running **mean cycle time**, and the **ETA** plus expected
+wall-clock finish time:
+
+```
+trial 4/9 took 31.2 s | mean cycle 30.8 s | 5 left, ETA 2:34 (done ~14:21:07)
+```
 
 **To calibrate `connector_in_holder` for a connector:** hold it in the holder, hand-guide, and read
 `base_link <- connector` vs `base_link <- connector_holder` off the monitor; paste the relative pose
@@ -103,12 +136,17 @@ with the holder).
 | `connector_holder` | the shared holder mount (tool0 → connector_holder) |
 | `connector_holder_target` | recorded base→connector_holder at the mate (from the monitor); **per-cable, in `cables.yaml`** |
 | `standoff_axis` | approach/insertion axis in the target-connector frame (`[-1,0,0]` = direct −X → 0) |
+| `standoff_distance_m` | how far **beyond the trajectory's FIRST row** the one-time stand-off sits (measured from the path start, not the mate — so it is always clear of the path) |
+| `retract_distance_m` | how far to back out after each trial, straight along the **connector's own −X** from wherever the insert stopped (magnitude; compliant but un-guarded) |
 | `sampling.num_trials` | how many perturbed insertions |
 | `sampling.chunk_fraction` | fraction of the (resampled) trajectory to execute per trial |
 | `sampling.translational_resolution_m` / `rotational_resolution_deg` | densify the CSV to this spacing |
 | `sampling.perturb_frame` | `connector` (in-hand pose error, default) or `target` (socket pose error) — see above |
-| `sampling.uncertainty` | per-DOF **uniform half-widths** `[x,y,z (m), r,p,y (deg)]`, drawn once per trial in the frame above. Hard limits, not σ |
-| `sampling.noise` | extra jitter, drawn the same way but **per waypoint** (usually 0) |
+| `sampling.mode` | `random` (uniform draws, `num_trials` of them) or `grid` (ordered exhaustive sweep; **derives** the trial count) |
+| `sampling.grid_resolution` | per-DOF grid step, same order/units as the bounds (`grid` mode only) |
+| `sampling.uncertainty.lower` / `.upper` | per-DOF **absolute bounds** `[x,y,z (m), r,p,y (deg)]` in the frame above. Hard limits, not σ; need not be symmetric |
+| `sampling.noise.lower` / `.upper` | extra jitter, same form but drawn **per waypoint** (usually all 0) |
+| `speed.max_joint_velocity_deg_s` | free-space joint cap in **deg/s** (the `_rad_s` spelling is still accepted) |
 | `sampling.log_decimation` | log every Nth servo cycle (125 Hz / N ≈ rows/s); `5` ≈ 25 Hz |
 | `sampling.random_seed` | `0` = nondeterministic; `>0` seeds a dedicated RNG for replayable trials |
 | `sampling.csv_path` | output stem; a `<cable>/` subfolder is inserted and a `_YYYYmmdd_HHMMSS` appended, so runs are grouped by cable and unique |

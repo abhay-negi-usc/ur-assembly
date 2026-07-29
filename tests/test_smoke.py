@@ -569,6 +569,34 @@ def test_admittance_yields_along_external_push():
         assert arm.commanded[axis, 3] > 0, f'axis {axis}: commanded pose must move along the push'
 
 
+def test_retract_backs_out_along_the_connector_axis():
+    """Linear peg-in-hole escape: the retract must translate the HELD PART along ITS OWN -X, so a
+    tilted (perturbed) connector backs out along its own axis rather than the target's. Distance is
+    a magnitude -- a negative config value must not drive INTO the socket."""
+    from urlab.apps.uncertain_sampling import _retract_ref
+    from urlab.transforms import xyzrpy_to_matrix
+
+    T_tool0_held = xyzrpy_to_matrix([0.0, -0.045, 0.010], [math.pi, 0.0, -math.pi / 2])
+    d = 0.05
+
+    # Tool0 reference chosen so the HELD PART sits pitched 30 deg about base Y.
+    T_conn = xyzrpy_to_matrix([0.4, 0.2, 0.3], np.radians([0.0, 30.0, 0.0]))
+    T_ref = T_conn @ T.inverse(T_tool0_held)
+
+    out = _retract_ref(T_ref, T_tool0_held, d)
+    conn_out = out @ T_tool0_held                       # where the connector ended up
+    moved = conn_out[:3, 3] - T_conn[:3, 3]
+
+    assert np.allclose(conn_out[:3, :3], T_conn[:3, :3], atol=1e-12), 'retract must not rotate'
+    assert np.isclose(np.linalg.norm(moved), d), f'must travel exactly {d} m'
+    assert np.allclose(moved / d, -T_conn[:3, 0], atol=1e-9), \
+        "travel must be along the CONNECTOR's own -X"
+    assert not np.allclose(moved / d, [-1.0, 0.0, 0.0], atol=1e-3), \
+        'a 30 deg tilt must move it off the target/base -X'
+    # magnitude only: a negative distance must retract, never insert
+    assert np.allclose(_retract_ref(T_ref, T_tool0_held, -d), out)
+
+
 def test_pose_block_accepts_monitor_units():
     """Calibration poses are pasted off the monitor, which prints mm/deg. `xyz_mm`/`rpy_deg` convert
     to the repo-standard m/rad; the unit lives in the KEY so it cannot be confused. Mixing both units
@@ -605,58 +633,105 @@ def test_perturb_frames_model_different_error_sources():
     # Ideal path: -5 cm -> 0 along the target's X, identity rotation (mate = last row = identity).
     dense = [xyzrpy_to_matrix([-s, 0, 0], [0, 0, 0]) for s in np.linspace(0.05, 0.0, 6)]
     pitch = 30.0
-    bias = [0.0, 0.0, 0.0, 0.0, pitch, 0.0]
-
-    class _FixedRng:                       # a deterministic 'uniform' -> always the +half-width
-        @staticmethod
-        def uniform(lo, hi, n):
-            return np.ones(n)
+    R_bias = xyzrpy_to_matrix([0, 0, 0], np.radians([0, pitch, 0]))
+    bias = R_bias                          # the trial's chosen delta (grid point or random draw)
+    zeros = [0.0] * 6
+    rng = np.random.default_rng(0)
 
     def travel_dir(path):
         v = path[-1][:3, 3] - path[0][:3, 3]
         return v / np.linalg.norm(v)
 
-    own_axis = xyzrpy_to_matrix([0, 0, 0], np.radians([0, pitch, 0]))[:3, 0]
-
-    in_hand = perturb(dense, bias, [0.0] * 6, _FixedRng(), frame='connector')
+    in_hand = perturb(dense, bias, zeros, zeros, rng, frame='connector')
     assert np.allclose(travel_dir(in_hand), [1.0, 0.0, 0.0], atol=1e-9), \
         'in-hand error must leave travel on the TARGET axis (the robot moves nominally)'
-    assert np.allclose(in_hand[-1][:3, :3], xyzrpy_to_matrix([0, 0, 0], np.radians([0, pitch, 0]))[:3, :3]), \
+    assert np.allclose(in_hand[-1][:3, :3], R_bias[:3, :3]), \
         'the part itself must still be tilted by the bias'
 
-    socket = perturb(dense, bias, [0.0] * 6, _FixedRng(), frame='target')
-    assert np.allclose(travel_dir(socket), own_axis, atol=1e-9), \
+    socket = perturb(dense, bias, zeros, zeros, rng, frame='target')
+    assert np.allclose(travel_dir(socket), R_bias[:3, 0], atol=1e-9), \
         "socket error must rotate travel onto the part's OWN axis"
 
     # 'held' is an alias for 'connector'; an unknown frame must fail loudly, not silently pick one.
-    assert np.allclose(perturb(dense, bias, [0.0] * 6, _FixedRng(), frame='held'), in_hand)
+    assert np.allclose(perturb(dense, bias, zeros, zeros, rng, frame='held'), in_hand)
     try:
-        perturb(dense, bias, [0.0] * 6, _FixedRng(), frame='base')
+        perturb(dense, bias, zeros, zeros, rng, frame='base')
         assert False, 'expected ValueError for an unknown perturb frame'
     except ValueError:
         pass
 
 
-def test_uncertainty_is_uniform_within_hard_limits():
-    """The per-DOF `uncertainty` values are UNIFORM half-widths, not sigmas: draws fill the range
-    and NEVER exceed it. A Gaussian reading of these numbers would put ~32% of trials outside."""
+def test_uncertainty_is_uniform_within_its_bounds():
+    """`uncertainty` is per-DOF ABSOLUTE lower/upper bounds (not half-widths, so a range need not be
+    centred on zero). Draws fill the range and NEVER leave it -- these are hard limits, not sigmas."""
     from urlab.skills.trajectory import random_delta
     from urlab.transforms import matrix_to_xyzrpy
 
-    bounds = [0.010, 0.0, 0.005, 0.0, 30.0, 0.0]
+    lower = [0.0, 0.0, -0.005, 0.0, -15.0, 0.0]
+    upper = [0.0, 0.0, 0.005, 0.0, 15.0, 0.0]
     rng = np.random.default_rng(3)
     draws = []
     for _ in range(4000):
-        xyz, rpy = matrix_to_xyzrpy(random_delta(bounds, rng))
+        xyz, rpy = matrix_to_xyzrpy(random_delta(lower, upper, rng))
         draws.append(np.concatenate([xyz, np.degrees(rpy)]))
-    d = np.abs(np.asarray(draws))
-    hw = np.array(bounds)
-    assert np.all(d <= hw + 1e-9), 'a draw exceeded its half-width -- these are HARD limits'
-    for i in (0, 2, 4):                    # the three active DOFs should fill their range
-        assert d[:, i].max() > 0.97 * hw[i], f'DOF {i} never approached its limit'
-        assert abs(np.mean(np.asarray(draws)[:, i])) < 0.06 * hw[i], f'DOF {i} not zero-centred'
-    for i in (1, 3, 5):                    # zero half-width -> exactly zero, never jitter
-        assert np.all(d[:, i] == 0.0), f'DOF {i} has half-width 0 and must never move'
+    d = np.asarray(draws)
+    assert np.all(d >= np.array(lower) - 1e-9) and np.all(d <= np.array(upper) + 1e-9), \
+        'a draw left its bounds -- these are HARD limits'
+    for i in (2, 4):                       # the active DOFs fill their range, both ends
+        assert d[:, i].min() < lower[i] * 0.97 and d[:, i].max() > upper[i] * 0.97
+    for i in (0, 1, 3, 5):                 # lower == upper == 0 -> never moves
+        assert np.all(d[:, i] == 0.0), f'DOF {i} has a zero-width range and must never move'
+
+    # An ASYMMETRIC range must be honoured -- the old half-width form could not express this.
+    off = [random_delta([0, 0, -0.004, 0, 0, 0], [0, 0, -0.001, 0, 0, 0], rng)[2, 3]
+           for _ in range(500)]
+    assert min(off) >= -0.004 - 1e-9 and max(off) <= -0.001 + 1e-9, 'asymmetric range not honoured'
+
+    try:
+        random_delta([0.0] * 6, [-1.0] + [0.0] * 5, rng)
+        assert False, 'expected ValueError when upper < lower'
+    except ValueError:
+        pass
+
+
+def test_grid_sweep_is_ordered_and_exhaustive():
+    """Grid mode must step through the range IN ORDER -- deterministic, every combination exactly
+    once, endpoints included -- not sample it randomly. The trial count IS len(grid)."""
+    from urlab.skills.trajectory import grid_deltas
+    from urlab.transforms import matrix_to_xyzrpy
+
+    lower = [0.0, 0.0, -0.005, 0.0, -15.0, 0.0]
+    upper = [0.0, 0.0, 0.005, 0.0, 15.0, 0.0]
+    res = [0.0, 0.0, 0.005, 0.0, 15.0, 0.0]
+
+    grid = grid_deltas(lower, upper, res)
+    assert len(grid) == 9, f'3 z-steps x 3 pitch-steps = 9, got {len(grid)}'
+
+    pts = []
+    for g in grid:
+        xyz, rpy = matrix_to_xyzrpy(g)
+        pts.append((round(xyz[2], 6), round(math.degrees(rpy[1]), 4)))
+
+    # EXACT order: z is the outer loop, pitch the inner (itertools.product, last axis fastest).
+    expect = [(z, p) for z in (-0.005, 0.0, 0.005) for p in (-15.0, 0.0, 15.0)]
+    assert pts == expect, f'grid not in sweep order:\n got {pts}\n want {expect}'
+    assert len(set(pts)) == len(pts), 'a grid point repeated'
+    assert grid_deltas(lower, upper, res)[0] is not None
+    assert [tuple(map(lambda v: round(v, 6), p)) for p in pts][0] == (-0.005, -15.0), \
+        'sweep must start at the lower corner'
+
+    # Degenerate DOFs cost nothing; a spanning DOF with no step is a loud error, not a silent 1 point.
+    assert len(grid_deltas([0.0] * 6, [0.0] * 6, [0.0] * 6)) == 1
+    try:
+        grid_deltas([0.0] * 6, [0.0, 0.0, 0.01, 0.0, 0.0, 0.0], [0.0] * 6)
+        assert False, 'expected ValueError for a spanning DOF with zero resolution'
+    except ValueError:
+        pass
+
+    # A range that is not a whole multiple of the step still hits BOTH endpoints.
+    g2 = grid_deltas([0.0] * 6, [0.0, 0.0, 0.010, 0.0, 0.0, 0.0], [0.0, 0.0, 0.004, 0.0, 0.0, 0.0])
+    zs = [round(matrix_to_xyzrpy(g)[0][2], 6) for g in g2]
+    assert zs[0] == 0.0 and zs[-1] == 0.010, f'endpoints not hit exactly: {zs}'
 
 
 def test_wrench_is_bridged_into_base_link():

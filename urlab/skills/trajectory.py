@@ -18,6 +18,7 @@ whole point -- do not try to measure the target frame independently.
 """
 
 import csv
+import itertools
 import math
 
 import numpy as np
@@ -82,20 +83,59 @@ def resample(mats, res_t=0.001, res_r_deg=1.0):
     return dense
 
 
-def random_delta(bounds, rng):
-    """A random pose perturbation from per-dimension half-widths [x,y,z (m), r,p,y (deg)]."""
-    b = np.asarray(bounds, dtype=float)
-    t = rng.uniform(-1.0, 1.0, 3) * b[0:3]
-    r = np.radians(rng.uniform(-1.0, 1.0, 3) * b[3:6])
-    return xyzrpy_to_matrix(t, r)
+def delta_from(vec):
+    """A 4x4 pose delta from a 6-vector [x, y, z (m), roll, pitch, yaw (DEG)]."""
+    v = np.asarray(vec, dtype=float)
+    return xyzrpy_to_matrix(v[:3], np.radians(v[3:6]))
+
+
+def random_delta(lower, upper, rng):
+    """A uniform random pose delta with per-DOF LOWER/UPPER bounds [x,y,z (m), r,p,y (deg)].
+
+    Bounds are absolute, NOT half-widths -- so a range need not be centred on zero (e.g. a connector
+    that always sags can be given [-4, -1] mm rather than a symmetric +/-)."""
+    lo = np.asarray(lower, dtype=float)
+    hi = np.asarray(upper, dtype=float)
+    if np.any(hi < lo):
+        raise ValueError(f'uncertainty upper < lower on DOF {list(np.where(hi < lo)[0])}')
+    return delta_from(lo + rng.uniform(0.0, 1.0, 6) * (hi - lo))
+
+
+def _axis_values(lo, hi, step):
+    """Grid values from lo to hi INCLUSIVE, ~`step` apart. The step is nudged so both endpoints are
+    hit exactly (a range that isn't a whole multiple of `step` would otherwise silently drop its
+    upper end). A degenerate DOF (lo == hi) contributes a single value."""
+    if math.isclose(lo, hi):
+        return [lo]
+    if step <= 0:
+        raise ValueError(f'grid_resolution must be > 0 for a DOF spanning [{lo}, {hi}]')
+    n = max(1, int(round(abs(hi - lo) / step)))
+    return [lo + i * (hi - lo) / n for i in range(n + 1)]
+
+
+def grid_deltas(lower, upper, resolution):
+    """Every combination of the per-DOF grid values -- the full Cartesian product, in order.
+
+    Deterministic and exhaustive: `len()` IS the trial count. DOFs whose lower == upper contribute
+    one value, so an all-zero DOF costs nothing. Returns a list of 4x4 deltas."""
+    lo = np.asarray(lower, dtype=float)
+    hi = np.asarray(upper, dtype=float)
+    if np.any(hi < lo):
+        raise ValueError(f'uncertainty upper < lower on DOF {list(np.where(hi < lo)[0])}')
+    res = np.asarray(resolution, dtype=float)
+    axes = [_axis_values(lo[i], hi[i], res[i]) for i in range(6)]
+    return [delta_from(v) for v in itertools.product(*axes)]
 
 
 PERTURB_FRAMES = ('connector', 'held', 'target')
 
 
-def perturb(dense, bias_bounds, noise_bounds, rng, frame='connector'):
-    """The dense poses with a bias (ONE draw for the whole trial -- a systematic offset) plus noise
+def perturb(dense, bias, noise_lower, noise_upper, rng, frame='connector'):
+    """The dense poses with a bias (ONE delta for the whole trial -- a systematic offset) plus noise
     (a fresh draw per waypoint -- jitter).
+
+    `bias` is an already-chosen 4x4 delta, so the caller decides how it was picked: a random draw
+    (`random_delta`) or the next point of an exhaustive sweep (`grid_deltas`).
 
     WHICH FRAME the bias acts in is a choice of ERROR SOURCE, and the two model different physics:
 
@@ -117,10 +157,9 @@ def perturb(dense, bias_bounds, noise_bounds, rng, frame='connector'):
     study; uncertain_sampling exposes it as `sampling.perturb_frame`."""
     if frame not in PERTURB_FRAMES:
         raise ValueError(f'perturb frame {frame!r} must be one of {PERTURB_FRAMES}')
-    bias = random_delta(bias_bounds, rng)
     if frame in ('held', 'connector'):
-        return [c @ bias @ random_delta(noise_bounds, rng) for c in dense]
-    return [bias @ random_delta(noise_bounds, rng) @ c for c in dense]
+        return [c @ bias @ random_delta(noise_lower, noise_upper, rng) for c in dense]
+    return [bias @ random_delta(noise_lower, noise_upper, rng) @ c for c in dense]
 
 
 def closest_index(actual, dense, rot_weight_mm_per_deg=1.0):

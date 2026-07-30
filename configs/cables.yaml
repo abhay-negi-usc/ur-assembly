@@ -71,7 +71,7 @@ cables:
     # Where the JUNCTION sits in the FINGERTIP frame at the grasp (fingertip target =
     # detected junction @ inverse of this). Monitor units (mm/deg) -- xyz/rpy (m/rad) also work.
     junction_in_fingertip:
-      xyz_mm:  [17.0, 0.0, 0.0]
+      xyz_mm:  [-17.0, 0.0, 0.0]
       rpy_deg: [0.0, 0.0, 0.0]
     # Assembly CALIBRATION: this connector's pose wrt connector_holder (connector_holder -> connector),
     # used by uncertain_sampling as the held connector frame. MEASURE per connector: hold the connector

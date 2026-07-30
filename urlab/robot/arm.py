@@ -39,13 +39,42 @@ import numpy as np
 
 from .. import log as urlog
 from ..transforms import (
-    BASE_LINK_FROM_UR_BASE, UR_JOINTS, inverse, matrix_to_rtde, rtde_to_matrix, transform_wrench)
+    BASE_LINK_FROM_UR_BASE, UR_JOINTS, inverse, matrix_to_rtde, pose_error, rtde_to_matrix,
+    transform_wrench)
 
 log = urlog.get('arm')
 
 
 class ArmError(RuntimeError):
     pass
+
+
+_DEFAULT_LIMITS = (1.05, 1.2, 0.25, 0.0)     # rad/s, rad/s^2, m/s, rad/s (0 = unbounded)
+
+
+def parse_limits(spd, base=_DEFAULT_LIMITS):
+    """A `speed:`-style mapping -> (joint_vel, joint_accel, cart_vel, cart_rot) in SI units.
+
+    The four canonical keys carry their unit in the name -- max_joint_velocity_deg_s,
+    max_joint_acceleration_deg_s2, max_cartesian_translation_mm_s, max_cartesian_rotation_deg_s.
+    Precedence preserves older configs' exact behaviour: the deg joint spellings win over the
+    legacy rad ones (more explicit), but the legacy max_cartesian_velocity_m_s wins over the mm/s
+    key (in older configs m/s governed moveL while mm/s only paced the compliant reference).
+    Absent keys fall back to `base` -- pass the global limits there to make a partial override
+    block (e.g. assembly.speed) inherit the rest."""
+    spd = spd or {}
+    jv = (np.radians(float(spd['max_joint_velocity_deg_s']))
+          if spd.get('max_joint_velocity_deg_s') is not None
+          else float(spd.get('max_joint_velocity_rad_s', 0.0)) or base[0])
+    ja = (np.radians(float(spd['max_joint_acceleration_deg_s2']))
+          if spd.get('max_joint_acceleration_deg_s2') is not None
+          else float(spd.get('joint_acceleration_rad_s2', 0.0)) or base[1])
+    mm = spd.get('max_cartesian_translation_mm_s')
+    cv = (float(spd.get('max_cartesian_velocity_m_s', 0.0))
+          or (float(mm) / 1000.0 if mm is not None else 0.0) or base[2])
+    cr = (np.radians(float(spd['max_cartesian_rotation_deg_s']))
+          if spd.get('max_cartesian_rotation_deg_s') is not None else base[3])
+    return jv, ja, cv, cr
 
 
 class URArm:
@@ -58,15 +87,12 @@ class URArm:
         self.joint_names = list(UR_JOINTS)
 
         # Speed caps. Applied directly as RTDE limits, so these are HARD ceilings, not the
-        # average-velocity bounds the old duration-based scheme produced.
+        # average-velocity bounds the old duration-based scheme produced. The GLOBAL `speed:`
+        # block sets the four limits for every move; a caller may pass a `caps=` mapping (same
+        # schema) to move_j / move_l to override them for one move (e.g. assembly.speed).
         speed = cfg.section('speed')
-        # Joint cap may be given in deg/s (unit in the key name, matching the cartesian mm/s / deg/s
-        # limits) or rad/s. deg/s wins if both are set -- it is the more explicit spelling.
-        self.max_joint_vel = (np.radians(float(speed['max_joint_velocity_deg_s']))
-                              if speed.get('max_joint_velocity_deg_s') is not None
-                              else float(speed.get('max_joint_velocity_rad_s', 0.0)) or 1.05)
-        self.max_cart_vel = float(speed.get('max_cartesian_velocity_m_s', 0.0)) or 0.25
-        self.joint_accel = float(speed.get('joint_acceleration_rad_s2', 1.2))
+        (self.max_joint_vel, self.joint_accel,
+         self.max_cart_vel, self.max_cart_rot) = parse_limits(speed)
         self.cart_accel = float(speed.get('cartesian_acceleration_m_s2', 0.5))
 
         self.move_timeout = float(cfg.get('move_timeout_s', 60.0))
@@ -170,23 +196,32 @@ class URArm:
         return False
 
     # ------------------------------------------------------------------ motion
-    def _speeds(self, q_target):
-        """(joint speed, accel) honouring BOTH caps.
+    def _limits(self, caps):
+        """The four limits for one move: `caps` (a `speed:`-style mapping) overriding the global
+        values, or the global values themselves when caps is None."""
+        mine = (self.max_joint_vel, self.joint_accel, self.max_cart_vel, self.max_cart_rot)
+        return parse_limits(caps, mine) if caps else mine
 
-        The joint cap is direct. The Cartesian cap is converted into an equivalent joint speed:
-        the tool travels `d` metres while the largest joint travels `dj` radians, so holding the
-        tool under `max_cart_vel` means holding that joint under `dj/d * max_cart_vel`. Taking
-        the min of the two gives a move that respects whichever cap actually binds."""
+    def _speeds(self, q_target, caps=None):
+        """(joint speed, accel) honouring EVERY cap -- whichever actually binds.
+
+        The joint caps are direct. Each Cartesian cap is converted into an equivalent joint
+        speed: the tool travels `d` (metres, or radians of tool rotation) while the largest joint
+        travels `dj` radians, so holding the tool under the cap means holding that joint under
+        `dj/d * cap`. The min over all of them respects every limit simultaneously."""
+        jv, ja, cv, cr = self._limits(caps)
         q_now = np.asarray(self.q(), dtype=float)
         dj = float(np.max(np.abs(np.asarray(q_target, dtype=float) - q_now)))
-        speed = self.max_joint_vel
-        if dj > 1e-6 and self.max_cart_vel > 0.0:
-            d = float(np.linalg.norm(self.fk(q_target)[:3, 3] - self.tcp_pose()[:3, 3]))
-            if d > 1e-6:
-                speed = min(speed, dj / d * self.max_cart_vel)
-        return max(speed, 1e-3), self.joint_accel
+        speed = jv
+        if dj > 1e-6 and (cv > 0.0 or cr > 0.0):
+            lin, ang = pose_error(self.tcp_pose(), self.fk(q_target))
+            if cv > 0.0 and lin > 1e-6:
+                speed = min(speed, dj / lin * cv)
+            if cr > 0.0 and ang > 1e-6:
+                speed = min(speed, dj / ang * cr)
+        return max(speed, 1e-3), ja
 
-    def move_j(self, q_target, speed=None, accel=None, label='move'):
+    def move_j(self, q_target, speed=None, accel=None, label='move', caps=None):
         """Joint-space move to `q_target`. Blocking; returns True on success.
 
         SYNCHRONOUS unless a guard is armed. A synchronous moveJ blocks until the arm has actually
@@ -200,7 +235,7 @@ class URArm:
             self._sim_q = np.asarray(q_target, dtype=float)
             return True
 
-        auto_speed, auto_accel = self._speeds(q_target)
+        auto_speed, auto_accel = self._speeds(q_target, caps)
         speed = auto_speed if speed is None else speed
         accel = auto_accel if accel is None else accel
 
@@ -215,15 +250,17 @@ class URArm:
         self.rtde_c.moveJ(list(q_target), speed, accel, True)             # async -> pollable guard
         return self._await_move(label)
 
-    def move_l(self, T_base_tool0, speed=None, accel=None, label='move'):
+    def move_l(self, T_base_tool0, speed=None, accel=None, label='move', caps=None):
         """Straight-line Cartesian move (the tool travels a line in space, not a joint arc).
+        `caps` (a `speed:`-style mapping) overrides the global limits for this move; moveL's RTDE
+        speed is a TCP linear speed, so the translation cap is the one applied.
 
         Synchronous unless a guard is armed, for the same reason as move_j."""
         if self.dry_run:
             log.info('[dry-run] %s -> linear', label)
             return True
         pose = matrix_to_rtde(T_base_tool0)
-        speed = self.max_cart_vel if speed is None else speed
+        speed = self._limits(caps)[2] if speed is None else speed
         accel = self.cart_accel if accel is None else accel
         if not self._guards:
             ok = self.rtde_c.moveL(pose, speed, accel, False)

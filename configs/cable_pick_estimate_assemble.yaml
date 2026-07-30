@@ -50,7 +50,7 @@ connector_estimator:
 
 # ---- Ground-plane manual-select scan (the default scan.mode) ----
 ground_plane:
-  z_m: -0.758
+  z_m: -0.760
   max_cables: 8
   new_view_translation_m: 0.04
   z_step_m: 0.05
@@ -68,7 +68,7 @@ grasp_tcp_offset:
   xyz: [0.0, 0.0, 0.0]
   rpy: [0.0, 0.0, 0.0]
 fingertip_grasp:
-  xyz: [0.0, -0.01254, 0.183]
+  xyz: [0.0, 0.0, 0.183]
   rpy: [3.14159, 0.0, -1.5708]
 
 connector_holder:
@@ -126,9 +126,8 @@ lift_axis: [0.0, 0.0, 1.0]
 pickup:
   mode: compliance
   # SPEED-based pacing (no time-based motion in this app): the ramp duration is derived from the
-  # ACTUAL distance, so the touchdown speed never changes silently with approach_distance_m.
-  descent_translation_mm_s: 20.0
-  descent_rotation_deg_s: 20.0
+  # ACTUAL distance, paced by the GLOBAL cartesian limits (speed: block below) like every other
+  # pre-assembly motion.
   settle_s: 0.5
   compliance:
     enabled: true
@@ -165,19 +164,16 @@ grasp_check:
     cable_shift_fraction: 0.8
     empty_drop_m: 0.003
 
+# GLOBAL speed limits -- every motion EXCEPT the assembly phase (scan, pick descent/lift, home
+# moves). Exactly four limits, all enforced simultaneously (whichever binds): the joint caps
+# bound every joint directly; the cartesian caps bound the TOOL (converted to an equivalent
+# joint bound for moveJ, and pacing the compliant reference ramps + moveL directly).
+# The assembly phase uses assembly.speed below instead.
 speed:
-  # FREE-SPACE moves (moveJ). For short realign hops the ACCELERATION binds, not the cap.
-  # NOTE: 120 deg/s is the UR10e base/shoulder joint HARDWARE limit -- a nominal 2x (200) would
-  # just fault/clamp at the controller, so the cap stops at the hardware ceiling.
-  max_joint_velocity_deg_s: 20.0
-  joint_acceleration_rad_s2: 10.0
-  max_cartesian_velocity_m_s: 0.5
-  # CARTESIAN limits for the COMPLIANT reference (mm/s, deg/s). INSERT = the contact phase;
-  # RETRACT = the between-attempts escape (still compliant, un-guarded).
-  max_cartesian_translation_mm_s: 20.0
-  max_cartesian_rotation_deg_s: 20.0
-  retract_translation_mm_s: 20.0
-  retract_rotation_deg_s: 20.0
+  max_joint_velocity_deg_s: 30.0
+  max_joint_acceleration_deg_s2: 30.0
+  max_cartesian_translation_mm_s: 25.0
+  max_cartesian_rotation_deg_s: 30.0
 
 move_timeout_s: 60.0
 settle_s: 0.5
@@ -223,8 +219,17 @@ assembly:
   # Between attempts: back out along the CONNECTOR's OWN -X from wherever the insert stopped.
   retract_distance_m: 0.050
 
+  # ASSEMBLY speed limits -- the same four keys as the global speed: block, overriding it for
+  # everything from the stand-off approach on: the realign moveJs, the insertion reference, the
+  # between-attempt retract, and the release escape. An absent key inherits the global value.
+  speed:
+    max_joint_velocity_deg_s: 15.0
+    max_joint_acceleration_deg_s2: 15.0
+    max_cartesian_translation_mm_s: 5.0
+    max_cartesian_rotation_deg_s: 5.0
+
   # The loop: assemble -> check -> retract -> estimate -> realign, at most this many attempts.
-  max_attempts: 5
+  max_attempts: 10
 
   # After each attempt the believed-pose-vs-target numbers are LOGGED for the record, but SUCCESS
   # IS THE OPERATOR'S CALL at the prompt (y = done / Enter = retry / q = abort) -- the operator can
@@ -290,14 +295,14 @@ estimation:
   icp_iterations: 50
   num_initial_guesses: 100
   init_guess_range:
-    x_mm: 5.0
-    y_mm: 5.0
+    x_mm: 0.0
+    y_mm: 0.0
     z_mm: 5.0
-    roll_deg: 15.0
-    pitch_deg: 15.0
-    yaw_deg: 15.0
+    roll_deg: 0.0
+    pitch_deg: 10.0
+    yaw_deg: 0.0
   step_gain: 1.5
   ransac_iters: 200
   ransac_tol: 1.0
-  residual_gate: 1.5             # drop guesses whose final residual > gate x best before voting
+  residual_gate: None             # drop guesses whose final residual > gate x best before voting
   random_seed: 0

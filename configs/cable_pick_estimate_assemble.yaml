@@ -127,8 +127,8 @@ pickup:
   mode: compliance
   # SPEED-based pacing (no time-based motion in this app): the ramp duration is derived from the
   # ACTUAL distance, so the touchdown speed never changes silently with approach_distance_m.
-  descent_translation_mm_s: 100.0
-  descent_rotation_deg_s: 60.0
+  descent_translation_mm_s: 20.0
+  descent_rotation_deg_s: 20.0
   settle_s: 0.5
   compliance:
     enabled: true
@@ -169,15 +169,15 @@ speed:
   # FREE-SPACE moves (moveJ). For short realign hops the ACCELERATION binds, not the cap.
   # NOTE: 120 deg/s is the UR10e base/shoulder joint HARDWARE limit -- a nominal 2x (200) would
   # just fault/clamp at the controller, so the cap stops at the hardware ceiling.
-  max_joint_velocity_deg_s: 120.0
+  max_joint_velocity_deg_s: 20.0
   joint_acceleration_rad_s2: 10.0
   max_cartesian_velocity_m_s: 0.5
   # CARTESIAN limits for the COMPLIANT reference (mm/s, deg/s). INSERT = the contact phase;
   # RETRACT = the between-attempts escape (still compliant, un-guarded).
   max_cartesian_translation_mm_s: 20.0
-  max_cartesian_rotation_deg_s: 60.0
-  retract_translation_mm_s: 200.0
-  retract_rotation_deg_s: 100.0
+  max_cartesian_rotation_deg_s: 20.0
+  retract_translation_mm_s: 20.0
+  retract_rotation_deg_s: 20.0
 
 move_timeout_s: 60.0
 settle_s: 0.5
@@ -218,7 +218,7 @@ assembly:
   # Stand-off beyond the trajectory START (target-connector frame), approached once after the lift.
   standoff:
     axis: [-1.0, 0.0, 0.0]
-    distance_m: 0.010
+    distance_m: 0.100
 
   # Between attempts: back out along the CONNECTOR's OWN -X from wherever the insert stopped.
   retract_distance_m: 0.050
@@ -254,7 +254,7 @@ assembly:
 
   force_guard:
     enabled: true
-    max_force_n: 10.0
+    max_force_n: 50.0
     max_torque_nm: 8.0
 
   # AFTER SUCCESS: release, then back the fingertip out along the CONNECTOR's OWN -X by this
@@ -268,7 +268,7 @@ assembly:
 # ===================================================================================================
 estimation:
   # The contact manifold for THIS connector type (built by analysis/contact_manifold.py).
-  manifold_csv: data/uncertain_assembly_sampling/banana/banana_connector_contact_manifold.csv
+  manifold_csv: /abhay_ws/ur-assembly/configs/data/uncertain_assembly_sampling/banana/uncertain_assembly_log_20260729_181654.csv
 
   # Optional override of the initial in-hand estimate (fingertip -> connector, m / rad).
   # Default (absent): the grasp geometry, inv(connector_grasp).

@@ -264,6 +264,12 @@ class GraspController:
         self.compliance = p.get('compliance', {}) or {}
         self.compliance_enabled = bool(self.compliance.get('enabled', True))
         self.tare_before = bool(self.compliance.get('tare_before', True))
+        # NEVER tare at the LIFT by default: the lift starts IN CONTACT (part on the ground), so a
+        # tare there bakes the ground reaction into the baseline -- the moment the part lifts off,
+        # that baseline reads as a PHANTOM DOWNWARD force and the admittance drives the tool back
+        # into the ground (jerky scraping, force climbing to the pendant's safety stop). The
+        # descent's FREE-SPACE tare (at grasp-align) stays valid for the lift.
+        self.tare_before_lift = bool(p.get('tare_before_lift', False))
         self.descent_time_s = float(p.get('descent_time_s', 2.0))
         # SPEED-based pacing (preferred): when either limit is set, the ramp duration is derived
         # from the ACTUAL distance -- so the touchdown speed no longer changes silently when
@@ -299,29 +305,35 @@ class GraspController:
         t_ang = (np.degrees(ang_rad) / w) if w > 0 else 0.0
         return max(t_lin, t_ang, 0.1)
 
-    def _to(self, robot, T_target, label, what, position_guard=None):
+    def _to(self, robot, T_target, label, what, position_guard=None, tare=None):
         """Move the fingertip to T_target in the configured mode. In POSITION mode, `position_guard`
         (a callable taking the move thunk) runs it force-guarded; in COMPLIANCE mode the guard is
         ignored -- the admittance bounds the contact force itself (a stiff guarded move is exactly
-        what trips on the cable's resistance)."""
+        what trips on the cable's resistance). `tare` overrides whether to re-tare mid-warmup
+        (default: the descent's tare_before) -- a move that STARTS IN CONTACT must not tare."""
         if self.compliant:
             self._lazy_build(robot)
             T_start = robot.fingertip()
             return _compliant_move(robot, self._adm, self._guard, T_start, T_target,
-                                   self._duration(T_start, T_target), self.tare_before,
+                                   self._duration(T_start, T_target),
+                                   self.tare_before if tare is None else tare,
                                    self.settle_s, what)
         if position_guard is not None:
             return position_guard(lambda: robot.move_fingertip(T_target, label))
         return robot.move_fingertip(T_target, label)
 
     def descend(self, robot, geom, label='grasp'):
-        """Move to the grasp pose (from wherever the arm is -- the grasp-align pose)."""
+        """Move to the grasp pose (from wherever the arm is -- the grasp-align pose). Tares in
+        FREE SPACE (at grasp-align), which is the baseline the lift keeps."""
         return self._to(robot, geom.T_base_grasp, label, 'Grasp descent')
 
     def lift(self, robot, geom, label='lift', position_guard=None):
         """Lift to geom.lift() in the SAME mode as the descent. `position_guard` guards the
-        position-mode lift only."""
-        return self._to(robot, geom.lift(), label, 'Lift', position_guard=position_guard)
+        position-mode lift only. Does NOT re-tare (tare_before_lift, default off): the lift starts
+        in contact, and taring there turns the ground reaction into a phantom downward force at
+        liftoff -- the arm would chase it back into the ground."""
+        return self._to(robot, geom.lift(), label, 'Lift', position_guard=position_guard,
+                        tare=self.tare_before_lift)
 
 
 class GraspImageRecorder:

@@ -697,6 +697,10 @@ def test_grasp_descent_is_speed_paced():
     legacy = GraspController(Config({'pickup': {'mode': 'compliance', 'descent_time_s': 3.0}}))
     assert legacy._duration(A, B) == 3.0, 'no speed keys -> the legacy fixed duration'
 
+    # The LIFT must not re-tare by default: it starts IN CONTACT, and a tare there turns the
+    # ground reaction into a phantom downward force at liftoff (the arm chases it into the ground).
+    assert g.tare_before is True and g.tare_before_lift is False
+
 
 def test_manifold_estimator_recovers_belief_error():
     """skills/manifold: observations whose POSE columns carry a rigid belief error (right-multiplied,

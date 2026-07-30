@@ -203,7 +203,7 @@ class URArm:
         return parse_limits(caps, mine) if caps else mine
 
     def _speeds(self, q_target, caps=None):
-        """(joint speed, accel) honouring EVERY cap -- whichever actually binds.
+        """(joint speed, accel, name-of-binding-cap) honouring EVERY cap -- whichever binds.
 
         The joint caps are direct. Each Cartesian cap is converted into an equivalent joint
         speed: the tool travels `d` (metres, or radians of tool rotation) while the largest joint
@@ -212,14 +212,14 @@ class URArm:
         jv, ja, cv, cr = self._limits(caps)
         q_now = np.asarray(self.q(), dtype=float)
         dj = float(np.max(np.abs(np.asarray(q_target, dtype=float) - q_now)))
-        speed = jv
+        speed, which = jv, 'joint-velocity'
         if dj > 1e-6 and (cv > 0.0 or cr > 0.0):
             lin, ang = pose_error(self.tcp_pose(), self.fk(q_target))
-            if cv > 0.0 and lin > 1e-6:
-                speed = min(speed, dj / lin * cv)
-            if cr > 0.0 and ang > 1e-6:
-                speed = min(speed, dj / ang * cr)
-        return max(speed, 1e-3), ja
+            if cv > 0.0 and lin > 1e-6 and dj / lin * cv < speed:
+                speed, which = dj / lin * cv, 'cartesian-translation'
+            if cr > 0.0 and ang > 1e-6 and dj / ang * cr < speed:
+                speed, which = dj / ang * cr, 'cartesian-rotation'
+        return max(speed, 1e-3), ja, which
 
     def move_j(self, q_target, speed=None, accel=None, label='move', caps=None):
         """Joint-space move to `q_target`. Blocking; returns True on success.
@@ -235,9 +235,17 @@ class URArm:
             self._sim_q = np.asarray(q_target, dtype=float)
             return True
 
-        auto_speed, auto_accel = self._speeds(q_target, caps)
-        speed = auto_speed if speed is None else speed
+        auto_speed, auto_accel, which = self._speeds(q_target, caps)
+        if speed is None:
+            speed = auto_speed
+        else:
+            which = 'explicit'
         accel = auto_accel if accel is None else accel
+        # Log the COMMANDED speed and the cap that produced it: if the arm visibly moves slower
+        # than this line says, the throttle is on the CONTROLLER side (pendant speed slider,
+        # safety Reduced mode / restricted limits), not in this code or the config.
+        log.info('[%s] moveJ %.2f rad/s (%.0f deg/s leading joint, %s cap), accel %.2f rad/s^2',
+                 label, speed, np.degrees(speed), which, accel)
 
         if not self._guards:
             ok = self.rtde_c.moveJ(list(q_target), speed, accel, False)   # blocks until finished
@@ -262,6 +270,7 @@ class URArm:
         pose = matrix_to_rtde(T_base_tool0)
         speed = self._limits(caps)[2] if speed is None else speed
         accel = self.cart_accel if accel is None else accel
+        log.info('[%s] moveL %.3f m/s, accel %.2f m/s^2', label, speed, accel)
         if not self._guards:
             ok = self.rtde_c.moveL(pose, speed, accel, False)
             if not ok:

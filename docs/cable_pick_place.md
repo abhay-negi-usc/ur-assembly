@@ -73,7 +73,7 @@ Config: `configs/cable_pick_place.yaml`
 | `scan.refine.orbit_deg` / `max_orbit_deg` / `min_height_m` | axis-sharpening orbit + its guards |
 | `connector_estimator.*` | RANSAC / parallax / workspace gates for the fuse-mode fit |
 | `reconstruction.*` | curve reconstruction + its two convergence thresholds (`scan.mode: reconstruction`) |
-| `connector_grasp` | fingertip offset from the connector frame at grasp |
+| `<cable>.junction_in_fingertip` (cables.yaml) | the junction pose wrt the **fingertip** at grasp — the fingertip is posed at detected junction @ its inverse before closing (replaces `connector_grasp` / `junction_offset_m`) |
 | `fingertip_grasp` | the fingertip relative to tool0 (the grasp reference) |
 | `grasp_check.closed_counts` | full-closure counts; stalling short = failed grasp |
 

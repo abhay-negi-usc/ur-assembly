@@ -33,7 +33,7 @@ fixed -- this is correspondence + triangulation, not SfM.
 
 The output frame convention is IDENTICAL to ConnectorEstimator's (x = cable axis pointing INTO the
 connector, z ~ up, y = z x x), so a reconstruction pose is a drop-in replacement for estimate() and
-every connector_grasp / fingertip offset in the config still applies unchanged.
+every grasp offset (junction_in_fingertip / fingertip_grasp) in the config still applies unchanged.
 """
 
 import numpy as np

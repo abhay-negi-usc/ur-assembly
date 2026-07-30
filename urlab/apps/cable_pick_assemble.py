@@ -15,7 +15,7 @@ from ..skills import insert as ins
 from ..skills import reset
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
                            GraspRecovery, log_grasp_delta)
-from ..transforms import from_cfg
+from ..transforms import from_cfg, inverse
 from ._cable import build_scanner, make_confirm
 from ._runner import run_app
 
@@ -25,13 +25,15 @@ log = urlog.get('cable-assemble')
 def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder):
     """The cable pick, returning 'ok' | 'missed' | 'empty' | 'abort'."""
     scanner.estimator.reset()
-    T_conn_grasp = from_cfg(cfg.section('connector_grasp'))
+    # junction_in_fingertip (from cables.yaml): where the junction sits in the FINGERTIP frame at
+    # the grasp -- so the fingertip goes to detected_junction @ its inverse before closing.
+    T_ftip_junction = from_cfg(cfg.section('junction_in_fingertip'))
     if not robot.gripper.open('open'):
         return 'abort'
     T_conn = scanner.scan(confirm=confirm)
     if T_conn is None:
         return 'abort'
-    geom.T_base_grasp = T_conn @ T_conn_grasp
+    geom.T_base_grasp = T_conn @ inverse(T_ftip_junction)
 
     # Grasp directly from wherever the scan ended (already close to the cable) -- no detour home first.
     # Record wrist images at grasp_check.capture_rate_hz (default 1 Hz) over the descent + close +
@@ -87,7 +89,7 @@ def build_and_run(cfg, robot, camera, args):
             return False
 
     # 2. Reduce the target to a fingertip pose and derive the stand-off.
-    T_target = ins.fingertip_target(ic, from_cfg(cfg.section('connector_grasp')),
+    T_target = ins.fingertip_target(ic, inverse(from_cfg(cfg.section('junction_in_fingertip'))),
                                     robot.T_tool0_fingertip)
     T_standoff = ins.standoff_of(ic, T_target)
     log.info('Kinematic assembly: fingertip target %s, stand-off %s.',

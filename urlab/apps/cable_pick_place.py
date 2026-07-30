@@ -23,7 +23,9 @@ log = urlog.get('cable-pick-place')
 def _attempt(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder):
     """One scan->grasp attempt. Returns 'ok' | 'missed' | 'empty' | 'abort'."""
     scanner.estimator.reset()
-    T_conn_grasp = from_cfg(cfg.section('connector_grasp'))
+    # junction_in_fingertip (from cables.yaml): where the junction sits in the FINGERTIP frame at
+    # the grasp -- so the fingertip goes to detected_junction @ its inverse before closing.
+    T_ftip_junction = from_cfg(cfg.section('junction_in_fingertip'))
 
     if not robot.gripper.open('open'):
         return 'abort'
@@ -31,7 +33,7 @@ def _attempt(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorde
     T_conn = scanner.scan(confirm=confirm)
     if T_conn is None:
         return 'abort'
-    geom.T_base_grasp = T_conn @ T_conn_grasp
+    geom.T_base_grasp = T_conn @ inverse(T_ftip_junction)
     log.info('Connector origin %s, grasp target set.', T_conn[:3, 3].round(3))
 
     # Grasp directly from wherever the scan ended (already close to the cable) -- no detour back to

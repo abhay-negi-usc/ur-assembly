@@ -133,10 +133,18 @@ def apply_cable_profile(cfg):
         cfg.set_path('grasp_check.groove_max_counts', hi)            # >  this  = miss (the cable)
     if 'cable' in entry:
         cfg.set_path('grasp_check.cable_counts', int(entry['cable']))   # reference: cable grab = miss
-    # Fingertip target offset from the junction, POSITIVE along the connector axis (x, toward the
-    # connector's END): connector_grasp is the fingertip pose relative to the connector frame.
-    off = float(entry.get('junction_offset_m', 0.0))
-    cfg.set_path('connector_grasp.xyz', [off, 0.0, 0.0])
+    # Grasp geometry: junction_in_fingertip = the JUNCTION pose wrt the FINGERTIP at the grasp
+    # (T_fingertip_junction). The pick poses the fingertip so the DETECTED junction lands exactly
+    # there before closing: fingertip target = detected junction @ inverse(junction_in_fingertip).
+    # Replaces both junction_offset_m and the demo configs' connector_grasp (its inverse).
+    if 'junction_offset_m' in entry:
+        off = float(entry['junction_offset_m'])
+        raise ValueError(
+            f'cables.yaml {name!r}: junction_offset_m is replaced by junction_in_fingertip '
+            f'(the junction pose wrt the fingertip; the old offset converts to '
+            f'junction_in_fingertip: {{xyz: [{-off}, 0.0, 0.0], rpy: [0.0, 0.0, 0.0]}}).')
+    if entry.get('junction_in_fingertip'):
+        cfg.set_path('junction_in_fingertip', _pose_si(entry['junction_in_fingertip']))
     # Held-connector calibration (connector_holder -> connector) for the assembly / uncertain_sampling.
     if entry.get('connector_in_holder'):
         cfg.set_path('connector_in_holder', _pose_si(entry['connector_in_holder']))

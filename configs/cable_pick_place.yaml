@@ -113,11 +113,8 @@ cable_end:
   enabled: false                  # opt-in; true = run Phase 1 before the junction scan
   switch_distance_m: 0.20         # switch to junction estimation once the junction is this close
 
-# Offset of the FINGERTIP target from the connector frame (x=axis, z=up, y=side). Identity -> the
-# fingertip lands on the connector frame at grasp.
-connector_grasp:
-  xyz: [0.0, 0.0, 0.0]
-  rpy: [0.0, 0.0, 0.0]
+# (The grasp pose comes from <cable>.junction_in_fingertip in cables.yaml -- the junction pose wrt
+# the fingertip at the grasp; the old connector_grasp block is obsolete.)
 
 grasp_tcp_offset:                # gripper frame relative to tool0 (identity here)
   xyz: [0.0, 0.0, 0.0]

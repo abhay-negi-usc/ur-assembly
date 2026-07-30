@@ -89,9 +89,8 @@ cable_end:
   enabled: true
   switch_distance_m: 0.250
 
-connector_grasp:
-  xyz: [0.0, 0.0, 0.0]
-  rpy: [0.0, 0.0, 0.0]
+# (The grasp pose comes from <cable>.junction_in_fingertip in cables.yaml -- the junction pose wrt
+# the fingertip at the grasp; the old connector_grasp block is obsolete.)
 grasp_tcp_offset:
   xyz: [0.0, 0.0, 0.0]
   rpy: [0.0, 0.0, 0.0]

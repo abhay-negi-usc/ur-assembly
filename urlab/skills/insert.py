@@ -64,14 +64,15 @@ class InsertConfig:
             self.retract_steps = [axis * dist] if abs(dist) > 1e-9 else []
 
 
-def fingertip_target(ic, T_connector_grasp, T_tool0_fingertip):
+def fingertip_target(ic, T_connector_fingertip, T_tool0_fingertip):
     """Reduce the configured target to a FINGERTIP pose (what the arm actually commands).
 
     'fingertip' -> the pose IS the fingertip target.
     'tool0'     -> the pose is the flange target; fingertip = target @ T_tool0_fingertip.
     'connector' -> the pose is where the held connector must land. The connector is rigidly held,
-                   and at grasp the fingertip was commanded to connector @ connector_grasp, so
-                   T_connector_fingertip == connector_grasp: fingertip = target @ connector_grasp.
+                   and at grasp the fingertip was posed with the junction at junction_in_fingertip
+                   (cables.yaml), so T_connector_fingertip == inverse(junction_in_fingertip):
+                   fingertip = target @ T_connector_fingertip.
     """
     T = ic.T_base_target
     if ic.target_frame == 'fingertip':
@@ -79,7 +80,7 @@ def fingertip_target(ic, T_connector_grasp, T_tool0_fingertip):
     if ic.target_frame == 'tool0':
         return T @ T_tool0_fingertip
     if ic.target_frame == 'connector':
-        return T @ T_connector_grasp
+        return T @ T_connector_fingertip
     raise ValueError(f"assembly.target.frame {ic.target_frame!r} must be "
                      "'fingertip' | 'tool0' | 'connector'")
 

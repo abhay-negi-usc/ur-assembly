@@ -21,8 +21,11 @@
 #   <cable>.connector -> grasp_check success BAND: faces_max_counts = min-1, groove_max_counts = max,
 #                        groove_counts = midpoint; also grasp_check.connector_counts = [min, max]
 #   <cable>.cable     -> grasp_check.cable_counts   (reference; grabbing the cable = a MISS)
-#   <cable>.junction_offset_m -> connector_grasp.xyz = [offset, 0, 0]
-#                        (fingertip target offset from the junction, POSITIVE toward the connector's END)
+#   <cable>.junction_in_fingertip -> junction_in_fingertip  (the JUNCTION pose wrt the FINGERTIP at
+#                        the grasp: the robot poses the fingertip so the detected junction lands
+#                        exactly there, then closes the gripper. Replaces junction_offset_m AND the
+#                        demo configs' connector_grasp -- the fingertip grasp target is
+#                        detected_junction @ inverse(junction_in_fingertip).)
 #   <cable>.connector_in_holder -> connector_in_holder  (the held connector's pose wrt connector_holder;
 #                        used by uncertain_sampling as the connector frame)
 #   <cable>.connector_holder_target -> connector_holder_target  (recorded base->connector_holder at the
@@ -48,7 +51,11 @@ cables:
   banana:
     connector: [207, 213]   # CONNECTOR between the fingertips = grasp SUCCESS (the target)
     cable: 225              # grabbing the CABLE instead (thinner, higher count) = a MISS
-    junction_offset_m: 0.010  # fingertip target offset from the junction, + toward the connector's END
+    # Where the JUNCTION sits in the FINGERTIP frame at the grasp (fingertip target =
+    # detected junction @ inverse of this). Monitor units (mm/deg) -- xyz/rpy (m/rad) also work.
+    junction_in_fingertip:
+      xyz_mm:  [10.0, 0.0, 3.0]
+      rpy_deg: [0.0, 0.0, 0.0]
     # Assembly CALIBRATION: this connector's pose wrt connector_holder (connector_holder -> connector),
     # used by uncertain_sampling as the held connector frame. MEASURE per connector: hold the connector
     # in the holder, hand-guide, and read base_link<-connector vs connector_holder off the monitor.
@@ -67,7 +74,9 @@ cables:
   bnc:
     connector: [197, 206]
     cable: 221
-    junction_offset_m: 0.0070
+    junction_in_fingertip:    # MEASURE (see banana); zeros = junction exactly at the fingertip
+      xyz_mm:  [0.0, 0.0, 0.0]
+      rpy_deg: [0.0, 0.0, 0.0]
     connector_in_holder:      # MEASURE (see banana)
       xyz: [0.0, 0.0, 0.0]
       rpy: [0.0, 0.0, 0.0]
@@ -78,7 +87,9 @@ cables:
   c13:
     connector: [195, 198]
     cable: 218
-    junction_offset_m: 0.0075
+    junction_in_fingertip:    # MEASURE (see banana); zeros = junction exactly at the fingertip
+      xyz_mm:  [0.0, 0.0, 0.0]
+      rpy_deg: [0.0, 0.0, 0.0]
     connector_in_holder:      # MEASURE (see banana)
       xyz: [0.0, 0.0, 0.0]
       rpy: [0.0, 0.0, 0.0]

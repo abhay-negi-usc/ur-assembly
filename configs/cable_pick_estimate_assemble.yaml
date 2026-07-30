@@ -61,9 +61,8 @@ cable_end:
   enabled: true
   switch_distance_m: 0.250
 
-connector_grasp:
-  xyz: [0.0, 0.0, 0.0]
-  rpy: [0.0, 0.0, 0.0]
+# (The grasp pose comes from <cable>.junction_in_fingertip in cables.yaml -- the junction pose wrt
+# the fingertip at the grasp; the old connector_grasp block is obsolete.)
 grasp_tcp_offset:
   xyz: [0.0, 0.0, 0.0]
   rpy: [0.0, 0.0, 0.0]
@@ -276,7 +275,7 @@ estimation:
   manifold_csv: /abhay_ws/ur-assembly/configs/data/uncertain_assembly_sampling/banana/uncertain_assembly_log_20260729_181654.csv
 
   # Optional override of the initial in-hand estimate (fingertip -> connector, m / rad).
-  # Default (absent): the grasp geometry, inv(connector_grasp).
+  # Default (absent): the grasp geometry, <cable>.junction_in_fingertip from cables.yaml.
   # initial_connector_in_fingertip:
   #   xyz: [0.0, 0.0, 0.0]
   #   rpy: [0.0, 0.0, 0.0]

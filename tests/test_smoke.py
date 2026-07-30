@@ -375,8 +375,11 @@ def test_cable_profile_applies_counts():
     assert cfg.get_path('grasp_check.groove_max_counts') == 213        # > this (< empty) = miss (cable)
     assert cfg.get_path('grasp_check.groove_counts') == 210            # band midpoint
     assert cfg.get_path('grasp_check.cable_counts') == 225
-    xyz = cfg.get_path('connector_grasp.xyz')                          # junction_offset_m -> [off, 0, 0]
-    assert xyz[1] == 0.0 and xyz[2] == 0.0 and isinstance(xyz[0], float)
+    # junction_in_fingertip: the junction pose wrt the fingertip at the grasp -- monitor units
+    # (xyz_mm/rpy_deg) must be converted to m/rad, replacing junction_offset_m/connector_grasp.
+    jf = cfg.get_path('junction_in_fingertip')
+    assert set(jf) == {'xyz', 'rpy'}, 'xyz_mm/rpy_deg must be converted away, not passed through'
+    assert all(abs(v) < 0.1 for v in jf['xyz']), 'xyz must be METRES (mm would be ~1000x)'
     assert cfg.get_path('connector_in_holder.xyz') is not None         # held-connector calibration applied
     assert cfg.get_path('connector_in_holder.rpy') is not None
     # The recorded mate is per-cable and gets RE-MEASURED, so assert the UNIT CONVERSION (mm/deg ->
@@ -390,6 +393,22 @@ def test_cable_profile_applies_counts():
     apply_cable_profile(bnc)
     assert bnc.get_path('grasp_check.faces_max_counts') == 196
     assert bnc.get_path('grasp_check.groove_max_counts') == 206
+
+    # The RETIRED junction_offset_m must fail LOUDLY with the conversion recipe -- a silently
+    # ignored offset would grasp at the junction itself.
+    import shutil
+    import tempfile
+    tmp = tempfile.mkdtemp()
+    try:
+        with open(os.path.join(tmp, 'cables.yaml'), 'w') as fh:
+            fh.write('cables:\n  x:\n    junction_offset_m: 0.01\n')
+        try:
+            apply_cable_profile(Config({'cable': 'x', '_config_dir': tmp}))
+            raise AssertionError('junction_offset_m must raise, not be ignored')
+        except ValueError as exc:
+            assert 'junction_in_fingertip' in str(exc)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
     # unknown cable -> a clear error; unset -> no-op.
     try:

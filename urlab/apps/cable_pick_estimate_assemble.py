@@ -147,11 +147,12 @@ def build_and_run(cfg, robot, camera, args):
     dense = traj.resample(mats, float(a.get('translational_resolution_m', 0.001)),
                           float(a.get('rotational_resolution_deg', 1.0)))
 
-    # ---- The in-hand ESTIMATE (fingertip -> connector). Grasp geometry is the initial belief:
-    # at grasp the fingertip is commanded to connector @ connector_grasp, so ftip->conn = its
-    # inverse. estimation.initial_connector_in_fingertip (m/rad) overrides it when set. ----
+    # ---- The in-hand ESTIMATE (fingertip -> connector). The grasp geometry is the initial
+    # belief: at grasp the fingertip is posed so the junction lands at junction_in_fingertip
+    # (cables.yaml), so ftip->conn IS that pose. estimation.initial_connector_in_fingertip
+    # (m/rad) overrides it when set. ----
     init = cfg.get_path('estimation.initial_connector_in_fingertip')
-    T_ftip_conn = from_cfg(init) if init else inverse(from_cfg(cfg.section('connector_grasp')))
+    T_ftip_conn = from_cfg(init) if init else from_cfg(cfg.section('junction_in_fingertip'))
 
     # ---- Speed limits: TWO blocks only. The GLOBAL `speed:` block paces everything up to and
     # including the lift (scan, pick, home moves); the ASSEMBLY `assembly.speed:` block -- the

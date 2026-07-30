@@ -282,6 +282,11 @@ class GraspController:
                                     spd.get('max_cartesian_translation_mm_s'))
         self.descent_w_deg_s = p.get('descent_rotation_deg_s',
                                      spd.get('max_cartesian_rotation_deg_s'))
+        # Per-phase scaling of the global limits (speed.phase_scale): the descent runs at the
+        # 'pickup' scale, the lift at the 'lift' scale (typically slower -- the cable is in hand).
+        scales = spd.get('phase_scale', {}) or {}
+        self.pickup_scale = float(scales.get('pickup', 1.0))
+        self.lift_scale = float(scales.get('lift', 1.0))
         self.settle_s = float(p.get('settle_s', 0.5))
         self._guard_cfg = p.get('force_guard', {}) or {}
         self._adm = None
@@ -298,30 +303,33 @@ class GraspController:
             if self._guard_cfg.get('enabled', False):
                 self._guard = ForceGuard(robot.arm, self._guard_cfg)
 
-    def _duration(self, T_from, T_to):
+    def _duration(self, T_from, T_to, scale=1.0):
         """Ramp seconds for a compliant move: distance / the configured SPEED limits (whichever of
         translation/rotation needs longer), or the legacy fixed descent_time_s when no speed is
-        configured. Floored at 0.1 s so a zero-length move still ramps sanely."""
+        configured. `scale` is the phase's speed.phase_scale factor (0.5 = half speed = double
+        time). Floored at 0.1 s so a zero-length move still ramps sanely."""
+        scale = max(float(scale), 1e-6)
         if self.descent_v_mm_s is None and self.descent_w_deg_s is None:
-            return self.descent_time_s
+            return self.descent_time_s / scale
         lin_m, ang_rad = pose_error(T_from, T_to)
-        v = float(self.descent_v_mm_s or 0.0)
-        w = float(self.descent_w_deg_s or 0.0)
+        v = float(self.descent_v_mm_s or 0.0) * scale
+        w = float(self.descent_w_deg_s or 0.0) * scale
         t_lin = (lin_m * 1000.0 / v) if v > 0 else 0.0
         t_ang = (np.degrees(ang_rad) / w) if w > 0 else 0.0
         return max(t_lin, t_ang, 0.1)
 
-    def _to(self, robot, T_target, label, what, position_guard=None, tare=None):
+    def _to(self, robot, T_target, label, what, position_guard=None, tare=None, scale=1.0):
         """Move the fingertip to T_target in the configured mode. In POSITION mode, `position_guard`
         (a callable taking the move thunk) runs it force-guarded; in COMPLIANCE mode the guard is
         ignored -- the admittance bounds the contact force itself (a stiff guarded move is exactly
         what trips on the cable's resistance). `tare` overrides whether to re-tare mid-warmup
-        (default: the descent's tare_before) -- a move that STARTS IN CONTACT must not tare."""
+        (default: the descent's tare_before) -- a move that STARTS IN CONTACT must not tare.
+        `scale` is the phase's speed.phase_scale factor."""
         if self.compliant:
             self._lazy_build(robot)
             T_start = robot.fingertip()
             return _compliant_move(robot, self._adm, self._guard, T_start, T_target,
-                                   self._duration(T_start, T_target),
+                                   self._duration(T_start, T_target, scale),
                                    self.tare_before if tare is None else tare,
                                    self.settle_s, what)
         if position_guard is not None:
@@ -330,16 +338,17 @@ class GraspController:
 
     def descend(self, robot, geom, label='grasp'):
         """Move to the grasp pose (from wherever the arm is -- the grasp-align pose). Tares in
-        FREE SPACE (at grasp-align), which is the baseline the lift keeps."""
-        return self._to(robot, geom.T_base_grasp, label, 'Grasp descent')
+        FREE SPACE (at grasp-align), which is the baseline the lift keeps. Runs at the 'pickup'
+        phase scale."""
+        return self._to(robot, geom.T_base_grasp, label, 'Grasp descent', scale=self.pickup_scale)
 
     def lift(self, robot, geom, label='lift', position_guard=None):
-        """Lift to geom.lift() in the SAME mode as the descent. `position_guard` guards the
-        position-mode lift only. Does NOT re-tare (tare_before_lift, default off): the lift starts
-        in contact, and taring there turns the ground reaction into a phantom downward force at
-        liftoff -- the arm would chase it back into the ground."""
+        """Lift to geom.lift() in the SAME mode as the descent, at the 'lift' phase scale.
+        `position_guard` guards the position-mode lift only. Does NOT re-tare (tare_before_lift,
+        default off): the lift starts in contact, and taring there turns the ground reaction into
+        a phantom downward force at liftoff -- the arm would chase it back into the ground."""
         return self._to(robot, geom.lift(), label, 'Lift', position_guard=position_guard,
-                        tare=self.tare_before_lift)
+                        tare=self.tare_before_lift, scale=self.lift_scale)
 
 
 class GraspImageRecorder:

@@ -98,7 +98,13 @@ class ManifoldEstimator:
         self.step_gain = float(c.get('step_gain', 1.0))
         self.ransac_iters = int(c.get('ransac_iters', 200))
         self.ransac_tol = float(c.get('ransac_tol', 1.0))
-        self.residual_gate = c.get('residual_gate', 1.5)
+        # residual_gate: a float, or DISABLED via null/~ in yaml. The strings 'None'/'none'/'null'
+        # also disable it -- yaml parses a bare `None` as the STRING "None" (only `null`/`~` are
+        # yaml null), and float('None') would otherwise blow up MID-RUN, after the robot moved.
+        gate = c.get('residual_gate', 1.5)
+        if isinstance(gate, str) and gate.strip().lower() in ('none', 'null', '~', ''):
+            gate = None
+        self.residual_gate = None if not gate else float(gate)   # bad values fail HERE, pre-motion
         self.min_observations = int(c.get('min_observations', 20))
         seed = int(c.get('random_seed', 0))
         self.rng = np.random.default_rng(seed if seed > 0 else None)

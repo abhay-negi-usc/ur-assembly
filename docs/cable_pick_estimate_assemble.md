@@ -90,13 +90,19 @@ are exactly **two limit sets of the same four keys**:
 | `max_cartesian_translation_mm_s` | the tool: moveL speed, compliant-reference ramp pacing, and an equivalent joint bound inside moveJ |
 | `max_cartesian_rotation_deg_s` | the tool's rotation: compliant-reference pacing + the moveJ equivalent bound |
 
-The **global `speed:`** block paces everything up to and including the lift (scan, pick
-descent/lift, home/reset moves — the descent/lift ramp time is derived from the actual distance at
-the global cartesian limits). The **`assembly.speed:`** block overrides it for everything from the
-stand-off approach on: the realign `moveJ`s, the insertion reference, the between-attempt retract,
-and the release escape. An absent assembly key inherits the global value. All four limits are
+There is **one global `speed:` block**, and each phase applies a **scale factor** to all four
+limits via `speed.phase_scale` (1.0 = the global limit itself):
+
+| phase | scales |
+|---|---|
+| `pickup` | the compliant grasp descent (free-space scan moves always run at 1.0) |
+| `lift` | the compliant lift after the grasp |
+| `assemble` | everything from the stand-off approach on: realign `moveJ`s, the insertion reference, the between-attempt retract, the release escape |
+
+Home/reset and other free-space moves run at the unscaled global limits. All four limits are
 enforced simultaneously — whichever binds. (Legacy keys `max_joint_velocity_rad_s`,
-`joint_acceleration_rad_s2`, `max_cartesian_velocity_m_s` still parse for the older configs.)
+`joint_acceleration_rad_s2`, `max_cartesian_velocity_m_s` still parse for the older configs, and
+`move_j`/`move_l` accept `caps=` as either a four-key mapping or a bare scale factor.)
 
 ## Cautions
 - **Linear (peg-in-hole) assembly assumed** — same as uncertain_sampling; no curved or twist mates.

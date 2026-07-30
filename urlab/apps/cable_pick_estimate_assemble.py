@@ -154,14 +154,14 @@ def build_and_run(cfg, robot, camera, args):
     init = cfg.get_path('estimation.initial_connector_in_fingertip')
     T_ftip_conn = from_cfg(init) if init else from_cfg(cfg.section('junction_in_fingertip'))
 
-    # ---- Speed limits: TWO blocks only. The GLOBAL `speed:` block paces everything up to and
-    # including the lift (scan, pick, home moves); the ASSEMBLY `assembly.speed:` block -- the
-    # same four keys, absent keys inheriting the global value -- paces everything from the
-    # stand-off approach on: the realign moveJs, the insertion reference, the between-attempt
-    # retract, and the release escape. ----
-    asm_caps = {**cfg.section('speed'), **(a.get('speed', {}) or {})}
-    v_mm_s = float(asm_caps.get('max_cartesian_translation_mm_s', 3.5))
-    w_deg_s = float(asm_caps.get('max_cartesian_rotation_deg_s', 5.0))
+    # ---- Speed limits: ONE global `speed:` block; each phase applies a SCALE to all four
+    # limits (speed.phase_scale). The 'assemble' scale paces everything from the stand-off
+    # approach on: the realign moveJs, the insertion reference, the between-attempt retract, and
+    # the release escape (the pick/lift phases apply their scales inside GraspController). ----
+    spd = cfg.section('speed')
+    asm_caps = float((spd.get('phase_scale', {}) or {}).get('assemble', 1.0))
+    v_mm_s = float(spd.get('max_cartesian_translation_mm_s', 3.5)) * asm_caps
+    w_deg_s = float(spd.get('max_cartesian_rotation_deg_s', 5.0)) * asm_caps
     min_seg_s = 1.0 / adm.rate
 
     def seg_time(A, B):

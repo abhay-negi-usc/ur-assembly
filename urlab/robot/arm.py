@@ -197,10 +197,16 @@ class URArm:
 
     # ------------------------------------------------------------------ motion
     def _limits(self, caps):
-        """The four limits for one move: `caps` (a `speed:`-style mapping) overriding the global
-        values, or the global values themselves when caps is None."""
+        """The four limits for one move. `caps` is either a `speed:`-style mapping (absolute
+        overrides; absent keys inherit the global values), or a bare NUMBER that SCALES all four
+        global limits (the speed.phase_scale mechanism -- e.g. 0.2 = a fifth of every limit).
+        None = the global limits."""
         mine = (self.max_joint_vel, self.joint_accel, self.max_cart_vel, self.max_cart_rot)
-        return parse_limits(caps, mine) if caps else mine
+        if caps is None:
+            return mine
+        if isinstance(caps, (int, float)):
+            return tuple(v * float(caps) for v in mine)
+        return parse_limits(caps, mine)
 
     def _speeds(self, q_target, caps=None):
         """(joint speed, accel, name-of-binding-cap) honouring EVERY cap -- whichever binds.

@@ -163,16 +163,23 @@ grasp_check:
     cable_shift_fraction: 0.8
     empty_drop_m: 0.003
 
-# GLOBAL speed limits -- every motion EXCEPT the assembly phase (scan, pick descent/lift, home
-# moves). Exactly four limits, all enforced simultaneously (whichever binds): the joint caps
-# bound every joint directly; the cartesian caps bound the TOOL (converted to an equivalent
-# joint bound for moveJ, and pacing the compliant reference ramps + moveL directly).
-# The assembly phase uses assembly.speed below instead.
+# GLOBAL speed limits -- ONE set of four, all enforced simultaneously (whichever binds): the
+# joint caps bound every joint directly; the cartesian caps bound the TOOL (converted to an
+# equivalent joint bound for moveJ, and pacing the compliant reference ramps + moveL directly).
 speed:
   max_joint_velocity_deg_s: 30.0
   max_joint_acceleration_deg_s2: 30.0
   max_cartesian_translation_mm_s: 25.0
   max_cartesian_rotation_deg_s: 30.0
+  # Per-PHASE scaling of ALL FOUR limits above (1.0 = the global limit itself).
+  #   pickup   -- the compliant grasp descent (free-space scan moves always run at 1.0)
+  #   lift     -- the compliant lift after the grasp
+  #   assemble -- everything from the stand-off approach on: the realign moveJs, the insertion
+  #               reference, the between-attempt retract, and the release escape
+  phase_scale:
+    pickup: 1.0
+    lift: 0.5
+    assemble: 0.2
 
 move_timeout_s: 60.0
 settle_s: 0.5
@@ -218,14 +225,7 @@ assembly:
   # Between attempts: back out along the CONNECTOR's OWN -X from wherever the insert stopped.
   retract_distance_m: 0.050
 
-  # ASSEMBLY speed limits -- the same four keys as the global speed: block, overriding it for
-  # everything from the stand-off approach on: the realign moveJs, the insertion reference, the
-  # between-attempt retract, and the release escape. An absent key inherits the global value.
-  speed:
-    max_joint_velocity_deg_s: 15.0
-    max_joint_acceleration_deg_s2: 15.0
-    max_cartesian_translation_mm_s: 5.0
-    max_cartesian_rotation_deg_s: 5.0
+  # (Assembly-phase speeds = the global speed: block x speed.phase_scale.assemble.)
 
   # The loop: assemble -> check -> retract -> estimate -> realign, at most this many attempts.
   max_attempts: 10
@@ -303,5 +303,6 @@ estimation:
   step_gain: 1.5
   ransac_iters: 200
   ransac_tol: 1.0
-  residual_gate: None             # drop guesses whose final residual > gate x best before voting
+  residual_gate: None             # drop guesses whose final residual > gate x best before voting;
+                                  # None/null disables the gate (like manifold_icp_validation)
   random_seed: 0

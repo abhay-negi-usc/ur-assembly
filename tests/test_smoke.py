@@ -723,6 +723,16 @@ def test_grasp_descent_is_speed_paced():
                                              'max_cartesian_rotation_deg_s': 30.0}}))
     assert np.isclose(glob._duration(A, B), 4.0), '100 mm at the global 25 mm/s must take 4 s'
 
+    # speed.phase_scale: the descent runs at the 'pickup' scale, the lift at the 'lift' scale.
+    sc = GraspController(Config({'pickup': {'mode': 'compliance'},
+                                 'speed': {'max_cartesian_translation_mm_s': 25.0,
+                                           'max_cartesian_rotation_deg_s': 30.0,
+                                           'phase_scale': {'pickup': 1.0, 'lift': 0.5,
+                                                           'assemble': 0.2}}}))
+    assert (sc.pickup_scale, sc.lift_scale) == (1.0, 0.5)
+    assert np.isclose(sc._duration(A, B, sc.pickup_scale), 4.0)
+    assert np.isclose(sc._duration(A, B, sc.lift_scale), 8.0), 'half speed = double ramp time'
+
     # The LIFT must not re-tare by default: it starts IN CONTACT, and a tare there turns the
     # ground reaction into a phantom downward force at liftoff (the arm chases it into the ground).
     assert g.tare_before is True and g.tare_before_lift is False
@@ -746,12 +756,17 @@ def test_speed_limits_global_and_assembly_blocks():
     assert np.isclose(arm.max_cart_vel, 0.025), 'moveL speed comes from the mm/s key'
     assert np.isclose(arm.max_cart_rot, np.radians(30.0))
 
-    # A partial assembly.speed override: set keys win, absent keys inherit the global limits.
+    # A partial mapping override: set keys win, absent keys inherit the global limits.
     base = (arm.max_joint_vel, arm.joint_accel, arm.max_cart_vel, arm.max_cart_rot)
     jv, ja, cv, cr = parse_limits({'max_joint_velocity_deg_s': 15.0,
                                    'max_cartesian_translation_mm_s': 5.0}, base)
     assert np.isclose(jv, np.radians(15.0)) and np.isclose(cv, 0.005)
     assert np.isclose(ja, np.radians(30.0)) and np.isclose(cr, np.radians(30.0))
+
+    # A bare NUMBER as caps scales ALL FOUR global limits -- the speed.phase_scale mechanism.
+    jv, ja, cv, cr = arm._limits(0.2)
+    assert np.isclose(jv, np.radians(6.0)) and np.isclose(ja, np.radians(6.0))
+    assert np.isclose(cv, 0.005) and np.isclose(cr, np.radians(6.0))
 
     # Legacy spellings keep their meaning (and the legacy m/s wins over mm/s for moveL).
     jv, ja, cv, cr = parse_limits({'max_joint_velocity_rad_s': 1.0,
@@ -759,6 +774,37 @@ def test_speed_limits_global_and_assembly_blocks():
                                    'max_cartesian_velocity_m_s': 0.5,
                                    'max_cartesian_translation_mm_s': 10.0})
     assert (jv, ja, cv) == (1.0, 2.0, 0.5)
+
+
+def test_gripper_gap_to_forward_relation():
+    """robot/gripper_kinematics: the 2F-85 pad rides a circle around the spring-link pivot, so
+    gap and forward position obey (gap/2 - Y0 - W)^2 + (z - Z0)^2 = R^2 -- pads ADVANCE as the
+    gripper closes, ~28 mm over the full stroke (Menagerie loop-closure geometry)."""
+    from urlab.robot import gripper_kinematics as gk
+
+    assert 0.084 < gk.GAP_MAX_M < 0.090, 'stock full-open gap must be ~ the 85 mm spec'
+    z_open = gk.pad_forward_from_gap(gk.GAP_MAX_M)
+    z_closed = gk.pad_forward_from_gap(0.0)
+    assert z_closed > z_open, 'the pads must ADVANCE (larger z) as the gripper closes'
+    assert 0.020 < z_closed - z_open < 0.035, 'full-stroke advance is ~28 mm'
+
+    gaps = np.linspace(0.0, gk.GAP_MAX_M, 25)
+    zs = np.array([gk.pad_forward_from_gap(g) for g in gaps])
+    assert np.all(np.diff(zs) < 0.0), 'z must fall monotonically as the gap grows'
+    r2 = ((gaps / 2 - gk.SPRING_PIVOT_LATERAL_M - gk.STOCK_PAD_LATERAL_M) ** 2
+          + (zs - gk.SPRING_PIVOT_FORWARD_M) ** 2)
+    assert np.allclose(r2, gk.FOLLOWER_RADIUS_M ** 2), 'the pad must stay ON the linkage circle'
+
+    # Counts anchor on THIS gripper's measured endpoints (custom tips close at 228, not 255).
+    assert gk.gap_from_counts(228, 3, 228, 0.085) == 0.0
+    assert np.isclose(gk.gap_from_counts(3, 3, 228, 0.085), 0.085)
+    assert 0.0 < gk.gap_from_counts(210, 3, 228, 0.085) < 0.01, 'connector band = a small gap'
+
+    try:
+        gk.pad_forward_from_gap(0.2)
+        raise AssertionError('a gap beyond the stroke must raise')
+    except ValueError:
+        pass
 
 
 def test_cartesian_bound_ignores_pose_model_mismatch_at_target():
@@ -841,6 +887,18 @@ def test_manifold_estimator_recovers_belief_error():
         # Too few observations must SKIP (None + reason), never guess from thin data.
         none_corr, reason = est.estimate(vec6[:3], w6[:3])
         assert none_corr is None and 'observations' in reason
+
+        # residual_gate: None disables it (like manifold_icp_validation) -- INCLUDING the STRING
+        # 'None', because yaml parses a bare `None` as a string (only null/~ are yaml null) and
+        # float('None') used to blow up MID-RUN, after the robot had already moved.
+        for gate in (None, 'None', 'null', 0):
+            gated = ManifoldEstimator({'manifold_csv': path, 'residual_gate': gate,
+                                       'estimate_dims': ['z_mm', 'pitch_deg'],
+                                       'icp_iterations': 5, 'num_initial_guesses': 10,
+                                       'random_seed': 5})
+            assert gated.residual_gate is None, f'{gate!r} must DISABLE the gate'
+            corr, info2 = gated.estimate(vec6, w6)
+            assert corr is not None, f'gate {gate!r}: estimate must run gateless, not crash'
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

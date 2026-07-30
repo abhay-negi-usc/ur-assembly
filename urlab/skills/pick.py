@@ -273,9 +273,15 @@ class GraspController:
         self.descent_time_s = float(p.get('descent_time_s', 2.0))
         # SPEED-based pacing (preferred): when either limit is set, the ramp duration is derived
         # from the ACTUAL distance -- so the touchdown speed no longer changes silently when
-        # approach_distance_m does. descent_time_s is the legacy fallback when both are absent.
-        self.descent_v_mm_s = p.get('descent_translation_mm_s')
-        self.descent_w_deg_s = p.get('descent_rotation_deg_s')
+        # approach_distance_m does. The pickup keys override; absent, the GLOBAL cartesian limits
+        # (speed.max_cartesian_translation_mm_s / _rotation_deg_s) pace the descent and lift like
+        # every other pre-assembly motion. descent_time_s is the legacy fallback when neither the
+        # pickup nor the global limits are set.
+        spd = cfg.section('speed')
+        self.descent_v_mm_s = p.get('descent_translation_mm_s',
+                                    spd.get('max_cartesian_translation_mm_s'))
+        self.descent_w_deg_s = p.get('descent_rotation_deg_s',
+                                     spd.get('max_cartesian_rotation_deg_s'))
         self.settle_s = float(p.get('settle_s', 0.5))
         self._guard_cfg = p.get('force_guard', {}) or {}
         self._adm = None

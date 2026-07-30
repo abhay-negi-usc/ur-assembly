@@ -153,17 +153,20 @@ def build_and_run(cfg, robot, camera, args):
     init = cfg.get_path('estimation.initial_connector_in_fingertip')
     T_ftip_conn = from_cfg(init) if init else inverse(from_cfg(cfg.section('connector_grasp')))
 
-    # ---- Speeds for the compliant reference (same convention as uncertain_sampling) ----
-    v_mm_s = float(cfg.get_path('speed.max_cartesian_translation_mm_s', 3.5))
-    w_deg_s = float(cfg.get_path('speed.max_cartesian_rotation_deg_s', 5.0))
-    rv_mm_s = float(cfg.get_path('speed.retract_translation_mm_s', v_mm_s))
-    rw_deg_s = float(cfg.get_path('speed.retract_rotation_deg_s', w_deg_s))
+    # ---- Speed limits: TWO blocks only. The GLOBAL `speed:` block paces everything up to and
+    # including the lift (scan, pick, home moves); the ASSEMBLY `assembly.speed:` block -- the
+    # same four keys, absent keys inheriting the global value -- paces everything from the
+    # stand-off approach on: the realign moveJs, the insertion reference, the between-attempt
+    # retract, and the release escape. ----
+    asm_caps = {**cfg.section('speed'), **(a.get('speed', {}) or {})}
+    v_mm_s = float(asm_caps.get('max_cartesian_translation_mm_s', 3.5))
+    w_deg_s = float(asm_caps.get('max_cartesian_rotation_deg_s', 5.0))
     min_seg_s = 1.0 / adm.rate
 
-    def seg_time(A, B, v=v_mm_s, w=w_deg_s):
+    def seg_time(A, B):
         lin_m, ang_rad = pose_error(A, B)
-        t_lin = (lin_m * 1000.0 / v) if v > 0 else 0.0
-        t_ang = (np.degrees(ang_rad) / w) if w > 0 else 0.0
+        t_lin = (lin_m * 1000.0 / v_mm_s) if v_mm_s > 0 else 0.0
+        t_ang = (np.degrees(ang_rad) / w_deg_s) if w_deg_s > 0 else 0.0
         return max(t_lin, t_ang, min_seg_s)
 
     comp = a.get('compliance', {}) or {}
@@ -219,7 +222,8 @@ def build_and_run(cfg, robot, camera, args):
     seed_q = robot.arm.q()
     T_tool0_conn = robot.T_tool0_fingertip @ T_ftip_conn
     q = robot.arm.ik(tool0_ref(T_standoff_row, T_tool0_conn), seed_q)
-    if q is None or not _guarded(robot, guard, lambda: robot.arm.move_j(q, label='stand-off')):
+    if q is None or not _guarded(robot, guard, lambda: robot.arm.move_j(q, label='stand-off',
+                                                                        caps=asm_caps)):
         return False
     seed_q = q
 
@@ -248,7 +252,8 @@ def build_and_run(cfg, robot, camera, args):
             # Realign with the START of the (re-estimated) trajectory -- stiff, free space, guarded.
             q = robot.arm.ik(refs[0], seed_q)
             if q is None or not _guarded(robot, guard,
-                                         lambda: robot.arm.move_j(q, label=f'align start {it}')):
+                                         lambda: robot.arm.move_j(q, label=f'align start {it}',
+                                                                  caps=asm_caps)):
                 log.error('Could not reach the trajectory start; aborting.')
                 return False
             seed_q = q
@@ -306,9 +311,10 @@ def build_and_run(cfg, robot, camera, args):
                 success = True
                 break
 
-            # RETRACT: linear escape along the connector's own -X (compliant, un-guarded).
+            # RETRACT: linear escape along the connector's own -X (compliant, un-guarded), at the
+            # same assembly speed limits as the insert.
             T_out = _retract_ref(last_ref, T_tool0_conn, retract_m)
-            adm.ramp(last_ref, T_out, seg_time(last_ref, T_out, rv_mm_s, rw_deg_s), guard=None)
+            adm.ramp(last_ref, T_out, seg_time(last_ref, T_out), guard=None)
             robot.arm.servo_stop()
 
             if it == max_attempts:
@@ -358,7 +364,8 @@ def build_and_run(cfg, robot, camera, args):
 
     def release_escape():
         T_new = translation_matrix(back) @ robot.tool0()
-        return _guarded(robot, guard, lambda: robot.arm.move_l(T_new, label='retract (connector -X)'))
+        return _guarded(robot, guard, lambda: robot.arm.move_l(T_new, label='retract (connector -X)',
+                                                               caps=asm_caps))
 
     ok = runner.run([('open gripper (release)', robot.gripper.open),
                      ('retract (connector -X)', release_escape)])

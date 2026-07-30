@@ -697,9 +697,49 @@ def test_grasp_descent_is_speed_paced():
     legacy = GraspController(Config({'pickup': {'mode': 'compliance', 'descent_time_s': 3.0}}))
     assert legacy._duration(A, B) == 3.0, 'no speed keys -> the legacy fixed duration'
 
+    # Without pickup descent keys the GLOBAL cartesian limits pace the descent/lift, so a config
+    # with only the four-key speed: block needs no pickup speed duplicates.
+    glob = GraspController(Config({'pickup': {'mode': 'compliance'},
+                                   'speed': {'max_cartesian_translation_mm_s': 25.0,
+                                             'max_cartesian_rotation_deg_s': 30.0}}))
+    assert np.isclose(glob._duration(A, B), 4.0), '100 mm at the global 25 mm/s must take 4 s'
+
     # The LIFT must not re-tare by default: it starts IN CONTACT, and a tare there turns the
     # ground reaction into a phantom downward force at liftoff (the arm chases it into the ground).
     assert g.tare_before is True and g.tare_before_lift is False
+
+
+def test_speed_limits_global_and_assembly_blocks():
+    """EXACTLY four speed limits (joint vel deg/s, joint accel deg/s^2, cartesian translation
+    mm/s, cartesian rotation deg/s), in two variations: the global speed: block and an
+    assembly.speed override whose absent keys inherit the global values. Legacy spellings
+    (rad/s, rad/s^2, m/s) still parse for the older configs."""
+    from urlab.config import Config
+    from urlab.robot.arm import URArm, parse_limits
+
+    arm = URArm(Config({'robot': {'dry_run': True},
+                        'speed': {'max_joint_velocity_deg_s': 30.0,
+                                  'max_joint_acceleration_deg_s2': 30.0,
+                                  'max_cartesian_translation_mm_s': 25.0,
+                                  'max_cartesian_rotation_deg_s': 30.0}}))
+    assert np.isclose(arm.max_joint_vel, np.radians(30.0))
+    assert np.isclose(arm.joint_accel, np.radians(30.0)), 'accel key is in deg/s^2'
+    assert np.isclose(arm.max_cart_vel, 0.025), 'moveL speed comes from the mm/s key'
+    assert np.isclose(arm.max_cart_rot, np.radians(30.0))
+
+    # A partial assembly.speed override: set keys win, absent keys inherit the global limits.
+    base = (arm.max_joint_vel, arm.joint_accel, arm.max_cart_vel, arm.max_cart_rot)
+    jv, ja, cv, cr = parse_limits({'max_joint_velocity_deg_s': 15.0,
+                                   'max_cartesian_translation_mm_s': 5.0}, base)
+    assert np.isclose(jv, np.radians(15.0)) and np.isclose(cv, 0.005)
+    assert np.isclose(ja, np.radians(30.0)) and np.isclose(cr, np.radians(30.0))
+
+    # Legacy spellings keep their meaning (and the legacy m/s wins over mm/s for moveL).
+    jv, ja, cv, cr = parse_limits({'max_joint_velocity_rad_s': 1.0,
+                                   'joint_acceleration_rad_s2': 2.0,
+                                   'max_cartesian_velocity_m_s': 0.5,
+                                   'max_cartesian_translation_mm_s': 10.0})
+    assert (jv, ja, cv) == (1.0, 2.0, 0.5)
 
 
 def test_manifold_estimator_recovers_belief_error():

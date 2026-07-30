@@ -80,12 +80,23 @@ An experiment folder `data/experiments/cable_pick_estimate_assemble_<timestamp>/
 - `estimates.csv` — check errors, per-dim corrections, ICP inliers/residual, success flag.
 
 ## Speeds — no time-based motion
-Every motion in this app is paced by an explicit config limit, never a fixed duration: free-space
-`moveJ` by `speed.max_joint_velocity_deg_s` / `joint_acceleration_rad_s2` / `max_cartesian_velocity_m_s`;
-the pickup descent + lift by `pickup.descent_translation_mm_s` / `descent_rotation_deg_s` (ramp time
-derived from the actual distance); the compliant insert and between-attempt retract by
-`speed.max_cartesian_*` / `speed.retract_*` (mm/s, deg/s); the reset home is a guarded position
-`moveJ` under the same caps.
+Every motion in this app is paced by an explicit config limit, never a fixed duration, and there
+are exactly **two limit sets of the same four keys**:
+
+| key | bounds |
+|---|---|
+| `max_joint_velocity_deg_s` | every joint, directly (moveJ speed) |
+| `max_joint_acceleration_deg_s2` | the moveJ accel/decel ramp |
+| `max_cartesian_translation_mm_s` | the tool: moveL speed, compliant-reference ramp pacing, and an equivalent joint bound inside moveJ |
+| `max_cartesian_rotation_deg_s` | the tool's rotation: compliant-reference pacing + the moveJ equivalent bound |
+
+The **global `speed:`** block paces everything up to and including the lift (scan, pick
+descent/lift, home/reset moves — the descent/lift ramp time is derived from the actual distance at
+the global cartesian limits). The **`assembly.speed:`** block overrides it for everything from the
+stand-off approach on: the realign `moveJ`s, the insertion reference, the between-attempt retract,
+and the release escape. An absent assembly key inherits the global value. All four limits are
+enforced simultaneously — whichever binds. (Legacy keys `max_joint_velocity_rad_s`,
+`joint_acceleration_rad_s2`, `max_cartesian_velocity_m_s` still parse for the older configs.)
 
 ## Cautions
 - **Linear (peg-in-hole) assembly assumed** — same as uncertain_sampling; no curved or twist mates.

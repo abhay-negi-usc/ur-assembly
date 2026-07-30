@@ -124,13 +124,35 @@ def apply_cable_profile(cfg):
         cfg.set_path('gripper.force_counts', int(shared['force']))
     # The grasp TARGET is the CONNECTOR, so its count range is the SUCCESS band; the cable (thinner,
     # HIGHER count) is a miss above it, and anything thicker (<= band) is a miss below it.
+    # PHYSICAL DIMENSIONS ARE PREFERRED: <cable>.connector_diameter_mm derives the band through
+    # the calibrated gripper kinematics + the fingertip groove depth (gripper.groove_depth_mm),
+    # so re-measuring a connector means re-measuring a DIAMETER with calipers, not gripper
+    # counts. Raw count keys remain the fallback (and the logged reference when both exist).
+    import math
+
     conn = entry.get('connector')
+    d_conn = entry.get('connector_diameter_mm')
+    if d_conn:
+        from .robot.gripper_kinematics import GROOVE_DEPTH_M, counts_from_width
+        groove = (float(shared['groove_depth_mm']) / 1000.0
+                  if shared.get('groove_depth_mm') is not None else GROOVE_DEPTH_M)
+        d_lo, d_hi = sorted(float(v) for v in d_conn)
+        margin = int(entry.get('band_margin_counts', 1))         # widen for stall-force spread
+        lo = int(math.floor(counts_from_width(d_hi / 1000.0, groove))) - margin  # thickest end
+        hi = int(math.ceil(counts_from_width(d_lo / 1000.0, groove))) + margin   # thinnest end
+        if conn:
+            print(f'  cable {name!r}: connector band from diameters {d_lo}-{d_hi} mm -> '
+                  f'[{lo}, {hi}] counts (measured reference: {sorted(int(v) for v in conn)})')
+        cfg.set_path('grasp_check.connector_diameter_mm', [d_lo, d_hi])   # for payload-width checks
+        conn = [lo, hi]
     if conn:
         lo, hi = int(min(conn)), int(max(conn))
         cfg.set_path('grasp_check.connector_counts', [lo, hi])
         cfg.set_path('grasp_check.groove_counts', (lo + hi) // 2)     # success reference (midpoint)
         cfg.set_path('grasp_check.faces_max_counts', lo - 1)          # <= this  = miss (too thick)
         cfg.set_path('grasp_check.groove_max_counts', hi)            # >  this  = miss (the cable)
+    if entry.get('cable_diameter_mm') is not None:
+        cfg.set_path('grasp_check.cable_diameter_mm', float(entry['cable_diameter_mm']))
     if 'cable' in entry:
         cfg.set_path('grasp_check.cable_counts', int(entry['cable']))   # reference: cable grab = miss
     # Grasp geometry: junction_in_fingertip = the JUNCTION pose wrt the FINGERTIP at the grasp

@@ -1,91 +1,120 @@
-"""Robotiq 2F-85 finger-gap <-> fingertip-advance relation (analytic, from the open linkage).
+"""Robotiq 2F-85 finger gap <-> fingertip forward position -- CALIBRATED on our gripper.
 
-WHY: the 2F-85's fingertips do not close in a fixed plane -- each pad rides a CIRCLE around its
-inner-knuckle (spring-link) pivot while staying parallel, so the pads ADVANCE along the gripper
-approach axis as the fingers close (~28 mm over the full 85 mm stroke). A grasp closed to one gap
-therefore puts the fingertip at a DIFFERENT distance from the flange than a grasp at another gap;
-this module gives that relation in closed form so grasp/descent depths can be compensated per
-object diameter.
+WHY: the 2F-85's fingertips do not close in a fixed plane -- each fingertip rides a CIRCLE
+around its inner-knuckle (spring-link) pivot while staying parallel, so the tips ADVANCE along
+the gripper approach axis as the fingers close. A grasp closed to one gap therefore puts the
+fingertip at a DIFFERENT distance from the flange than a grasp at another gap; this module gives
+that relation so grasp/descent depths can be compensated per object diameter.
 
-SOURCE of the linkage constants: the MuJoCo Menagerie 2F-85 model
-(google-deepmind/mujoco_menagerie, robotiq_2f85/2f85.xml). Chosen over the ROS URDFs (e.g.
-PickNikRobotics/ros2_robotiq_gripper) DELIBERATELY: Menagerie models the true four-bar LOOP
-CLOSURE, and its spring-link geometry reproduces the full ~85 mm stroke across the driver's
-0..0.8 rad range; the URDFs' mimic-joint parallelogram (inner joints = +-driver angle)
-understrokes (~71 mm) -- good enough to visualise, wrong to measure from.
+THE MODEL (per finger; y = lateral from the centreline, z = forward, metres):
 
-THE MODEL (per finger; y = lateral from the gripper centreline, z = forward from the mounting
-face, both in metres). The pad-carrying follower attaches to the spring link at radius R from
-the pivot (Y0, Z0), and the pad keeps a fixed orientation, so the pad face moves on
+    gap/2 = A + R cos(psi)        z = B + R sin(psi)        psi = PSI0 + K * counts
 
-    y(psi) = Y0 + R cos(psi) + W        z(psi) = Z0 + R sin(psi) + H
+i.e. the fingertip point moves on a circle of radius R, traversed LINEARLY in encoder counts,
+until the pads meet at psi_closed = arccos(-A/R) (~counts 216 on our unit); commanding further
+(216..255) only squeezes the pads -- the geometry FREEZES there. Eliminating psi:
 
-with psi swinging PSI_OPEN -> PSI_CLOSED as the gripper closes. gap = 2 y, and eliminating psi:
+    z(gap) = B + sqrt(R^2 - (gap/2 - A)^2)
 
-    z(gap) = Z0 + sqrt(R^2 - (gap/2 - Y0 - W)^2) + H
+CALIBRATION (2026-07-30, OUR gripper with the custom grooved fingertips; supersedes the
+constants first derived from the MuJoCo Menagerie robotiq_2f85 model). Measured
+(encoder, finger separation mm, delta height mm):
 
-W lumps every fixed LATERAL offset from the follower origin to the actual pad face and H every
-fixed FORWARD offset. CUSTOM FINGERTIPS CHANGE W AND H (ours have a groove): calibrate them by
-measuring (gap, fingertip z) at one or two known closures. The defaults are the STOCK pads --
-W chosen so the faces meet exactly (gap 0) at the driver limit (it then equals Menagerie's pad
-+ silicone offsets, a consistency check), H = 0. DIFFERENCES z(g1) - z(g2) are H-free, so
-depth COMPENSATION between two gaps needs no H calibration at all.
+    3: (83.56, 93.66)   50: (67.03, 99.03)   100: (47.80, 104.15)
+    150: (27.19, 105.90)   200: (7.36, 106.42)   230: (0.00, 106.42)
+
+Least-squares circle + linear-angle fit reproduces every row within 0.6 mm gap / 0.5 mm z.
+The fitted R = 55.0 mm differs from the Menagerie linkage radius (66.6 mm): the custom
+fingertips' CONTACT point does not coincide with the stock pad reference (and the pads flex), so
+it rides a smaller effective circle -- the measurement wins. Full-stroke tip advance: 12.8 mm.
+
+DATUM: z is in the CALIBRATION datum (the "delta height" measurement), NOT flange-absolute.
+DIFFERENCES z(g1) - z(g2) are datum-free -- that is what depth compensation needs. For an
+absolute flange distance add one measured constant via `datum_offset_m`.
+
+QUIRK worth knowing: gap 0 lies slightly PAST the circle's apex (psi_closed ~ 96.5 deg > 90),
+so z(gap) is not strictly monotonic -- it peaks at gap = 2A ~ 12.4 mm and dips ~0.3 mm by gap 0
+(the measured 200/230 rows are flat for exactly this reason).
 """
 
 import numpy as np
 
-# Menagerie robotiq_2f85/2f85.xml: spring_link body at (y, z) = (0.0132, 0.0609) from the base
-# mounting face; follower attached at (0.055, 0.0375) in the spring-link frame; driver (and,
-# through the loop closure, the spring link) swings 0..0.8 rad.
-SPRING_PIVOT_LATERAL_M = 0.0132
-SPRING_PIVOT_FORWARD_M = 0.0609
-FOLLOWER_RADIUS_M = float(np.hypot(0.055, 0.0375))          # 0.066568
-PSI_OPEN_RAD = float(np.arctan2(0.0375, 0.055))             # 0.59870 (fully open)
-PSI_CLOSED_RAD = PSI_OPEN_RAD + 0.8                         # 1.39870 (fully closed)
+# ---- Calibrated constants (fit residuals < 0.5 mm; see the docstring table) ----
+R_M = 0.054976                    # effective fingertip circle radius
+APEX_LATERAL_M = 0.006212         # A: circle-centre lateral offset (apex at gap = 2A)
+DATUM_FORWARD_M = 0.051645        # B: circle-centre forward position, in the calibration datum
+PSI0_RAD = float(np.radians(49.225))          # fingertip angle at encoder 0
+K_RAD_PER_COUNT = float(np.radians(0.2186))   # angle per encoder count (linear -- fit +-0.3 deg)
 
-# Stock pads: the lateral pad-face offset that makes gap(PSI_CLOSED) exactly 0. Comes out to
-# -24.6 mm = Menagerie's pad offset (-18.9 mm) plus its silicone thickness -- a cross-check.
-STOCK_PAD_LATERAL_M = -(SPRING_PIVOT_LATERAL_M
-                        + FOLLOWER_RADIUS_M * float(np.cos(PSI_CLOSED_RAD)))
+# The pads meet (gap 0) here; beyond, the pads squeeze and the geometry freezes.
+PSI_CLOSED_RAD = float(np.arccos(-APEX_LATERAL_M / R_M))              # ~96.5 deg
+COUNTS_CLOSED = (PSI_CLOSED_RAD - PSI0_RAD) / K_RAD_PER_COUNT         # ~216
+# Widest commandable gap (encoder 0).
+GAP_MAX_M = 2.0 * (APEX_LATERAL_M + R_M * float(np.cos(PSI0_RAD)))    # ~84.2 mm
 
-# Full-open gap with the stock pads: ~87 mm (spec 85 mm; the margin is pad compression).
-GAP_MAX_M = 2.0 * (SPRING_PIVOT_LATERAL_M + FOLLOWER_RADIUS_M * float(np.cos(PSI_OPEN_RAD))
-                   + STOCK_PAD_LATERAL_M)
-
-
-def pad_forward_from_gap(gap_m, pad_lateral_m=STOCK_PAD_LATERAL_M, pad_forward_m=0.0):
-    """Forward position (m, along the approach axis from the 2F-85 mounting face) of the pad
-    face when the fingers are at `gap_m`. Larger when more closed -- the pads ADVANCE.
-
-    `pad_lateral_m` / `pad_forward_m` are the fixed offsets of YOUR pad face from the follower
-    origin (calibrate for custom fingertips; defaults = stock pads). Raises ValueError for a gap
-    the linkage cannot reach with those pads."""
-    u = gap_m / 2.0 - SPRING_PIVOT_LATERAL_M - pad_lateral_m        # = R cos(psi)
-    u_min = FOLLOWER_RADIUS_M * float(np.cos(PSI_CLOSED_RAD))
-    u_max = FOLLOWER_RADIUS_M * float(np.cos(PSI_OPEN_RAD))
-    if not (u_min - 1e-9 <= u <= u_max + 1e-9):
-        lo = 2.0 * (SPRING_PIVOT_LATERAL_M + u_min + pad_lateral_m)
-        hi = 2.0 * (SPRING_PIVOT_LATERAL_M + u_max + pad_lateral_m)
-        raise ValueError(f'gap {gap_m * 1000:.1f} mm is outside the linkage stroke '
-                         f'[{lo * 1000:.1f}, {hi * 1000:.1f}] mm for these pads')
-    u = float(np.clip(u, u_min, u_max))
-    return (SPRING_PIVOT_FORWARD_M + float(np.sqrt(FOLLOWER_RADIUS_M ** 2 - u * u))
-            + pad_forward_m)
+# Per-fingertip V-GROOVE depth. An object SEATED IN THE GROOVE stalls the fingers at a FLAT-FACE
+# separation of (object width - 2 * groove), so width <-> counts needs this on top of the circle
+# model. Calibrated from the banana connector (diameter 9.55-10.7 mm stalling at counts 213/207
+# -> 4.11/3.43 mm per side); the +-0.35 mm spread is the current model uncertainty. This is an
+# EFFECTIVE depth: the stall data behind it was taken at the working grip force, so the typical
+# PAD COMPRESSION (all separations in this module are zero-compression values; real grasps
+# squeeze the pads, which is desired for grip pressure) is absorbed here on average.
+GROOVE_DEPTH_M = 0.00377
 
 
-def gap_from_counts(counts, counts_open, counts_closed, gap_at_open_m=GAP_MAX_M):
-    """Finger gap (m) from a gripper position in COUNTS, anchored on THIS gripper's measured
-    endpoints: `counts_open` <-> `gap_at_open_m`, `counts_closed` <-> gap 0 (the counts where
-    YOUR pads meet -- e.g. 228, not 255, with custom fingertips). Linear in counts, which is
-    Robotiq's own ~0.4 mm/count convention; the residual nonlinearity through the four-bar is
-    well under the repeatability of the drive."""
-    frac = (float(counts_closed) - float(counts)) / (float(counts_closed) - float(counts_open))
-    return max(0.0, min(1.0, frac)) * float(gap_at_open_m)
+def gap_from_counts(counts):
+    """Finger separation (m) at an encoder value, from the calibrated circle + linear-angle
+    model (NOT a linear mm/count approximation -- the measured mapping bends from 0.35 to
+    0.41 mm/count through the stroke). Saturates at 0 past COUNTS_CLOSED (~216): commanding
+    216..255 only squeezes the pads."""
+    psi = PSI0_RAD + K_RAD_PER_COUNT * min(float(counts), COUNTS_CLOSED)
+    return max(0.0, 2.0 * (APEX_LATERAL_M + R_M * float(np.cos(psi))))
 
 
-def pad_forward_from_counts(counts, counts_open, counts_closed, gap_at_open_m=GAP_MAX_M,
-                            pad_lateral_m=STOCK_PAD_LATERAL_M, pad_forward_m=0.0):
-    """pad_forward_from_gap of gap_from_counts -- the one-call version."""
-    return pad_forward_from_gap(gap_from_counts(counts, counts_open, counts_closed,
-                                                gap_at_open_m),
-                                pad_lateral_m, pad_forward_m)
+def counts_from_gap(gap_m):
+    """The encoder value at which closure reaches finger separation `gap_m` -- the inverse of
+    gap_from_counts. NOTE this predicts the FLAT-FACE separation: an object seated in the
+    fingertip GROOVE stalls LATER (at higher counts) by the combined groove depth, so measured
+    grasp bands (cables.yaml) sit above this prediction -- compare the two to estimate the
+    groove depth, not to replace the measured bands."""
+    if not (-1e-9 <= gap_m <= GAP_MAX_M + 1e-9):
+        raise ValueError(f'gap {gap_m * 1000:.1f} mm is outside the calibrated stroke '
+                         f'[0, {GAP_MAX_M * 1000:.1f}] mm')
+    u = float(np.clip(gap_m, 0.0, GAP_MAX_M)) / 2.0 - APEX_LATERAL_M
+    psi = float(np.arccos(u / R_M))
+    return (psi - PSI0_RAD) / K_RAD_PER_COUNT
+
+
+def counts_from_width(width_m, groove_depth_m=GROOVE_DEPTH_M):
+    """The encoder value at which the fingers stall on an object of physical `width_m` SEATED IN
+    THE GROOVES: counts_from_gap(width - 2 * groove). An object thinner than 2 * groove (e.g. a
+    bare cable) disappears into the grooves entirely -- the prediction saturates at COUNTS_CLOSED
+    and the true stall lands somewhere in the pad-flex region beyond (measured, not modelled)."""
+    return counts_from_gap(max(0.0, float(width_m) - 2.0 * groove_depth_m))
+
+
+def width_from_counts(counts, groove_depth_m=GROOVE_DEPTH_M):
+    """Physical width (m) of an object seated in the grooves when the fingers stalled at
+    `counts` -- the PAYLOAD WIDTH readback: gap_from_counts + 2 * groove. Floors at 2 * groove
+    past free closure (~counts 216), where thin objects are no longer resolvable."""
+    return gap_from_counts(counts) + 2.0 * groove_depth_m
+
+
+def pad_forward_from_gap(gap_m, datum_offset_m=0.0):
+    """Forward fingertip position (m, calibration datum + `datum_offset_m`) at finger gap
+    `gap_m`. Larger when more closed -- the tips ADVANCE by 12.8 mm over the full stroke.
+    Differences between two gaps are datum-free. Raises ValueError outside the reachable
+    stroke [0, GAP_MAX_M]."""
+    if not (-1e-9 <= gap_m <= GAP_MAX_M + 1e-9):
+        raise ValueError(f'gap {gap_m * 1000:.1f} mm is outside the calibrated stroke '
+                         f'[0, {GAP_MAX_M * 1000:.1f}] mm')
+    u = float(np.clip(gap_m, 0.0, GAP_MAX_M)) / 2.0 - APEX_LATERAL_M
+    return DATUM_FORWARD_M + float(np.sqrt(R_M ** 2 - u * u)) + datum_offset_m
+
+
+def pad_forward_from_counts(counts, datum_offset_m=0.0):
+    """Forward fingertip position (m) at an encoder value -- rises to the apex (~counts 186),
+    dips ~0.3 mm to pad contact, then freezes past COUNTS_CLOSED. The one-call composition for
+    depth compensation from the gripper state."""
+    psi = PSI0_RAD + K_RAD_PER_COUNT * min(float(counts), COUNTS_CLOSED)
+    return DATUM_FORWARD_M + R_M * float(np.sin(psi)) + datum_offset_m

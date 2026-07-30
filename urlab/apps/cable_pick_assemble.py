@@ -40,16 +40,51 @@ def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder, 
         T_conn = T_conn @ translation_matrix([offset_x_m, 0.0, 0.0])
     geom.T_base_grasp = T_conn @ inverse(T_ftip_junction)
 
+    # PICKUP HEIGHT from the gripper model (pickup.height_from_model). ASSUMES the connector
+    # rests ON THE GROUND PLANE -- the ground-plane scan puts the junction estimate AT the plane,
+    # so the grasp target rises by d_max/2 (the centerline of the connector's thickest section)
+    # PLUS the fingertip ADVANCE between the separation fingertip_grasp was calibrated at and the
+    # expected grasp stall separation: the physical pad travels ~12.8 mm along the approach axis
+    # over the stroke (calibrated circle model), so the STATIC tool0->fingertip transform is
+    # exact at ONE separation only. COMPRESSION: all separations are zero-compression values; in
+    # practice the pads squeeze (desired -- grip pressure), which the calibrated groove depth
+    # already absorbs on average, and near closure the advance is insensitive to it (<0.1 mm) --
+    # pad_compression_mm is exposed for completeness.
+    hm = cfg.get_path('pickup.height_from_model', {}) or {}
+    d_conn = cfg.get_path('grasp_check.connector_diameter_mm')
+    if bool(hm.get('enabled', False)) and d_conn:
+        from ..robot.gripper_kinematics import pad_forward_from_gap
+        d_max = max(float(v) for v in d_conn) / 1000.0
+        s_ref = float(hm.get('fingertip_ref_separation_mm', 0.0)) / 1000.0
+        s_grasp = max(0.0, d_max - 2.0 * robot.gripper.groove_depth_m
+                      - float(hm.get('pad_compression_mm', 0.0)) / 1000.0)
+        advance = pad_forward_from_gap(s_grasp) - pad_forward_from_gap(s_ref)
+        dz = d_max / 2.0 + advance
+        log.info('Pickup height from the gripper model: %+.2f mm '
+                 '(centerline %+.2f, fingertip advance %+.2f at %.1f mm separation).',
+                 dz * 1000, d_max / 2.0 * 1000, advance * 1000, s_grasp * 1000)
+        geom.T_base_grasp = translation_matrix([0.0, 0.0, dz]) @ geom.T_base_grasp
+
     # Grasp directly from wherever the scan ended (already close to the cable) -- no detour home first.
     # Record wrist images at grasp_check.capture_rate_hz (default 1 Hz) over the descent + close +
     # recovery, alongside the count-labelled frames GraspRecovery saves.
     runner = StepRunner(log, confirm=confirm is not None)
+    steps = [
+        ('move to grasp-align', lambda: robot.move_fingertip(geom.pre_grasp(), 'grasp-align')),
+        ('report pre-grasp delta', lambda: log_grasp_delta(robot, geom.T_base_grasp, 'pre-grasp')),
+    ]
+    # PHYSICAL-dimension gripper prep: with the connector diameter known (cables.yaml), narrow
+    # the fingers to diameter + clearance instead of descending fully open -- less close travel
+    # at the grasp. Done AFTER the scan (full open keeps the fingers splayed out of the camera
+    # view) and BEFORE the descent.
+    d_conn = cfg.get_path('grasp_check.connector_diameter_mm')
+    if d_conn:
+        gap_m = (max(d_conn) + float(cfg.get_path('gripper.open_clearance_mm', 15.0))) / 1000.0
+        steps.append(('narrow to clearance',
+                      lambda: robot.gripper.go_to_gap(gap_m, 'clearance')))
+    steps.append(('move to grasp', lambda: grasp.descend(robot, geom, 'grasp')))
     with recorder.recording(scanner.camera):
-        if not runner.run([
-            ('move to grasp-align', lambda: robot.move_fingertip(geom.pre_grasp(), 'grasp-align')),
-            ('report pre-grasp delta', lambda: log_grasp_delta(robot, geom.T_base_grasp, 'pre-grasp')),
-            ('move to grasp', lambda: grasp.descend(robot, geom, 'grasp')),
-        ]):
+        if not runner.run(steps):
             return 'abort'
         # Close + grasp-check + recovery (blind retry, then mode-directed reseat nudges) -- see
         # GraspRecovery -- so a cable on the fingertip flats/tips is reseated, not failed.

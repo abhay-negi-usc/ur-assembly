@@ -128,6 +128,17 @@ pickup:
   # ACTUAL distance, paced by the GLOBAL cartesian limits (speed: block below) like every other
   # pre-assembly motion.
   settle_s: 0.5
+  # PICKUP HEIGHT from the gripper kinematic model. Assumes the connector RESTS ON THE GROUND
+  # PLANE (ground_plane.z_m): the grasp target = plane + connector d_max/2 (centerline) + the
+  # fingertip ADVANCE between fingertip_ref_separation_mm (where fingertip_grasp z was
+  # calibrated: 0 = measured with the gripper closed; 83.56 = at full open) and the expected
+  # stall separation. Separations are ZERO-COMPRESSION values -- real grasps squeeze the pads
+  # (desired, grip pressure); the calibrated groove depth absorbs the average squeeze and the
+  # advance is insensitive to it near closure, so pad_compression_mm usually stays 0.
+  height_from_model:
+    enabled: true
+    fingertip_ref_separation_mm: 0.0
+    pad_compression_mm: 0.0
   compliance:
     enabled: true
     tare_before: true
@@ -186,12 +197,12 @@ speed:
   # Per-PHASE scaling of ALL FOUR limits above (1.0 = the global limit itself), one entry per
   # phase of cable_pick_estimate_assemble. An absent phase runs at 1.0.
   phase_scale:
-    reset: 0.8       # start/end home moves (and the between-retry homes)
-    scan: 0.8        # the multi-view scan + grasp-align + reseat moves
+    reset: 1.5       # start/end home moves (and the between-retry homes)
+    scan: 1.0        # the multi-view scan + grasp-align + reseat moves
     pickup: 0.8      # the compliant grasp descent
     lift: 0.8        # the compliant lift (including the slip-check partial lift)
-    standoff: 0.8    # the move to stand-off + the per-attempt realign moveJs
-    assemble: 0.8    # the insertion reference ramp
+    standoff: 1.0    # the move to stand-off + the per-attempt realign moveJs
+    assemble: 0.2    # the insertion reference ramp
     retract: 0.8     # the between-attempt retract + the release escape
 
 move_timeout_s: 60.0
@@ -307,11 +318,11 @@ estimation:
   icp_iterations: 50
   num_initial_guesses: 100
   init_guess_range:
-    x_mm: 0.0
+    x_mm: 5.0
     y_mm: 0.0
     z_mm: 5.0
     roll_deg: 0.0
-    pitch_deg: 10.0
+    pitch_deg: 15.0
     yaw_deg: 0.0
   step_gain: 1.5
   ransac_iters: 200

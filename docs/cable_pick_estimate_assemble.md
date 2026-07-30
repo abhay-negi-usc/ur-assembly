@@ -119,6 +119,17 @@ Two failure modes are handled around the pick:
   fixed point (the fresh scan reproduces the same junction estimate). Full retries perturb the
   grasp along the junction x by 0, +d, −d, +2d, … to break it. `0` disables.
 
+## Pickup height (`pickup.height_from_model`)
+With the connector **on the ground plane**, the grasp target height is derived from physics
+instead of a hand-tuned z-trim: plane + `connector_diameter_mm` max/2 (the centerline) + the
+fingertip **advance** between the separation `fingertip_grasp` was calibrated at
+(`fingertip_ref_separation_mm`: 0 = gripper closed, 83.56 = full open) and the expected stall
+separation — the physical pad travels ~12.8 mm along the approach axis over the stroke, so the
+static tool0→fingertip transform is exact at one separation only. All separations are
+zero-compression values; real grasps squeeze the pads (desired — grip pressure), which the
+calibrated groove depth absorbs on average (`pad_compression_mm` exists for completeness but the
+advance is insensitive to it near closure).
+
 ## Cautions
 - **Linear (peg-in-hole) assembly assumed** — same as uncertain_sampling; no curved or twist mates.
 - The correction is restricted to `estimate_dims`; a belief error outside those dims (or one whose

@@ -256,6 +256,15 @@ def build_and_run(cfg, robot, camera, args):
         log.info('Payload width: %.2f mm (expected connector %.2f-%.2f mm).',
                  w_mm, min(d_conn), max(d_conn))
 
+    # ---- PHYSICAL payload check: the stalled counts -> held width through the calibrated
+    # gripper model (+ groove depth). Purely informational next to the counts-band check, but in
+    # units a human can sanity-check against the datasheet with calipers. ----
+    d_conn = cfg.get_path('grasp_check.connector_diameter_mm')
+    if d_conn and not robot.arm.dry_run:
+        w_mm = robot.gripper.held_width_m() * 1000.0
+        log.info('Payload width: %.2f mm (expected connector %.2f-%.2f mm).',
+                 w_mm, min(d_conn), max(d_conn))
+
     # ---- Approach the stand-off (beyond the trajectory START, target frame) ----
 
     standoff_axis = np.asarray((a.get('standoff', {}) or {}).get('axis', [-1, 0, 0]), dtype=float)

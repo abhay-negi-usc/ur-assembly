@@ -215,9 +215,15 @@ class URArm:
         speed, which = jv, 'joint-velocity'
         if dj > 1e-6 and (cv > 0.0 or cr > 0.0):
             lin, ang = pose_error(self.tcp_pose(), self.fk(q_target))
-            if cv > 0.0 and lin > 1e-6 and dj / lin * cv < speed:
+            # SANITY-GATE the ratios: lin/dj is the move's effective lever arm, physically bounded
+            # by the reach (~1.3 m; tool rotation similarly by the sum of joint rotations). A ratio
+            # beyond that means the pose delta is NOT this move's motion but the constant few-mm
+            # disagreement between getActualTCPPose and getForwardKinematics -- which DOMINATES
+            # when the arm is already AT the target (dj ~ 0) and would collapse the bound to the
+            # 1e-3 floor ("moveJ 0.00 rad/s"). Sub-mm moves need no cartesian pacing either way.
+            if cv > 0.0 and 1e-3 < lin <= 2.0 * dj and dj / lin * cv < speed:
                 speed, which = dj / lin * cv, 'cartesian-translation'
-            if cr > 0.0 and ang > 1e-6 and dj / ang * cr < speed:
+            if cr > 0.0 and 1e-3 < ang <= 8.0 * dj and dj / ang * cr < speed:
                 speed, which = dj / ang * cr, 'cartesian-rotation'
         return max(speed, 1e-3), ja, which
 

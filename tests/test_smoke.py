@@ -761,6 +761,38 @@ def test_speed_limits_global_and_assembly_blocks():
     assert (jv, ja, cv) == (1.0, 2.0, 0.5)
 
 
+def test_cartesian_bound_ignores_pose_model_mismatch_at_target():
+    """The moveJ cartesian bound divides tool travel by joint travel. When the arm is ALREADY at
+    the target (dj ~ encoder residual) the measured 'tool travel' is just the constant few-mm
+    disagreement between getActualTCPPose and getForwardKinematics -- an impossible >2 m/rad lever
+    -- and an ungated bound collapses to the 1e-3 floor ('moveJ 0.00 rad/s'). The gate must skip
+    the bound there, yet still apply it to physically real moves."""
+    from urlab.robot.arm import URArm
+
+    arm = URArm.__new__(URArm)                       # no hardware: exercise _speeds alone
+    arm.max_joint_vel = np.radians(30.0)
+    arm.joint_accel = np.radians(30.0)
+    arm.max_cart_vel = 0.025
+    arm.max_cart_rot = np.radians(30.0)
+
+    # Already at home (1e-4 rad residual), pose sources disagreeing by a constant 5 mm.
+    arm.q = lambda: [1e-4, 0, 0, 0, 0, 0]
+    arm.fk = lambda q: np.eye(4)
+    T_mismatch = T.translation_matrix([0.005, 0.0, 0.0])
+    arm.tcp_pose = lambda: T_mismatch
+    speed, accel, which = arm._speeds([0.0] * 6)
+    assert which == 'joint-velocity' and np.isclose(speed, arm.max_joint_vel), \
+        'a no-op move must not collapse to the floor on pose-model mismatch'
+
+    # A real move (1 rad swinging the tool 0.5 m -- lever 0.5 m/rad) IS still bounded.
+    arm.q = lambda: [0.0] * 6
+    arm.fk = lambda q: T.translation_matrix([0.5, 0.0, 0.0])
+    arm.tcp_pose = lambda: np.eye(4)
+    speed, accel, which = arm._speeds([1.0, 0, 0, 0, 0, 0])
+    assert which == 'cartesian-translation' and np.isclose(speed, 1.0 / 0.5 * 0.025), \
+        'a real swing must still be paced by the cartesian translation cap'
+
+
 def test_manifold_estimator_recovers_belief_error():
     """skills/manifold: observations whose POSE columns carry a rigid belief error (right-multiplied,
     like an in-hand grasp error) but whose WRENCH is the true contact signature must yield a

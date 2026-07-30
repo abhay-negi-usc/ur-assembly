@@ -10,6 +10,10 @@ them back onto the manifold estimates the error. This module does that alignment
     unit(f) x s_force | unit(tau) x s_torque]   -- weights decide what "nearest" means;
   * multi-start ICP: nearest-neighbour matching across ALL 12 dims, the correction updated in the
     chosen `estimate_dims` only (right-multiplied, i.e. in the part's own frame);
+  * RECENCY weighting: the rigid-belief-error assumption can BREAK mid-attempt (the connector
+    slips between the finger pads), so observations decay exponentially with age -- the newest,
+    which describe the CURRENT in-hand pose, dominate the NN mean and the residual
+    (recency_half_life_frac, a fraction of the observation window);
   * residual-gated RANSAC over the finals: a wrong local minimum can capture the LARGER cluster of
     guesses, but its alignment residual stays visibly worse, so residual breaks the vote-count tie.
 
@@ -105,6 +109,14 @@ class ManifoldEstimator:
         if isinstance(gate, str) and gate.strip().lower() in ('none', 'null', '~', ''):
             gate = None
         self.residual_gate = None if not gate else float(gate)   # bad values fail HERE, pre-motion
+        # RECENCY weighting: the in-hand pose can DRIFT during an attempt (pad slip), so newer
+        # observations describe the CURRENT pose better than older ones. Exponential decay with
+        # age; half-life as a FRACTION of the observation window (0.5 = moderate: the oldest
+        # sample carries 0.25x the newest's weight). None/null/'None'/0 disables (uniform).
+        hl = c.get('recency_half_life_frac', 0.5)
+        if isinstance(hl, str) and hl.strip().lower() in ('none', 'null', '~', ''):
+            hl = None
+        self.recency_half_life_frac = None if not hl else float(hl)
         self.min_observations = int(c.get('min_observations', 20))
         seed = int(c.get('random_seed', 0))
         self.rng = np.random.default_rng(seed if seed > 0 else None)
@@ -165,6 +177,16 @@ class ManifoldEstimator:
         if len(vec6) < self.min_observations:
             return None, f'only {len(vec6)} observations (< min_observations {self.min_observations})'
 
+        # RECENCY weights: observations are TIME-ORDERED (the caller logs them sequentially), and
+        # the in-hand pose may have drifted mid-attempt -- the fit leans toward the newest rows.
+        # (min-force filtering mostly drops the free-space START, so the survivors stay ~uniform
+        # in time and the sequence index is a fair clock.)
+        wts = None
+        if self.recency_half_life_frac and len(vec6) > 1:
+            age = (len(vec6) - 1 - np.arange(len(vec6))) / (len(vec6) - 1)   # 0 newest .. 1 oldest
+            wts = np.power(0.5, age / self.recency_half_life_frac)
+            wts /= wts.sum()
+
         Y = mats_from_vec6(vec6)
         G, K, idx = self.guesses, self.iterations, self.idx
 
@@ -184,8 +206,8 @@ class ManifoldEstimator:
             pts = scaled12(vec6_from_mats(C), w6, self.s_rot)
             dist, nn = self.tree.query(pts.reshape(-1, 12), workers=-1)
             dist, nn = dist.reshape(G, -1), nn.reshape(G, -1)
-            res_hist[:, k] = dist.mean(axis=1)
-            delta12 = (self.M12[nn] - pts).mean(axis=1)
+            res_hist[:, k] = np.average(dist, axis=1, weights=wts)          # recency-weighted
+            delta12 = np.average(self.M12[nn] - pts, axis=1, weights=wts)
             delta6 = np.zeros((G, 6))
             delta6[:, :3] = delta12[:, :3]
             delta6[:, 3:] = delta12[:, 3:6] / max(self.s_rot, 1e-12)
@@ -221,7 +243,7 @@ class ManifoldEstimator:
             'theta_corr': {d: float(theta[j]) for d, j in zip(self.estimate_dims, idx)},
             'inliers': int(best.sum()), 'guesses': G,
             'final_residual': float(res_hist[best, -1].mean()),
-            'n_observations': len(vec6),
+            'n_observations': len(vec6), 'recency_half_life_frac': self.recency_half_life_frac,
             # Per-iteration histories (all guesses) for convergence plots: correction params in
             # physical mm/deg on estimate_dims, the mean NN residual, and the RANSAC inlier mask.
             'theta_hist': theta_hist, 'res_hist': res_hist, 'inlier_mask': best,

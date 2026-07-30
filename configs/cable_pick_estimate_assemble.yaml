@@ -144,7 +144,7 @@ pickup:
     tare_before: true
     mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
     stiffness:     [2000.0, 2000.0, 500.0, 15.0, 15.0, 15.0]
-    damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    damping_ratio: [1.5, 1.5, 1.5, 1.5, 1.5, 1.5]
     selected_axes: [1, 1, 1, 1, 1, 1]
     reference_rate_hz: 125.0
     lookahead_time_s: 0.1
@@ -315,8 +315,8 @@ estimation:
 
   # The common mm-equivalent 12-D space (weights of the nearest-neighbour match).
   scaling_constant_deg_to_mm: 1.0
-  scaling_constant_unit_force_to_mm: 10.0
-  scaling_constant_unit_torque_to_mm: 100.0
+  scaling_constant_unit_force_to_mm: 1.0
+  scaling_constant_unit_torque_to_mm: 1.0
   min_force_n: 0.5               # observations/manifold rows below this |f| carry no contact info
   min_observations: 20           # skip estimation (keep the old belief) with fewer contact samples
 
@@ -338,4 +338,9 @@ estimation:
   ransac_tol: 1.0
   residual_gate: None             # drop guesses whose final residual > gate x best before voting;
                                   # None/null disables the gate (like manifold_icp_validation)
+  # RECENCY weighting in the ICP: the in-hand pose can DRIFT mid-attempt (the connector slips
+  # between the finger pads, breaking the rigid-belief-error assumption), so newer observations
+  # describe the CURRENT pose better. Half-life as a fraction of the attempt's observation
+  # window (0.5 = moderate: the oldest sample carries 0.25x the newest's weight). None disables.
+  recency_half_life_frac: 0.5
   random_seed: 0

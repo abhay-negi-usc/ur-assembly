@@ -91,6 +91,11 @@ CONFIG = {
     # a wrong local minimum can attract MANY guesses (a big cluster), but its alignment stays
     # visibly worse, so residual is the tie-breaker vote-counting alone does not have.
     'residual_gate': None,                    # None disables the gate
+    # RECENCY weighting: the in-hand pose can DRIFT mid-attempt (the connector slips between the
+    # finger pads), so newer observations describe the CURRENT pose better. Exponential decay by
+    # observation age; HALF-LIFE as a fraction of the observation window (0.5 = moderate: the
+    # oldest sample carries 0.25x the newest's weight). None disables (uniform weights).
+    'recency_half_life_frac': 0.5,
     'random_seed': 0,                        # 0 = nondeterministic
 
     # ---- run control --------------------------------------------------------------------
@@ -193,6 +198,15 @@ def solve_trial(vec6, w6, tree, M12, cfg, rng):
         stride = int(np.ceil(len(vec6) / cap))
         vec6, w6 = vec6[::stride], w6[::stride]
 
+    # RECENCY weights (same as skills/manifold.py): rows are time-ordered; the in-hand pose may
+    # drift mid-attempt (pad slip), so the NN mean and residual lean toward the NEWEST rows.
+    wts = None
+    hl = cfg.get('recency_half_life_frac')
+    if hl and len(vec6) > 1:
+        age = (len(vec6) - 1 - np.arange(len(vec6))) / (len(vec6) - 1)   # 0 newest .. 1 oldest
+        wts = np.power(0.5, age / float(hl))
+        wts /= wts.sum()
+
     # The hidden offset: zero the perturbed dims of the observation's FIRST pose, keep the rest.
     # For a multi-trial observation this SAME offset is applied to every trial in the group.
     p0 = vec6[0].copy()
@@ -222,8 +236,8 @@ def solve_trial(vec6, w6, tree, M12, cfg, rng):
         pts = _scaled12(v6, w6, s_rot)                            # (G, N, 12)
         dist, nn = tree.query(pts.reshape(-1, 12), workers=-1)    # match across ALL dimensions
         dist, nn = dist.reshape(G, -1), nn.reshape(G, -1)
-        res_hist[:, k] = dist.mean(axis=1)
-        delta12 = (M12[nn] - pts).mean(axis=1)                    # mean NN delta, per guess
+        res_hist[:, k] = np.average(dist, axis=1, weights=wts)    # recency-weighted
+        delta12 = np.average(M12[nn] - pts, axis=1, weights=wts)  # weighted NN delta, per guess
         delta6 = np.zeros((G, 6))
         delta6[:, :3] = delta12[:, :3]
         delta6[:, 3:] = delta12[:, 3:6] / max(s_rot, 1e-12)       # back to physical deg

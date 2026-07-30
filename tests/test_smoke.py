@@ -990,6 +990,22 @@ def test_manifold_estimator_recovers_belief_error():
         none_corr, reason = est.estimate(vec6[:3], w6[:3])
         assert none_corr is None and 'observations' in reason
 
+        # RECENCY weighting: if the in-hand pose DRIFTS mid-attempt (the connector slips between
+        # the finger pads), the newest observations must dominate -- the correction lands nearer
+        # the CURRENT belief error than the stale one. First half at (z -1, pitch +2), second
+        # half at (z -4, pitch +9): the estimate must sit past the midpoint, toward the new.
+        D_old = T.inverse(mats_from_vec6([0.0, 0.0, -1.0, 0.0, 2.0, 0.0]))
+        D_new = T.inverse(mats_from_vec6([0.0, 0.0, -4.0, 0.0, 9.0, 0.0]))
+        half = len(true6) // 2
+        obs_drift = np.vstack([vec6_from_mats(mats_from_vec6(true6[:half]) @ D_old),
+                               vec6_from_mats(mats_from_vec6(true6[half:]) @ D_new)])
+        v6d, w6d = est.prepare_observations(obs_drift, f_raw, tau_raw)
+        T_corr_d, info_d = est.estimate(v6d, w6d)
+        assert T_corr_d is not None, info_d
+        tc = info_d['theta_corr']
+        assert tc['z_mm'] < -2.5 and tc['pitch_deg'] > 5.5, \
+            f'recency weighting must pull the estimate toward the NEWEST in-hand pose: {tc}'
+
         # residual_gate: None disables it (like manifold_icp_validation) -- INCLUDING the STRING
         # 'None', because yaml parses a bare `None` as a string (only null/~ are yaml null) and
         # float('None') used to blow up MID-RUN, after the robot had already moved.

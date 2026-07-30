@@ -68,23 +68,16 @@ def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder, 
     # Grasp directly from wherever the scan ended (already close to the cable) -- no detour home first.
     # Record wrist images at grasp_check.capture_rate_hz (default 1 Hz) over the descent + close +
     # recovery, alongside the count-labelled frames GraspRecovery saves.
+    # The descent runs FULLY OPEN deliberately: the open fingers' full capture width (~84 mm) is
+    # the robustness margin against LATERAL (y) grasp error -- narrowing to the connector
+    # diameter before the close would shrink exactly that margin.
     runner = StepRunner(log, confirm=confirm is not None)
-    steps = [
-        ('move to grasp-align', lambda: robot.move_fingertip(geom.pre_grasp(), 'grasp-align')),
-        ('report pre-grasp delta', lambda: log_grasp_delta(robot, geom.T_base_grasp, 'pre-grasp')),
-    ]
-    # PHYSICAL-dimension gripper prep: with the connector diameter known (cables.yaml), narrow
-    # the fingers to diameter + clearance instead of descending fully open -- less close travel
-    # at the grasp. Done AFTER the scan (full open keeps the fingers splayed out of the camera
-    # view) and BEFORE the descent.
-    d_conn = cfg.get_path('grasp_check.connector_diameter_mm')
-    if d_conn:
-        gap_m = (max(d_conn) + float(cfg.get_path('gripper.open_clearance_mm', 15.0))) / 1000.0
-        steps.append(('narrow to clearance',
-                      lambda: robot.gripper.go_to_gap(gap_m, 'clearance')))
-    steps.append(('move to grasp', lambda: grasp.descend(robot, geom, 'grasp')))
     with recorder.recording(scanner.camera):
-        if not runner.run(steps):
+        if not runner.run([
+            ('move to grasp-align', lambda: robot.move_fingertip(geom.pre_grasp(), 'grasp-align')),
+            ('report pre-grasp delta', lambda: log_grasp_delta(robot, geom.T_base_grasp, 'pre-grasp')),
+            ('move to grasp', lambda: grasp.descend(robot, geom, 'grasp')),
+        ]):
             return 'abort'
         # Close + grasp-check + recovery (blind retry, then mode-directed reseat nudges) -- see
         # GraspRecovery -- so a cable on the fingertip flats/tips is reseated, not failed.

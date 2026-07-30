@@ -21,6 +21,10 @@
 #   <cable>.connector -> grasp_check success BAND: faces_max_counts = min-1, groove_max_counts = max,
 #                        groove_counts = midpoint; also grasp_check.connector_counts = [min, max]
 #   <cable>.cable     -> grasp_check.cable_counts   (reference; grabbing the cable = a MISS)
+#   <cable>.connector_diameter_mm -> grasp_check.connector_counts DERIVED through the calibrated
+#                        gripper kinematic model + gripper.groove_depth_mm (PREFERRED over the raw
+#                        count keys; also passed through as grasp_check.connector_diameter_mm for
+#                        the payload-width check). cable_diameter_mm passes through likewise.
 #   <cable>.junction_in_fingertip -> junction_in_fingertip  (the JUNCTION pose wrt the FINGERTIP at
 #                        the grasp: the robot poses the fingertip so the detected junction lands
 #                        exactly there, then closes the gripper. Replaces junction_offset_m AND the
@@ -46,15 +50,28 @@ gripper:
   closed: 228            # fully closed on nothing
   speed: 255
   force: 150
+  # Per-fingertip V-groove depth (mm) -- lets the gripper kinematic model convert PHYSICAL object
+  # widths <-> stall counts (an object seated in the grooves stalls at face gap = width - 2*this).
+  # Calibrated from the banana connector band; see urlab/robot/gripper_kinematics.py. NOTE this is
+  # an EFFECTIVE depth: the band it was fitted on was measured at the working grip force, so the
+  # typical PAD COMPRESSION (real grasps squeeze the pads -- desired, grip pressure; all separation
+  # values elsewhere are zero-compression) is already absorbed here on average.
+  groove_depth_mm: 3.77
 
 cables:
   banana:
-    connector: [207, 213]   # CONNECTOR between the fingertips = grasp SUCCESS (the target)
-    cable: 225              # grabbing the CABLE instead (thinner, higher count) = a MISS
+    # PHYSICAL dimensions (preferred): the grasp-check count band is DERIVED from these through
+    # the calibrated gripper kinematic model + groove_depth_mm. The measured count keys below
+    # are kept as the recorded reference; when both are present the DIAMETERS win and the
+    # loader logs the derived-vs-measured comparison.
+    connector_diameter_mm: [9.55, 10.7]   # grasp SUCCESS = fingers stalled on this (the target)
+    cable_diameter_mm: 3.66               # thinner than 2*groove: stalls in the flex region
+    connector: [207, 213]   # measured reference (CONNECTOR between the fingertips = SUCCESS)
+    cable: 225              # measured reference (grabbing the CABLE instead = a MISS)
     # Where the JUNCTION sits in the FINGERTIP frame at the grasp (fingertip target =
     # detected junction @ inverse of this). Monitor units (mm/deg) -- xyz/rpy (m/rad) also work.
     junction_in_fingertip:
-      xyz_mm:  [10.0, 0.0, -3.0]
+      xyz_mm:  [17.0, 0.0, 0.0]
       rpy_deg: [0.0, 0.0, 0.0]
     # Assembly CALIBRATION: this connector's pose wrt connector_holder (connector_holder -> connector),
     # used by uncertain_sampling as the held connector frame. MEASURE per connector: hold the connector

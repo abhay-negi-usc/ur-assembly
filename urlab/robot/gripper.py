@@ -51,6 +51,11 @@ class Robotiq2F85:
         self.speed = int(g.get('speed_counts', 255))
         self.force = int(g.get('force_counts', 150))
         self.timeout_s = float(g.get('timeout_s', 5.0))
+        # Per-fingertip groove depth for the width <-> counts conversions (gripper_kinematics);
+        # default = the calibrated value baked into the model.
+        from .gripper_kinematics import GROOVE_DEPTH_M
+        self.groove_depth_m = (float(g['groove_depth_mm']) / 1000.0
+                               if g.get('groove_depth_mm') is not None else GROOVE_DEPTH_M)
         self.dry_run = bool(cfg.get_path('robot.dry_run', False))
 
         if self.dry_run:
@@ -240,6 +245,21 @@ class Robotiq2F85:
         frac = float(np.clip(frac, 0.0, 1.0))
         counts = self.open_counts + frac * (self.closed_counts - self.open_counts)
         return self.go_to(round(counts), label or f'{frac * 100:.0f}% closed')
+
+    # ------------------------------------------------------------ physical dimensions
+    def go_to_gap(self, gap_m, label=''):
+        """Command a physical FLAT-FACE finger separation (m), via the calibrated kinematic
+        model (gripper_kinematics.counts_from_gap). Clamped to the reachable stroke."""
+        from .gripper_kinematics import GAP_MAX_M, counts_from_gap
+        gap = float(np.clip(gap_m, 0.0, GAP_MAX_M))
+        return self.go_to(round(counts_from_gap(gap)), label or f'gap {gap * 1000:.1f} mm')
+
+    def held_width_m(self):
+        """Physical width (m) of the object the fingers are stalled on, assuming it is SEATED IN
+        THE GROOVES: gap_from_counts(position) + 2 * groove depth. Floors at 2 * groove past free
+        closure (~counts 216) -- a bare cable in the flex region reads as that floor."""
+        from .gripper_kinematics import width_from_counts
+        return width_from_counts(self.position(), self.groove_depth_m)
 
     # ------------------------------------------------------------------ grasp check
     def grasp_result(self, groove_counts, empty_counts, faces_max_counts, tolerance=1,

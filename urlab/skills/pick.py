@@ -73,6 +73,8 @@ class GraspCheck:
         lc = gc.get('lift_check', {}) or {}
         self.lift_check_enabled = bool(lc.get('enabled', True))
         self.lift_check_height_m = float(lc.get('height_m', 0.02))
+        # After a detected slip: rise this much straight up (no full reset) before rescanning.
+        self.slip_raise_m = float(lc.get('slip_raise_m', 0.10))
         # Outer-retry grasp perturbation step along the junction x-axis (0 = off).
         self.retry_perturb_x_m = float(gc.get('retry_perturb_x_m', 0.0))
 

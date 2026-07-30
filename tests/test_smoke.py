@@ -370,11 +370,15 @@ def test_cable_profile_applies_counts():
     assert cfg.get_path('gripper.speed_counts') == 255
     assert cfg.get_path('gripper.force_counts') == 150
     assert cfg.get_path('grasp_check.empty_counts') == 228
+    # The banana band is now DERIVED from connector_diameter_mm via the calibrated gripper model
+    # + groove depth -- and must land on the measured reference band.
     assert cfg.get_path('grasp_check.connector_counts') == [207, 213]  # SUCCESS band (the connector)
     assert cfg.get_path('grasp_check.faces_max_counts') == 206         # <= this = miss (too thick)
     assert cfg.get_path('grasp_check.groove_max_counts') == 213        # > this (< empty) = miss (cable)
     assert cfg.get_path('grasp_check.groove_counts') == 210            # band midpoint
     assert cfg.get_path('grasp_check.cable_counts') == 225
+    assert cfg.get_path('grasp_check.connector_diameter_mm') == [9.55, 10.7]  # payload-width check
+    assert cfg.get_path('grasp_check.cable_diameter_mm') == 3.66
     # junction_in_fingertip: the junction pose wrt the fingertip at the grasp -- monitor units
     # (xyz_mm/rpy_deg) must be converted to m/rad, replacing junction_offset_m/connector_grasp.
     jf = cfg.get_path('junction_in_fingertip')
@@ -800,6 +804,7 @@ def test_lift_slip_check_and_retry_perturbation():
     gc['lift_check'] = {'enabled': True, 'height_m': 0.02}
     cfg = Config({'grasp_check': gc})
     check, grasp, geom = GraspCheck(cfg), GraspController(cfg), GraspGeometry(cfg)
+    assert np.isclose(check.slip_raise_m, 0.10), 'slip recovery rises 10 cm by default'
     geom.T_base_grasp = np.eye(4)
 
     held = _FakeRobot(_FakeGripper(on_close=[210]))       # re-close stalls in the band: still held
@@ -818,28 +823,58 @@ def test_lift_slip_check_and_retry_perturbation():
 
 
 def test_gripper_gap_to_forward_relation():
-    """robot/gripper_kinematics: the 2F-85 pad rides a circle around the spring-link pivot, so
-    gap and forward position obey (gap/2 - Y0 - W)^2 + (z - Z0)^2 = R^2 -- pads ADVANCE as the
-    gripper closes, ~28 mm over the full stroke (Menagerie loop-closure geometry)."""
+    """robot/gripper_kinematics: the CALIBRATED circle model (R=55.0 mm, apex offset 6.2 mm,
+    linear counts->angle) must reproduce the 2026-07-30 measured table -- (encoder, gap mm,
+    delta-height mm) -- within the fit tolerance, saturate past pad contact (~counts 216), and
+    advance the tips ~12.8 mm over the full stroke."""
     from urlab.robot import gripper_kinematics as gk
 
-    assert 0.084 < gk.GAP_MAX_M < 0.090, 'stock full-open gap must be ~ the 85 mm spec'
-    z_open = gk.pad_forward_from_gap(gk.GAP_MAX_M)
-    z_closed = gk.pad_forward_from_gap(0.0)
-    assert z_closed > z_open, 'the pads must ADVANCE (larger z) as the gripper closes'
-    assert 0.020 < z_closed - z_open < 0.035, 'full-stroke advance is ~28 mm'
+    measured = [(3, 83.56, 93.66), (50, 67.03, 99.03), (100, 47.80, 104.15),
+                (150, 27.19, 105.90), (200, 7.36, 106.42), (230, 0.00, 106.42)]
+    for c, gap_mm, z_mm in measured:
+        assert abs(gk.gap_from_counts(c) * 1000 - gap_mm) < 0.7, f'gap mismatch at counts {c}'
+        assert abs(gk.pad_forward_from_counts(c) * 1000 - z_mm) < 0.5, f'z mismatch at counts {c}'
 
+    # Full-stroke advance: the measured 12.76 mm, not the Menagerie-derived 28 mm.
+    adv = gk.pad_forward_from_counts(230) - gk.pad_forward_from_counts(3)
+    assert 0.012 < adv < 0.0135, 'tips must ADVANCE ~12.8 mm from open to closed'
+
+    # Saturation: past pad contact (~counts 216) the geometry freezes -- 230 = 216, not further.
+    assert gk.gap_from_counts(230) == 0.0
+    assert np.isclose(gk.pad_forward_from_counts(230),
+                      gk.pad_forward_from_counts(gk.COUNTS_CLOSED))
+    assert 210 < gk.COUNTS_CLOSED < 222
+
+    # z(gap) closed form sits ON the fitted circle. z is monotonic in counts only UP TO the
+    # apex (~counts 186); from there to pad contact it dips < 0.5 mm (the measured rows are
+    # flat there -- within noise), then freezes.
     gaps = np.linspace(0.0, gk.GAP_MAX_M, 25)
-    zs = np.array([gk.pad_forward_from_gap(g) for g in gaps])
-    assert np.all(np.diff(zs) < 0.0), 'z must fall monotonically as the gap grows'
-    r2 = ((gaps / 2 - gk.SPRING_PIVOT_LATERAL_M - gk.STOCK_PAD_LATERAL_M) ** 2
-          + (zs - gk.SPRING_PIVOT_FORWARD_M) ** 2)
-    assert np.allclose(r2, gk.FOLLOWER_RADIUS_M ** 2), 'the pad must stay ON the linkage circle'
+    r2 = ((gaps / 2 - gk.APEX_LATERAL_M) ** 2
+          + (np.array([gk.pad_forward_from_gap(g) for g in gaps]) - gk.DATUM_FORWARD_M) ** 2)
+    assert np.allclose(r2, gk.R_M ** 2), 'z(gap) must stay ON the calibrated circle'
+    zc = np.array([gk.pad_forward_from_counts(c) for c in range(0, 187, 3)])
+    assert np.all(np.diff(zc) > 0.0), 'z must rise monotonically up to the apex'
+    dip = zc[-1] - gk.pad_forward_from_counts(gk.COUNTS_CLOSED)
+    assert 0.0 <= dip < 0.0005, 'the post-apex dip must stay under half a millimetre'
 
-    # Counts anchor on THIS gripper's measured endpoints (custom tips close at 228, not 255).
-    assert gk.gap_from_counts(228, 3, 228, 0.085) == 0.0
-    assert np.isclose(gk.gap_from_counts(3, 3, 228, 0.085), 0.085)
-    assert 0.0 < gk.gap_from_counts(210, 3, 228, 0.085) < 0.01, 'connector band = a small gap'
+    # counts_from_gap is the exact inverse of gap_from_counts on the live stroke.
+    for c in (3, 50, 100, 150, 200):
+        assert abs(gk.counts_from_gap(gk.gap_from_counts(c)) - c) < 0.01
+    assert np.isclose(gk.counts_from_gap(0.0), gk.COUNTS_CLOSED)
+
+    # WIDTH conversions (groove-aware): the banana connector diameters land inside the measured
+    # grasp band; a bare cable (thinner than 2*groove) saturates to free closure.
+    assert abs(gk.counts_from_width(0.0107) - 208.6) < 0.5
+    assert abs(gk.counts_from_width(0.00955) - 211.4) < 0.5
+    assert np.isclose(gk.counts_from_width(0.00366), gk.COUNTS_CLOSED)
+    assert abs(gk.width_from_counts(gk.counts_from_width(0.0107)) - 0.0107) < 1e-9
+
+    # PICKUP HEIGHT (connector on the ground plane): the banana grasp target rises d_max/2 above
+    # the plane plus the (tiny, near-closure) advance vs the closed-calibrated fingertip frame.
+    d_max = 0.0107
+    s_grasp = d_max - 2.0 * gk.GROOVE_DEPTH_M
+    dz = d_max / 2.0 + gk.pad_forward_from_gap(s_grasp) - gk.pad_forward_from_gap(0.0)
+    assert 0.005 < dz < 0.006, 'banana pickup height must be ~5.5 mm above the ground plane'
 
     try:
         gk.pad_forward_from_gap(0.2)

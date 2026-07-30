@@ -230,9 +230,31 @@ def build_and_run(cfg, robot, camera, args):
         attempt += 1
         log.warning('Grasp %s -- recovering (attempt %d/%d).',
                     result, attempt + 1, check.max_retries + 1)
-        phase('reset')
-        if not (robot.gripper.open('drop') and robot.arm.move_j(q_home, label='home')):
-            return False
+        if result == 'slipped' and hasattr(scanner, 'reselect'):
+            # SLIP RECOVERY -- lighter than the full reset: the cable fell somewhere below, so
+            # open, rise slip_raise_m STRAIGHT UP from here, and let the next scan re-image,
+            # re-number, and RE-PROMPT the operator from this vantage (reselect() drops the
+            # cached junction selection -- it is stale, the cable moved when it dropped).
+            phase('scan')
+            T_up = translation_matrix([0.0, 0.0, check.slip_raise_m]) @ robot.tool0()
+            if not (robot.gripper.open('drop')
+                    and _guarded(robot, guard,
+                                 lambda: robot.arm.move_l(T_up, label='slip recovery (up)'))):
+                return False
+            scanner.reselect()
+        else:
+            phase('reset')
+            if not (robot.gripper.open('drop') and robot.arm.move_j(q_home, label='home')):
+                return False
+
+    # ---- PHYSICAL payload check: the stalled counts -> held width through the calibrated
+    # gripper model (+ groove depth). Purely informational next to the counts-band check, but in
+    # units a human can sanity-check against the datasheet with calipers. ----
+    d_conn = cfg.get_path('grasp_check.connector_diameter_mm')
+    if d_conn and not robot.arm.dry_run:
+        w_mm = robot.gripper.held_width_m() * 1000.0
+        log.info('Payload width: %.2f mm (expected connector %.2f-%.2f mm).',
+                 w_mm, min(d_conn), max(d_conn))
 
     # ---- Approach the stand-off (beyond the trajectory START, target frame) ----
 

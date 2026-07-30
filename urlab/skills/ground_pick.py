@@ -66,6 +66,14 @@ class GroundPlaneScanner:
     def reset(self):
         """No-op: keep the user's cable selection across grasp retries (they pick once per run)."""
 
+    def reselect(self):
+        """Drop the cached cable selection AND re-anchor the view base at the CURRENT camera
+        pose, so the next scan() re-detects, re-numbers, and RE-PROMPTS the operator from here.
+        Used by the slip recovery: a dropped cable lands somewhere new, so the cached junction
+        (and the auto re-match against it) is stale."""
+        self._selection = None
+        self._base_view = None
+
     # ------------------------------------------------------------------ scan
     def scan(self, confirm=None):
         """Capture, let the user pick a cable (once; 'n' takes a new view), and return its

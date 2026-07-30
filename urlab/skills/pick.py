@@ -97,6 +97,12 @@ class GraspRecovery:
       * CONNECTOR band  -> the connector is seated: SUCCESS.
       * CABLE (within tolerance of cable_counts) -> grabbed the thinner cable: open, shift
                            cable_shift_fraction * finger_width in +x (toward the connector end), retry.
+      * EDGE PINCH (within edge_tolerance_counts of the model's FREE-CLOSURE counts, ~216) ->
+                           separation ~0, held width at the 2*groove floor -- LESS than any
+                           connector, so the grooves closed PAST the connector's fat section: the
+                           grasp is too SHALLOW. Open, move edge_drop_m IN toward the connector
+                           (-z), retry. (The trigger comes from the CALIBRATED gripper model, not
+                           a hand-typed count.)
       * CLOSED (within tolerance of the closed/empty position) -> nothing grasped: open, drop
                            empty_drop_m in -z (toward the object on the ground), retry.
       * anything else    -> unexpected: open + blind retry (no move).
@@ -112,6 +118,14 @@ class GraspRecovery:
         fw = float(rc.get('finger_width_m', 0.02278))
         self.cable_shift = float(rc.get('cable_shift_fraction', 0.8)) * fw   # +x reseat for a cable grab
         self.empty_drop = float(rc.get('empty_drop_m', 0.003))              # -z reseat for an empty close
+        # EDGE-PINCH band: a stall at ~the FREE-CLOSURE counts means separation ~0 (held width at
+        # the 2*groove floor, thinner than any connector) -- the grooves closed PAST the
+        # connector's fat section, i.e. the grasp is too SHALLOW. Resolution: -z, IN toward the
+        # connector. The trigger counts come from the calibrated gripper model (~216).
+        from ..robot.gripper_kinematics import COUNTS_CLOSED
+        self.edge_counts = int(round(COUNTS_CLOSED))
+        self.edge_tol = int(rc.get('edge_tolerance_counts', 1))
+        self.edge_drop = float(rc.get('edge_drop_m', 0.003))                # -z reseat, deeper on
 
         # Count bands (from the grasp_check block, set per-cable by apply_cable_profile): the CONNECTOR
         # range is success, cable_counts / the closed position are the two miss states.
@@ -188,6 +202,14 @@ class GraspRecovery:
                 self._capture_grasp(camera, pos, tag, 'cable')
                 delta = translation_matrix([self.cable_shift, 0.0, 0.0])   # +x = toward connector end
                 reseat = 'reseat +x (toward connector)'
+            elif abs(pos - self.edge_counts) <= self.edge_tol:
+                log.warning('EDGE PINCH (%d ~ free closure %d): separation ~0 -- the grooves '
+                            'closed past the connector, the grasp is too SHALLOW. Open, move '
+                            '%.1f mm -z IN toward the connector, retry.',
+                            pos, self.edge_counts, self.edge_drop * 1000)
+                self._capture_grasp(camera, pos, tag, 'edge')
+                delta = translation_matrix([0.0, 0.0, -self.edge_drop])    # -z = deeper onto it
+                reseat = 'reseat -z (deeper onto the connector)'
             elif abs(pos - self.closed_counts) <= self.tol:
                 log.warning('EMPTY close (%d ~ closed %d) -- open, drop %.1f mm -z toward the '
                             'object, retry.', pos, self.closed_counts, self.empty_drop * 1000)
@@ -247,6 +269,26 @@ def _compliant_move(robot, adm, guard, T_start_ftip, T_target_ftip, duration,
         return True
     finally:
         robot.arm.servo_stop()                          # leave the servo loop before the next step
+
+
+def verify_cable_held(robot, check, where=''):
+    """Cable-in-gripper check: RE-CLOSE the gripper and re-run the counts check -- is the
+    connector still between the fingers? Same principle as the lift slip check (the stalled
+    fingers HOLD position when a part vanishes, so only a re-close can reveal the loss), without
+    any arm motion. True = still held. Skipped (True) when the grasp check is disabled or in a
+    dry run (a dry-run gripper closes to 'empty' by construction)."""
+    if not check.enabled or getattr(getattr(robot, 'arm', None), 'dry_run', False):
+        return True
+    if not robot.gripper.close(f're-close ({where or "held check"})'):
+        return False
+    result = check.evaluate(robot.gripper)
+    if result != 'ok':
+        log.error('Cable-in-gripper check%s: %s -- the connector is no longer held.',
+                  f' at {where}' if where else '', result)
+        return False
+    log.info('Cable-in-gripper check%s passed -- still holding the connector.',
+             f' at {where}' if where else '')
+    return True
 
 
 def retry_offset_x(attempt, step_m):
@@ -381,7 +423,7 @@ class GraspController:
         reading the position without closing again would still show the old, healthy band.
 
         Returns 'ok' | 'slipped' | 'abort' (a move failed)."""
-        if not check.lift_check_enabled:
+        if not check.lift_check_enabled or getattr(getattr(robot, 'arm', None), 'dry_run', False):
             return 'ok' if self.lift(robot, geom, label, position_guard) else 'abort'
         T_partial = (translation_matrix(geom.lift_axis * check.lift_check_height_m)
                      @ geom.T_base_grasp)

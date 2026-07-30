@@ -7,12 +7,13 @@ but that estimate carries in-hand error. Each attempt runs the assembly trajecto
 admittance exactly like uncertain_sampling -- following the (believed) path, yielding to contact,
 LOGGING observations (believed connector-wrt-target pose + wrench in the believed connector frame).
 
-    [pick] -> lift -> stand-off ->
+    [pick] -> lift (slip-checked) -> stand-off (held check) ->
         LOOP (max assembly.max_attempts):
             assemble (admittance, guarded, observing)
             check    (believed connector pose vs target, success_tolerance)
               -> within tolerance: release, retract, done
             retract  (linear, back along the connector's own -X -- peg-in-hole assumption)
+            held check (re-close + counts: the insertion/retract can strip the part out)
             estimate (ICP of the observations against the CONTACT MANIFOLD -- skills/manifold.py,
                       the same algorithm analysis/manifold_icp_validation.py validates offline)
             update   (T_fingertip_connector <- T_fingertip_connector @ T_corr)
@@ -41,7 +42,7 @@ from ..skills import reset
 from ..skills import trajectory as traj
 from ..skills.manifold import FORCE_COLS, ManifoldEstimator, POSE_COLS, TORQUE_COLS
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
-                           GraspRecovery, retry_offset_x)
+                           GraspRecovery, retry_offset_x, verify_cable_held)
 from ..transforms import from_cfg, inverse, matrix_to_xyzrpy, pose_error, translation_matrix
 from ._cable import build_scanner, make_confirm
 from ._runner import run_app
@@ -256,6 +257,15 @@ def build_and_run(cfg, robot, camera, args):
         log.info('Payload width: %.2f mm (expected connector %.2f-%.2f mm).',
                  w_mm, min(d_conn), max(d_conn))
 
+    # ---- PHYSICAL payload check: the stalled counts -> held width through the calibrated
+    # gripper model (+ groove depth). Purely informational next to the counts-band check, but in
+    # units a human can sanity-check against the datasheet with calipers. ----
+    d_conn = cfg.get_path('grasp_check.connector_diameter_mm')
+    if d_conn and not robot.arm.dry_run:
+        w_mm = robot.gripper.held_width_m() * 1000.0
+        log.info('Payload width: %.2f mm (expected connector %.2f-%.2f mm).',
+                 w_mm, min(d_conn), max(d_conn))
+
     # ---- Approach the stand-off (beyond the trajectory START, target frame) ----
 
     standoff_axis = np.asarray((a.get('standoff', {}) or {}).get('axis', [-1, 0, 0]), dtype=float)
@@ -272,6 +282,11 @@ def build_and_run(cfg, robot, camera, args):
     if q is None or not _guarded(robot, guard, lambda: robot.arm.move_j(q, label='stand-off')):
         return False
     seed_q = q
+
+    # CABLE-IN-GRIPPER check at the stand-off: the transit from the lift can lose the part
+    # without any force signature (re-close + counts, like the slip check -- no motion).
+    if not verify_cable_held(robot, check, 'stand-off'):
+        return False
 
     # UNCONDITIONAL pause at the stand-off (like the reset gate): the next motion drives the held
     # part into contact, so a human confirms the scene is ready -- regardless of confirm_each_step.
@@ -363,6 +378,14 @@ def build_and_run(cfg, robot, camera, args):
             adm.ramp(last_ref, T_out, seg_time(last_ref, T_out, g_v * s_ret, g_w * s_ret),
                      guard=None)
             robot.arm.servo_stop()
+
+            # CABLE-IN-GRIPPER check after the attempt: an insertion/retract can strip the part
+            # out of the fingers (it may even be left IN the socket). Without the part, further
+            # attempts -- and the estimate from this attempt's observations -- are meaningless.
+            if not verify_cable_held(robot, check, f'attempt {it} retract'):
+                row['cable_held'] = False
+                est_rows.append(row)
+                return False
 
             if it == max_attempts:
                 est_rows.append(row)

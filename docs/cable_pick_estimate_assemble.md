@@ -121,6 +121,16 @@ Two failure modes are handled around the pick:
 - **Deterministic grasp failure** (`grasp_check.retry_perturb_x_m`): a scan→grasp→fail loop is a
   fixed point (the fresh scan reproduces the same junction estimate). Full retries perturb the
   grasp along the junction x by 0, +d, −d, +2d, … to break it. `0` disables.
+- **Edge pinch** (`recovery.edge_tolerance_counts` / `edge_drop_m`): a close stalling within ±1
+  count of the calibrated model's **free-closure point** (~216 — separation ≈ 0, held width at the
+  2×groove floor, thinner than any connector) means the grooves closed *past* the connector's fat
+  section: the grasp is too shallow. Directed reseat −z, in toward the connector, like the other
+  count-directed reseats.
+- **Cable-in-gripper checks** (same re-close + counts principle, no arm motion): at the
+  **stand-off** (the transit from the lift can lose the part silently) and **after each assembly
+  attempt's retract** (an insertion can strip the part out of the fingers — even leave it in the
+  socket). A failed check aborts the run with the reason logged (and `cable_held: False` in
+  `estimates.csv` for the per-attempt case) — further attempts without the part are meaningless.
 
 ## Pickup height (`pickup.height_from_model`)
 With the connector **on the ground plane**, the grasp target height is derived from physics

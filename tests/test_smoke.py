@@ -524,6 +524,23 @@ def test_grasp_recovery_cable_shifts_toward_connector():
     assert abs(geom.T_base_grasp[1, 3]) < 1e-12 and abs(geom.T_base_grasp[2, 3]) < 1e-12
 
 
+def test_grasp_recovery_edge_pinch_moves_deeper():
+    """A stall at ~the FREE-CLOSURE counts (216 from the calibrated model: separation ~0, held
+    width at the 2*groove floor -- thinner than any connector) is an EDGE PINCH: the grooves
+    closed past the connector's fat section, the grasp is too shallow. Directed reseat: -z, IN
+    toward the connector, then retry."""
+    from urlab.skills.pick import GraspCheck, GraspGeometry, GraspRecovery
+    cfg = _recovery_cfg()
+    g = _FakeGripper(on_close=[216, 210])         # edge pinch, then the -z reseat seats it
+    robot = _FakeRobot(g)
+    geom = GraspGeometry(cfg)
+    res = GraspRecovery(cfg).grasp_with_recovery(robot, geom, GraspCheck(cfg))
+    assert res == 'ok', res
+    assert len(robot.moves) == 1
+    assert abs(geom.T_base_grasp[2, 3] + 0.003) < 1e-9    # -z only (deeper onto the connector)
+    assert abs(geom.T_base_grasp[0, 3]) < 1e-12 and abs(geom.T_base_grasp[1, 3]) < 1e-12
+
+
 def test_grasp_recovery_empty_drops_toward_ground():
     """An EMPTY close (231) opens, drops 3 mm in -z (toward the object), and reseats."""
     from urlab.skills.pick import GraspCheck, GraspGeometry, GraspRecovery
@@ -816,6 +833,14 @@ def test_lift_slip_check_and_retry_perturbation():
     slipped = _FakeRobot(_FakeGripper(on_close=[231]))    # re-close runs on to EMPTY: slipped out
     assert grasp.lift_verified(slipped, geom, check) == 'slipped'
     assert len(slipped.moves) == 1, 'no full lift after a detected slip'
+
+    # verify_cable_held: the SAME re-close principle without any arm motion (stand-off + per-
+    # attempt checks). Held stalls in band -> True; gone runs to empty -> False; no moves either way.
+    from urlab.skills.pick import verify_cable_held
+    still = _FakeRobot(_FakeGripper(on_close=[210]))
+    assert verify_cable_held(still, check, 'stand-off') is True and still.moves == []
+    gone = _FakeRobot(_FakeGripper(on_close=[231]))
+    assert verify_cable_held(gone, check, 'stand-off') is False and gone.moves == []
 
     d = 0.003
     assert [retry_offset_x(a, d) for a in range(5)] == [0.0, d, -d, 2 * d, -2 * d]

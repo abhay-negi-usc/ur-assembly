@@ -188,6 +188,12 @@ grasp_check:
     finger_width_m: 0.02278
     cable_shift_fraction: 0.8
     empty_drop_m: 0.003
+    # EDGE PINCH: a stall within this many counts of the model's FREE-CLOSURE point (~216 =
+    # separation ~0, held width at the 2*groove floor -- thinner than any connector) means the
+    # grooves closed PAST the connector's fat section: too SHALLOW. Reseat edge_drop_m in -z,
+    # IN toward the connector.
+    edge_tolerance_counts: 1
+    edge_drop_m: 0.003
 
 # GLOBAL speed limits -- ONE set of four, all enforced simultaneously (whichever binds): the
 # joint caps bound every joint directly; the cartesian caps bound the TOOL (converted to an

@@ -154,6 +154,18 @@ grasp_check:
   detect_empty: true
   settle_s: 1.0
   max_retries: 2
+  # LIFT SLIP CHECK: raise height_m, RE-CLOSE the gripper, and re-read the counts. (A slipped
+  # cable is invisible without the re-close -- the fingers HOLD their stalled position when the
+  # part vanishes.) Still held -> finish the lift; slipped -> open and retry the whole
+  # scan->grasp from the start.
+  lift_check:
+    enabled: true
+    height_m: 0.020
+  # Between FULL retries (rescan included), perturb the grasp along the junction +/-x by
+  # 0, +d, -d, +2d, -2d, ... -- a deterministic scan->grasp->fail loop is a FIXED POINT (the
+  # fresh scan reproduces the same junction estimate and therefore the same wrong grasp);
+  # stepping along the connector axis breaks it. 0 disables.
+  retry_perturb_x_m: 0.003
   capture_images: true
   capture_rate_hz: 1.0
   recovery:
@@ -171,15 +183,16 @@ speed:
   max_joint_acceleration_deg_s2: 30.0
   max_cartesian_translation_mm_s: 25.0
   max_cartesian_rotation_deg_s: 30.0
-  # Per-PHASE scaling of ALL FOUR limits above (1.0 = the global limit itself).
-  #   pickup   -- the compliant grasp descent (free-space scan moves always run at 1.0)
-  #   lift     -- the compliant lift after the grasp
-  #   assemble -- everything from the stand-off approach on: the realign moveJs, the insertion
-  #               reference, the between-attempt retract, and the release escape
+  # Per-PHASE scaling of ALL FOUR limits above (1.0 = the global limit itself), one entry per
+  # phase of cable_pick_estimate_assemble. An absent phase runs at 1.0.
   phase_scale:
-    pickup: 1.0
-    lift: 0.5
-    assemble: 0.2
+    reset: 0.8       # start/end home moves (and the between-retry homes)
+    scan: 0.8        # the multi-view scan + grasp-align + reseat moves
+    pickup: 0.8      # the compliant grasp descent
+    lift: 0.8        # the compliant lift (including the slip-check partial lift)
+    standoff: 0.8    # the move to stand-off + the per-attempt realign moveJs
+    assemble: 0.8    # the insertion reference ramp
+    retract: 0.8     # the between-attempt retract + the release escape
 
 move_timeout_s: 60.0
 settle_s: 0.5

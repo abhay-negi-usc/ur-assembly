@@ -14,16 +14,18 @@ from ..robot import AdmittanceController, ForceGuard
 from ..skills import insert as ins
 from ..skills import reset
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
-                           GraspRecovery, log_grasp_delta)
-from ..transforms import from_cfg, inverse
+                           GraspRecovery, log_grasp_delta, retry_offset_x)
+from ..transforms import from_cfg, inverse, translation_matrix
 from ._cable import build_scanner, make_confirm
 from ._runner import run_app
 
 log = urlog.get('cable-assemble')
 
 
-def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder):
-    """The cable pick, returning 'ok' | 'missed' | 'empty' | 'abort'."""
+def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder, offset_x_m=0.0):
+    """The cable pick, returning 'ok' | 'missed' | 'empty' | 'abort'. `offset_x_m` shifts the
+    grasp along the JUNCTION's own x-axis -- the outer-retry perturbation (retry_offset_x) that
+    keeps a deterministic scan->grasp->fail loop from retrying the identical pose."""
     scanner.estimator.reset()
     # junction_in_fingertip (from cables.yaml): where the junction sits in the FINGERTIP frame at
     # the grasp -- so the fingertip goes to detected_junction @ its inverse before closing.
@@ -33,6 +35,9 @@ def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder):
     T_conn = scanner.scan(confirm=confirm)
     if T_conn is None:
         return 'abort'
+    if offset_x_m:
+        log.info('Retry perturbation: %+.1f mm along the junction x-axis.', offset_x_m * 1000)
+        T_conn = T_conn @ translation_matrix([offset_x_m, 0.0, 0.0])
     geom.T_base_grasp = T_conn @ inverse(T_ftip_junction)
 
     # Grasp directly from wherever the scan ended (already close to the cable) -- no detour home first.
@@ -71,10 +76,11 @@ def build_and_run(cfg, robot, camera, args):
         return False
     q_home = robot.arm.q()
 
-    # 1. PICK, with grasp-check retry.
+    # 1. PICK, with grasp-check retry (each full retry perturbed along the junction x-axis).
     attempt = 0
     while True:
-        result = _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder)
+        result = _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder,
+                       offset_x_m=retry_offset_x(attempt, check.retry_perturb_x_m))
         if result == 'ok':
             break
         if result == 'abort':

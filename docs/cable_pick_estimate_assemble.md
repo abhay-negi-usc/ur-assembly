@@ -90,19 +90,34 @@ are exactly **two limit sets of the same four keys**:
 | `max_cartesian_translation_mm_s` | the tool: moveL speed, compliant-reference ramp pacing, and an equivalent joint bound inside moveJ |
 | `max_cartesian_rotation_deg_s` | the tool's rotation: compliant-reference pacing + the moveJ equivalent bound |
 
-There is **one global `speed:` block**, and each phase applies a **scale factor** to all four
-limits via `speed.phase_scale` (1.0 = the global limit itself):
+There is **one global `speed:` block**, and every phase of the app applies a **scale factor** to
+all four limits via `speed.phase_scale` (1.0 = the global limit itself; an absent phase = 1.0):
 
 | phase | scales |
 |---|---|
-| `pickup` | the compliant grasp descent (free-space scan moves always run at 1.0) |
-| `lift` | the compliant lift after the grasp |
-| `assemble` | everything from the stand-off approach on: realign `moveJ`s, the insertion reference, the between-attempt retract, the release escape |
+| `reset` | start/end home moves, and the between-retry homes |
+| `scan` | the multi-view scan + grasp-align + reseat moves |
+| `pickup` | the compliant grasp descent |
+| `lift` | the compliant lift, including the slip-check partial lift |
+| `standoff` | the move to stand-off + the per-attempt realign `moveJ`s |
+| `assemble` | the insertion reference ramp |
+| `retract` | the between-attempt retract + the release escape |
 
-Home/reset and other free-space moves run at the unscaled global limits. All four limits are
+Free-space moves inherit the current phase's scale through `arm.set_speed_scale` (the app marks
+each boundary); compliant ramps are paced directly from the scaled limits. All four limits are
 enforced simultaneously — whichever binds. (Legacy keys `max_joint_velocity_rad_s`,
 `joint_acceleration_rad_s2`, `max_cartesian_velocity_m_s` still parse for the older configs, and
 `move_j`/`move_l` accept `caps=` as either a four-key mapping or a bare scale factor.)
+
+## Grasp robustness
+Two failure modes are handled around the pick:
+- **Slip during the lift** (`grasp_check.lift_check`): the lift first raises `height_m`, then
+  **re-closes** the gripper and re-runs the counts check — the fingers hold their stalled position
+  when a part vanishes, so only a re-close can reveal the loss. Still held → finish the lift;
+  slipped → open and retry the whole scan→grasp.
+- **Deterministic grasp failure** (`grasp_check.retry_perturb_x_m`): a scan→grasp→fail loop is a
+  fixed point (the fresh scan reproduces the same junction estimate). Full retries perturb the
+  grasp along the junction x by 0, +d, −d, +2d, … to break it. `0` disables.
 
 ## Cautions
 - **Linear (peg-in-hole) assembly assumed** — same as uncertain_sampling; no curved or twist mates.

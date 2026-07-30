@@ -211,6 +211,8 @@ grasp_check:
   detect_empty: true
   settle_s: 1.0
   max_retries: 2                 # whole scan->grasp attempts (outer loop) if recovery still misses
+  retry_perturb_x_m: 0.003       # between FULL retries, perturb the grasp 0,+d,-d,+2d,... along the
+                                 # junction x -- breaks the deterministic scan->grasp->fail fixed point
   capture_images: true           # save wrist images during grasping: a timed record at
                                  # capture_rate_hz PLUS a count-labelled frame at each close
   capture_rate_hz: 1.0           # rate of the timed recording during the descent + close + recovery

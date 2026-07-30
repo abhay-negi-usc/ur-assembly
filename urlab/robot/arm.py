@@ -94,6 +94,7 @@ class URArm:
         (self.max_joint_vel, self.joint_accel,
          self.max_cart_vel, self.max_cart_rot) = parse_limits(speed)
         self.cart_accel = float(speed.get('cartesian_acceleration_m_s2', 0.5))
+        self.speed_scale = 1.0            # the CURRENT phase's scaling (set_speed_scale)
 
         self.move_timeout = float(cfg.get('move_timeout_s', 60.0))
         self.settle_s = float(cfg.get('settle_s', 0.5))
@@ -196,14 +197,22 @@ class URArm:
         return False
 
     # ------------------------------------------------------------------ motion
+    def set_speed_scale(self, scale, phase=''):
+        """Set the CURRENT phase's scaling of the global speed limits (speed.phase_scale.<phase>).
+        Applies to every following move until changed; a per-move `caps` still overrides it."""
+        self.speed_scale = max(float(scale), 1e-3)
+        log.info('Speed scale%s: %.2fx the global limits',
+                 f' [{phase}]' if phase else '', self.speed_scale)
+
     def _limits(self, caps):
-        """The four limits for one move. `caps` is either a `speed:`-style mapping (absolute
-        overrides; absent keys inherit the global values), or a bare NUMBER that SCALES all four
-        global limits (the speed.phase_scale mechanism -- e.g. 0.2 = a fifth of every limit).
-        None = the global limits."""
+        """The four limits for one move. None = the global limits x the CURRENT phase scale
+        (set_speed_scale). Otherwise `caps` REPLACES the phase scale for this move: either a
+        `speed:`-style mapping (absolute overrides; absent keys inherit the global values), or a
+        bare NUMBER scaling all four global limits (e.g. 0.2 = a fifth of every limit)."""
         mine = (self.max_joint_vel, self.joint_accel, self.max_cart_vel, self.max_cart_rot)
         if caps is None:
-            return mine
+            s = self.speed_scale
+            return tuple(v * s for v in mine)
         if isinstance(caps, (int, float)):
             return tuple(v * float(caps) for v in mine)
         return parse_limits(caps, mine)

@@ -69,6 +69,12 @@ class GraspCheck:
         self.detect_empty = bool(gc.get('detect_empty', True))
         self.max_retries = int(gc.get('max_retries', 2))
         self.settle_s = float(gc.get('settle_s', 1.0))
+        # LIFT SLIP CHECK (grasp_check.lift_check): raise height_m, RE-CLOSE, re-read the counts.
+        lc = gc.get('lift_check', {}) or {}
+        self.lift_check_enabled = bool(lc.get('enabled', True))
+        self.lift_check_height_m = float(lc.get('height_m', 0.02))
+        # Outer-retry grasp perturbation step along the junction x-axis (0 = off).
+        self.retry_perturb_x_m = float(gc.get('retry_perturb_x_m', 0.0))
 
     def evaluate(self, gripper):
         """'ok' | 'missed' | 'empty' from the settled finger position."""
@@ -241,6 +247,18 @@ def _compliant_move(robot, adm, guard, T_start_ftip, T_target_ftip, duration,
         robot.arm.servo_stop()                          # leave the servo loop before the next step
 
 
+def retry_offset_x(attempt, step_m):
+    """The grasp perturbation (m, along the junction x-axis) for OUTER retry `attempt` (0 = the
+    first try). Pattern: 0, +d, -d, +2d, -2d, ... -- a scan->grasp loop that fails
+    DETERMINISTICALLY is a FIXED POINT (the fresh scan reproduces the same junction estimate, so
+    the retry reproduces the same wrong grasp); stepping alternately outward along the connector
+    axis is what breaks it. step_m = 0 disables (every retry at the nominal pose)."""
+    if attempt <= 0 or step_m == 0.0:
+        return 0.0
+    k = (attempt + 1) // 2
+    return k * float(step_m) * (1.0 if attempt % 2 == 1 else -1.0)
+
+
 class GraspController:
     """Moves the fingertip in the configured pickup mode -- used for BOTH the grasp DESCENT
     (grasp-align -> grasp) and the LIFT (grasp -> lift), so they always match:
@@ -349,6 +367,35 @@ class GraspController:
         a phantom downward force at liftoff -- the arm would chase it back into the ground."""
         return self._to(robot, geom.lift(), label, 'Lift', position_guard=position_guard,
                         tare=self.tare_before_lift, scale=self.lift_scale)
+
+    def lift_verified(self, robot, geom, check, label='lift', position_guard=None):
+        """Lift with SLIP DETECTION -- for the failure mode where the grasp check PASSES but the
+        cable slips out of the fingers during the lift. Raise a SMALL amount first
+        (grasp_check.lift_check.height_m), RE-CLOSE the gripper, and re-run the counts check:
+        a held connector stalls the fingers in the same band ('ok' -> finish the lift); a slipped
+        cable lets them run on to the cable/empty counts -> 'slipped' (the caller opens and
+        retries the whole scan->grasp). The RE-CLOSE is what makes a slip visible at all: after
+        the original close stalled, the fingers HOLD POSITION even if the part vanishes, so
+        reading the position without closing again would still show the old, healthy band.
+
+        Returns 'ok' | 'slipped' | 'abort' (a move failed)."""
+        if not check.lift_check_enabled:
+            return 'ok' if self.lift(robot, geom, label, position_guard) else 'abort'
+        T_partial = (translation_matrix(geom.lift_axis * check.lift_check_height_m)
+                     @ geom.T_base_grasp)
+        if not self._to(robot, T_partial, f'{label} (slip check)', 'Partial lift',
+                        position_guard=position_guard, tare=self.tare_before_lift,
+                        scale=self.lift_scale):
+            return 'abort'
+        if not robot.gripper.close('re-close (slip check)'):
+            return 'abort'
+        result = check.evaluate(robot.gripper)
+        if result != 'ok':
+            log.warning('Slip check after the %.0f mm partial lift: %s -- the cable is no longer '
+                        'held.', check.lift_check_height_m * 1000, result)
+            return 'slipped'
+        log.info('Slip check passed -- still holding the connector; completing the lift.')
+        return 'ok' if self.lift(robot, geom, label, position_guard) else 'abort'
 
 
 class GraspImageRecorder:

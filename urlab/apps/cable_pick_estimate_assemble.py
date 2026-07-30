@@ -41,7 +41,7 @@ from ..skills import reset
 from ..skills import trajectory as traj
 from ..skills.manifold import FORCE_COLS, ManifoldEstimator, POSE_COLS, TORQUE_COLS
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
-                           GraspRecovery)
+                           GraspRecovery, retry_offset_x)
 from ..transforms import from_cfg, inverse, matrix_to_xyzrpy, pose_error, translation_matrix
 from ._cable import build_scanner, make_confirm
 from ._runner import run_app
@@ -154,20 +154,28 @@ def build_and_run(cfg, robot, camera, args):
     init = cfg.get_path('estimation.initial_connector_in_fingertip')
     T_ftip_conn = from_cfg(init) if init else from_cfg(cfg.section('junction_in_fingertip'))
 
-    # ---- Speed limits: ONE global `speed:` block; each phase applies a SCALE to all four
-    # limits (speed.phase_scale). The 'assemble' scale paces everything from the stand-off
-    # approach on: the realign moveJs, the insertion reference, the between-attempt retract, and
-    # the release escape (the pick/lift phases apply their scales inside GraspController). ----
+    # ---- Speed limits: ONE global `speed:` block; EVERY phase of this app applies its own
+    # scale to all four limits (speed.phase_scale.<phase>). Free-space moves inherit the scale
+    # from arm.set_speed_scale -- `phase(...)` marks each boundary below -- while the compliant
+    # ramps are paced here (assemble / retract) and in GraspController (pickup / lift). ----
     spd = cfg.section('speed')
-    asm_caps = float((spd.get('phase_scale', {}) or {}).get('assemble', 1.0))
-    v_mm_s = float(spd.get('max_cartesian_translation_mm_s', 3.5)) * asm_caps
-    w_deg_s = float(spd.get('max_cartesian_rotation_deg_s', 5.0)) * asm_caps
+    scales = spd.get('phase_scale', {}) or {}
+
+    def phase(name):
+        robot.arm.set_speed_scale(float(scales.get(name, 1.0)), name)
+
+    g_v = float(spd.get('max_cartesian_translation_mm_s', 3.5))
+    g_w = float(spd.get('max_cartesian_rotation_deg_s', 5.0))
+    s_asm = float(scales.get('assemble', 1.0))
+    s_ret = float(scales.get('retract', 1.0))
     min_seg_s = 1.0 / adm.rate
 
-    def seg_time(A, B):
+    def seg_time(A, B, v=None, w=None):
+        v = g_v * s_asm if v is None else v
+        w = g_w * s_asm if w is None else w
         lin_m, ang_rad = pose_error(A, B)
-        t_lin = (lin_m * 1000.0 / v_mm_s) if v_mm_s > 0 else 0.0
-        t_ang = (np.degrees(ang_rad) / w_deg_s) if w_deg_s > 0 else 0.0
+        t_lin = (lin_m * 1000.0 / v) if v > 0 else 0.0
+        t_ang = (np.degrees(ang_rad) / w) if w > 0 else 0.0
         return max(t_lin, t_ang, min_seg_s)
 
     comp = a.get('compliance', {}) or {}
@@ -187,15 +195,33 @@ def build_and_run(cfg, robot, camera, args):
     os.makedirs(out_dir, exist_ok=True)
     log.info('Experiment folder: %s', out_dir)
 
-    # ---- RESET + PICK (identical to cable_pick_assemble) ----
+    # ---- RESET + PICK + slip-checked LIFT (pick identical to cable_pick_assemble). The lift is
+    # INSIDE the retry loop: a cable that slips out during the lift ('slipped', detected by the
+    # partial-lift re-close in GraspController.lift_verified) restarts the whole scan->grasp,
+    # and each full retry perturbs the grasp along the junction +/-x (retry_offset_x). ----
+    phase('reset')
     if not reset.reset_robot(robot, cfg, 'start reset'):
         return False
     q_home = robot.arm.q()
     attempt = 0
+    runner = StepRunner(log, confirm=confirm is not None)
     while True:
-        result = _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder)
+        phase('scan')
+        result = _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder,
+                       offset_x_m=retry_offset_x(attempt, check.retry_perturb_x_m))
         if result == 'ok':
-            break
+            status = {}
+
+            def do_lift(_s=status):
+                _s['r'] = grasp.lift_verified(robot, geom, check, 'lift',
+                                              position_guard=lambda mv: _guarded(robot, guard, mv))
+                return _s['r'] == 'ok'
+
+            if runner.run([('lift (slip-checked)', do_lift)]):
+                break
+            result = status.get('r')
+            if result != 'slipped':
+                return False               # a move failed, or the user aborted at the step gate
         if result == 'abort':
             return False
         if attempt >= check.max_retries:
@@ -204,14 +230,11 @@ def build_and_run(cfg, robot, camera, args):
         attempt += 1
         log.warning('Grasp %s -- recovering (attempt %d/%d).',
                     result, attempt + 1, check.max_retries + 1)
+        phase('reset')
         if not (robot.gripper.open('drop') and robot.arm.move_j(q_home, label='home')):
             return False
 
-    # ---- Lift, then approach the stand-off (beyond the trajectory START, target frame) ----
-    runner = StepRunner(log, confirm=confirm is not None)
-    if not runner.run([('lift', lambda: grasp.lift(robot, geom, 'lift',
-                                                   position_guard=lambda mv: _guarded(robot, guard, mv)))]):
-        return False
+    # ---- Approach the stand-off (beyond the trajectory START, target frame) ----
 
     standoff_axis = np.asarray((a.get('standoff', {}) or {}).get('axis', [-1, 0, 0]), dtype=float)
     standoff_m = float((a.get('standoff', {}) or {}).get('distance_m', 0.01))
@@ -220,11 +243,11 @@ def build_and_run(cfg, robot, camera, args):
     def tool0_ref(row, T_tool0_conn):
         return T_base_tconn @ row @ inverse(T_tool0_conn)
 
+    phase('standoff')
     seed_q = robot.arm.q()
     T_tool0_conn = robot.T_tool0_fingertip @ T_ftip_conn
     q = robot.arm.ik(tool0_ref(T_standoff_row, T_tool0_conn), seed_q)
-    if q is None or not _guarded(robot, guard, lambda: robot.arm.move_j(q, label='stand-off',
-                                                                        caps=asm_caps)):
+    if q is None or not _guarded(robot, guard, lambda: robot.arm.move_j(q, label='stand-off')):
         return False
     seed_q = q
 
@@ -251,10 +274,10 @@ def build_and_run(cfg, robot, camera, args):
             refs = [tool0_ref(row, T_tool0_conn) for row in dense]
 
             # Realign with the START of the (re-estimated) trajectory -- stiff, free space, guarded.
+            phase('standoff')
             q = robot.arm.ik(refs[0], seed_q)
             if q is None or not _guarded(robot, guard,
-                                         lambda: robot.arm.move_j(q, label=f'align start {it}',
-                                                                  caps=asm_caps)):
+                                         lambda: robot.arm.move_j(q, label=f'align start {it}')):
                 log.error('Could not reach the trajectory start; aborting.')
                 return False
             seed_q = q
@@ -313,9 +336,10 @@ def build_and_run(cfg, robot, camera, args):
                 break
 
             # RETRACT: linear escape along the connector's own -X (compliant, un-guarded), at the
-            # same assembly speed limits as the insert.
+            # 'retract' phase scale.
             T_out = _retract_ref(last_ref, T_tool0_conn, retract_m)
-            adm.ramp(last_ref, T_out, seg_time(last_ref, T_out), guard=None)
+            adm.ramp(last_ref, T_out, seg_time(last_ref, T_out, g_v * s_ret, g_w * s_ret),
+                     guard=None)
             robot.arm.servo_stop()
 
             if it == max_attempts:
@@ -365,11 +389,12 @@ def build_and_run(cfg, robot, camera, args):
 
     def release_escape():
         T_new = translation_matrix(back) @ robot.tool0()
-        return _guarded(robot, guard, lambda: robot.arm.move_l(T_new, label='retract (connector -X)',
-                                                               caps=asm_caps))
+        return _guarded(robot, guard, lambda: robot.arm.move_l(T_new, label='retract (connector -X)'))
 
+    phase('retract')
     ok = runner.run([('open gripper (release)', robot.gripper.open),
                      ('retract (connector -X)', release_escape)])
+    phase('reset')
     return ok and reset.reset_robot(robot, cfg, 'end reset')
 
 

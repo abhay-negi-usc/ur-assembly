@@ -768,12 +768,53 @@ def test_speed_limits_global_and_assembly_blocks():
     assert np.isclose(jv, np.radians(6.0)) and np.isclose(ja, np.radians(6.0))
     assert np.isclose(cv, 0.005) and np.isclose(cr, np.radians(6.0))
 
+    # The arm-level PHASE scale (set_speed_scale) applies whenever no per-move caps is given;
+    # an explicit caps REPLACES it rather than compounding.
+    assert arm.speed_scale == 1.0
+    arm.set_speed_scale(0.8, 'scan')
+    jv, ja, cv, cr = arm._limits(None)
+    assert np.isclose(jv, np.radians(24.0)) and np.isclose(cv, 0.02)
+    jv, ja, cv, cr = arm._limits(0.2)
+    assert np.isclose(jv, np.radians(6.0)) and np.isclose(cv, 0.005), \
+        'explicit caps must replace the phase scale, not multiply it'
+    arm.set_speed_scale(1.0)
+
     # Legacy spellings keep their meaning (and the legacy m/s wins over mm/s for moveL).
     jv, ja, cv, cr = parse_limits({'max_joint_velocity_rad_s': 1.0,
                                    'joint_acceleration_rad_s2': 2.0,
                                    'max_cartesian_velocity_m_s': 0.5,
                                    'max_cartesian_translation_mm_s': 10.0})
     assert (jv, ja, cv) == (1.0, 2.0, 0.5)
+
+
+def test_lift_slip_check_and_retry_perturbation():
+    """pick: (1) lift_verified RE-CLOSES after a small partial lift -- a slipped cable lets the
+    fingers run to empty -> 'slipped' (no full lift); a held connector stalls in band -> 'ok' and
+    the lift completes. The re-close is essential: the fingers HOLD their stalled position when
+    the part vanishes, so a bare position read cannot see the slip. (2) retry_offset_x steps
+    0, +d, -d, +2d, -2d along the junction x -- the fixed-point breaker for outer retries."""
+    from urlab.config import Config
+    from urlab.skills.pick import (GraspCheck, GraspController, GraspGeometry, retry_offset_x)
+
+    gc = _recovery_cfg().section('grasp_check')
+    gc['lift_check'] = {'enabled': True, 'height_m': 0.02}
+    cfg = Config({'grasp_check': gc})
+    check, grasp, geom = GraspCheck(cfg), GraspController(cfg), GraspGeometry(cfg)
+    geom.T_base_grasp = np.eye(4)
+
+    held = _FakeRobot(_FakeGripper(on_close=[210]))       # re-close stalls in the band: still held
+    assert grasp.lift_verified(held, geom, check) == 'ok'
+    assert len(held.moves) == 2, 'partial slip-check lift, then the full lift'
+    assert np.isclose(held.moves[0][1][2, 3], 0.02), 'first raise is the small slip-check lift'
+    assert np.isclose(held.moves[1][1][2, 3], 0.10), 'then the full lift height'
+
+    slipped = _FakeRobot(_FakeGripper(on_close=[231]))    # re-close runs on to EMPTY: slipped out
+    assert grasp.lift_verified(slipped, geom, check) == 'slipped'
+    assert len(slipped.moves) == 1, 'no full lift after a detected slip'
+
+    d = 0.003
+    assert [retry_offset_x(a, d) for a in range(5)] == [0.0, d, -d, 2 * d, -2 * d]
+    assert retry_offset_x(3, 0.0) == 0.0, 'step 0 disables the perturbation'
 
 
 def test_gripper_gap_to_forward_relation():
@@ -820,6 +861,7 @@ def test_cartesian_bound_ignores_pose_model_mismatch_at_target():
     arm.joint_accel = np.radians(30.0)
     arm.max_cart_vel = 0.025
     arm.max_cart_rot = np.radians(30.0)
+    arm.speed_scale = 1.0
 
     # Already at home (1e-4 rad residual), pose sources disagreeing by a constant 5 mm.
     arm.q = lambda: [1e-4, 0, 0, 0, 0, 0]

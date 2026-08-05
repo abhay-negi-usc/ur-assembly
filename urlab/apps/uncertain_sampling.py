@@ -1,9 +1,14 @@
 """Uncertain-assembly sampling -- data collection for a HELD CONNECTOR.
 
 Repeatedly drive a PERTURBED connector into the mate under compliance, logging each sample, then
-retract and repeat. The connector is held via the connector_holder frame (tool0 -> connector_holder
--> connector); the assembly TARGET is recorded for the connector_holder (hand-guide to a good mate,
-read it off the monitor), and the connector target = that @ the holder->connector offset.
+retract and repeat. The HELD frame and its assembly target come from ONE of two places:
+
+  * `held_frame: <name>` (PREFERRED) -- BOTH the held part's tool0-attached pose (frames:) and
+    its recorded base_link target at the mate (targets:) come from the SHARED catalogue,
+    configs/frames.yaml, selected by name per connector type;
+  * legacy (no held_frame): the connector is held via the connector_holder frame (tool0 ->
+    connector_holder -> connector), with connector_in_holder and the recorded
+    connector_holder_target supplied by the `cable:` profile from cables.yaml.
 
 Each logged sample is: trial, timestamp, raw tool0-wrt-base, the connector's DEVIATION from the
 ideal mate (identity at a perfect mate), and the contact wrench BOTH as recorded (base_link) and
@@ -32,6 +37,7 @@ import numpy as np
 
 from .. import config as urconfig
 from .. import log as urlog
+from .. import tool_frames
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import trajectory as traj
 from ..transforms import from_cfg, inverse, matrix_to_xyzrpy, pose_error, translation_matrix
@@ -58,15 +64,31 @@ def build_and_run(cfg, robot, camera, args):
     # the ROS version shared numpy's global RNG with IK's random restarts, which desynchronised it.
     rng = np.random.default_rng(seed if seed > 0 else None)
 
-    # The held part is the CONNECTOR, via the holder (tool0 -> connector_holder -> connector). The
-    # assembly target is recorded for the connector_holder; the connector target = that @ the
-    # (holder -> connector) offset. The assembled TOOL0 pose falls out, and the anchoring is unchanged.
-    T_tool0_holder = robot.T_tool0_connector_holder
-    T_holder_connector = robot.T_connector_holder_connector
-    T_tool0_held = robot.T_tool0_connector                       # held part = the connector
-    T_base_holder_target = from_cfg(cfg.section('connector_holder_target'))
-    T_base_connector_target = T_base_holder_target @ T_holder_connector   # ideal assembled connector
-    T_base_assembled = T_base_holder_target @ inverse(T_tool0_holder)     # assembled tool0 pose
+    # The HELD frame + its recorded base_link target at the mate. `held_frame: <name>` pulls BOTH
+    # from the shared catalogue (configs/frames.yaml frames: + targets:); otherwise the legacy
+    # holder chain applies (tool0 -> connector_holder -> connector, target recorded for the
+    # holder via the cable profile). Either way the assembled TOOL0 pose falls out below.
+    held_name = cfg.get('held_frame')
+    if held_name:
+        frames = tool_frames.load_frames(cfg)
+        targets = tool_frames.load_targets(cfg)
+        if held_name not in frames:
+            log.error('held_frame %r is not in %s.', held_name, tool_frames.frames_path(cfg))
+            return False
+        if held_name not in targets:
+            log.error('held_frame %r has no targets: entry in %s -- hand-guide to a good mate, '
+                      'read `base_link <- %s` off the monitor, and paste it there.',
+                      held_name, tool_frames.frames_path(cfg), held_name)
+            return False
+        T_tool0_held = frames[held_name]
+        T_base_connector_target = targets[held_name]              # ideal assembled held frame
+        log.info('Held frame %r + target from the shared catalogue (%s).',
+                 held_name, tool_frames.frames_path(cfg))
+    else:
+        T_tool0_held = robot.T_tool0_connector                    # held part = the connector
+        T_base_connector_target = (from_cfg(cfg.section('connector_holder_target'))
+                                   @ robot.T_connector_holder_connector)
+    T_base_assembled = T_base_connector_target @ inverse(T_tool0_held)    # assembled tool0 pose
 
     # The trajectory rows are the CONNECTOR w.r.t. the TARGET CONNECTOR (last row = identity = the
     # mate; a direct -X -> 0 insertion). With an identity last row, anchor_target reduces to

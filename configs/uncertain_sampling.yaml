@@ -25,9 +25,19 @@ tip_frame: tool0
 # Change it here, or on the CLI: --set cable=bnc
 cable: banana
 
-# ---- Held connector, via the connector holder (tool0 -> connector_holder -> connector) ----
-# connector_holder is the SHARED holder mount. The per-connector connector_in_holder and the recorded
-# assembly target (connector_holder_target) both come from the `cable:` profile above, NOT from here.
+# ---- Held frame from the SHARED catalogue (PREFERRED) ----
+# Names a configs/frames.yaml frame: the held part's pose wrt tool0 comes from its `frames:`
+# entry and the assembly target (base_link <- frame at the mate) from its `targets:` entry --
+# ONE common source, selected here per connector type (or on the CLI:
+# --set held_frame=banana_connector_finger_holder). When set, the legacy chain below
+# (connector_holder + the cable profile's connector_in_holder / connector_holder_target) is NOT
+# used for the held part or the target. Comment it out to fall back to the legacy chain.
+held_frame: banana_connector_finger_holder
+
+# ---- LEGACY held connector, via the connector holder (tool0 -> connector_holder -> connector) ----
+# Used only when held_frame above is unset. connector_holder is the SHARED holder mount; the
+# per-connector connector_in_holder and the recorded assembly target (connector_holder_target)
+# both come from the `cable:` profile above, NOT from here.
 connector_holder:
   xyz: [0.0, -0.045, 0.010]
   rpy: [3.14159, 0.0, -1.5708]   # +X -> tool0 -Y, +Z -> tool0 -Z

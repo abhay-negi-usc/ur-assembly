@@ -1076,6 +1076,72 @@ def test_manifold_interpolation_reduces_latching():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_tool_frames_shared_yaml_source():
+    """configs/frames.yaml is the SINGLE source of tool0-attached frames (urlab/tool_frames.py):
+    one yaml entry defines a frame (monitor units welcome), parent chains flatten to tool0,
+    typos fail loudly, and drift against a config's legacy sections warns instead of rotting."""
+    import shutil
+    import tempfile
+
+    from urlab.config import Config
+    from urlab.tool_frames import check_drift, load_frames
+    from urlab.transforms import matrix_to_xyzrpy
+
+    # The repo file: every catalogued frame present, tool0 the identity root, and the
+    # banana_connector_finger_holder entry exactly as specified (159 mm +Z, rpy 180/0/-90 deg).
+    frames = load_frames()
+    assert np.allclose(frames['tool0'], np.eye(4))
+    for name in ('fingertip', 'camera', 'grasp', 'connector_holder',
+                 'banana_connector_finger_holder'):
+        assert name in frames, f'missing frame {name!r}'
+    xyz, rpy = matrix_to_xyzrpy(frames['banana_connector_finger_holder'])
+    d = np.degrees(rpy)
+    assert np.allclose(xyz, [0.0, 0.0, 0.159])
+    assert np.isclose(abs(d[0]), 180.0) and np.isclose(d[1], 0.0) and np.isclose(d[2], -90.0)
+
+    # No drift: a config whose legacy sections MATCH the catalogue stays silent.
+    cfg = Config({'fingertip_grasp': {'xyz': [0.0, 0.0, 0.183],
+                                      'rpy': [3.14159, 0.0, -1.5708]}})
+    assert check_drift(frames, cfg) == []
+    # Drift: a section that disagrees is CALLED OUT by name (the facade reads the section).
+    cfg_bad = Config({'fingertip_grasp': {'xyz': [0.0, 0.0, 0.190],
+                                          'rpy': [3.14159, 0.0, -1.5708]}})
+    assert check_drift(frames, cfg_bad) == ['fingertip']
+
+    tmp = tempfile.mkdtemp()
+    try:
+        # Parent CHAINING flattens to tool0: b sits 50 mm along a's z, a 100 mm along tool0's z.
+        chain = os.path.join(tmp, 'chain.yaml')
+        with open(chain, 'w') as fh:
+            fh.write('frames:\n'
+                     '  a: {xyz: [0.0, 0.0, 0.1], rpy: [0.0, 0.0, 0.0]}\n'
+                     '  b: {parent: a, xyz_mm: [0.0, 0.0, 50.0], rpy_deg: [0.0, 0.0, 0.0]}\n')
+        got = load_frames(path=chain)
+        assert np.allclose(got['b'][:3, 3], [0.0, 0.0, 0.15])
+
+        # Typos fail LOUDLY at load: unknown parent, parent cycle, redefined root.
+        for body, why in (
+                ('frames:\n  b: {parent: nope, xyz: [0, 0, 0.1], rpy: [0, 0, 0]}\n', 'unknown parent'),
+                ('frames:\n'
+                 '  c: {parent: d, xyz: [0, 0, 0.1], rpy: [0, 0, 0]}\n'
+                 '  d: {parent: c, xyz: [0, 0, 0.1], rpy: [0, 0, 0]}\n', 'parent cycle'),
+                ('frames:\n  tool0: {xyz: [0, 0, 0.1], rpy: [0, 0, 0]}\n', 'redefined root'),
+                # from_cfg zero-fills unknown/missing keys, so these would otherwise SILENTLY
+                # place the frame at its parent -- the classic quiet unit bug.
+                ('frames:\n  e: {xyz_m: [0, 0, 0.1], rpy: [0, 0, 0]}\n', 'typoed pose key'),
+                ('frames:\n  f: {}\n', 'no pose keys')):
+            bad = os.path.join(tmp, 'bad.yaml')
+            with open(bad, 'w') as fh:
+                fh.write(body)
+            try:
+                load_frames(path=bad)
+                assert False, f'expected ValueError for {why}'
+            except ValueError:
+                pass
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_pose_block_accepts_monitor_units():
     """Calibration poses are pasted off the monitor, which prints mm/deg. `xyz_mm`/`rpy_deg` convert
     to the repo-standard m/rad; the unit lives in the KEY so it cannot be confused. Mixing both units

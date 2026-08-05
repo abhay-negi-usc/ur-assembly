@@ -1,0 +1,46 @@
+# ============================================================================
+# FRAMES -- the single shared source of tool0-attached frames (urlab/frames.py).
+#
+# Every entry is a frame rigidly attached to the arm, defined wrt its `parent` (default: tool0,
+# the flange / all-zeros pendant TCP). Parents may be OTHER frames declared here -- the loader
+# flattens the chain to tool0 and rejects unknown parents and cycles at load time.
+#
+# POSE UNITS (same convention as cables.yaml): either the repo-standard `xyz` (m) + `rpy`
+# (rad, extrinsic XYZ), or MONITOR UNITS `xyz_mm` (mm) + `rpy_deg` (deg) -- paste a line straight
+# off urlab.apps.monitor with no conversion. The unit lives in the KEY name; setting both units
+# for one triple is an error. THIS FILE is written uniformly in MONITOR UNITS (mm / deg).
+#
+# ADDING A FRAME IS ONE ENTRY HERE -- no code. Generic consumers (urlab.apps.monitor) list
+# whatever this file contains.
+#
+# NOTE the Robot facade still reads the per-demo-config sections (fingertip_grasp, hand_eye,
+# grasp_tcp_offset, connector_holder); the seeds below mirror cable_pick_estimate_assemble.yaml,
+# and the loader's check_drift() WARNS when this file and a loaded config disagree, so the
+# duplication cannot rot silently. Treat THIS file as the place to edit first.
+# ============================================================================
+
+frames:
+  # The gripper fingertip at the grasp (tool0 -> fingertip). Mirrors fingertip_grasp.
+  fingertip:
+    xyz_mm:  [0.0, 0.0, 183.0]
+    rpy_deg: [180.0, 0.0, -90.0]
+
+  # The RealSense color optical frame (tool0 -> camera). Mirrors hand_eye.
+  camera:
+    xyz_mm:  [-9.0, -80.0, 31.0]
+    rpy_deg: [0.0, 0.0, 0.0]
+
+  # The grasp TCP (tool0 -> grasp). Mirrors grasp_tcp_offset.
+  grasp:
+    xyz_mm:  [0.0, 0.0, 0.0]
+    rpy_deg: [0.0, 0.0, 0.0]
+
+  # The connector holder on the tool (tool0 -> connector_holder). Mirrors connector_holder.
+  connector_holder:
+    xyz_mm:  [0.0, -45.0, 10.0]
+    rpy_deg: [180.0, 0.0, -90.0]
+
+  # The banana-connector finger holder (tool0 -> holder).
+  banana_connector_finger_holder:
+    xyz_mm:  [0.0, 0.0, 159.0]
+    rpy_deg: [180.0, 0.0, -90.0]

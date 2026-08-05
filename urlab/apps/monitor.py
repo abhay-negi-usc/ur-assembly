@@ -14,13 +14,14 @@ Remote Control because they DRIVE the arm.)
     python -m urlab.apps.monitor --wrench --gripper    # also show the TCP wrench + gripper counts
     python -m urlab.apps.monitor --csv poses.csv       # append every sample to a CSV
 
-Every frame is in base_link, built from the SAME config sections the demos use, so what you read
-here is exactly what a demo would command:
-    tool0            -- the flange (the all-zeros pendant TCP; getActualTCPPose is this pose)
-    fingertip        -- fingertip_grasp    (tool0 -> fingertip)
-    camera           -- hand_eye           (tool0 -> camera)
-    grasp            -- grasp_tcp_offset   (tool0 -> grasp TCP)
-    connector_holder -- connector_holder   (tool0 -> connector_holder; only if configured)
+Every frame is in base_link. The tool0-attached frames come from the SHARED frames catalogue,
+configs/frames.yaml (urlab/tool_frames.py) -- ALL of its entries are shown, so adding a frame
+there (one yaml entry: parent + xyz/rpy or xyz_mm/rpy_deg) makes it appear here with no code
+change. 'tool0' itself (the flange / all-zeros pendant TCP; getActualTCPPose is this pose) is
+always first, and the cable-specific 'connector' (connector_holder @ connector_in_holder) is
+appended when the loaded config defines it. If frames.yaml is missing, the legacy per-config
+sections (fingertip_grasp, hand_eye, grasp_tcp_offset, connector_holder) are used as before;
+when both exist and disagree, a drift warning prints at startup.
 Poses print as xyz (mm) + rpy (deg, EXTRINSIC XYZ). This is the tool to MEASURE the config values
 the README's hardware checklist leaves open (assembly.target, a grasp pose, etc.): jog to the spot,
 read the frame off here, paste it in.
@@ -38,24 +39,33 @@ import numpy as np
 
 from .. import config as urconfig
 from .. import log as urlog
+from .. import tool_frames
 from ..transforms import BASE_LINK_FROM_UR_BASE, from_cfg, matrix_to_xyzrpy, rtde_to_matrix
 
 log = urlog.get('monitor')
 
 
 def _frames(cfg):
-    """{name: T_tool0_frame} for every tool0-attached frame, from the same config sections the
-    Robot facade uses (robot/robot.py)."""
-    frames = {
-        'tool0': np.eye(4),
-        'fingertip': from_cfg(cfg.section('fingertip_grasp')),
-        'camera': from_cfg(cfg.section('hand_eye')),
-        'grasp': from_cfg(cfg.section('grasp_tcp_offset')),
-    }
-    if cfg.get('connector_holder'):                    # tool0 -> connector_holder (-> connector)
-        T_holder = from_cfg(cfg.section('connector_holder'))
-        frames['connector_holder'] = T_holder
-        frames['connector'] = T_holder @ from_cfg(cfg.section('connector_in_holder'))
+    """{name: T_tool0_frame} for every tool0-attached frame -- ALL entries of the shared
+    configs/frames.yaml (urlab/tool_frames.py: add a frame there, it shows up here), plus the
+    cable-specific 'connector' (connector_holder @ connector_in_holder) when the config defines
+    it. Falls back to the legacy per-config sections if the frames yaml is missing."""
+    try:
+        frames = tool_frames.load_frames(cfg)
+        tool_frames.check_drift(frames, cfg)           # warn if the legacy sections disagree
+    except FileNotFoundError as exc:
+        log.warning('%s -- falling back to the per-config frame sections.', exc)
+        frames = {
+            'tool0': np.eye(4),
+            'fingertip': from_cfg(cfg.section('fingertip_grasp')),
+            'camera': from_cfg(cfg.section('hand_eye')),
+            'grasp': from_cfg(cfg.section('grasp_tcp_offset')),
+        }
+        if cfg.get('connector_holder'):
+            frames['connector_holder'] = from_cfg(cfg.section('connector_holder'))
+    if 'connector_holder' in frames and cfg.get('connector_in_holder'):
+        frames['connector'] = (frames['connector_holder']
+                               @ from_cfg(urconfig._pose_si(cfg.section('connector_in_holder'))))
     return frames
 
 

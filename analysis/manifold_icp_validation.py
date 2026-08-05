@@ -24,8 +24,11 @@ was wrong by theta. The wrench columns are left as recorded: the physical contac
 because our ESTIMATE of the pose is off, so the wrench is the signature the offset cannot erase.
 
 ICP. Correspondences are found across ALL 12 dimensions (KD-tree nearest neighbour in the scaled
-space); the correction transform is updated in the PERTURBED dims only (right-multiplied, like the
-offset itself), for a fixed number of iterations. Many random initial guesses are run in parallel
+space); OPTIONALLY (interp_neighbors > 1) the match target is a closeness-weighted blend of the k
+nearest manifold points -- INTERPOLATING between close-enough samples instead of latching onto the
+single nearest one of a finitely-sampled manifold. The correction transform is updated in the
+PERTURBED dims only (right-multiplied, like the offset itself), for a fixed number of iterations.
+Many random initial guesses are run in parallel
 and the final estimates are aggregated with RANSAC (consensus = mean of the largest inlier set).
 theta_est = perturbed-dim values of the corrected initial pose; perfect recovery -> theta_est ==
 theta_true, so the plotted per-dim ERROR converges to the dashed zero line.
@@ -96,6 +99,13 @@ CONFIG = {
     # observation age; HALF-LIFE as a fraction of the observation window (0.5 = moderate: the
     # oldest sample carries 0.25x the newest's weight). None disables (uniform weights).
     'recency_half_life_frac': 0.5,
+    # INTERPOLATED correspondence (OPTIONAL -- same as skills/manifold.py): with k > 1 the match
+    # target is a blend of the k nearest manifold points, weighted exp(-(d - d_nearest)/tau),
+    # tau = interp_softness x the manifold's median point spacing. Avoids LATCHING onto the single
+    # closest sample of the finitely-sampled manifold (which quantises the correction by the local
+    # spacing). 1 = exact NN, the baseline behaviour. Tune with analysis/manifold_interp_ablation.py.
+    'interp_neighbors': 1,
+    'interp_softness': 1.0,
     'random_seed': 0,                        # 0 = nondeterministic
 
     # ---- run control --------------------------------------------------------------------
@@ -207,6 +217,17 @@ def solve_trial(vec6, w6, tree, M12, cfg, rng):
         wts = np.power(0.5, age / float(hl))
         wts /= wts.sum()
 
+    # INTERPOLATED correspondence (same as skills/manifold.py). tau derives from the manifold's
+    # median point spacing, computed once and cached ON the cfg dict -- the manifold does not
+    # change between trials, and a fresh cfg per variant (see manifold_interp_ablation.py) gets
+    # its own cache, so softness changes are never served a stale tau.
+    kq = int(cfg.get('interp_neighbors') or 1)
+    kq = max(1, min(kq, len(M12)))
+    tau = cfg.get('_interp_tau')
+    if kq > 1 and tau is None:
+        spacing = float(np.median(tree.query(M12, k=2, workers=-1)[0][:, 1]))
+        tau = cfg['_interp_tau'] = max(spacing * float(cfg.get('interp_softness', 1.0)), 1e-9)
+
     # The hidden offset: zero the perturbed dims of the observation's FIRST pose, keep the rest.
     # For a multi-trial observation this SAME offset is applied to every trial in the group.
     p0 = vec6[0].copy()
@@ -234,10 +255,19 @@ def solve_trial(vec6, w6, tree, M12, cfg, rng):
         C = np.einsum('nij,gjk->gnik', Y, T_corr)                 # corrected poses, all guesses
         v6 = _vec6(C)
         pts = _scaled12(v6, w6, s_rot)                            # (G, N, 12)
-        dist, nn = tree.query(pts.reshape(-1, 12), workers=-1)    # match across ALL dimensions
-        dist, nn = dist.reshape(G, -1), nn.reshape(G, -1)
+        dist, nn = tree.query(pts.reshape(-1, 12), k=kq, workers=-1)   # match across ALL dimensions
+        if kq > 1:
+            # soft correspondence: blend the close-enough neighbours so the target INTERPOLATES
+            # between manifold samples instead of latching onto the single closest one
+            bw = np.exp(-(dist - dist[:, :1]) / tau)
+            bw /= bw.sum(axis=1, keepdims=True)
+            tgt = np.einsum('mk,mkd->md', bw, M12[nn])
+            dist = np.linalg.norm(tgt - pts.reshape(-1, 12), axis=1)
+        else:
+            tgt = M12[nn]
+        tgt, dist = tgt.reshape(G, -1, 12), dist.reshape(G, -1)
         res_hist[:, k] = np.average(dist, axis=1, weights=wts)    # recency-weighted
-        delta12 = np.average(M12[nn] - pts, axis=1, weights=wts)  # weighted NN delta, per guess
+        delta12 = np.average(tgt - pts, axis=1, weights=wts)      # weighted (soft) NN delta
         delta6 = np.zeros((G, 6))
         delta6[:, :3] = delta12[:, :3]
         delta6[:, 3:] = delta12[:, 3:6] / max(s_rot, 1e-12)       # back to physical deg

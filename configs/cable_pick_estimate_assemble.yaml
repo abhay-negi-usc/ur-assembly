@@ -208,7 +208,7 @@ speed:
   phase_scale:
     reset: 1.5       # start/end home moves (and the between-retry homes)
     scan: 1.0        # the multi-view scan + grasp-align + reseat moves
-    pickup: 0.8      # the compliant grasp descent
+    pickup: 1.5      # the compliant grasp descent
     lift: 0.8        # the compliant lift (including the slip-check partial lift)
     standoff: 1.0    # the move to stand-off + the per-attempt realign moveJs
     assemble: 0.2    # the insertion reference ramp
@@ -314,10 +314,10 @@ estimation:
   #   rpy: [0.0, 0.0, 0.0]
 
   # The common mm-equivalent 12-D space (weights of the nearest-neighbour match).
-  scaling_constant_deg_to_mm: 1.0
-  scaling_constant_unit_force_to_mm: 1.0
+  scaling_constant_deg_to_mm: 0.2
+  scaling_constant_unit_force_to_mm: 0.0
   scaling_constant_unit_torque_to_mm: 1.0
-  min_force_n: 0.5               # observations/manifold rows below this |f| carry no contact info
+  min_force_n: 0.0               # observations/manifold rows below this |f| carry no contact info
   min_observations: 20           # skip estimation (keep the old belief) with fewer contact samples
 
   # WHICH belief dims to correct (the dims the grasp can be wrong in).
@@ -327,11 +327,11 @@ estimation:
   icp_iterations: 50
   num_initial_guesses: 100
   init_guess_range:
-    x_mm: 5.0
+    x_mm: 0.0
     y_mm: 0.0
-    z_mm: 5.0
+    z_mm: 0.0
     roll_deg: 0.0
-    pitch_deg: 15.0
+    pitch_deg: 0.0
     yaw_deg: 0.0
   step_gain: 1.5
   ransac_iters: 200
@@ -342,5 +342,13 @@ estimation:
   # between the finger pads, breaking the rigid-belief-error assumption), so newer observations
   # describe the CURRENT pose better. Half-life as a fraction of the attempt's observation
   # window (0.5 = moderate: the oldest sample carries 0.25x the newest's weight). None disables.
-  recency_half_life_frac: 0.5
+  recency_half_life_frac: 0.8
+  # INTERPOLATED correspondence (OPTIONAL, off by default): the manifold is a FINITE sample of a
+  # continuous surface, so exact-NN matching can LATCH onto the single closest sample and quantise
+  # the correction by the local sample spacing. With interp_neighbors > 1 the match target blends
+  # the k nearest manifold points, weighted exp(-(d - d_nearest)/tau) with tau = interp_softness x
+  # the manifold's median point spacing -- it interpolates between close-enough samples. 1 = exact
+  # NN (the original behaviour). Compare tunings with analysis/manifold_interp_ablation.py.
+  interp_neighbors: 16
+  interp_softness: 1.0
   random_seed: 0

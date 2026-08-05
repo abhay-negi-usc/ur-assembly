@@ -14,6 +14,10 @@ them back onto the manifold estimates the error. This module does that alignment
     slips between the finger pads), so observations decay exponentially with age -- the newest,
     which describe the CURRENT in-hand pose, dominate the NN mean and the residual
     (recency_half_life_frac, a fraction of the observation window);
+  * OPTIONAL soft correspondence (interp_neighbors > 1): the manifold is a FINITE sample of a
+    continuous surface, so exact-NN matching can LATCH onto the single closest sample and
+    quantise the correction by the local sample spacing; instead, blend the k nearest manifold
+    points weighted by closeness so the match target INTERPOLATES between close-enough samples;
   * residual-gated RANSAC over the finals: a wrong local minimum can capture the LARGER cluster of
     guesses, but its alignment residual stays visibly worse, so residual breaks the vote-count tie.
 
@@ -117,6 +121,18 @@ class ManifoldEstimator:
         if isinstance(hl, str) and hl.strip().lower() in ('none', 'null', '~', ''):
             hl = None
         self.recency_half_life_frac = None if not hl else float(hl)
+        # INTERPOLATED correspondence (OPTIONAL, off by default): the manifold is a finite SAMPLE,
+        # so exact-NN matching latches onto the single closest point. With interp_neighbors > 1
+        # the match target is instead a blend of the k nearest manifold points, weighted
+        # exp(-(d - d_nearest) / tau) with tau = interp_softness x the manifold's median point
+        # spacing -- a point ~tau further than the nearest carries ~0.37x its weight, ~3 tau
+        # carries ~0.05x, so "close enough" is relative to how dense the manifold actually is.
+        # 1/None/'None' disables (exact NN, the original behaviour).
+        kn = c.get('interp_neighbors', 1)
+        if isinstance(kn, str) and kn.strip().lower() in ('none', 'null', '~', ''):
+            kn = 1
+        self.interp_neighbors = max(1, int(kn)) if kn else 1
+        self.interp_softness = float(c.get('interp_softness', 1.0))
         self.min_observations = int(c.get('min_observations', 20))
         seed = int(c.get('random_seed', 0))
         self.rng = np.random.default_rng(seed if seed > 0 else None)
@@ -127,6 +143,13 @@ class ManifoldEstimator:
         self.M12 = self._load_manifold(path)
         self.tree = cKDTree(self.M12)
         log.info('Contact manifold: %d points from %s', len(self.M12), path)
+        self.interp_neighbors = min(self.interp_neighbors, len(self.M12))
+        self.interp_tau = None
+        if self.interp_neighbors > 1:
+            spacing = float(np.median(self.tree.query(self.M12, k=2, workers=-1)[0][:, 1]))
+            self.interp_tau = max(spacing * self.interp_softness, 1e-9)
+            log.info('Interpolated matching: k=%d, tau=%.3f mm-eq (median manifold spacing %.3f)',
+                     self.interp_neighbors, self.interp_tau, spacing)
 
     # ------------------------------------------------------------------ data
     def _load_manifold(self, path):
@@ -201,13 +224,23 @@ class ManifoldEstimator:
         res_hist = np.zeros((G, K))
         theta_hist = np.zeros((G, K + 1, len(idx)))       # correction params per iteration (physical)
         theta_hist[:, 0] = g6[:, idx]
+        kq = self.interp_neighbors
         for k in range(K):
             C = np.einsum('nij,gjk->gnik', Y, T_corr)
             pts = scaled12(vec6_from_mats(C), w6, self.s_rot)
-            dist, nn = self.tree.query(pts.reshape(-1, 12), workers=-1)
-            dist, nn = dist.reshape(G, -1), nn.reshape(G, -1)
+            dist, nn = self.tree.query(pts.reshape(-1, 12), k=kq, workers=-1)
+            if kq > 1:
+                # soft correspondence: blend the close-enough neighbours so the target
+                # INTERPOLATES between manifold samples instead of latching onto one
+                bw = np.exp(-(dist - dist[:, :1]) / self.interp_tau)
+                bw /= bw.sum(axis=1, keepdims=True)
+                tgt = np.einsum('mk,mkd->md', bw, self.M12[nn])
+                dist = np.linalg.norm(tgt - pts.reshape(-1, 12), axis=1)
+            else:
+                tgt = self.M12[nn]
+            tgt, dist = tgt.reshape(G, -1, 12), dist.reshape(G, -1)
             res_hist[:, k] = np.average(dist, axis=1, weights=wts)          # recency-weighted
-            delta12 = np.average(self.M12[nn] - pts, axis=1, weights=wts)
+            delta12 = np.average(tgt - pts, axis=1, weights=wts)
             delta6 = np.zeros((G, 6))
             delta6[:, :3] = delta12[:, :3]
             delta6[:, 3:] = delta12[:, 3:6] / max(self.s_rot, 1e-12)
@@ -244,6 +277,7 @@ class ManifoldEstimator:
             'inliers': int(best.sum()), 'guesses': G,
             'final_residual': float(res_hist[best, -1].mean()),
             'n_observations': len(vec6), 'recency_half_life_frac': self.recency_half_life_frac,
+            'interp_neighbors': self.interp_neighbors,
             # Per-iteration histories (all guesses) for convergence plots: correction params in
             # physical mm/deg on estimate_dims, the mean NN residual, and the RANSAC inlier mask.
             'theta_hist': theta_hist, 'res_hist': res_hist, 'inlier_mask': best,

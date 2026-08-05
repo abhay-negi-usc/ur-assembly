@@ -1021,6 +1021,61 @@ def test_manifold_estimator_recovers_belief_error():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_manifold_interpolation_reduces_latching():
+    """skills\\manifold interp_neighbors: the manifold is a FINITE sample of a continuous surface,
+    so exact-NN matching LATCHES onto the single closest sample -- observations lying BETWEEN
+    samples get dragged onto a sample, quantising the correction by the sample spacing. The
+    optional soft correspondence blends close-enough samples so the target INTERPOLATES; on a
+    coarse manifold the recovered correction must land far closer to the truth."""
+    import csv as _csv
+    import shutil
+    import tempfile
+
+    from urlab.skills.manifold import FORCE_COLS, POSE_COLS, TORQUE_COLS, ManifoldEstimator
+
+    tmp = tempfile.mkdtemp()
+    try:
+        # COARSE manifold: the ridge z = x sampled every 2 mm -- the continuous surface exists
+        # BETWEEN the samples. Constant contact direction (contributes nothing to the NN match).
+        u_f, u_t = np.array([0.0, 0.0, -1.0]), np.array([0.0, 1.0, 0.0])
+        rows = [[x, 0.0, x, 0.0, 0.0, 0.0] + list(5.0 * u_f) + list(0.5 * u_t)
+                for x in np.arange(-10.0, 10.0 + 1e-9, 2.0)]
+        path = os.path.join(tmp, 'coarse_manifold.csv')
+        with open(path, 'w', newline='') as fh:
+            w = _csv.writer(fh)
+            w.writerow(POSE_COLS + FORCE_COLS + TORQUE_COLS)
+            w.writerows(rows)
+
+        # Observations ON the continuous ridge, clustered BETWEEN samples 0 and 2 (x ~ 0.7):
+        # the true correction is ZERO. z is the only estimated dim, so sliding along the ridge
+        # cannot absorb the error -- any nonzero z correction IS the latching artifact.
+        xs = np.linspace(0.6, 0.8, 30)
+        obs6 = np.column_stack([xs, np.zeros_like(xs), xs] + [np.zeros_like(xs)] * 3)
+        f_raw = np.tile(5.0 * u_f, (len(obs6), 1))
+        tau_raw = np.tile(0.5 * u_t, (len(obs6), 1))
+
+        cfg = {'manifold_csv': path, 'estimate_dims': ['z_mm'], 'icp_iterations': 15,
+               'num_initial_guesses': 30, 'random_seed': 5}
+        errs = {}
+        for kn in (1, 4):
+            est = ManifoldEstimator({**cfg, 'interp_neighbors': kn})
+            v6, w6 = est.prepare_observations(obs6, f_raw, tau_raw)
+            T_corr, info = est.estimate(v6, w6)
+            assert T_corr is not None, info
+            errs[kn] = abs(info['theta_corr']['z_mm'])
+        # Exact NN latches onto the sample at (0,0): ~0.7 mm of pure quantisation error.
+        assert errs[1] > 0.4, f'expected the latching artifact on the coarse manifold: {errs}'
+        # Interpolation blends the neighbours and lands near the true (zero) correction.
+        assert errs[4] < 0.2 and errs[4] < errs[1] / 2.0, \
+            f'interpolation must beat exact NN on off-sample observations: {errs}'
+
+        # 'None'/1 keep the feature OFF (exact NN), matching the residual_gate yaml convention.
+        off = ManifoldEstimator({**cfg, 'interp_neighbors': 'None'})
+        assert off.interp_neighbors == 1 and off.interp_tau is None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_pose_block_accepts_monitor_units():
     """Calibration poses are pasted off the monitor, which prints mm/deg. `xyz_mm`/`rpy_deg` convert
     to the repo-standard m/rad; the unit lives in the KEY so it cannot be confused. Mixing both units

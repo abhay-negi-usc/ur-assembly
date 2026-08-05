@@ -5,6 +5,13 @@ RELATIVE POSE of the held part (the peg) with respect to the fixed part (the hol
 `held_target_*` columns, which the sampler already logs as inv(T_base_target) @ T_base_tool0 @
 T_tool0_held. Commanded poses (`cmd_held_target_*`) can be plotted instead via CONFIG.
 
+MAP CSVs (e.g. data/uncertain_assembly_sampling/banana_map.csv) use a different column schema --
+`connector_target_x_mm`-style names with the translation ALREADY in mm, and wrenches under
+`wrench_connector_*` / `wrench_base_*` instead of `ft_tool0_*`. Both schemas are handled:
+translation units follow the column SUFFIX (`x` = metres, `x_mm` = millimetres), a missing
+`pose_prefix` falls back to the first known prefix present in the file, and the force columns are
+auto-detected (connector-frame wrench preferred -- it is the contact-frame load).
+
 CONVENTIONS (both differ from the raw CSV, so they are applied here explicitly):
   * Rotation is ZYX INTRINSIC -- yaw (Z), pitch (Y'), roll (X'') -- in DEGREES. By default it is
     recomputed from the logged quaternion via scipy's 'ZYX', so the convention is guaranteed rather
@@ -31,6 +38,11 @@ FIGURE COLLECTION 2 -- the same rotating 3D views, but coloured by CONTACT FORCE
 uses a single-hue light->dark ramp with a colorbar (never a rainbow, which would band the data).
 This is the view that answers "where in the relative pose does the peg actually load up?".
 
+FIGURE COLLECTION 3 -- the x / z / pitch POINT CLOUD: the in-plane contact-manifold slice (the
+three coordinates the manifold estimator corrects). Coloured by |F| when wrench columns exist,
+else plotted as plain uniform-colour points. With CONFIG['show_xzpitch_window'] it ALSO opens in
+an interactive window (drag to rotate) after all files are written, blocking until closed.
+
 Usage:
     python analysis/data_plotting.py
     python analysis/data_plotting.py --csv data/my_log.csv --description "trial B, 3 mm bias"
@@ -48,7 +60,8 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 import matplotlib
-matplotlib.use('Agg')                       # file output only; no display needed
+matplotlib.use('Agg')                       # file output; a GUI backend is switched in only for
+                                            # the optional interactive window at the very end
 import matplotlib.pyplot as plt             # noqa: E402
 from matplotlib.animation import FuncAnimation, PillowWriter   # noqa: E402
 from mpl_toolkits.mplot3d import Axes3D     # noqa: E402,F401  (registers the 3d projection)
@@ -59,13 +72,16 @@ from mpl_toolkits.mplot3d import Axes3D     # noqa: E402,F401  (registers the 3d
 # =====================================================================================
 CONFIG = {
     # ---- input / output ----------------------------------------------------------------
-    'csv_path': r'data/uncertain_assembly_log_20260710_002536.csv',
+    'csv_path': r'data/uncertain_assembly_sampling/banana_map.csv',
     'output_root': 'analysis',       # a timestamped subdirectory is created under this
     'description': None,             # optional str -> written to description.txt
 
     # ---- which pose to plot ------------------------------------------------------------
-    # 'held_target_'      = ACTUAL peg pose wrt the hole (what really happened)
-    # 'cmd_held_target_'  = COMMANDED peg pose wrt the hole (the reference)
+    # 'held_target_'      = ACTUAL peg pose wrt the hole (assembly logs)
+    # 'cmd_held_target_'  = COMMANDED peg pose wrt the hole (assembly logs)
+    # 'connector_target_' = connector pose wrt the target (map CSVs)
+    # If the configured prefix is absent from the file, the first known prefix that IS present
+    # is used instead (logged + recorded in description.txt), so either CSV kind plots as-is.
     'pose_prefix': 'held_target_',
     'recompute_euler_from_quat': True,   # True = derive ZYX-intrinsic ypr from the quaternion
 
@@ -86,7 +102,13 @@ CONFIG = {
         'rot3d_ypr_rgb_xyz': True,   # axes yaw/pitch/roll (deg), colour x/y/z
         'rot3d_xyz_force': True,     # axes x/y/z (mm),  colour |F| (N)
         'rot3d_ypr_force': False,    # axes yaw/pitch/roll (deg), colour |F| (N)
+        'rot3d_xzpitch': True,       # axes x/z (mm) + pitch (deg) -- the contact-manifold slice;
+                                     # coloured |F| (N) when wrench columns exist, else plain points
     },
+    # ALSO open the x/z/pitch cloud in an interactive window (drag to rotate) after all files are
+    # written. BLOCKS until the window is closed; needs a GUI backend (Qt/Tk) -- skipped with a
+    # warning on a headless box (e.g. over plain ssh to the robot machine).
+    'show_xzpitch_window': True,
     'save_static_png': True,         # a still PNG twin of each rotating GIF
 
     # ---- force-magnitude colouring -----------------------------------------------------
@@ -145,17 +167,26 @@ def load_csv(path):
     return out
 
 
+def has_pose_columns(data, prefix):
+    """True if `prefix` has a full xyz translation block in either schema (`x` or `x_mm`)."""
+    return (all(prefix + s + '_mm' in data for s in 'xyz')
+            or all(prefix + s in data for s in 'xyz'))
+
+
 def extract_relative_pose(data, prefix, recompute_euler=True):
     """(N, 6) relative pose [x, y, z, yaw, pitch, roll] in mm and degrees (ZYX intrinsic).
 
     `prefix` selects the block of columns -- 'held_target_' is the held part (peg) expressed in the
-    target/fixed part (hole) frame, i.e. exactly the relative pose."""
-    need = [prefix + s for s in ('x', 'y', 'z')]
-    missing = [c for c in need if c not in data]
-    if missing:
-        raise KeyError(f'CSV has no {missing} columns. Available prefixes look like: '
-                       f'{sorted({k.rsplit("_", 1)[0] for k in data})}')
-    xyz_mm = np.column_stack([data[prefix + 'x'], data[prefix + 'y'], data[prefix + 'z']]) * 1000.0
+    target/fixed part (hole) frame, i.e. exactly the relative pose. The translation unit follows
+    the column SUFFIX: assembly logs write `<prefix>x` in metres, map CSVs write `<prefix>x_mm`
+    already in millimetres."""
+    if all(prefix + s + '_mm' in data for s in 'xyz'):
+        xyz_mm = np.column_stack([data[prefix + s + '_mm'] for s in 'xyz'])
+    elif all(prefix + s in data for s in 'xyz'):
+        xyz_mm = np.column_stack([data[prefix + s] for s in 'xyz']) * 1000.0
+    else:
+        raise KeyError(f'CSV has no {prefix}x/y/z (or {prefix}x_mm/...) columns. Available '
+                       f'prefixes look like: {sorted({k.rsplit("_", 1)[0] for k in data})}')
 
     quat_cols = [prefix + s for s in ('qx', 'qy', 'qz', 'qw')]
     if recompute_euler and all(c in data for c in quat_cols):
@@ -167,12 +198,22 @@ def extract_relative_pose(data, prefix, recompute_euler=True):
     return np.column_stack([xyz_mm, ypr])
 
 
+# Known pose prefixes, in fallback preference order (assembly logs first, then map CSVs).
+_POSE_PREFIXES = ('held_target_', 'cmd_held_target_', 'connector_target_')
+
+# Known wrench blocks, in preference order. Assembly logs write ft_tool0_*; map CSVs write
+# wrench_connector_* / wrench_base_*. The connector-frame wrench outranks the base-frame one
+# because it is the load expressed at the contact.
+_FORCE_PREFIXES = ('ft_tool0_', 'wrench_connector_', 'wrench_base_')
+
+
 def force_magnitude(data):
-    """|(fx, fy, fz)| in N, or None if the wrench columns are absent."""
-    cols = ['ft_tool0_fx', 'ft_tool0_fy', 'ft_tool0_fz']
-    if not all(c in data for c in cols):
-        return None
-    return np.linalg.norm(np.column_stack([data[c] for c in cols]), axis=1)
+    """(|(fx, fy, fz)| in N, wrench column prefix used), or (None, None) if no block is present."""
+    for p in _FORCE_PREFIXES:
+        cols = [p + a for a in ('fx', 'fy', 'fz')]
+        if all(c in data for c in cols):
+            return np.linalg.norm(np.column_stack([data[c] for c in cols]), axis=1), p
+    return None, None
 
 
 def build_mask(data, pose, cfg):
@@ -191,15 +232,15 @@ def build_mask(data, pose, cfg):
 
     thr = cfg.get('force_threshold_n')
     if thr is not None:
-        fmag = force_magnitude(data)
+        fmag, fprefix = force_magnitude(data)
         if fmag is None:
-            notes.append('force threshold requested but the CSV has no ft_tool0_f* columns -- '
-                         'filter NOT applied')
+            notes.append('force threshold requested but the CSV has no recognised wrench columns '
+                         f'({"/".join(p + "f*" for p in _FORCE_PREFIXES)}) -- filter NOT applied')
         else:
             mode = str(cfg.get('force_threshold_mode', 'above')).lower()
             keep = fmag >= float(thr) if mode == 'above' else fmag <= float(thr)
             mask &= np.nan_to_num(keep, nan=False).astype(bool)
-            notes.append(f'force magnitude {mode} {float(thr):.3g} N '
+            notes.append(f'force magnitude ({fprefix}f*) {mode} {float(thr):.3g} N '
                          f'({int(keep.sum())}/{len(keep)} samples pass)')
     return mask, notes
 
@@ -340,6 +381,22 @@ def rotating_3d_figure(pose, axis_idx, color_idx, out_stem, cfg, title, groups=N
     return _render_rotating(fig, ax, out_stem, cfg)
 
 
+def rotating_3d_plain_figure(pose, axis_idx, out_stem, cfg, title, groups=None):
+    """Rotating 3D scatter with one uniform colour -- a plain point cloud for when no further
+    quantity should (or can) be encoded. The single hue is a mid-tone of the force ramp so the
+    figure family stays visually consistent."""
+    pts = pose[:, list(axis_idx)]
+    fig, ax = _new_3d_axes(cfg, title, len(pts))
+    _draw_path(ax, pts, cfg, groups)
+    tone = plt.get_cmap(cfg.get('force_cmap', 'Blues'))(0.65)
+    ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], color=tone, s=cfg['point_size'],
+               depthshade=False, edgecolors='none', zorder=2)
+    _style_axes(ax, axis_idx)
+    if cfg.get('equal_aspect'):
+        _equalise(ax, pts)
+    return _render_rotating(fig, ax, out_stem, cfg)
+
+
 def rotating_3d_scalar_figure(pose, axis_idx, values, out_stem, cfg, title,
                               value_label='|F|', value_unit='N', groups=None):
     """Rotating 3D scatter coloured by a SCALAR magnitude (force) rather than the RGB cube.
@@ -349,16 +406,33 @@ def rotating_3d_scalar_figure(pose, axis_idx, values, out_stem, cfg, title,
     the light end (`force_cmap_low`) so the smallest values stay visible on a white surface."""
     pts = pose[:, list(axis_idx)]
     values = np.asarray(values, dtype=float)
+    cmap, norm, vmax = _force_colour(values, cfg)
 
+    fig, ax = _new_3d_axes(cfg, title, len(pts))
+    _draw_path(ax, pts, cfg, groups)
+    sc = ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], c=values, cmap=cmap, norm=norm,
+                    s=cfg['point_size'], depthshade=False, edgecolors='none', zorder=2)
+
+    _style_axes(ax, axis_idx)
+    if cfg.get('equal_aspect'):
+        _equalise(ax, pts)
+    _add_force_colorbar(fig, sc, values, vmax, value_label, value_unit)
+    return _render_rotating(fig, ax, out_stem, cfg)
+
+
+def _force_colour(values, cfg):
+    """(truncated cmap, norm, vmax) for the force views -- shared by the saved figures and the
+    interactive window so both colour identically.
+
+    Contact force is heavily skewed (a long tail of rare high-load samples), so a raw min-max
+    linear scale leaves ~all points in the palest band and the ramp says nothing. Clip the limits
+    to a percentile window by default; the colorbar is marked 'extend' so the clipping is visible
+    rather than silent. force_clim (explicit N) overrides the percentiles."""
     base = plt.get_cmap(cfg.get('force_cmap', 'Blues'))
     low = float(cfg.get('force_cmap_low', 0.25))
     cmap = matplotlib.colors.LinearSegmentedColormap.from_list(
         'trunc', base(np.linspace(low, 1.0, 256)))
 
-    # Contact force is heavily skewed (a long tail of rare high-load samples), so a raw min-max
-    # linear scale leaves ~all points in the palest band and the ramp says nothing. Clip the limits
-    # to a percentile window by default; the colorbar is marked 'extend' so the clipping is visible
-    # rather than silent. force_clim (explicit N) overrides the percentiles.
     clim = cfg.get('force_clim')
     if clim:
         vmin, vmax = float(clim[0]), float(clim[1])
@@ -375,16 +449,11 @@ def rotating_3d_scalar_figure(pose, axis_idx, values, out_stem, cfg, title,
         norm = matplotlib.colors.LogNorm(vmin=max(floor, 1e-6), vmax=vmax)
     else:
         norm = matplotlib.colors.Normalize(vmin=vmin, vmax=vmax)
+    return cmap, norm, vmax
 
-    fig, ax = _new_3d_axes(cfg, title, len(pts))
-    _draw_path(ax, pts, cfg, groups)
-    sc = ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], c=values, cmap=cmap, norm=norm,
-                    s=cfg['point_size'], depthshade=False, edgecolors='none', zorder=2)
 
-    _style_axes(ax, axis_idx)
-    if cfg.get('equal_aspect'):
-        _equalise(ax, pts)
-
+def _add_force_colorbar(fig, sc, values, vmax, value_label, value_unit):
+    """The force colorbar + over-limit note, identical on the saved figure and the window."""
     n_over = int(np.sum(values > vmax))
     cax = fig.add_axes([0.90, 0.30, 0.022, 0.42])
     cb = fig.colorbar(sc, cax=cax, extend='max' if n_over else 'neither')
@@ -394,7 +463,45 @@ def rotating_3d_scalar_figure(pose, axis_idx, values, out_stem, cfg, title,
     if n_over:
         fig.text(0.885, 0.255, f'{n_over} sample(s) > {vmax:.1f} {value_unit}\nshown at the top step',
                  fontsize=6.5, color='#777777')
-    return _render_rotating(fig, ax, out_stem, cfg)
+
+
+def show_xzpitch_window(pose, fmag, cfg, groups=None):
+    """Open the x/z/pitch cloud in an INTERACTIVE window -- drag to rotate, scroll to zoom.
+
+    Called after every file is written, so closing the window loses nothing. Needs a GUI
+    matplotlib backend; on a headless box (no Qt/Tk/display) it warns and returns instead of
+    crashing. BLOCKS until the window is closed."""
+    plt.close('all')                 # saved figures are already closed; makes the switch silent
+    for backend in ('QtAgg', 'TkAgg'):
+        try:
+            plt.switch_backend(backend)
+            break
+        except Exception:
+            continue
+    else:
+        print('  WARNING: no interactive matplotlib backend (Qt/Tk) available -- '
+              'x/z/pitch window skipped.', file=sys.stderr)
+        return
+
+    axis_idx = (0, 2, 4)
+    pts = pose[:, list(axis_idx)]
+    fig, ax = _new_3d_axes(cfg, 'Peg wrt hole: x / z / pitch point cloud  (drag to rotate)',
+                           len(pts))
+    _draw_path(ax, pts, cfg, groups)
+    if fmag is not None:
+        cmap, norm, vmax = _force_colour(fmag, cfg)
+        sc = ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], c=fmag, cmap=cmap, norm=norm,
+                        s=cfg['point_size'], depthshade=False, edgecolors='none', zorder=2)
+        _add_force_colorbar(fig, sc, fmag, vmax, '|F|', 'N')
+    else:
+        tone = plt.get_cmap(cfg.get('force_cmap', 'Blues'))(0.65)
+        ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], color=tone, s=cfg['point_size'],
+                   depthshade=False, edgecolors='none', zorder=2)
+    _style_axes(ax, axis_idx)
+    if cfg.get('equal_aspect'):
+        _equalise(ax, pts)
+    ax.view_init(elev=float(cfg['gif_elev_deg']), azim=float(cfg['gif_azim_start_deg']))
+    plt.show()
 
 
 # =====================================================================================
@@ -406,7 +513,7 @@ def make_output_dir(root):
     return out
 
 
-def write_description(out_dir, cfg, csv_path, n_total, n_plotted, notes):
+def write_description(out_dir, cfg, csv_path, n_total, n_plotted, notes, prefix):
     """description.txt -- the user's text plus the provenance needed to reproduce the figures."""
     if not cfg.get('description'):
         return None
@@ -416,7 +523,7 @@ def write_description(out_dir, cfg, csv_path, n_total, n_plotted, notes):
         f.write('--- provenance ---\n')
         f.write(f'generated:      {datetime.now().isoformat(timespec="seconds")}\n')
         f.write(f'source csv:     {os.path.abspath(csv_path)}\n')
-        f.write(f'pose plotted:   {cfg["pose_prefix"]}* '
+        f.write(f'pose plotted:   {prefix}* '
                 f'(held/peg relative to target/hole)\n')
         f.write('rotation:       ZYX intrinsic (yaw, pitch, roll), degrees\n')
         f.write('translation:    millimetres\n')
@@ -433,9 +540,24 @@ def run(cfg):
         return 1
 
     data = load_csv(csv_path)
-    pose_all = extract_relative_pose(data, cfg['pose_prefix'], cfg['recompute_euler_from_quat'])
+
+    # Resolve the pose prefix: the configured one if present, else the first known prefix the
+    # file actually has (map CSVs name the block connector_target_* rather than held_target_*).
+    prefix = cfg['pose_prefix']
+    pre_notes = []
+    if not has_pose_columns(data, prefix):
+        fallback = next((p for p in _POSE_PREFIXES if has_pose_columns(data, p)), None)
+        if fallback is None:
+            print(f"ERROR: no '{prefix}*' pose columns in {csv_path} and none of the known "
+                  f"prefixes ({', '.join(_POSE_PREFIXES)}) are present either.", file=sys.stderr)
+            return 1
+        pre_notes.append(f"no '{prefix}*' columns in this CSV -- plotted '{fallback}*' instead")
+        prefix = fallback
+
+    pose_all = extract_relative_pose(data, prefix, cfg['recompute_euler_from_quat'])
     n_total = len(pose_all)
     mask, notes = build_mask(data, pose_all, cfg)
+    notes = pre_notes + notes
 
     # Carry an INDEX array (not a sliced copy) so the trial grouping stays aligned with the pose
     # through both the filter mask and the subsample stride.
@@ -456,7 +578,7 @@ def run(cfg):
 
     pose = pose_all[idx]
     groups = data['trial'][idx] if 'trial' in data else None
-    fmag_all = force_magnitude(data)
+    fmag_all, force_prefix = force_magnitude(data)
     fmag = fmag_all[idx] if fmag_all is not None else None
 
     out_dir = make_output_dir(cfg['output_root'])
@@ -482,10 +604,10 @@ def run(cfg):
 
     want_force = figs.get('rot3d_xyz_force') or figs.get('rot3d_ypr_force')
     if want_force and fmag is None:
-        print('  WARNING: force figures requested but the CSV has no ft_tool0_f* columns -- '
-              'skipped.', file=sys.stderr)
+        print('  WARNING: force figures requested but the CSV has no recognised wrench columns '
+              f'({"/".join(p + "f*" for p in _FORCE_PREFIXES)}) -- skipped.', file=sys.stderr)
     elif want_force:
-        print(f'  force magnitude over plotted samples: '
+        print(f'  force magnitude ({force_prefix}f*) over plotted samples: '
               f'{fmag.min():.2f} .. {fmag.max():.2f} N (mean {fmag.mean():.2f})')
         if figs.get('rot3d_xyz_force'):
             written += rotating_3d_scalar_figure(
@@ -498,13 +620,30 @@ def run(cfg):
                 out_stem=os.path.join(out_dir, 'rot3d_ypr_force'), cfg=cfg, groups=groups,
                 title='Peg wrt hole: orientation axes, contact force magnitude as colour')
 
-    desc = write_description(out_dir, cfg, csv_path, n_total, len(pose), notes)
+    # x / z / pitch: the in-plane contact-manifold slice as a point cloud. Force-coloured when
+    # the wrench block exists; plain uniform points otherwise (this figure never skips).
+    if figs.get('rot3d_xzpitch'):
+        stem = os.path.join(out_dir, 'rot3d_xzpitch')
+        if fmag is not None:
+            written += rotating_3d_scalar_figure(
+                pose, axis_idx=(0, 2, 4), values=fmag, out_stem=stem, cfg=cfg, groups=groups,
+                title='Peg wrt hole: x / z / pitch point cloud, contact force as colour')
+        else:
+            written += rotating_3d_plain_figure(
+                pose, axis_idx=(0, 2, 4), out_stem=stem, cfg=cfg, groups=groups,
+                title='Peg wrt hole: x / z / pitch point cloud')
+
+    desc = write_description(out_dir, cfg, csv_path, n_total, len(pose), notes, prefix)
     if desc:
         written.append(desc)
     for p in written:
         print(f'  wrote {p}')
     if not written:
         print('No figures enabled in CONFIG["figures"].')
+
+    if cfg.get('show_xzpitch_window'):
+        print('  opening the x/z/pitch window (close it to exit) ...')
+        show_xzpitch_window(pose, fmag, cfg, groups)
     return 0
 
 

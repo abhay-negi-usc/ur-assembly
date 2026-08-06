@@ -47,7 +47,7 @@ POSE_KEYS = {'xyz', 'rpy', 'xyz_mm', 'rpy_deg'}
 
 # frames.yaml name -> the legacy per-config section that still feeds the Robot facade.
 LEGACY_SECTIONS = {'fingertip': 'fingertip_grasp', 'camera': 'hand_eye',
-                   'grasp': 'grasp_tcp_offset', 'connector_holder': 'connector_holder'}
+                   'grasp': 'grasp_tcp_offset'}
 
 
 def frames_path(cfg=None):

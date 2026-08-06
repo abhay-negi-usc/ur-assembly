@@ -98,14 +98,8 @@ fingertip_grasp:
   xyz: [0.0, -0.01254, 0.183]
   rpy: [3.14159, 0.0, -1.5708]
 
-# Connector holder frame (tool0 -> connector_holder). rpy is EXTRINSIC XYZ (= [180, 0, -90] deg),
-# which aligns connector_holder +X with tool0 -Y and +Z with tool0 -Z. Shown live in the monitor.
-connector_holder:
-  xyz: [0.0, -0.045, 0.010]
-  rpy: [3.14159, 0.0, -1.5708]
-
-# The held CONNECTOR frame (connector_holder -> connector) -- connector_in_holder -- is supplied by
-# the cable profile (configs/cables.yaml) for the selected `cable:`. Shown live in the monitor.
+# (The connector_holder chain is RETIRED -- a rigidly held connector is a configs/frames.yaml
+# frame declared directly wrt tool0.)
 
 scan:
   # mode: fuse | reconstruction | ground_plane  (see the reconstruction + ground_plane blocks above).

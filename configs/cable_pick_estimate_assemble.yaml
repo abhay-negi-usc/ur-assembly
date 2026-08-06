@@ -70,10 +70,6 @@ fingertip_grasp:
   xyz: [0.0, 0.0, 0.183]
   rpy: [3.14159, 0.0, -1.5708]
 
-connector_holder:
-  xyz: [0.0, -0.045, 0.010]
-  rpy: [3.14159, 0.0, -1.5708]
-
 scan:
   mode: ground_plane
   require_detection: true
@@ -143,7 +139,7 @@ pickup:
     enabled: true
     tare_before: true
     mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
-    stiffness:     [2000.0, 2000.0, 500.0, 15.0, 15.0, 15.0]
+    stiffness:     [500.0, 500.0, 500.0, 15.0, 15.0, 15.0]
     damping_ratio: [1.5, 1.5, 1.5, 1.5, 1.5, 1.5]
     selected_axes: [1, 1, 1, 1, 1, 1]
     reference_rate_hz: 125.0
@@ -199,10 +195,10 @@ grasp_check:
 # joint caps bound every joint directly; the cartesian caps bound the TOOL (converted to an
 # equivalent joint bound for moveJ, and pacing the compliant reference ramps + moveL directly).
 speed:
-  max_joint_velocity_deg_s: 30.0
+  max_joint_velocity_deg_s: 90.0
   max_joint_acceleration_deg_s2: 30.0
   max_cartesian_translation_mm_s: 25.0
-  max_cartesian_rotation_deg_s: 30.0
+  max_cartesian_rotation_deg_s: 90.0
   # Per-PHASE scaling of ALL FOUR limits above (1.0 = the global limit itself), one entry per
   # phase of cable_pick_estimate_assemble. An absent phase runs at 1.0.
   phase_scale:
@@ -225,7 +221,7 @@ reset:
   max_force_n: 50.0
   compliance:
     tare_before: true
-    mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+    mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
     stiffness:     [2000.0, 2000.0, 2000.0, 15.0, 15.0, 15.0]
     damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     selected_axes: [1, 1, 1, 1, 1, 1]
@@ -237,11 +233,12 @@ reset:
 # ASSEMBLY -- the estimate-while-assemble loop
 # ===================================================================================================
 assembly:
-  # The KNOWN target (where the CONNECTOR must end up, base_link) comes from the CABLE PROFILE:
-  # cables.yaml <cable>.connector_holder_target @ <cable>.connector_in_holder -- the same recorded
-  # mate uncertain_sampling assembles to, one source per cable. MEASURE: hand-guide to a good
-  # mate, paste `base_link <- connector_holder` off the monitor into that cable's entry (mm/deg).
-  # (The old assembly.target_connector key here is IGNORED with a warning if present.)
+  # The KNOWN target (where the CONNECTOR must end up, base_link): names a configs/frames.yaml
+  # frame whose `targets:` entry is the recorded mate -- the same catalogue record
+  # uncertain_sampling and estimator_eval assemble to, one per socket. MEASURE: hand-guide to a
+  # good mate, read `base_link <- <frame>` off the monitor, paste it under targets: (mm/deg).
+  # (The old assembly.target_connector / connector_holder_target keys are IGNORED with a warning.)
+  target_frame: banana_connector_finger_holder
 
   # The ideal insertion path: CONNECTOR w.r.t. the TARGET connector, last row = identity (the mate).
   trajectory_csv: assembly_trajectory.csv
@@ -304,7 +301,7 @@ assembly:
 # ===================================================================================================
 estimation:
   # The contact manifold for THIS connector type (built by analysis/contact_manifold.py).
-  manifold_csv: /abhay_ws/ur-assembly/configs/data/uncertain_assembly_sampling/banana/uncertain_assembly_log_20260729_181654.csv
+  manifold_csv: ./configs/data/banana_manifold.csv
 
   # Optional override of the initial in-hand estimate (fingertip -> connector, m / rad).
   # Default (absent): the grasp geometry, <cable>.junction_in_fingertip from cables.yaml.

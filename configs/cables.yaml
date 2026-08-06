@@ -30,16 +30,16 @@
 #                        exactly there, then closes the gripper. Replaces junction_offset_m AND the
 #                        demo configs' connector_grasp -- the fingertip grasp target is
 #                        detected_junction @ inverse(junction_in_fingertip).)
-#   <cable>.connector_in_holder -> connector_in_holder  (the held connector's pose wrt connector_holder;
-#                        used by uncertain_sampling as the connector frame)
-#   <cable>.connector_holder_target -> connector_holder_target  (recorded base->connector_holder at the
-#                        mate; used by uncertain_sampling as the assembly target)
 #
-# POSE UNITS. Pose blocks here (connector_in_holder, connector_holder_target) may be written in
-# MONITOR UNITS -- `xyz_mm` (mm) + `rpy_deg` (deg) -- so a reading can be pasted straight off the
-# monitor with no conversion. `xyz`/`rpy` (m/rad, the repo-wide convention) still work. The unit is
-# in the KEY NAME so the two can never be confused; setting both for one triple is an error.
-#   <cable>.target_connector_pose -> assembly.target_connector_pose   (future)
+# POSE UNITS. Pose blocks here (junction_in_fingertip) may be written in MONITOR UNITS --
+# `xyz_mm` (mm) + `rpy_deg` (deg) -- so a reading can be pasted straight off the monitor with no
+# conversion. `xyz`/`rpy` (m/rad, the repo-wide convention) still work. The unit is in the KEY
+# NAME so the two can never be confused; setting both for one triple is an error.
+#
+# NOTE the HOLDER chain is RETIRED: connector_in_holder / connector_holder_target are no longer
+# accepted (the loader fails loudly on them). A held connector is declared directly wrt tool0 in
+# configs/frames.yaml (frames:), with its recorded mate under targets:, and selected by name
+# (uncertain_sampling/estimator_eval `held_frame:`, the pick app's `assembly.target_frame`).
 # ============================================================================
 
 # Gripper hardware + endpoints (identical for all cables). These live SOLELY here now -- the cable
@@ -73,20 +73,8 @@ cables:
     junction_in_fingertip:
       xyz_mm:  [-17.0, 0.0, 5.0]
       rpy_deg: [0.0, 0.0, 0.0]
-    # Assembly CALIBRATION: this connector's pose wrt connector_holder (connector_holder -> connector),
-    # used by uncertain_sampling as the held connector frame. MEASURE per connector: hold the connector
-    # in the holder, hand-guide, and read base_link<-connector vs connector_holder off the monitor.
-    # Identity = unmeasured (connector coincides with connector_holder).
-    connector_in_holder:
-      xyz: [0.0, 0.0, 0.0]
-      rpy: [0.0, 0.0, 0.0]
-    # Recorded ASSEMBLY TARGET for the connector_holder (base_link -> connector_holder at the mate),
-    # read off the monitor after hand-guiding to a good mate. PER-CABLE (each socket is elsewhere).
-    # Used by uncertain_sampling; the connector target = this @ connector_in_holder.
-    # In MONITOR UNITS (mm, deg) -- paste straight from the monitor line, no conversion.
-    connector_holder_target:
-      xyz_mm:  [82.69, 1071.80, -185.15]
-      rpy_deg: [-0.72, 0.69, 88.73]
+    # (The held-connector frame + its recorded mate live in configs/frames.yaml:
+    # frames: banana_connector_finger_holder + targets: banana_connector_finger_holder.)
 
   bnc:
     connector: [197, 206]
@@ -94,12 +82,8 @@ cables:
     junction_in_fingertip:    # MEASURE (see banana); zeros = junction exactly at the fingertip
       xyz_mm:  [0.0, 0.0, 0.0]
       rpy_deg: [0.0, 0.0, 0.0]
-    connector_in_holder:      # MEASURE (see banana)
-      xyz: [0.0, 0.0, 0.0]
-      rpy: [0.0, 0.0, 0.0]
-    # connector_holder_target:   # RECORD off the monitor (mm, deg) before running uncertain_sampling
-    #   xyz_mm:  [0.0, 0.0, 0.0]
-    #   rpy_deg: [0.0, 0.0, 0.0]
+    # (Held-connector frame + mate target: declare in configs/frames.yaml when this cable runs
+    # the assembly apps.)
 
   c13:
     connector: [195, 198]
@@ -107,9 +91,5 @@ cables:
     junction_in_fingertip:    # MEASURE (see banana); zeros = junction exactly at the fingertip
       xyz_mm:  [0.0, 0.0, 0.0]
       rpy_deg: [0.0, 0.0, 0.0]
-    connector_in_holder:      # MEASURE (see banana)
-      xyz: [0.0, 0.0, 0.0]
-      rpy: [0.0, 0.0, 0.0]
-    # connector_holder_target:   # RECORD off the monitor (mm, deg) before running uncertain_sampling
-    #   xyz_mm:  [0.0, 0.0, 0.0]
-    #   rpy_deg: [0.0, 0.0, 0.0]
+    # (Held-connector frame + mate target: declare in configs/frames.yaml when this cable runs
+    # the assembly apps.)

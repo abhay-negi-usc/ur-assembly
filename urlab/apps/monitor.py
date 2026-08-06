@@ -17,11 +17,10 @@ Remote Control because they DRIVE the arm.)
 Every frame is in base_link. The tool0-attached frames come from the SHARED frames catalogue,
 configs/frames.yaml (urlab/tool_frames.py) -- ALL of its entries are shown, so adding a frame
 there (one yaml entry: parent + xyz/rpy or xyz_mm/rpy_deg) makes it appear here with no code
-change. 'tool0' itself (the flange / all-zeros pendant TCP; getActualTCPPose is this pose) is
-always first, and the cable-specific 'connector' (connector_holder @ connector_in_holder) is
-appended when the loaded config defines it. If frames.yaml is missing, the legacy per-config
-sections (fingertip_grasp, hand_eye, grasp_tcp_offset, connector_holder) are used as before;
-when both exist and disagree, a drift warning prints at startup.
+change; held connectors are declared there directly wrt tool0. 'tool0' itself (the flange /
+all-zeros pendant TCP; getActualTCPPose is this pose) is always first. If frames.yaml is
+missing, the legacy per-config sections (fingertip_grasp, hand_eye, grasp_tcp_offset) are used
+as before; when both exist and disagree, a drift warning prints at startup.
 Poses print as xyz (mm) + rpy (deg, EXTRINSIC XYZ). This is the tool to MEASURE the config values
 the README's hardware checklist leaves open (assembly.target, a grasp pose, etc.): jog to the spot,
 read the frame off here, paste it in.
@@ -47,9 +46,9 @@ log = urlog.get('monitor')
 
 def _frames(cfg):
     """{name: T_tool0_frame} for every tool0-attached frame -- ALL entries of the shared
-    configs/frames.yaml (urlab/tool_frames.py: add a frame there, it shows up here), plus the
-    cable-specific 'connector' (connector_holder @ connector_in_holder) when the config defines
-    it. Falls back to the legacy per-config sections if the frames yaml is missing."""
+    configs/frames.yaml (urlab/tool_frames.py: add a frame there, it shows up here; held
+    connectors are declared there directly wrt tool0). Falls back to the legacy per-config
+    sections if the frames yaml is missing."""
     try:
         frames = tool_frames.load_frames(cfg)
         tool_frames.check_drift(frames, cfg)           # warn if the legacy sections disagree
@@ -61,11 +60,6 @@ def _frames(cfg):
             'camera': from_cfg(cfg.section('hand_eye')),
             'grasp': from_cfg(cfg.section('grasp_tcp_offset')),
         }
-        if cfg.get('connector_holder'):
-            frames['connector_holder'] = from_cfg(cfg.section('connector_holder'))
-    if 'connector_holder' in frames and cfg.get('connector_in_holder'):
-        frames['connector'] = (frames['connector_holder']
-                               @ from_cfg(urconfig._pose_si(cfg.section('connector_in_holder'))))
     return frames
 
 

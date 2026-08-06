@@ -15,6 +15,8 @@ import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
 from urlab import transforms as T   # noqa: E402
 from urlab.frames import FrameGraph   # noqa: E402
@@ -388,6 +390,9 @@ def test_cable_profile_applies_counts():
     # The HOLDER chain is retired: no cable may still promote the old keys.
     assert cfg.get_path('connector_in_holder') is None
     assert cfg.get_path('connector_holder_target') is None
+    # The HOLDER chain is retired: no cable may still promote the old keys.
+    assert cfg.get_path('connector_in_holder') is None
+    assert cfg.get_path('connector_holder_target') is None
 
     bnc = Config({'cable': 'bnc', '_config_dir': CONFIG_DIR})
     apply_cable_profile(bnc)
@@ -407,6 +412,15 @@ def test_cable_profile_applies_counts():
             raise AssertionError('junction_offset_m must raise, not be ignored')
         except ValueError as exc:
             assert 'junction_in_fingertip' in str(exc)
+        # The retired HOLDER keys must fail loudly too -- a stale entry would otherwise feed a
+        # target nothing reads any more.
+        with open(os.path.join(tmp, 'cables.yaml'), 'w') as fh:
+            fh.write('cables:\n  x:\n    connector_holder_target: {xyz_mm: [1, 2, 3]}\n')
+        try:
+            apply_cable_profile(Config({'cable': 'x', '_config_dir': tmp}))
+            raise AssertionError('connector_holder_target must raise, not be ignored')
+        except ValueError as exc:
+            assert 'frames.yaml' in str(exc)
         # The retired HOLDER keys must fail loudly too -- a stale entry would otherwise feed a
         # target nothing reads any more.
         with open(os.path.join(tmp, 'cables.yaml'), 'w') as fh:
@@ -1097,7 +1111,9 @@ def test_tool_frames_shared_yaml_source():
     frames = load_frames()
     assert np.allclose(frames['tool0'], np.eye(4))
     for name in ('fingertip', 'camera', 'grasp', 'banana_connector_finger_holder'):
+    for name in ('fingertip', 'camera', 'grasp', 'banana_connector_finger_holder'):
         assert name in frames, f'missing frame {name!r}'
+    assert 'connector_holder' not in frames, 'the holder chain is retired'
     assert 'connector_holder' not in frames, 'the holder chain is retired'
     xyz, rpy = matrix_to_xyzrpy(frames['banana_connector_finger_holder'])
     d = np.degrees(rpy)
@@ -1109,10 +1125,18 @@ def test_tool_frames_shared_yaml_source():
     # user's to re-measure whenever the mate moves, so assert the UNIT round-trip against the
     # yaml itself (monitor mm/deg -> m/rad), not a hard-coded pose.
     import yaml
+    # held_frame); every target must pair with a declared frame. The recorded NUMBERS are the
+    # user's to re-measure whenever the mate moves, so assert the UNIT round-trip against the
+    # yaml itself (monitor mm/deg -> m/rad), not a hard-coded pose.
+    import yaml
     targets = load_targets()
     with open(os.path.join(ROOT, 'configs', 'frames.yaml')) as fh:
         raw = yaml.safe_load(fh)['targets']['banana_connector_finger_holder']
+    with open(os.path.join(ROOT, 'configs', 'frames.yaml')) as fh:
+        raw = yaml.safe_load(fh)['targets']['banana_connector_finger_holder']
     xyz, rpy = matrix_to_xyzrpy(targets['banana_connector_finger_holder'])
+    assert np.allclose(xyz * 1000.0, raw['xyz_mm'])
+    assert np.allclose(np.degrees(rpy), raw['rpy_deg'])
     assert np.allclose(xyz * 1000.0, raw['xyz_mm'])
     assert np.allclose(np.degrees(rpy), raw['rpy_deg'])
 

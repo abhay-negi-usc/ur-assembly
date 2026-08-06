@@ -13,7 +13,8 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
 from urlab import transforms as T   # noqa: E402
 from urlab.frames import FrameGraph   # noqa: E402
@@ -384,14 +385,9 @@ def test_cable_profile_applies_counts():
     jf = cfg.get_path('junction_in_fingertip')
     assert set(jf) == {'xyz', 'rpy'}, 'xyz_mm/rpy_deg must be converted away, not passed through'
     assert all(abs(v) < 0.1 for v in jf['xyz']), 'xyz must be METRES (mm would be ~1000x)'
-    assert cfg.get_path('connector_in_holder.xyz') is not None         # held-connector calibration applied
-    assert cfg.get_path('connector_in_holder.rpy') is not None
-    # The recorded mate is per-cable and gets RE-MEASURED, so assert the UNIT CONVERSION (mm/deg ->
-    # m/rad), not the calibration values themselves.
-    tgt = cfg.get_path('connector_holder_target')
-    assert set(tgt) == {'xyz', 'rpy'}, 'xyz_mm/rpy_deg must be converted away, not passed through'
-    assert all(abs(v) < 10.0 for v in tgt['xyz']), 'xyz must be METRES (mm would be ~1000x)'
-    assert all(abs(v) <= math.pi + 1e-9 for v in tgt['rpy']), 'rpy must be RADIANS (deg would be >pi)'
+    # The HOLDER chain is retired: no cable may still promote the old keys.
+    assert cfg.get_path('connector_in_holder') is None
+    assert cfg.get_path('connector_holder_target') is None
 
     bnc = Config({'cable': 'bnc', '_config_dir': CONFIG_DIR})
     apply_cable_profile(bnc)
@@ -411,6 +407,15 @@ def test_cable_profile_applies_counts():
             raise AssertionError('junction_offset_m must raise, not be ignored')
         except ValueError as exc:
             assert 'junction_in_fingertip' in str(exc)
+        # The retired HOLDER keys must fail loudly too -- a stale entry would otherwise feed a
+        # target nothing reads any more.
+        with open(os.path.join(tmp, 'cables.yaml'), 'w') as fh:
+            fh.write('cables:\n  x:\n    connector_holder_target: {xyz_mm: [1, 2, 3]}\n')
+        try:
+            apply_cable_profile(Config({'cable': 'x', '_config_dir': tmp}))
+            raise AssertionError('connector_holder_target must raise, not be ignored')
+        except ValueError as exc:
+            assert 'frames.yaml' in str(exc)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1091,20 +1096,25 @@ def test_tool_frames_shared_yaml_source():
     # banana_connector_finger_holder entry exactly as specified (159 mm +Z, rpy 180/0/-90 deg).
     frames = load_frames()
     assert np.allclose(frames['tool0'], np.eye(4))
-    for name in ('fingertip', 'camera', 'grasp', 'connector_holder',
-                 'banana_connector_finger_holder'):
+    for name in ('fingertip', 'camera', 'grasp', 'banana_connector_finger_holder'):
         assert name in frames, f'missing frame {name!r}'
+    assert 'connector_holder' not in frames, 'the holder chain is retired'
     xyz, rpy = matrix_to_xyzrpy(frames['banana_connector_finger_holder'])
     d = np.degrees(rpy)
     assert np.allclose(xyz, [0.0, 0.0, 0.159])
     assert np.isclose(abs(d[0]), 180.0) and np.isclose(d[1], 0.0) and np.isclose(d[2], -90.0)
 
     # targets: the recorded base_link <- frame poses (the mate for uncertain_sampling's
-    # held_frame); every target must pair with a declared frame.
+    # held_frame); every target must pair with a declared frame. The recorded NUMBERS are the
+    # user's to re-measure whenever the mate moves, so assert the UNIT round-trip against the
+    # yaml itself (monitor mm/deg -> m/rad), not a hard-coded pose.
+    import yaml
     targets = load_targets()
+    with open(os.path.join(ROOT, 'configs', 'frames.yaml')) as fh:
+        raw = yaml.safe_load(fh)['targets']['banana_connector_finger_holder']
     xyz, rpy = matrix_to_xyzrpy(targets['banana_connector_finger_holder'])
-    assert np.allclose(xyz, [0.08853, 1.06075, -0.18474])
-    assert np.allclose(np.degrees(rpy), [-1.57, 1.24, 88.98])
+    assert np.allclose(xyz * 1000.0, raw['xyz_mm'])
+    assert np.allclose(np.degrees(rpy), raw['rpy_deg'])
 
     # No drift: a config whose legacy sections MATCH the catalogue stays silent.
     cfg = Config({'fingertip_grasp': {'xyz': [0.0, 0.0, 0.183],
@@ -1310,6 +1320,119 @@ def test_wrench_is_bridged_into_base_link():
     assert np.allclose(w, [-1.0, -2.0, 3.0, -0.4, -0.5, 0.6]), w
     assert np.isclose(np.linalg.norm(w[:3]), np.linalg.norm([1.0, 2.0, 3.0])), \
         'a pure rotation must preserve magnitude (so the force guard is unaffected)'
+
+
+def test_common_yaml_is_the_shared_base_layer():
+    """configs/_common.yaml is LOADED as the base under every config: top-level blocks a config
+    does not define are inherited; a block the config defines is owned WHOLESALE (no per-key
+    merge -- schema generations must never mix inside one speed: block); --set beats both; a
+    directory without a _common.yaml inherits nothing."""
+    import shutil
+    import tempfile
+    from urlab import config as C
+    from urlab import tool_frames
+
+    # Repo wiring: a demo config without a camera: block inherits the shared device...
+    cfg = C.load('estimator_eval')
+    assert cfg.get_path('camera.serial_no') == '218622272137'
+    # ...and the pick app's mate comes from the frames catalogue (target_frame -> targets:).
+    pick = C.load('cable_pick_estimate_assemble')
+    assert pick.get_path('assembly.target_frame') in tool_frames.load_targets(pick)
+
+    tmp = tempfile.mkdtemp()
+    try:
+        with open(os.path.join(tmp, '_common.yaml'), 'w') as fh:
+            fh.write('robot: {ip: 1.2.3.4, dry_run: true}\nspeed: {a: 1, b: 2}\nextra: 7\n')
+        with open(os.path.join(tmp, 'demo.yaml'), 'w') as fh:
+            fh.write('speed: {a: 9}\n')
+        cfg = C.load(os.path.join(tmp, 'demo.yaml'))
+        assert cfg.get_path('robot.ip') == '1.2.3.4'       # absent block -> inherited
+        assert cfg.get('extra') == 7                       # top-level scalars inherit too
+        assert cfg.get_path('speed.a') == 9                # defined block is owned...
+        assert cfg.get_path('speed.b') is None, 'WHOLE-BLOCK ownership: no per-key merge'
+        assert C.load(os.path.join(tmp, 'demo.yaml'),
+                      ['robot.ip=9.9.9.9']).get_path('robot.ip') == '9.9.9.9'
+        # _common.yaml itself must load flat, not recurse into itself.
+        assert C.load(os.path.join(tmp, '_common.yaml')).get_path('speed.b') == 2
+        os.remove(os.path.join(tmp, '_common.yaml'))
+        assert C.load(os.path.join(tmp, 'demo.yaml')).get('robot') is None, \
+            'no _common.yaml in the directory -> nothing inherited'
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_estimator_eval_ground_truth_algebra():
+    """The eval harness scores the estimator against a KNOWN truth, so its algebra must close the
+    loop exactly: the injected right-multiplied belief error reads back verbatim through
+    _gt_error (identity = perfect belief), and the estimator's own correction convention
+    (mm translation, believed @ corr ~= true) applied with the exact inverse zeroes it."""
+    from urlab.apps.estimator_eval import _corr_to_m, _gt_error
+    from urlab.skills.trajectory import delta_from
+    from urlab.transforms import xyzrpy_to_matrix
+
+    T_true = xyzrpy_to_matrix([0.0, 0.0, 0.159], [math.pi, 0.0, -math.pi / 2])   # the banana holder
+    inj = [0.003, 0.0, -0.002, 0.0, 4.0, 0.0]              # +3 mm x, -2 mm z, +4 deg pitch
+    T_bel = T_true @ delta_from(inj)
+
+    vec, pos_mm, rot_deg = _gt_error(T_true, T_bel)
+    assert np.allclose(vec, [3.0, 0.0, -2.0, 0.0, 4.0, 0.0], atol=1e-9), vec
+    assert np.isclose(pos_mm, math.hypot(3.0, 2.0)) and np.isclose(rot_deg, 4.0)
+    # ... and a perfect belief scores zero.
+    assert _gt_error(T_true, T_true)[1] < 1e-12
+
+    # A PERFECT correction, in the estimator's return convention (translation in mm): the belief
+    # update T_bel @ _corr_to_m(T_corr_mm) must land back on the truth exactly.
+    T_corr_mm = T.inverse(delta_from(inj))
+    T_corr_mm[:3, 3] *= 1000.0
+    _, pos2, rot2 = _gt_error(T_true, T_bel @ _corr_to_m(T_corr_mm))
+    assert pos2 < 1e-9 and rot2 < 1e-9, (pos2, rot2)
+
+
+def test_estimator_eval_trial_error_plot_renders():
+    """The per-trial error figure must actually render (the plotter is best-effort at runtime --
+    an exception is swallowed with a warning, so only a file-exists check catches a broken plot).
+    Data shape: index 0 = injected error, then one point per attempt."""
+    import shutil
+    import tempfile
+    from urlab.apps.estimator_eval import _plot_trial_errors
+
+    tmp = tempfile.mkdtemp()
+    try:
+        path = os.path.join(tmp, 'trial_001_errors.png')
+        err6 = [[4.0, 0.0, -3.0, 0.0, 5.0, 0.0],           # injected
+                [1.2, 0.0, -0.8, 0.0, 1.5, 0.0],           # after attempt 1
+                [0.3, 0.0, 0.2, 0.0, 0.4, 0.0]]            # after attempt 2
+        norms = [(5.0, 5.0), (1.4, 1.5), (0.36, 0.4)]
+        _plot_trial_errors(path, 1, ['x_mm', 'z_mm', 'pitch_deg'], err6, norms, 2.0, 3.0)
+        assert os.path.isfile(path) and os.path.getsize(path) > 0, \
+            'plot did not render (the runtime warning path swallowed an error)'
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_estimator_eval_config_is_wired_to_the_catalogue():
+    """configs/estimator_eval.yaml must parse, name a held_frame present in BOTH the catalogue's
+    frames: and targets: (the app refuses to move otherwise -- the frame IS the ground truth),
+    and carry the requested defaults: 50 trials x 5 attempts, x/z +/-5 mm, pitch +/-5 deg."""
+    from urlab import config as C
+    from urlab import tool_frames
+
+    cfg = C.load(os.path.join(ROOT, 'configs', 'estimator_eval.yaml'))
+    held = cfg.get('held_frame')
+    assert held in tool_frames.load_frames(cfg), held
+    assert held in tool_frames.load_targets(cfg), held
+
+    ev = cfg.section('eval')
+    assert int(ev.get('num_trials')) == 50 and int(ev.get('max_attempts')) == 5
+    assert ev['perturbation']['lower'] == [-0.005, 0.0, -0.005, 0.0, -5.0, 0.0]   # m / deg
+    assert ev['perturbation']['upper'] == [0.005, 0.0, 0.005, 0.0, 5.0, 0.0]
+    assert cfg.get_path('estimation.estimate_dims') == ['x_mm', 'z_mm', 'pitch_deg']
+    # The trials.csv schema must name every estimated dim's correction and the ground-truth
+    # error columns the summary aggregates (err_after_<dim> matches estimate_dims by name).
+    from urlab.apps.estimator_eval import _fieldnames
+    fields = _fieldnames(cfg.get_path('estimation.estimate_dims'))
+    for d in cfg.get_path('estimation.estimate_dims'):
+        assert f'corr_{d}' in fields and f'err_after_{d}' in fields
 
 
 if __name__ == '__main__':

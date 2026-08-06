@@ -32,38 +32,32 @@ the connector **seated**; the retract runs **un-guarded** (a seated part is alre
 so a guarded retract would block the motion that frees it).
 
 ## Which cable/connector is under test
-Set it in `configs/uncertain_sampling.yaml`:
+Set both keys in `configs/uncertain_sampling.yaml`:
 ```yaml
-cable: banana        # or: bnc | c13   (or on the CLI: --set cable=bnc)
+cable: banana                                  # grasp params from configs/cables.yaml
+held_frame: banana_connector_finger_holder     # held pose + mate from configs/frames.yaml
 ```
-That one key pulls this connector's **calibration** from `configs/cables.yaml` — both
-`connector_in_holder` (its pose in the holder) and `connector_holder_target` (the recorded mate).
-Add or measure a connector by editing its entry under `cables:`; **`banana` is the default and is
-set up there.**
+`cable:` pulls the grasp calibration from `configs/cables.yaml`; `held_frame:` (REQUIRED) names a
+`configs/frames.yaml` frame — the held connector is declared there **directly wrt tool0** (the old
+`connector_holder` chain is retired).
 
 ## Frames & the recorded target
-The connector is held via the holder: **tool0 → `connector_holder` → `connector`**. `connector_holder`
-(the shared holder mount) is in the config; the per-connector `connector_in_holder` comes from the
-`cable:` profile. Both frames are shown live in the `monitor`.
-
-The **assembly target is recorded for the `connector_holder`** and is **per-cable, in `cables.yaml`**:
-hand-guide to a good mate, read `base_link <- connector_holder` off the monitor, and paste it in —
-**in the monitor's own units**, using the `xyz_mm` / `rpy_deg` keys, so there is nothing to convert:
+`held_frame` selects **both** poses from the shared catalogue, `configs/frames.yaml`:
+- `frames:` — the held connector's pose wrt tool0 (one entry, monitor units welcome);
+- `targets:` — the recorded mate (`base_link <- <frame>`): hand-guide to a good mate, read the
+  frame's line off the monitor, and paste it — **in the monitor's own units** (`xyz_mm`/`rpy_deg`),
+  so there is nothing to convert:
 
 ```yaml
-connector_holder_target:
-  xyz_mm:  [90.71, 1073.48, -184.20]     # straight off the monitor line
-  rpy_deg: [-0.79, -0.25, 88.92]
+targets:
+  banana_connector_finger_holder:
+    xyz_mm:  [82.69, 1071.80, -185.15]     # straight off the monitor line
+    rpy_deg: [-0.72, 0.69, 88.73]
 ```
 
 (`xyz`/`rpy` in m/rad still work. The unit is in the **key name**, so the two can't be confused;
-setting both for one triple raises rather than silently picking one.) The connector target is then
-`connector_holder_target · (holder→connector)`, and the assembled tool0 pose + the anchoring fall out
-automatically (last trajectory row ↦ the assembled pose).
-
-**To calibrate `connector_in_holder`:** hold the connector in the holder, hand-guide, and read
-`base_link <- connector` vs `base_link <- connector_holder` off the monitor; paste the relative pose
-into that cable's `connector_in_holder`. Identity = unmeasured (connector coincides with the holder).
+setting both for one triple raises rather than silently picking one.) The assembled tool0 pose +
+the anchoring fall out automatically (last trajectory row ↦ the assembled pose).
 
 The **assembly trajectory** (`assembly_trajectory.csv`) is the **connector w.r.t. the target
 connector** (`T_targetconn_conn`); its **last row must be identity** (connector == target connector
@@ -128,8 +122,8 @@ trial 4/9 took 31.2 s | mean cycle 30.8 s | 5 left, ETA 2:34 (done ~14:21:07)
 ### Part, frames, path
 | key | meaning |
 |---|---|
-| `cable` | the connector under test; pulls its calibration from `cables.yaml` (`connector_in_holder`, `connector_holder_target`) |
-| `connector_holder` | the shared holder mount (tool0 → connector_holder) |
+| `cable` | the connector under test; pulls its grasp calibration from `cables.yaml` |
+| `held_frame` | REQUIRED: the `configs/frames.yaml` frame naming the held connector (its `frames:` pose wrt tool0 + its `targets:` mate) |
 | `trajectory_csv` / `trajectory_angles_deg` | the ideal path (connector wrt target connector; last row identity) |
 | `standoff_axis` | approach/insertion axis in the target-connector frame (`[-1,0,0]` = direct −X → 0) |
 | `standoff_distance_m` | how far **beyond the trajectory's FIRST row** the one-time stand-off sits (measured from the path start, not the mate — so it is always clear of the path) |

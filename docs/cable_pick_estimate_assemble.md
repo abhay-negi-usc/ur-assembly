@@ -50,9 +50,10 @@ it — multi-start ICP across the 12-D pose+wrench space, correction restricted 
 ## Prerequisites
 1. A **contact manifold** for this connector type (`analysis/contact_manifold.py` over
    uncertain_sampling runs) at `estimation.manifold_csv`.
-2. The **target connector pose** recorded in the cable profile (cables.yaml
-   `<cable>.connector_holder_target` @ `connector_in_holder` — the same mate uncertain_sampling
-   assembles to; paste `base_link <- connector_holder` off the monitor, mm/deg).
+2. The **target connector pose** recorded in the shared frames catalogue: `assembly.target_frame`
+   names a `configs/frames.yaml` frame whose `targets:` entry is the mate — the same record
+   uncertain_sampling and estimator_eval assemble to (paste `base_link <- <frame>` off the
+   monitor, mm/deg).
 3. The **trajectory CSV** (connector w.r.t. target connector, last row identity, −X → 0).
 4. The scaling constants under `estimation:` should be the ones that **validated offline** in
    `analysis/manifold_icp_validation.py` — that script is the rehearsal for this app.
@@ -60,7 +61,7 @@ it — multi-start ICP across the 12-D pose+wrench space, correction restricted 
 ## Config highlights (`configs/cable_pick_estimate_assemble.yaml`)
 | key | meaning |
 |---|---|
-| target connector pose | from the **cable profile**: cables.yaml `connector_holder_target` @ `connector_in_holder` (the old `assembly.target_connector` key is ignored with a warning) |
+| `assembly.target_frame` | names the **frames catalogue** entry (`configs/frames.yaml` `targets:`) recording the mate (the old `assembly.target_connector` / `connector_holder_target` keys are ignored with a warning) |
 | `assembly.max_attempts` | assemble→estimate loop budget |
 | `assembly.success_tolerance.pos_mm / rot_deg` | reference numbers at the check prompt; automatic decision only in `--dry-run` |
 | `assembly.release_retract_distance_m` | post-release escape along the **connector's own −X** (never a base-frame axis) |

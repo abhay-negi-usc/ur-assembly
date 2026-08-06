@@ -1,6 +1,10 @@
-# Shared hardware definition, INCLUDED by reference in the notes below (yaml has no real include,
-# so each config repeats the robot/camera/hand_eye/gripper blocks -- they are collected here as the
-# canonical source to copy from). Values carried over verbatim from the ROS stack.
+# Shared ROBOT-BOX definition -- LOADED as the BASE LAYER under every config (urlab/config.py
+# _apply_common): any top-level block a config does not define is taken from here. A config that
+# defines a block owns it WHOLESALE (no per-key merge), and `--set` still wins over everything.
+#
+# ONLY robot-box facts live here: the robot connection, the camera device, and the global speed
+# caps. FRAMES live in configs/frames.yaml (the shared catalogue); per-cable data (grasp counts,
+# junction pose, mate targets by frame name) lives in configs/cables.yaml.
 
 # ---- Robot (RTDE) ----
 robot:
@@ -18,40 +22,18 @@ base_frame: base_link            # ROS base_link; transforms.py bridges to the U
 tip_frame: tool0                 # the pendant all-zeros TCP; NOT `flange` (that is 90 deg twisted)
 camera_frame: camera1_color_optical_frame
 
-# ---- Hand-eye (tool0 -> camera), from the calibration T_TCP_TO_CAMERA0 ----
-# Eye-in-hand. This single static edge replaces the entire ur_tf_demo package.
-hand_eye:
-  xyz: [0.0, -0.080, 0.031]
-  rpy: [0.0, 0.0, 0.0]           # identity, matching dev's calibration -- SEE the hand-eye note
-
 # ---- Camera (RealSense D405) ----
 camera:
   serial_no: "218622272137"
   width: 1280
   height: 720
   fps: 15                          # D405 max at 1280x720 is 15 fps
-  enable_depth: false
 
-# ---- Gripper (Robotiq 2F-85 over Modbus RTU) ----
-# COUNTS are native now (0 open .. 255 closed) -- no more rad<->counts fudge via full_close_rad.
-gripper:
-  port: /dev/ttyUSB0             # prefer a stable /dev/serial/by-id/... path
-  baud: 115200
-  open_counts: 0
-  closed_counts: 255
-  speed_counts: 255
-  force_counts: 150
-  timeout_s: 5.0
-
-# ---- Speed caps (HARD ceilings, applied as RTDE limits) ----
+# ---- Global speed caps (the modern four-key schema; see docs/cable_pick_estimate_assemble.md).
+# All four are enforced simultaneously -- whichever binds. A config with its own speed: block
+# overrides ALL of this (whole-block ownership). ----
 speed:
-  max_joint_velocity_rad_s: 0.5
-  max_cartesian_velocity_m_s: 4.0
-  joint_acceleration_rad_s2: 1.2
-  cartesian_acceleration_m_s2: 0.5
-  min_move_duration_s: 0.5       # kept for schema parity; RTDE paces by velocity, not duration
-
-move_timeout_s: 60.0
-settle_s: 0.5
-confirm_each_step: true
-debug: false
+  max_joint_velocity_deg_s: 30.0
+  max_joint_acceleration_deg_s2: 30.0
+  max_cartesian_translation_mm_s: 25.0
+  max_cartesian_rotation_deg_s: 30.0

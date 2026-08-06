@@ -56,9 +56,36 @@ def load(name_or_path, overrides=()):
     cfg['_config_path'] = os.path.abspath(path)
     cfg['_config_dir'] = os.path.dirname(os.path.abspath(path))
 
+    _apply_common(cfg)                    # base layer: top-level blocks absent here come from _common
     _apply_overrides(cfg, overrides)      # 1st pass: a `--set cable=...` can select the profile
     apply_cable_profile(cfg)              # override gripper/grasp-check counts for the chosen cable
     _apply_overrides(cfg, overrides)      # 2nd pass: an explicit `--set` still wins over the profile
+    return cfg
+
+
+COMMON_FILE = '_common.yaml'
+
+
+def _apply_common(cfg):
+    """Fill TOP-LEVEL keys the config does not define from the _common.yaml sitting next to it --
+    the shared robot-box definition (robot, camera, speed), written ONCE instead of repeated in
+    every demo config.
+
+    The merge is deliberately WHOLE-BLOCK, not per-key: a config that defines `speed:` owns the
+    entire block. Merging key-by-key would mix schema generations inside one block (a config's
+    legacy `joint_acceleration_rad_s2` silently fighting an inherited
+    `max_joint_acceleration_deg_s2`), which is worse than repeating a block. Loading _common.yaml
+    itself, or a config in a directory without one, is a no-op."""
+    if os.path.basename(cfg.get('_config_path', '')) == COMMON_FILE:
+        return cfg
+    path = os.path.join(cfg.get('_config_dir', CONFIG_DIR), COMMON_FILE)
+    if not os.path.isfile(path):
+        return cfg
+    with open(path, 'r') as f:
+        common = yaml.safe_load(f) or {}
+    for key, value in common.items():
+        if key not in cfg:
+            cfg[key] = value
     return cfg
 
 
@@ -167,14 +194,15 @@ def apply_cable_profile(cfg):
             f'junction_in_fingertip: {{xyz: [{-off}, 0.0, 0.0], rpy: [0.0, 0.0, 0.0]}}).')
     if entry.get('junction_in_fingertip'):
         cfg.set_path('junction_in_fingertip', _pose_si(entry['junction_in_fingertip']))
-    # Held-connector calibration (connector_holder -> connector) for the assembly / uncertain_sampling.
-    if entry.get('connector_in_holder'):
-        cfg.set_path('connector_in_holder', _pose_si(entry['connector_in_holder']))
-    # Recorded assembly target for the connector_holder (per-cable) for uncertain_sampling.
-    if entry.get('connector_holder_target'):
-        cfg.set_path('connector_holder_target', _pose_si(entry['connector_holder_target']))
-    if entry.get('target_connector_pose'):                    # (future) the assembly target
-        cfg.set_path('assembly.target_connector_pose', entry['target_connector_pose'])
+    # The HOLDER chain (connector_in_holder / connector_holder_target) is RETIRED: held connectors
+    # are specified directly wrt tool0 in configs/frames.yaml (frames: + targets:). Fail loudly so
+    # a stale cables.yaml entry cannot silently feed a target nothing reads any more.
+    for obsolete in ('connector_in_holder', 'connector_holder_target'):
+        if entry.get(obsolete):
+            raise ValueError(
+                f'cables.yaml {name!r}: {obsolete} is retired -- the held connector is now a '
+                f'configs/frames.yaml frame (frames: tool0 -> connector; targets: the recorded '
+                f'mate), selected by name (held_frame / assembly.target_frame).')
     cfg['_cable_profile'] = name
     return cfg
 

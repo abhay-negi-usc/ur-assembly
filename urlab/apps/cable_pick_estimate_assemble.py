@@ -1,9 +1,9 @@
 """Cable pick, then ESTIMATE-while-ASSEMBLING -- cable_pick_assemble + the contact manifold.
 
 The PICK is exactly the cable_pick_assemble pipeline (scan, grasp, check, recovery). The assembly
-differs: the robot KNOWS the target connector pose (from the CABLE PROFILE in cables.yaml:
-connector_holder_target @ connector_in_holder -- the same recorded mate uncertain_sampling
-assembles to) and holds an
+differs: the robot KNOWS the target connector pose (assembly.target_frame names a
+configs/frames.yaml frame whose targets: entry is the recorded mate -- the same catalogue
+uncertain_sampling assembles to) and holds an
 ESTIMATE of the connector-in-hand (fingertip -> connector, initialised from the grasp geometry),
 but that estimate carries in-hand error. Each attempt runs the assembly trajectory under software
 admittance exactly like uncertain_sampling -- following the (believed) path, yielding to contact,
@@ -38,6 +38,7 @@ import numpy as np
 
 from .. import config as urconfig
 from .. import log as urlog
+from .. import tool_frames
 from ..log import StepRunner
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import reset
@@ -140,21 +141,25 @@ def build_and_run(cfg, robot, camera, args):
     adm = AdmittanceController(robot.arm, a.get('compliance', {}))
     confirm = make_confirm(cfg)
 
-    # ---- Known target from the CABLE PROFILE (cables.yaml): the recorded mate. The connector
-    # target = connector_holder_target @ connector_in_holder -- the SAME composition
-    # uncertain_sampling assembles to, so both apps (and the manifold data they produce/consume)
-    # mate to one recorded pose per cable. apply_cable_profile already converted both to m/rad. ----
-    tgt = cfg.section('connector_holder_target')
-    if not tgt:
-        log.error('No connector_holder_target recorded for cable %r in cables.yaml -- hand-guide '
-                  'to a good mate and paste `base_link <- connector_holder` off the monitor '
-                  '(mm/deg) into that cable entry.', cfg.get('cable'))
+    # ---- Known target from the SHARED frames catalogue: assembly.target_frame names a
+    # configs/frames.yaml frame whose targets: entry is the recorded mate (base_link <- connector
+    # -- the SAME record uncertain_sampling and estimator_eval assemble to, one per socket). ----
+    tname = a.get('target_frame')
+    if not tname:
+        log.error('assembly.target_frame is required -- name a %s frame whose targets: entry '
+                  'records the mate (hand-guide to a good mate, read `base_link <- <frame>` off '
+                  'the monitor, paste it under targets:).', tool_frames.frames_path(cfg))
         return False
-    T_base_tconn = from_cfg(tgt) @ from_cfg(cfg.section('connector_in_holder'))
-    if a.get('target_connector'):
-        log.warning('assembly.target_connector is IGNORED -- the target now comes from the cable '
-                    'profile (cables.yaml connector_holder_target @ connector_in_holder). Remove '
-                    'the key from the demo config.')
+    targets = tool_frames.load_targets(cfg)
+    if tname not in targets:
+        log.error('assembly.target_frame %r has no targets: entry in %s.',
+                  tname, tool_frames.frames_path(cfg))
+        return False
+    T_base_tconn = targets[tname]
+    if a.get('target_connector') or cfg.get('connector_holder_target'):
+        log.warning('assembly.target_connector / connector_holder_target are IGNORED -- the '
+                    'target now comes from the frames catalogue (targets: %r). Remove the old '
+                    'keys.', tname)
     csv_in = urconfig.resolve(cfg, a.get('trajectory_csv', 'assembly_trajectory.csv'))
     mats = traj.load_csv(csv_in, angles_deg=bool(a.get('trajectory_angles_deg', False)))
     if float(np.abs(mats[-1] - np.eye(4)).max()) > 1e-6:

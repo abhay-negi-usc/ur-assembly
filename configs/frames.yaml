@@ -14,9 +14,13 @@
 # whatever this file contains.
 #
 # NOTE the Robot facade still reads the per-demo-config sections (fingertip_grasp, hand_eye,
-# grasp_tcp_offset, connector_holder); the seeds below mirror cable_pick_estimate_assemble.yaml,
-# and the loader's check_drift() WARNS when this file and a loaded config disagree, so the
-# duplication cannot rot silently. Treat THIS file as the place to edit first.
+# grasp_tcp_offset); the seeds below mirror cable_pick_estimate_assemble.yaml, and the loader's
+# check_drift() WARNS when this file and a loaded config disagree, so the duplication cannot rot
+# silently. Treat THIS file as the place to edit first.
+#
+# HELD CONNECTORS are declared here directly wrt tool0 (e.g. banana_connector_finger_holder) --
+# the old connector_holder chain (holder mount + cables.yaml connector_in_holder /
+# connector_holder_target) is RETIRED.
 # ============================================================================
 
 frames:
@@ -35,12 +39,7 @@ frames:
     xyz_mm:  [0.0, 0.0, 0.0]
     rpy_deg: [0.0, 0.0, 0.0]
 
-  # The connector holder on the tool (tool0 -> connector_holder). Mirrors connector_holder.
-  connector_holder:
-    xyz_mm:  [0.0, -45.0, 10.0]
-    rpy_deg: [180.0, 0.0, -90.0]
-
-  # The banana-connector finger holder (tool0 -> holder).
+  # The banana connector fixtured between the closed fingers (tool0 -> connector).
   banana_connector_finger_holder:
     xyz_mm:  [0.0, 0.0, 159.0]
     rpy_deg: [180.0, 0.0, -90.0]
@@ -55,5 +54,5 @@ frames:
 targets:
   # banana_connector_finger_holder at the mate (read off the monitor).
   banana_connector_finger_holder:
-    xyz_mm:  [82.69, 1071.80, -185.15]
-    rpy_deg: [-0.72, 0.69, 88.73]
+    xyz_mm:  [+26.40, +1079.66,  -185.12]
+    rpy_deg: [+0.34,   -0.37,  +89.55]

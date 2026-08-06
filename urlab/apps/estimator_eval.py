@@ -100,19 +100,21 @@ def _fieldnames(dims):
             + ['converged'])
 
 
-def _plot_trial_errors(path, trial, dims, err6, norms, tol_pos_mm, tol_rot_deg):
+def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot):
     """ONE figure per trial, RE-SAVED after every attempt: the GROUND-TRUTH error, all attempts
     co-plotted (x = 0 is the injected error, x = k the error left after attempt k's update).
-    One panel per estimated dim (signed, dashed zero) plus the pos/rot norms against the
-    convergence tolerances. BEST-EFFORT: a plotting problem (e.g. matplotlib missing on the
-    robot box) is logged and skipped, never allowed to kill a hardware run."""
+
+    Panels: one per estimated dim (SIGNED error, symmetric ylim so the dashed zero line is the
+    centre), then the combined L2 error in the estimator's own mm-equivalent metric (rotation
+    scaled by scaling_constant_deg_to_mm), then the ICP mean NN residual per attempt on a LOG
+    y axis (nan where estimation was skipped). BEST-EFFORT: a plotting problem (e.g. matplotlib
+    missing on the robot box) is logged and skipped, never allowed to kill a hardware run."""
     try:
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
 
         err6 = np.asarray(err6, dtype=float)
-        norms = np.asarray(norms, dtype=float)
         x = np.arange(len(err6))
         n = len(dims) + 2
         fig, axes = plt.subplots(n, 1, figsize=(7.5, 2.1 * n), sharex=True)
@@ -122,15 +124,25 @@ def _plot_trial_errors(path, trial, dims, err6, norms, tol_pos_mm, tol_rot_deg):
             unit = 'deg' if dim.endswith('_deg') else 'mm'
             ax.axhline(0.0, ls='--', lw=1.0, color='#888888', zorder=1)
             ax.plot(x, err6[:, j], 'o-', color='#4C72B0', zorder=2)
+            lim = max(float(np.abs(err6[:, j]).max()), 1e-3) * 1.1
+            ax.set_ylim(-lim, lim)                 # symmetric: the zero line is the centre
             ax.set_ylabel(f'{dim} error [{unit}]')
-        for ax, col, label, tol in ((axes[-2], 0, '|pos| error [mm]', tol_pos_mm),
-                                    (axes[-1], 1, '|rot| error [deg]', tol_rot_deg)):
-            ax.plot(x, norms[:, col], 'o-', color='#DD8452', zorder=2)
-            ax.axhline(tol, ls='--', lw=1.0, color='#C44E52', zorder=1,
-                       label=f'tolerance {tol:g}')
-            ax.set_ylabel(label)
-            ax.set_ylim(bottom=0.0)
-            ax.legend(loc='upper right', fontsize=8)
+
+        # Combined L2 error in the SAME mm-equivalent metric the estimator matches in:
+        # sqrt(|t|^2 + |s_rot * rot|^2), rotation folded in via scaling_constant_deg_to_mm.
+        l2 = np.sqrt((err6[:, :3] ** 2).sum(axis=1) + ((s_rot * err6[:, 3:]) ** 2).sum(axis=1))
+        ax = axes[-2]
+        ax.plot(x, l2, 'o-', color='#DD8452', zorder=2)
+        ax.set_ylim(bottom=0.0)
+        ax.set_ylabel(f'L2 error [mm-eq]\n(deg x {s_rot:g})')
+
+        # ICP mean NN residual, one point per ATTEMPT (none for the injected point), log scale.
+        ax = axes[-1]
+        res = np.maximum(np.asarray(residuals, dtype=float), 1e-6)
+        ax.plot(np.arange(1, len(res) + 1), res, 'o-', color='#55A868', zorder=2)
+        ax.set_yscale('log')
+        ax.set_ylabel('ICP residual [mm-eq]')
+
         axes[-1].set_xticks(x)
         axes[-1].set_xlabel('attempt (0 = injected error, before any update)')
         fig.suptitle(f'trial {trial}: ground-truth belief error per attempt', y=0.995)
@@ -309,8 +321,9 @@ def build_and_run(cfg, robot, camera, args):
             log.info('--- trial %d/%d --- injected belief error xyz=[%+6.2f, %+6.2f, %+6.2f] mm '
                      'rpy=[%+6.2f, %+6.2f, %+6.2f] deg', trial, num_trials, *inj)
             # The trial's error track for the co-plot: index 0 = the injected error, index k =
-            # the error left after attempt k's update.
-            track6, trackn = [inj], [(inj_pos, inj_rot)]
+            # the error left after attempt k's update. trackr = the ICP residual per attempt
+            # (nan where estimation was skipped).
+            track6, trackr = [inj], []
 
             for attempt in range(1, max_attempts + 1):
                 errb, errb_pos, errb_rot = _gt_error(T_true, T_believed)
@@ -377,19 +390,20 @@ def build_and_run(cfg, robot, camera, args):
                 if T_corr_mm is None:
                     log.warning('Estimation skipped (%s) -- belief unchanged.', info)
                     row['estimate'] = f'skipped: {info}'
+                    trackr.append(float('nan'))
                 else:
                     T_believed = T_believed @ _corr_to_m(T_corr_mm)   # believed @ corr ~= true
                     row['estimate'] = 'ok'
                     row.update({f'corr_{k}': v for k, v in info['theta_corr'].items()})
                     row.update({'icp_inliers': info['inliers'],
                                 'icp_residual': info['final_residual']})
+                    trackr.append(float(info['final_residual']))
                 erra, erra_pos, erra_rot = _gt_error(T_true, T_believed)
                 track6.append(erra)
-                trackn.append((erra_pos, erra_rot))
                 if save_plots:                     # re-saved after EVERY attempt of this trial
                     _plot_trial_errors(os.path.join(out_dir, f'trial_{trial:03d}_errors.png'),
-                                       trial, estimator.estimate_dims, track6, trackn,
-                                       tol_pos_mm, tol_rot_deg)
+                                       trial, estimator.estimate_dims, track6, trackr,
+                                       estimator.s_rot)
                 row.update({f'err_after_{s}': v for s, v in zip(_ERR, erra)})
                 row.update({'err_after_pos_mm': erra_pos, 'err_after_rot_deg': erra_rot})
                 row['converged'] = bool(erra_pos <= tol_pos_mm and erra_rot <= tol_rot_deg)

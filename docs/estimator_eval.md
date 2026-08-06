@@ -67,8 +67,10 @@ computable, so every correction can be scored instead of eyeballed.
 - `trial_TTT_attempt_AA_observations.csv` — manifold-compatible raw observations per attempt.
 - `trial_TTT_errors.png` — ONE figure per trial, **re-saved after every attempt** so it can be
   watched live: the ground-truth error with all attempts co-plotted (x = 0 is the injected
-  error, x = k the error left after attempt k's update); one panel per estimated dim plus the
-  pos/rot norms against the convergence tolerances.
+  error, x = k the error left after attempt k's update); one panel per estimated dim (signed,
+  symmetric ylim about the zero line), then the combined L2 error in the estimator's
+  mm-equivalent metric (rotation × `scaling_constant_deg_to_mm`), then the ICP residual per
+  attempt on a log y axis.
 - `summary.csv` — per-attempt-index aggregate: mean/median |error| per estimated dim +
   convergence fraction, plus a `final` row (each trial's last attempt) — the headline numbers.
 - `eval_config.json` — the eval/estimation/compliance sections as run.

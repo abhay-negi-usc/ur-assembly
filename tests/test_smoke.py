@@ -1111,7 +1111,9 @@ def test_tool_frames_shared_yaml_source():
     frames = load_frames()
     assert np.allclose(frames['tool0'], np.eye(4))
     for name in ('fingertip', 'camera', 'grasp', 'banana_connector_finger_holder'):
+    for name in ('fingertip', 'camera', 'grasp', 'banana_connector_finger_holder'):
         assert name in frames, f'missing frame {name!r}'
+    assert 'connector_holder' not in frames, 'the holder chain is retired'
     assert 'connector_holder' not in frames, 'the holder chain is retired'
     xyz, rpy = matrix_to_xyzrpy(frames['banana_connector_finger_holder'])
     d = np.degrees(rpy)
@@ -1123,10 +1125,18 @@ def test_tool_frames_shared_yaml_source():
     # user's to re-measure whenever the mate moves, so assert the UNIT round-trip against the
     # yaml itself (monitor mm/deg -> m/rad), not a hard-coded pose.
     import yaml
+    # held_frame); every target must pair with a declared frame. The recorded NUMBERS are the
+    # user's to re-measure whenever the mate moves, so assert the UNIT round-trip against the
+    # yaml itself (monitor mm/deg -> m/rad), not a hard-coded pose.
+    import yaml
     targets = load_targets()
     with open(os.path.join(ROOT, 'configs', 'frames.yaml')) as fh:
         raw = yaml.safe_load(fh)['targets']['banana_connector_finger_holder']
+    with open(os.path.join(ROOT, 'configs', 'frames.yaml')) as fh:
+        raw = yaml.safe_load(fh)['targets']['banana_connector_finger_holder']
     xyz, rpy = matrix_to_xyzrpy(targets['banana_connector_finger_holder'])
+    assert np.allclose(xyz * 1000.0, raw['xyz_mm'])
+    assert np.allclose(np.degrees(rpy), raw['rpy_deg'])
     assert np.allclose(xyz * 1000.0, raw['xyz_mm'])
     assert np.allclose(np.degrees(rpy), raw['rpy_deg'])
 

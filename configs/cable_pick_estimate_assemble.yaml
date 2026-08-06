@@ -237,12 +237,11 @@ reset:
 # ASSEMBLY -- the estimate-while-assemble loop
 # ===================================================================================================
 assembly:
-  # The KNOWN target: where the CONNECTOR must end up (base_link; m / rad, extrinsic XYZ).
-  # MEASURE: jog/hand-guide to a good mate holding the part, read the connector frame off the
-  # monitor, convert mm/deg -> m/rad (or paste the tool0-derived values).
-  target_connector:
-    xyz: [0.0903, 1.0727, -0.1816]
-    rpy: [-0.0124, 0.0021, 1.5487]
+  # The KNOWN target (where the CONNECTOR must end up, base_link) comes from the CABLE PROFILE:
+  # cables.yaml <cable>.connector_holder_target @ <cable>.connector_in_holder -- the same recorded
+  # mate uncertain_sampling assembles to, one source per cable. MEASURE: hand-guide to a good
+  # mate, paste `base_link <- connector_holder` off the monitor into that cable's entry (mm/deg).
+  # (The old assembly.target_connector key here is IGNORED with a warning if present.)
 
   # The ideal insertion path: CONNECTOR w.r.t. the TARGET connector, last row = identity (the mate).
   trajectory_csv: assembly_trajectory.csv

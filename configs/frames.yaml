@@ -55,5 +55,5 @@ frames:
 targets:
   # banana_connector_finger_holder at the mate (read off the monitor).
   banana_connector_finger_holder:
-    xyz_mm:  [88.53, 1060.75, -184.74]
-    rpy_deg: [-1.57, 1.24, 88.98]
+    xyz_mm:  [82.69, 1071.80, -185.15]
+    rpy_deg: [-0.72, 0.69, 88.73]

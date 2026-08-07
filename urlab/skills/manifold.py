@@ -19,7 +19,11 @@ them back onto the manifold estimates the error. This module does that alignment
     quantise the correction by the local sample spacing; instead, blend the k nearest manifold
     points weighted by closeness so the match target INTERPOLATES between close-enough samples;
   * residual-gated RANSAC over the finals: a wrong local minimum can capture the LARGER cluster of
-    guesses, but its alignment residual stays visibly worse, so residual breaks the vote-count tie.
+    guesses, but its alignment residual stays visibly worse, so residual breaks the vote-count tie;
+  * OPTIONAL residual-softmax aggregation (aggregator: softmax): instead of the consensus vote,
+    average ALL finals weighted exp(-(r - r_min)/(softmax_temp x r_min)) -- the 2026-08 offline
+    ablation's winner: the residual VALUE carries more information than cluster mass, and a bad
+    cluster can then never outvote a few well-aligned starts.
 
 This is the SAME algorithm as analysis/manifold_icp_validation.py (which validates it offline
 against known offsets); this copy is numpy/scipy-only so the robot apps can run it without the
@@ -106,6 +110,16 @@ class ManifoldEstimator:
         self.step_gain = float(c.get('step_gain', 1.0))
         self.ransac_iters = int(c.get('ransac_iters', 200))
         self.ransac_tol = float(c.get('ransac_tol', 1.0))
+        # AGGREGATOR over the multi-start finals: 'ransac' = residual-gated consensus vote (the
+        # original); 'softmax' = weighted mean of ALL finals, weight exp(-(r - r_min) /
+        # (softmax_temp x r_min)) -- the 2026-08 offline ablation's winner (residual outranks
+        # cluster mass; ignores residual_gate / ransac_*). Temperature is RELATIVE to the best
+        # residual: with 0.15, a final 15% worse than the best carries ~0.37x its weight.
+        agg = str(c.get('aggregator', 'ransac')).strip().lower()
+        if agg not in ('ransac', 'softmax'):
+            raise ValueError(f"estimation.aggregator {agg!r} must be 'ransac' or 'softmax'")
+        self.aggregator = agg                          # bad values fail HERE, pre-motion
+        self.softmax_temp = float(c.get('softmax_temp', 0.15))
         # residual_gate: a float, or DISABLED via null/~ in yaml. The strings 'None'/'none'/'null'
         # also disable it -- yaml parses a bare `None` as the STRING "None" (only `null`/`~` are
         # yaml null), and float('None') would otherwise blow up MID-RUN, after the robot moved.
@@ -248,34 +262,46 @@ class ManifoldEstimator:
             T_corr = T_corr @ mats_from_vec6(delta6 * self.step_gain)
             theta_hist[:, k + 1] = vec6_from_mats(T_corr)[:, idx]
 
-        # Residual-gated RANSAC over the final corrections (distance in mm-equivalent space).
+        # Aggregate the G final corrections into ONE estimate (distances in mm-equivalent space).
         corr6 = vec6_from_mats(T_corr)                        # (G, 6) physical
         scale = np.array([self.s_rot if d.endswith('_deg') else 1.0 for d in DIMS])
         finals = corr6[:, idx] * scale[idx]
-        gate = self.residual_gate
-        keep = (res_hist[:, -1] <= res_hist[:, -1].min() * float(gate) + 1e-12) if gate else \
-            np.ones(G, dtype=bool)
-        kept_ids = np.flatnonzero(keep)
-        best = np.zeros(G, dtype=bool)
-        for _ in range(self.ransac_iters):
-            cand = finals[kept_ids[self.rng.integers(len(kept_ids))]]
-            inl = keep & (np.linalg.norm(finals - cand, axis=1) < self.ransac_tol)
-            if inl.sum() > best.sum():
-                best = inl
-        if not best.any():
-            best = keep.copy()
-        est = finals[best].mean(axis=0)
-        refit = keep & (np.linalg.norm(finals - est, axis=1) < self.ransac_tol)
-        if refit.any():
-            best = refit
+        r_fin = res_hist[:, -1]
+        if self.aggregator == 'softmax':
+            # Residual-softmax: EVERY final contributes, weighted by how close its residual is
+            # to the best -- no vote, no gate, no discrete inlier/outlier cliff.
+            r_min = float(r_fin.min())
+            w = np.exp(-(r_fin - r_min) / max(self.softmax_temp * r_min, 1e-12))
+            est = (finals * w[:, None]).sum(axis=0) / w.sum()
+            best = r_fin <= r_min * (1.0 + self.softmax_temp)   # the >=~e^-1-weight starts (info)
+            final_residual = float(np.average(r_fin, weights=w))
+        else:
+            # Residual-gated RANSAC over the final corrections.
+            gate = self.residual_gate
+            keep = (r_fin <= r_fin.min() * float(gate) + 1e-12) if gate else \
+                np.ones(G, dtype=bool)
+            kept_ids = np.flatnonzero(keep)
+            best = np.zeros(G, dtype=bool)
+            for _ in range(self.ransac_iters):
+                cand = finals[kept_ids[self.rng.integers(len(kept_ids))]]
+                inl = keep & (np.linalg.norm(finals - cand, axis=1) < self.ransac_tol)
+                if inl.sum() > best.sum():
+                    best = inl
+            if not best.any():
+                best = keep.copy()
             est = finals[best].mean(axis=0)
+            refit = keep & (np.linalg.norm(finals - est, axis=1) < self.ransac_tol)
+            if refit.any():
+                best = refit
+                est = finals[best].mean(axis=0)
+            final_residual = float(r_fin[best].mean())
 
         theta = np.zeros(6)
         theta[idx] = est / scale[idx]                         # physical mm / deg, free dims only
         info = {
             'theta_corr': {d: float(theta[j]) for d, j in zip(self.estimate_dims, idx)},
-            'inliers': int(best.sum()), 'guesses': G,
-            'final_residual': float(res_hist[best, -1].mean()),
+            'inliers': int(best.sum()), 'guesses': G, 'aggregator': self.aggregator,
+            'final_residual': final_residual,
             'n_observations': len(vec6), 'recency_half_life_frac': self.recency_half_life_frac,
             'interp_neighbors': self.interp_neighbors,
             # Per-iteration histories (all guesses) for convergence plots: correction params in

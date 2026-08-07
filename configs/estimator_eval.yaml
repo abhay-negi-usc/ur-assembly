@@ -73,7 +73,33 @@ eval:
   save_observations: true        # per-attempt observation CSVs (the post-analysis raw data)
   save_plots: true               # per-TRIAL error figure (trial_TTT_errors.png), RE-SAVED after
                                  # every attempt: ground-truth error vs attempt, all attempts
-                                 # co-plotted (x = 0 is the injected error)
+                                 # co-plotted (x = 0 is the injected error), plus the ICP
+                                 # residual track and a residual-vs-L2-outcome scatter
+
+  # LIVE figure: ONE fixed path OUTSIDE the per-experiment folder, atomically overwritten with
+  # the current trial's figure after every attempt -- keep it open in an image viewer across
+  # trials and runs. true = data/experiments/estimator_eval_live.png; a string = explicit path;
+  # false disables. (Needs save_plots: true.)
+  live_plot: true
+
+  # OPTIONAL trajectory noising: smoothed zero-mean Gaussian offsets applied to EVERY waypoint
+  # in the connector's OWN frame, REDRAWN per attempt -- exercises the estimator with varied
+  # contact instead of the same nominal path every time. Uses its OWN random stream, so
+  # toggling it does not change the injected-error draws (noised/nominal runs stay pairable).
+  trajectory_noise:
+    enabled: false
+    translation_m: 0.0005        # per-waypoint std, metres (after smoothing)
+    rotation_deg: 0.5            # per-waypoint std, degrees (after smoothing)
+    smooth_window: 25            # moving-average window (waypoints) -- keeps the reference smooth
+
+  # OPTIONAL final insertion: after a trial's estimation attempts, ONE more guarded assemble
+  # along the NOMINAL trajectory from the FINAL corrected belief, with this stiffness override
+  # (other compliance values unchanged) -- does the corrected belief actually seat? No
+  # estimation, no belief update; logged to trials.csv as attempt='final_insertion' (excluded
+  # from summary.csv).
+  final_insertion:
+    enabled: false
+    stiffness: [2000.0, 2000.0, 2000.0, 50.0, 50.0, 50.0]
 
 # ===================================================================================================
 # ESTIMATION -- the contact-manifold ICP under test. KEEP IN SYNC with the values
@@ -99,6 +125,13 @@ estimation:
   step_gain: 1.5
   ransac_iters: 200
   ransac_tol: 1.0
+  # AGGREGATOR over the multi-start finals: 'ransac' = residual-gated consensus vote (the
+  # original); 'softmax' = weighted mean of ALL finals, weight exp(-(r - r_min) /
+  # (softmax_temp x r_min)) -- the 2026-08 offline ablation's winner (residual carries more
+  # information than cluster mass; ignores residual_gate / ransac_*). softmax_temp is RELATIVE
+  # to the best residual: 0.15 = a final 15% worse than the best carries ~0.37x its weight.
+  aggregator: ransac
+  softmax_temp: 0.15
   residual_gate: None
   recency_half_life_frac: 0.8
   interp_neighbors: 16

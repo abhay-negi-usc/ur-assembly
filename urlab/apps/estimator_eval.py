@@ -18,7 +18,13 @@ exactly. Each trial then INJECTS a known belief error and lets the estimator try
             estimate   manifold ICP -> T_corr;  T_believed <- T_believed @ T_corr
             score      remaining GROUND-TRUTH error = inverse(T_true) @ T_believed -- logged
                        per attempt; within eval.success_tolerance -> converged (early stop)
+        final      OPTIONAL (eval.final_insertion): ONE more guarded insertion from the FINAL
+                   corrected belief under a DIFFERENT stiffness -- seats-or-not, no estimation
         disassemble: back at the stand-off (free space) before the next trial
+
+Options: eval.trajectory_noise adds smoothed per-waypoint noise (redrawn per attempt, its own
+random stream); eval.live_plot mirrors the current trial's figure to ONE fixed path outside the
+experiment folder, atomically, so it can stay open in an image viewer across trials and runs.
 
 The GRIPPER IS NEVER OPENED OR CLOSED (with_gripper=False) -- the part is fixtured in the closed
 fingers and an open would drop it mid-run.
@@ -44,7 +50,8 @@ from .. import tool_frames
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import trajectory as traj
 from ..skills.manifold import FORCE_COLS, ManifoldEstimator, POSE_COLS, TORQUE_COLS
-from ..transforms import inverse, matrix_to_xyzrpy, pose_error, translation_matrix
+from ..transforms import (inverse, matrix_to_xyzrpy, pose_error, translation_matrix,
+                          xyzrpy_to_matrix)
 from ._runner import run_app
 from .uncertain_sampling import _clock, _fmt_dur, _retract_ref
 
@@ -71,6 +78,21 @@ def _corr_to_m(T_corr_mm):
     T = np.array(T_corr_mm, dtype=float)
     T[:3, 3] /= 1000.0
     return T
+
+
+def _noised_rows(rows, rng, t_m, r_deg, window):
+    """Trajectory rows with SMOOTHED zero-mean Gaussian noise applied in each row's OWN frame
+    (right-multiplied -- the same frame the injected belief error lives in). The moving average
+    keeps the reference servo-smooth but shrinks white noise by ~sqrt(window), so the draw is
+    pre-scaled back up: translation_m / rotation_deg are the PER-WAYPOINT std as configured."""
+    d = rng.normal(size=(len(rows), 6))
+    d[:, :3] *= t_m
+    d[:, 3:] *= np.radians(r_deg)
+    if window > 1:
+        k = np.ones(window) / window
+        d = np.column_stack([np.convolve(d[:, j], k, mode='same') for j in range(6)])
+        d *= np.sqrt(window)
+    return [row @ xyzrpy_to_matrix(di[:3], di[3:]) for row, di in zip(rows, d)]
 
 
 def _observe(robot, T_tool0_conn, T_base_tconn):
@@ -100,15 +122,20 @@ def _fieldnames(dims):
             + ['converged'])
 
 
-def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot):
+def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None):
     """ONE figure per trial, RE-SAVED after every attempt: the GROUND-TRUTH error, all attempts
     co-plotted (x = 0 is the injected error, x = k the error left after attempt k's update).
 
-    Panels: one per estimated dim (SIGNED error, symmetric ylim so the dashed zero line is the
-    centre), then the combined L2 error in the estimator's own mm-equivalent metric (rotation
-    scaled by scaling_constant_deg_to_mm), then the ICP mean NN residual per attempt on a LOG
-    y axis (nan where estimation was skipped). BEST-EFFORT: a plotting problem (e.g. matplotlib
-    missing on the robot box) is logged and skipped, never allowed to kill a hardware run."""
+    LEFT column, sharing the attempt axis: one panel per estimated dim (SIGNED error, symmetric
+    ylim so the dashed zero line is the centre), then the combined L2 error in the estimator's
+    own mm-equivalent metric (rotation scaled by scaling_constant_deg_to_mm). RIGHT column: the
+    ICP mean NN residual per attempt on a LOG y axis (nan where estimation was skipped), then
+    residual vs the L2 error LEFT AFTER applying that attempt's correction, points labelled by
+    attempt -- the residual is only trustworthy if that scatter trends up-right. If live_path is
+    given, the same figure is ALSO written there ATOMICALLY (temp file + os.replace), so one
+    fixed file outside the experiment folder can stay open in an image viewer. BEST-EFFORT: a
+    plotting problem (e.g. matplotlib missing on the robot box) is logged and skipped, never
+    allowed to kill a hardware run."""
     try:
         import matplotlib
         matplotlib.use('Agg')
@@ -116,9 +143,18 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot):
 
         err6 = np.asarray(err6, dtype=float)
         x = np.arange(len(err6))
-        n = len(dims) + 2
-        fig, axes = plt.subplots(n, 1, figsize=(7.5, 2.1 * n), sharex=True)
-        axes = np.atleast_1d(axes)
+        # Combined L2 error in the SAME mm-equivalent metric the estimator matches in:
+        # sqrt(|t|^2 + |s_rot * rot|^2), rotation folded in via scaling_constant_deg_to_mm.
+        l2 = np.sqrt((err6[:, :3] ** 2).sum(axis=1) + ((s_rot * err6[:, 3:]) ** 2).sum(axis=1))
+        res = np.maximum(np.asarray(residuals, dtype=float), 1e-6)   # nan stays nan (gaps)
+
+        n_left = len(dims) + 1
+        fig = plt.figure(figsize=(11.0, max(2.1 * n_left, 6.5)))
+        gs = fig.add_gridspec(2 * n_left, 2, width_ratios=[1.25, 1.0])
+        axes = []
+        for i in range(n_left):
+            axes.append(fig.add_subplot(gs[2 * i:2 * i + 2, 0],
+                                        sharex=axes[0] if axes else None))
         for ax, dim in zip(axes, dims):
             j = _ERR.index(dim)
             unit = 'deg' if dim.endswith('_deg') else 'mm'
@@ -127,27 +163,45 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot):
             lim = max(float(np.abs(err6[:, j]).max()), 1e-3) * 1.1
             ax.set_ylim(-lim, lim)                 # symmetric: the zero line is the centre
             ax.set_ylabel(f'{dim} error [{unit}]')
+            ax.tick_params(labelbottom=False)
 
-        # Combined L2 error in the SAME mm-equivalent metric the estimator matches in:
-        # sqrt(|t|^2 + |s_rot * rot|^2), rotation folded in via scaling_constant_deg_to_mm.
-        l2 = np.sqrt((err6[:, :3] ** 2).sum(axis=1) + ((s_rot * err6[:, 3:]) ** 2).sum(axis=1))
-        ax = axes[-2]
+        ax = axes[-1]
         ax.plot(x, l2, 'o-', color='#DD8452', zorder=2)
         ax.set_ylim(bottom=0.0)
         ax.set_ylabel(f'L2 error [mm-eq]\n(deg x {s_rot:g})')
+        ax.set_xticks(x)
+        ax.set_xlabel('attempt (0 = injected error, before any update)')
 
         # ICP mean NN residual, one point per ATTEMPT (none for the injected point), log scale.
-        ax = axes[-1]
-        res = np.maximum(np.asarray(residuals, dtype=float), 1e-6)
-        ax.plot(np.arange(1, len(res) + 1), res, 'o-', color='#55A868', zorder=2)
-        ax.set_yscale('log')
-        ax.set_ylabel('ICP residual [mm-eq]')
+        ax_r = fig.add_subplot(gs[:n_left, 1])
+        ax_r.plot(np.arange(1, len(res) + 1), res, 'o-', color='#55A868', zorder=2)
+        ax_r.set_yscale('log')
+        ax_r.set_xticks(np.arange(1, len(res) + 1))
+        ax_r.set_xlabel('attempt')
+        ax_r.set_ylabel('ICP residual [mm-eq]')
 
-        axes[-1].set_xticks(x)
-        axes[-1].set_xlabel('attempt (0 = injected error, before any update)')
+        # Residual vs the L2 error LEFT AFTER that attempt's update: attempt k's residual pairs
+        # with l2[k] (the outcome of applying its correction).
+        ax_s = fig.add_subplot(gs[n_left:, 1])
+        m = min(len(res), len(l2) - 1)
+        fin = np.flatnonzero(np.isfinite(res[:m]))
+        ax_s.scatter(res[fin], l2[fin + 1], color='#55A868', zorder=2)
+        for k in fin:
+            ax_s.annotate(str(k + 1), (res[k], l2[k + 1]), textcoords='offset points',
+                          xytext=(4, 3), fontsize=8, color='#444444')
+        ax_s.set_xscale('log')
+        ax_s.set_ylim(bottom=0.0)
+        ax_s.set_xlabel('ICP residual [mm-eq]')
+        ax_s.set_ylabel('L2 error after update [mm-eq]')
+
         fig.suptitle(f'trial {trial}: ground-truth belief error per attempt', y=0.995)
         fig.tight_layout()
         fig.savefig(path, dpi=110)
+        if live_path:
+            # Temp-then-replace so a viewer polling the live file never reads a half-written PNG.
+            tmp = live_path + '.tmp'
+            fig.savefig(tmp, dpi=110, format='png')
+            os.replace(tmp, live_path)
         plt.close(fig)
     except Exception as exc:                       # noqa: BLE001 -- plotting is never fatal
         log.warning('trial error plot skipped (%s)', exc)
@@ -253,11 +307,47 @@ def build_and_run(cfg, robot, camera, args):
     # ONE error figure per trial (trial_TTT_errors.png), re-saved after every attempt -- cheap
     # (N files, not N x M), and watchable live during a run.
     save_plots = bool(ev.get('save_plots', True))
+    # LIVE figure: ONE fixed path OUTSIDE the per-experiment folder, atomically overwritten with
+    # the current trial's figure after every attempt -- keep it open in an image viewer across
+    # trials and runs. true = data/experiments/estimator_eval_live.png; a string = explicit path.
+    live = ev.get('live_plot', True)
+    live_path = None
+    if save_plots and live:
+        live_path = live if isinstance(live, str) else os.path.join(
+            cfg.get('data_dir', 'data'), 'experiments', 'estimator_eval_live.png')
+        os.makedirs(os.path.dirname(live_path) or '.', exist_ok=True)
+        log.info('Live figure: %s', live_path)
+
+    # OPTIONAL trajectory noising: smoothed zero-mean offsets in the connector's OWN frame,
+    # REDRAWN per attempt -- varied contact instead of the same nominal path every time. Its OWN
+    # random stream: toggling noise must not disturb the injected-error draws, so noised and
+    # nominal runs stay pairable trial-for-trial.
+    tn = ev.get('trajectory_noise', {}) or {}
+    tn_on = bool(tn.get('enabled', False))
+    tn_t = float(tn.get('translation_m', 0.0005))
+    tn_r = float(tn.get('rotation_deg', 0.5))
+    tn_w = max(1, int(tn.get('smooth_window', 25)))
+    noise_rng = np.random.default_rng(seed + 1 if seed > 0 else None)
+    if tn_on:
+        log.info('Trajectory noise ON: std %.2f mm / %.2f deg per waypoint, smooth window %d.',
+                 tn_t * 1000.0, tn_r, tn_w)
 
     # COMPLIANCE + guard + speeds: same shape as uncertain_sampling; the config mirrors the pick
     # app's assembly values so the estimator sees production-like observations.
     adm = AdmittanceController(robot.arm, cfg.section('compliance'))
     guard = ForceGuard(robot.arm, cfg.section('force_guard'))
+    # OPTIONAL FINAL INSERTION: one extra guarded assemble per trial from the FINAL corrected
+    # belief under a DIFFERENT stiffness (same compliance section otherwise) -- does the
+    # corrected belief actually seat? Built here so a bad stiffness list fails pre-motion.
+    fi = ev.get('final_insertion', {}) or {}
+    fi_on = bool(fi.get('enabled', False))
+    adm_final = None
+    if fi_on:
+        comp_final = dict(cfg.section('compliance'))
+        if fi.get('stiffness') is not None:
+            comp_final['stiffness'] = [float(v) for v in fi['stiffness']]
+        adm_final = AdmittanceController(robot.arm, comp_final)
+        log.info('Final insertion ON: stiffness %s.', comp_final.get('stiffness'))
     tare = (lambda: robot.arm.zero_ft(settle=False)) \
         if bool(cfg.get_path('compliance.tare_before', True)) else None
     settle_s = float(cfg.get_path('compliance.settle_s', 0.5))
@@ -275,6 +365,42 @@ def build_and_run(cfg, robot, camera, args):
         t_lin = (lin_m * 1000.0 / v) if v > 0 else 0.0
         t_ang = (np.degrees(ang_rad) / w) if w > 0 else 0.0
         return max(t_lin, t_ang, min_seg_s)
+
+    def run_insertion(adm_ctl, refs, T_bel):
+        """One admittance-followed insertion along refs, collecting observations (same law and
+        logging as cable_pick_estimate_assemble), the seated kinematic check, then the compliant
+        UN-guarded retract along the believed part's own -X (a seated part is already over the
+        guard limit; a guarded retract would block itself). Returns (obs, seated, lin, ang)."""
+        obs, cnt = [], [0]
+
+        def log_cb():
+            cnt[0] += 1
+            if cnt[0] % decim == 0:
+                obs.append(_observe(robot, T_bel, T_base_tconn))
+
+        adm_ctl.reset()
+        adm_ctl.warmup(refs[0], tare_fn=tare)
+        guard.reset()
+        last_ref, seated = refs[0], False
+        for i in range(1, len(refs)):
+            res = adm_ctl.ramp(refs[i - 1], refs[i], seg_time(refs[i - 1], refs[i]),
+                               guard, on_step=log_cb)
+            last_ref = refs[i]
+            if res == 'seated':
+                seated = True
+                log.info('Contact limit at waypoint %d/%d -- stopped advancing.',
+                         i, len(refs) - 1)
+                break
+        adm_ctl.hold(last_ref, settle_s, guard, on_step=log_cb)
+
+        # Kinematic check numbers, for the record only -- the GROUND-TRUTH error is the metric
+        # this app exists for.
+        lin, ang = pose_error(robot.tool0() @ T_bel, T_base_tconn)
+
+        T_out = _retract_ref(last_ref, T_bel, retract_m)
+        adm_ctl.ramp(last_ref, T_out, seg_time(last_ref, T_out, rv_mm_s, rw_deg_s), guard=None)
+        adm_ctl.stop()
+        return obs, seated, lin, ang
 
     out_dir = os.path.join(cfg.get('data_dir', 'data'), 'experiments',
                            f'estimator_eval_{datetime.now():%Y%m%d_%H%M%S}')
@@ -325,50 +451,23 @@ def build_and_run(cfg, robot, camera, args):
             # (nan where estimation was skipped).
             track6, trackr = [inj], []
 
+            abandoned = False
             for attempt in range(1, max_attempts + 1):
                 errb, errb_pos, errb_rot = _gt_error(T_true, T_believed)
-                refs = [T_base_tconn @ row @ inverse(T_believed) for row in dense]
+                rows_t = _noised_rows(dense, noise_rng, tn_t, tn_r, tn_w) if tn_on else dense
+                refs = [T_base_tconn @ row @ inverse(T_believed) for row in rows_t]
 
                 # To the attempt's start -- stiff, free space (the retract/stand-off cleared it).
                 q = robot.arm.ik(refs[0], seed_q)
                 if q is None or not robot.arm.move_j(
                         q, label=f'trial {trial} attempt {attempt} start'):
                     log.warning('IK/approach failed; abandoning the rest of trial %d.', trial)
+                    abandoned = True
                     break
                 seed_q = q
 
-                # ASSEMBLE under admittance, collecting observations (same law as the pick app).
-                obs, cnt = [], [0]
-
-                def log_cb(_obs=obs, _cnt=cnt, _T=T_believed):
-                    _cnt[0] += 1
-                    if _cnt[0] % decim == 0:
-                        _obs.append(_observe(robot, _T, T_base_tconn))
-
-                adm.reset()
-                adm.warmup(refs[0], tare_fn=tare)
-                guard.reset()
-                last_ref, seated = refs[0], False
-                for i in range(1, len(refs)):
-                    res = adm.ramp(refs[i - 1], refs[i], seg_time(refs[i - 1], refs[i]),
-                                   guard, on_step=log_cb)
-                    last_ref = refs[i]
-                    if res == 'seated':
-                        seated = True
-                        log.info('Contact limit at waypoint %d/%d -- stopped advancing.',
-                                 i, len(refs) - 1)
-                        break
-                adm.hold(last_ref, settle_s, guard, on_step=log_cb)
-
-                # Kinematic check numbers, for the record only -- the GROUND-TRUTH error below is
-                # the metric this app exists for.
-                lin, ang = pose_error(robot.tool0() @ T_believed, T_base_tconn)
-
-                # RETRACT: compliant, UN-guarded escape along the believed part's own -X (a seated
-                # part is already over the guard limit; a guarded retract would block itself).
-                T_out = _retract_ref(last_ref, T_believed, retract_m)
-                adm.ramp(last_ref, T_out, seg_time(last_ref, T_out, rv_mm_s, rw_deg_s), guard=None)
-                adm.stop()
+                # ASSEMBLE under admittance (same law as the pick app), check, retract.
+                obs, seated, lin, ang = run_insertion(adm, refs, T_believed)
 
                 if save_obs:
                     _save_observations(os.path.join(
@@ -403,7 +502,7 @@ def build_and_run(cfg, robot, camera, args):
                 if save_plots:                     # re-saved after EVERY attempt of this trial
                     _plot_trial_errors(os.path.join(out_dir, f'trial_{trial:03d}_errors.png'),
                                        trial, estimator.estimate_dims, track6, trackr,
-                                       estimator.s_rot)
+                                       estimator.s_rot, live_path)
                 row.update({f'err_after_{s}': v for s, v in zip(_ERR, erra)})
                 row.update({'err_after_pos_mm': erra_pos, 'err_after_rot_deg': erra_rot})
                 row['converged'] = bool(erra_pos <= tol_pos_mm and erra_rot <= tol_rot_deg)
@@ -416,6 +515,35 @@ def build_and_run(cfg, robot, camera, args):
                 os.fsync(fout.fileno())
                 if row['converged'] and stop_conv:
                     break
+
+            # OPTIONAL FINAL INSERTION: from the FINAL corrected belief, the NOMINAL (un-noised)
+            # trajectory, different stiffness -- no estimation, no belief update. Its trials.csv
+            # row carries attempt='final_insertion' and is EXCLUDED from summary.csv (which
+            # aggregates estimator updates, not this seat-check).
+            if fi_on and not abandoned:
+                refs = [T_base_tconn @ row @ inverse(T_believed) for row in dense]
+                q = robot.arm.ik(refs[0], seed_q)
+                if q is None or not robot.arm.move_j(q, label=f'trial {trial} final insertion'):
+                    log.warning('IK/approach failed for the final insertion of trial %d.', trial)
+                else:
+                    seed_q = q
+                    obs, seated, lin, ang = run_insertion(adm_final, refs, T_believed)
+                    if save_obs:
+                        _save_observations(os.path.join(
+                            out_dir, f'trial_{trial:03d}_final_insertion_observations.csv'), obs)
+                    errf, errf_pos, errf_rot = _gt_error(T_true, T_believed)
+                    frow = {'trial': trial, 'attempt': 'final_insertion',
+                            'n_observations': len(obs), 'seated': seated,
+                            'check_pos_mm': lin * 1000.0,
+                            'check_rot_deg': float(np.degrees(ang)),
+                            'estimate': 'none (final insertion)',
+                            'err_before_pos_mm': errf_pos, 'err_before_rot_deg': errf_rot}
+                    frow.update({f'err_before_{s}': v for s, v in zip(_ERR, errf)})
+                    writer.writerow(frow)
+                    fout.flush()
+                    os.fsync(fout.fileno())
+                    log.info('trial %d final insertion: seated=%s, check %.2f mm / %.2f deg',
+                             trial, seated, lin * 1000.0, float(np.degrees(ang)))
 
             # DISASSEMBLE between trials: back to the fixed stand-off (free space) so every trial
             # starts from the same physically-clear spot, whatever the last belief was.

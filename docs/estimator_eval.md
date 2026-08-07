@@ -19,6 +19,8 @@ for each of eval.num_trials trials:
         estimate   manifold ICP -> T_corr;  T_believed <- T_believed @ T_corr
         score      ground-truth error = inverse(T_true) @ T_believed  ->  trials.csv;
                    within eval.success_tolerance -> converged (early stop)
+    final      OPTIONAL (eval.final_insertion): one more guarded insertion from the FINAL
+               corrected belief under a different stiffness — seats-or-not, no estimation
     disassemble: return to the stand-off (free space) before the next trial
 ```
 
@@ -56,7 +58,11 @@ computable, so every correction can be scored instead of eyeballed.
 | `eval.success_tolerance` | convergence gate on the **ground-truth** error (not the believed check) |
 | `eval.stop_when_converged` | skip a trial's remaining attempts once converged |
 | `eval.save_observations` / `save_plots` | per-attempt raw CSVs / the per-trial error figure (both default on) |
+| `eval.live_plot` | mirror the current trial's figure to ONE fixed path outside the experiment folder (atomic overwrite — keep it open in an image viewer); `true` = `data/experiments/estimator_eval_live.png`, a string = explicit path |
+| `eval.trajectory_noise` | optional smoothed per-waypoint Gaussian noise in the connector's own frame, redrawn per attempt; its own random stream, so the injected-error draws are unchanged |
+| `eval.final_insertion` | optional extra guarded assemble per trial from the final corrected belief with a `stiffness` override — seat-check only, logged as `attempt=final_insertion`, excluded from `summary.csv` |
 | `estimation.*` | the estimator under test — same schema as `cable_pick_estimate_assemble` |
+| `estimation.aggregator` | `ransac` (residual-gated consensus vote, default) or `softmax` (residual-softmax weighted mean over all starts, `softmax_temp` relative to the best residual — the offline ablation's winner) |
 | `compliance` / `force_guard` / `speed` | mirror the pick app's assembly values so observations are production-like |
 | `retract_distance_m` | per-attempt escape along the believed connector's own −X; must exceed the insertion depth |
 
@@ -66,11 +72,17 @@ computable, so every correction can be scored instead of eyeballed.
   `seated`, `converged`. Written incrementally (flushed per row), so an aborted run keeps its data.
 - `trial_TTT_attempt_AA_observations.csv` — manifold-compatible raw observations per attempt.
 - `trial_TTT_errors.png` — ONE figure per trial, **re-saved after every attempt** so it can be
-  watched live: the ground-truth error with all attempts co-plotted (x = 0 is the injected
-  error, x = k the error left after attempt k's update); one panel per estimated dim (signed,
+  watched live. Left column (shared attempt axis): one panel per estimated dim (signed,
   symmetric ylim about the zero line), then the combined L2 error in the estimator's
-  mm-equivalent metric (rotation × `scaling_constant_deg_to_mm`), then the ICP residual per
-  attempt on a log y axis.
+  mm-equivalent metric (rotation × `scaling_constant_deg_to_mm`). Right column: the ICP
+  residual per attempt on a log y axis, then a scatter of residual vs the L2 error left
+  **after** that attempt's update (points labelled by attempt) — the residual is only
+  trustworthy if that scatter trends up-right.
+- `estimator_eval_live.png` (outside the experiment folder, with `eval.live_plot`) — the current
+  trial's figure, atomically overwritten after every attempt.
+- `trial_TTT_final_insertion_observations.csv` (with `eval.final_insertion`) — the seat-check
+  insertion's observations; its `trials.csv` row has `attempt=final_insertion` and only the
+  before-error / `seated` / kinematic-check fields.
 - `summary.csv` — per-attempt-index aggregate: mean/median |error| per estimated dim +
   convergence fraction, plus a `final` row (each trial's last attempt) — the headline numbers.
 - `eval_config.json` — the eval/estimation/compliance sections as run.

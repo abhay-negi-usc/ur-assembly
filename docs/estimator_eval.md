@@ -75,7 +75,9 @@ computable, so every correction can be scored instead of eyeballed.
   watched live. Left column (shared attempt axis): one panel per estimated dim (signed,
   symmetric ylim about the zero line), then the combined L2 error in the estimator's
   mm-equivalent metric (rotation × `scaling_constant_deg_to_mm`). Right column: the ICP
-  residual per attempt on a log y axis, then a scatter of residual vs the L2 error left
+  residuals per attempt on a log y axis — **every guess's final residual** as a faint column
+  (the population the aggregator votes over, so consensus spread and outlier guesses are
+  visible) with the aggregated residual bold on top — then a scatter of residual vs the L2 error left
   **after** that attempt's update (points labelled by attempt) — the residual is only
   trustworthy if that scatter trends up-right.
 - `estimator_eval_live.png` (outside the experiment folder, with `eval.live_plot`) — the current

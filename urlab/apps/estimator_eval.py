@@ -122,14 +122,18 @@ def _fieldnames(dims):
             + ['converged'])
 
 
-def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None):
+def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None,
+                       res_all=None):
     """ONE figure per trial, RE-SAVED after every attempt: the GROUND-TRUTH error, all attempts
     co-plotted (x = 0 is the injected error, x = k the error left after attempt k's update).
 
     LEFT column, sharing the attempt axis: one panel per estimated dim (SIGNED error, symmetric
     ylim so the dashed zero line is the centre), then the combined L2 error in the estimator's
     own mm-equivalent metric (rotation scaled by scaling_constant_deg_to_mm). RIGHT column: the
-    ICP mean NN residual per attempt on a LOG y axis (nan where estimation was skipped), then
+    ICP residual per attempt on a LOG y axis -- EVERY guess's final residual as a faint column
+    (res_all, one array per attempt: the population the aggregator votes over, so consensus
+    spread and outlier guesses are visible) with the AGGREGATED residual bold on top (nan =
+    estimation skipped) -- then
     residual vs the L2 error LEFT AFTER applying that attempt's correction, points labelled by
     attempt -- the residual is only trustworthy if that scatter trends up-right. If live_path is
     given, the same figure is ALSO written there ATOMICALLY (temp file + os.replace), so one
@@ -172,9 +176,22 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None
         ax.set_xticks(x)
         ax.set_xlabel('attempt (0 = injected error, before any update)')
 
-        # ICP mean NN residual, one point per ATTEMPT (none for the injected point), log scale.
+        # ICP residuals, one column per ATTEMPT (none for the injected point), log scale:
+        # every guess faint, the aggregated residual bold on top.
         ax_r = fig.add_subplot(gs[:n_left, 1])
-        ax_r.plot(np.arange(1, len(res) + 1), res, 'o-', color='#55A868', zorder=2)
+        labelled = False
+        for k, rg in enumerate(res_all or []):
+            rg = np.maximum(np.asarray(rg, dtype=float), 1e-6)
+            if not len(rg):
+                continue
+            jit = (np.arange(len(rg)) / max(len(rg) - 1, 1) - 0.5) * 0.3   # deterministic spread
+            ax_r.scatter(k + 1 + jit, rg, s=7, color='#55A868', alpha=0.25, lw=0, zorder=1,
+                         label=None if labelled else 'all guesses')
+            labelled = True
+        ax_r.plot(np.arange(1, len(res) + 1), res, 'o-', color='#55A868', zorder=2,
+                  label='aggregated')
+        if labelled:
+            ax_r.legend(fontsize=8, loc='best')
         ax_r.set_yscale('log')
         ax_r.set_xticks(np.arange(1, len(res) + 1))
         ax_r.set_xlabel('attempt')
@@ -447,9 +464,10 @@ def build_and_run(cfg, robot, camera, args):
             log.info('--- trial %d/%d --- injected belief error xyz=[%+6.2f, %+6.2f, %+6.2f] mm '
                      'rpy=[%+6.2f, %+6.2f, %+6.2f] deg', trial, num_trials, *inj)
             # The trial's error track for the co-plot: index 0 = the injected error, index k =
-            # the error left after attempt k's update. trackr = the ICP residual per attempt
-            # (nan where estimation was skipped).
-            track6, trackr = [inj], []
+            # the error left after attempt k's update. trackr = the AGGREGATED ICP residual per
+            # attempt (nan where estimation was skipped); trackg = every guess's final residual
+            # per attempt (the population the aggregator votes over).
+            track6, trackr, trackg = [inj], [], []
 
             abandoned = False
             for attempt in range(1, max_attempts + 1):
@@ -490,6 +508,7 @@ def build_and_run(cfg, robot, camera, args):
                     log.warning('Estimation skipped (%s) -- belief unchanged.', info)
                     row['estimate'] = f'skipped: {info}'
                     trackr.append(float('nan'))
+                    trackg.append(np.zeros(0))
                 else:
                     T_believed = T_believed @ _corr_to_m(T_corr_mm)   # believed @ corr ~= true
                     row['estimate'] = 'ok'
@@ -497,12 +516,13 @@ def build_and_run(cfg, robot, camera, args):
                     row.update({'icp_inliers': info['inliers'],
                                 'icp_residual': info['final_residual']})
                     trackr.append(float(info['final_residual']))
+                    trackg.append(np.asarray(info['res_hist'], dtype=float)[:, -1])
                 erra, erra_pos, erra_rot = _gt_error(T_true, T_believed)
                 track6.append(erra)
                 if save_plots:                     # re-saved after EVERY attempt of this trial
                     _plot_trial_errors(os.path.join(out_dir, f'trial_{trial:03d}_errors.png'),
                                        trial, estimator.estimate_dims, track6, trackr,
-                                       estimator.s_rot, live_path)
+                                       estimator.s_rot, live_path, trackg)
                 row.update({f'err_after_{s}': v for s, v in zip(_ERR, erra)})
                 row.update({'err_after_pos_mm': erra_pos, 'err_after_rot_deg': erra_rot})
                 row['converged'] = bool(erra_pos <= tol_pos_mm and erra_rot <= tol_rot_deg)

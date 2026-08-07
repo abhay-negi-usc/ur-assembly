@@ -1421,7 +1421,10 @@ def test_estimator_eval_trial_error_plot_renders():
                 [1.2, 0.0, -0.8, 0.0, 1.5, 0.0],           # after attempt 1
                 [0.3, 0.0, 0.2, 0.0, 0.4, 0.0]]            # after attempt 2
         residuals = [0.42, float('nan')]                   # attempt 2's estimation was skipped
-        _plot_trial_errors(path, 1, ['x_mm', 'z_mm', 'pitch_deg'], err6, residuals, 0.2)
+        res_all = [0.42 + 0.3 * np.random.default_rng(0).random(50),   # every guess, attempt 1
+                   np.zeros(0)]                                        # skipped -> no guesses
+        _plot_trial_errors(path, 1, ['x_mm', 'z_mm', 'pitch_deg'], err6, residuals, 0.2,
+                           None, res_all)
         assert os.path.isfile(path) and os.path.getsize(path) > 0, \
             'plot did not render (the runtime warning path swallowed an error)'
     finally:
@@ -1431,9 +1434,11 @@ def test_estimator_eval_trial_error_plot_renders():
 def test_estimator_eval_config_is_wired_to_the_catalogue():
     """configs/estimator_eval.yaml must parse, name a held_frame present in BOTH the catalogue's
     frames: and targets: (the app refuses to move otherwise -- the frame IS the ground truth),
-    and carry the requested defaults: 50 trials x 5 attempts, x/z +/-5 mm, pitch +/-5 deg."""
+    and be structurally sound. The tuned NUMBERS (trial counts, bounds, dims) are the user's
+    live experiment knobs -- assert their SHAPE, not their values, so tuning never breaks CI."""
     from urlab import config as C
     from urlab import tool_frames
+    from urlab.skills.manifold import DIMS
 
     cfg = C.load(os.path.join(ROOT, 'configs', 'estimator_eval.yaml'))
     held = cfg.get('held_frame')
@@ -1441,15 +1446,19 @@ def test_estimator_eval_config_is_wired_to_the_catalogue():
     assert held in tool_frames.load_targets(cfg), held
 
     ev = cfg.section('eval')
-    assert int(ev.get('num_trials')) == 50 and int(ev.get('max_attempts')) == 5
-    assert ev['perturbation']['lower'] == [-0.005, 0.0, -0.005, 0.0, -5.0, 0.0]   # m / deg
-    assert ev['perturbation']['upper'] == [0.005, 0.0, 0.005, 0.0, 5.0, 0.0]
-    assert cfg.get_path('estimation.estimate_dims') == ['x_mm', 'z_mm', 'pitch_deg']
+    assert int(ev.get('num_trials')) > 0 and int(ev.get('max_attempts')) > 0
+    lo, hi = ev['perturbation']['lower'], ev['perturbation']['upper']   # [m x3, deg x3]
+    assert len(lo) == 6 and len(hi) == 6
+    assert all(a <= b for a, b in zip(lo, hi)), 'perturbation lower must not exceed upper'
+    dims = cfg.get_path('estimation.estimate_dims')
+    assert dims and all(d in DIMS for d in dims), dims
+    agg = str(cfg.get_path('estimation.aggregator', 'ransac')).lower()
+    assert agg in ('ransac', 'softmax'), agg
     # The trials.csv schema must name every estimated dim's correction and the ground-truth
     # error columns the summary aggregates (err_after_<dim> matches estimate_dims by name).
     from urlab.apps.estimator_eval import _fieldnames
-    fields = _fieldnames(cfg.get_path('estimation.estimate_dims'))
-    for d in cfg.get_path('estimation.estimate_dims'):
+    fields = _fieldnames(dims)
+    for d in dims:
         assert f'corr_{d}' in fields and f'err_after_{d}' in fields
 
 

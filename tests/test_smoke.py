@@ -1431,6 +1431,46 @@ def test_estimator_eval_trial_error_plot_renders():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_bounds_deltas_hit_extremes():
+    """eval.mode 'bounds' tests each nonzero uncertainty endpoint one DOF at a time: two
+    deltas per two-sided DOF, one for a degenerate (lower == upper) DOF, nothing for all-zero
+    DOFs -- and each delta moves ONLY its own DOF."""
+    from urlab.skills import trajectory as traj
+    from urlab.transforms import matrix_to_xyzrpy
+
+    lo = [-0.005, 0.0, -0.003, 0.0, -5.0, 2.0]
+    hi = [0.005, 0.0, 0.003, 0.0, 5.0, 2.0]
+    ds = traj.bounds_deltas(lo, hi)
+    assert len(ds) == 7                            # x: 2, z: 2, pitch: 2, yaw (lo == hi): 1
+    xyz, rpy = matrix_to_xyzrpy(ds[0])             # first = x lower endpoint, nothing else
+    assert np.isclose(xyz[0], -0.005) and np.allclose(xyz[1:], 0.0) and np.allclose(rpy, 0.0)
+    xyz, rpy = matrix_to_xyzrpy(ds[-1])            # last = the degenerate yaw endpoint
+    assert np.isclose(np.degrees(rpy[2]), 2.0) and np.allclose(xyz, 0.0)
+    assert not traj.bounds_deltas([0.0] * 6, [0.0] * 6)   # all-zero bounds -> no trials
+
+
+def test_estimator_eval_accumulation_rebase():
+    """accumulate_observations re-projects stored rows into the updated belief. A logged pose
+    is inverse(T_target) @ tool0 @ T_believed_old with T_believed_new = T_believed_old @ T_corr,
+    so rel_new = rel_old @ T_corr exactly (mm); the wrench columns change frame by the same
+    T_corr, i.e. transform_wrench with T_ba = inverse(T_corr) (metres for the cross term). The
+    vectorized helper must match those reference implementations row by row."""
+    from urlab.apps.estimator_eval import _corr_to_m, _rebase_rows
+    from urlab.skills.manifold import mats_from_vec6, vec6_from_mats
+    from urlab.transforms import inverse, transform_wrench
+
+    rng = np.random.default_rng(4)
+    rows = np.hstack([rng.uniform(-20, 20, (7, 3)), rng.uniform(-10, 10, (7, 3)),
+                      rng.uniform(-8, 8, (7, 6))])
+    T_corr = mats_from_vec6(np.array([1.5, -0.5, 2.0, 0.0, 3.0, 0.0]))    # mm / deg
+    out = _rebase_rows(rows, T_corr)
+    T_ba = inverse(_corr_to_m(T_corr))
+    for r, o in zip(rows, out):
+        assert np.allclose(o[:6], vec6_from_mats(mats_from_vec6(r[:6]) @ T_corr))
+        f_b, tau_b = transform_wrench(r[6:9], r[9:12], T_ba)
+        assert np.allclose(o[6:9], f_b) and np.allclose(o[9:12], tau_b)
+
+
 def test_estimator_eval_config_is_wired_to_the_catalogue():
     """configs/estimator_eval.yaml must parse, name a held_frame present in BOTH the catalogue's
     frames: and targets: (the app refuses to move otherwise -- the frame IS the ground truth),

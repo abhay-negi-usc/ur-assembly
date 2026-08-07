@@ -42,6 +42,9 @@ FIGURE COLLECTION 3 -- the x / z / pitch POINT CLOUD: the in-plane contact-manif
 three coordinates the manifold estimator corrects). Coloured by |F| when wrench columns exist,
 else plotted as plain uniform-colour points. With CONFIG['show_xzpitch_window'] it ALSO opens in
 an interactive window (drag to rotate) after all files are written, blocking until closed.
+A second ALPHA variant of the same cloud (rot3d_xzpitch_alpha) uses much smaller markers with
+per-point OPACITY following |F| (same percentile-clipped scale as the colour): barely-loaded
+samples fade toward invisible, so the loaded manifold structure reads through the overplot.
 
 Usage:
     python analysis/data_plotting.py
@@ -104,6 +107,8 @@ CONFIG = {
         'rot3d_ypr_force': False,    # axes yaw/pitch/roll (deg), colour |F| (N)
         'rot3d_xzpitch': True,       # axes x/z (mm) + pitch (deg) -- the contact-manifold slice;
                                      # coloured |F| (N) when wrench columns exist, else plain points
+        'rot3d_xzpitch_alpha': True,  # the same slice with SMALL markers whose OPACITY follows
+                                      # |F| -- loaded structure reads through the overplot
     },
     # ALSO open the x/z/pitch cloud in an interactive window (drag to rotate) after all files are
     # written. BLOCKS until the window is closed; needs a GUI backend (Qt/Tk) -- skipped with a
@@ -131,6 +136,9 @@ CONFIG = {
     'gif_elev_deg': 22.0,
     'gif_azim_start_deg': -60.0,
     'point_size': 28,                # scatter marker area (pt^2)
+    'alpha_point_size': 6,           # marker area for the ALPHA variant (much smaller)
+    'alpha_range': [0.04, 0.9],      # per-point opacity at the force scale's [min, max]; the
+                                     # floor keeps zero-force samples faintly present as context
     # Faint line joining consecutive samples. It is BROKEN at trial boundaries (otherwise it draws
     # a false jump from the end of one insertion to the start of the next). Most useful with a
     # single trial selected above; across many trials it mostly adds clutter, hence off by default.
@@ -420,6 +428,46 @@ def rotating_3d_scalar_figure(pose, axis_idx, values, out_stem, cfg, title,
     return _render_rotating(fig, ax, out_stem, cfg)
 
 
+def rotating_3d_alpha_figure(pose, axis_idx, values, out_stem, cfg, title, groups=None):
+    """Rotating 3D scatter with SMALL markers whose OPACITY (and colour) follow a scalar
+    magnitude -- the overplot-friendly twin of rotating_3d_scalar_figure.
+
+    Alpha rides the SAME percentile-clipped normalisation as the colour ramp, remapped into
+    CONFIG['alpha_range']: barely-loaded samples fade toward (but never fully reach) invisible,
+    so dense free-space clouds stop hiding the loaded manifold structure behind them. With no
+    force data (values None) it falls back to small uniform points at the alpha floor + 0.3."""
+    pts = pose[:, list(axis_idx)]
+    size = float(cfg.get('alpha_point_size', 6))
+    a_lo, a_hi = (list(cfg.get('alpha_range')) or [0.04, 0.9])[:2]
+
+    fig, ax = _new_3d_axes(cfg, title, len(pts))
+    _draw_path(ax, pts, cfg, groups)
+    if values is not None:
+        values = np.asarray(values, dtype=float)
+        cmap, norm, vmax = _force_colour(values, cfg)
+        t = np.clip(norm(np.nan_to_num(values, nan=0.0)), 0.0, 1.0)
+        rgba = cmap(t)
+        rgba[:, 3] = a_lo + (a_hi - a_lo) * t
+        sc = ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], c=rgba, s=size,
+                        depthshade=False, edgecolors='none', zorder=2)
+        # The colorbar needs a mappable with the norm attached; the scatter carries raw RGBA,
+        # so hand it a proxy. The bar reads for BOTH encodings (alpha co-varies with colour).
+        proxy = matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap)
+        proxy.set_array(values)
+        _add_force_colorbar(fig, proxy, values, vmax, '|F|', 'N')
+        fig.text(0.885, 0.20, f'opacity {a_lo:.2f} -> {a_hi:.2f}\nover the same |F| scale',
+                 fontsize=6.5, color='#777777')
+    else:
+        tone = list(plt.get_cmap(cfg.get('force_cmap', 'Blues'))(0.65))
+        tone[3] = min(1.0, a_lo + 0.3)
+        ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], color=tone, s=size,
+                   depthshade=False, edgecolors='none', zorder=2)
+    _style_axes(ax, axis_idx)
+    if cfg.get('equal_aspect'):
+        _equalise(ax, pts)
+    return _render_rotating(fig, ax, out_stem, cfg)
+
+
 def _force_colour(values, cfg):
     """(truncated cmap, norm, vmax) for the force views -- shared by the saved figures and the
     interactive window so both colour identically.
@@ -632,6 +680,14 @@ def run(cfg):
             written += rotating_3d_plain_figure(
                 pose, axis_idx=(0, 2, 4), out_stem=stem, cfg=cfg, groups=groups,
                 title='Peg wrt hole: x / z / pitch point cloud')
+
+    # The ALPHA twin of the x/z/pitch cloud: small markers, opacity following |F| (uniform faint
+    # points when no wrench block exists -- like rot3d_xzpitch, this figure never skips).
+    if figs.get('rot3d_xzpitch_alpha'):
+        written += rotating_3d_alpha_figure(
+            pose, axis_idx=(0, 2, 4), values=fmag,
+            out_stem=os.path.join(out_dir, 'rot3d_xzpitch_alpha'), cfg=cfg, groups=groups,
+            title='Peg wrt hole: x / z / pitch point cloud, contact force as opacity')
 
     desc = write_description(out_dir, cfg, csv_path, n_total, len(pose), notes, prefix)
     if desc:

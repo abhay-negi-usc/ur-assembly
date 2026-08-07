@@ -113,6 +113,26 @@ def _axis_values(lo, hi, step):
     return [lo + i * (hi - lo) / n for i in range(n + 1)]
 
 
+def bounds_deltas(lower, upper):
+    """One delta per NONZERO bound endpoint, one DOF at a time (zeros elsewhere) -- the +/-
+    extremes of the uncertainty box along each axis, without the 2^n corner blow-up of a full
+    grid. A degenerate DOF (lower == upper != 0) contributes a single delta. Deterministic
+    order: DOF 0..5, lower endpoint then upper; `len()` IS the trial count."""
+    lo = np.asarray(lower, dtype=float)
+    hi = np.asarray(upper, dtype=float)
+    if np.any(hi < lo):
+        raise ValueError(f'uncertainty upper < lower on DOF {list(np.where(hi < lo)[0])}')
+    out = []
+    for i in range(6):
+        ends = [lo[i]] if math.isclose(lo[i], hi[i]) else [lo[i], hi[i]]
+        for v in ends:
+            if not math.isclose(v, 0.0):
+                d = np.zeros(6)
+                d[i] = v
+                out.append(delta_from(d))
+    return out
+
+
 def grid_deltas(lower, upper, resolution):
     """Every combination of the per-DOF grid values -- the full Cartesian product, in order.
 

@@ -34,12 +34,12 @@ rotational_resolution_deg: 1.0
 # Stand-off: the DISASSEMBLED rest between trials -- the trajectory START backed off a further
 # standoff_distance_m along standoff_axis, planned from the TRUE held pose (a fixed physical
 # spot regardless of the current belief). Visited once at start and after every trial.
-standoff_distance_m: 0.02
+standoff_distance_m: 0.025
 standoff_axis: [-1.0, 0.0, 0.0]
 
 # After each attempt: back straight out along the BELIEVED connector's own -X by this distance.
 # Must exceed the insertion depth so the part is fully clear before the next free-space move.
-retract_distance_m: 0.025
+retract_distance_m: 0.050
 
 # ===================================================================================================
 # EVAL -- the trial loop and the injected belief errors
@@ -108,14 +108,14 @@ eval:
   # from summary.csv).
   final_insertion:
     enabled: true
-    stiffness: [250.0, 250.0, 2000.0, 10.0, 10.0, 10.0]
+    stiffness: [250.0, 1500.0, 250.0, 10.0, 10.0, 10.0]
 
 # ===================================================================================================
 # ESTIMATION -- the contact-manifold ICP under test. KEEP IN SYNC with the values
 # cable_pick_estimate_assemble runs with -- this app exists to score exactly that configuration.
 # ===================================================================================================
 estimation:
-  manifold_csv: ./configs/data/banana_manifold_20260807.csv
+  manifold_csv: ./configs/data/banana_manifold_20260807_clean.csv
   scaling_constant_deg_to_mm: 1.0
   scaling_constant_unit_force_to_mm: 1.0
   scaling_constant_unit_torque_to_mm: 1.0
@@ -131,7 +131,7 @@ estimation:
     roll_deg: 0.0
     pitch_deg: 1.0
     yaw_deg: 0.0
-  step_gain: 2.0
+  step_gain: 1.0
   ransac_iters: 200
   ransac_tol: 1.0
   # AGGREGATOR over the multi-start finals: 'ransac' = residual-gated consensus vote (the
@@ -153,7 +153,7 @@ compliance:
   enabled: true
   tare_before: true
   mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
-  stiffness:     [250.0, 250.0, 250.0, 10.0, 10.0, 10.0]
+  stiffness:     [250.0, 1500.0, 250.0, 10.0, 10.0, 10.0]
   damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0

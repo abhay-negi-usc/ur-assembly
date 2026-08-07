@@ -75,7 +75,7 @@ from mpl_toolkits.mplot3d import Axes3D     # noqa: E402,F401  (registers the 3d
 # =====================================================================================
 CONFIG = {
     # ---- input / output ----------------------------------------------------------------
-    'csv_path': r'data/uncertain_assembly_sampling/banana_map.csv',
+    'csv_path': r'configs/data/banana_manifold_20260807_clean.csv',
     'output_root': 'analysis',       # a timestamped subdirectory is created under this
     'description': None,             # optional str -> written to description.txt
 

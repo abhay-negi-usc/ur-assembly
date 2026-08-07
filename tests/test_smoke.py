@@ -1421,10 +1421,12 @@ def test_estimator_eval_trial_error_plot_renders():
                 [1.2, 0.0, -0.8, 0.0, 1.5, 0.0],           # after attempt 1
                 [0.3, 0.0, 0.2, 0.0, 0.4, 0.0]]            # after attempt 2
         residuals = [0.42, float('nan')]                   # attempt 2's estimation was skipped
-        res_all = [0.42 + 0.3 * np.random.default_rng(0).random(50),   # every guess, attempt 1
-                   np.zeros(0)]                                        # skipped -> no guesses
+        rng = np.random.default_rng(0)
+        res_all = [0.42 + 0.3 * rng.random(50),            # every guess, attempt 1
+                   np.zeros(0)]                            # skipped -> no guesses
+        l2_all = [2.0 * rng.random(50), np.zeros(0)]       # each guess's would-be L2 outcome
         _plot_trial_errors(path, 1, ['x_mm', 'z_mm', 'pitch_deg'], err6, residuals, 0.2,
-                           None, res_all)
+                           None, res_all, l2_all)
         assert os.path.isfile(path) and os.path.getsize(path) > 0, \
             'plot did not render (the runtime warning path swallowed an error)'
     finally:
@@ -1447,6 +1449,17 @@ def test_bounds_deltas_hit_extremes():
     xyz, rpy = matrix_to_xyzrpy(ds[-1])            # last = the degenerate yaw endpoint
     assert np.isclose(np.degrees(rpy[2]), 2.0) and np.allclose(xyz, 0.0)
     assert not traj.bounds_deltas([0.0] * 6, [0.0] * 6)   # all-zero bounds -> no trials
+
+    # SIMULTANEOUS: every corner of the box -- all active DOFs at an extreme at once.
+    # x/z/pitch two-sided -> 2^3 corners; the degenerate yaw rides along in every one.
+    dc = traj.bounds_deltas(lo, hi, simultaneous=True)
+    assert len(dc) == 8
+    for d in dc:
+        xyz, rpy = matrix_to_xyzrpy(d)
+        assert np.isclose(abs(xyz[0]), 0.005) and np.isclose(abs(xyz[2]), 0.003)
+        assert np.isclose(abs(np.degrees(rpy[1])), 5.0, atol=0.05)
+        assert np.isclose(np.degrees(rpy[2]), 2.0, atol=0.05)
+    assert not traj.bounds_deltas([0.0] * 6, [0.0] * 6, simultaneous=True)
 
 
 def test_estimator_eval_accumulation_rebase():

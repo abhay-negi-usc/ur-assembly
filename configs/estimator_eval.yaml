@@ -50,9 +50,12 @@ eval:
 
   # HOW the injected errors are chosen: 'random' draws uniformly inside the bounds for
   # num_trials; 'grid' sweeps every combination at grid_resolution (count derived, like
-  # uncertain_sampling's grid mode); 'bounds' tests each nonzero bound endpoint one DOF at a
-  # time (the +/- extremes; count derived: 2 per two-sided DOF, 1 per degenerate DOF).
-  mode: random
+  # uncertain_sampling's grid mode); 'bounds' tests the +/- bound extremes (count derived) --
+  # one DOF at a time by default (2 per two-sided DOF, 1 per degenerate DOF), or with
+  # bounds_simultaneous every CORNER of the box at once (2^k for k two-sided DOFs).
+  mode: bounds
+  bounds_simultaneous: false     # bounds mode only: false = 1 DOF at a time; true = all
+                                 # active DOFs at an extreme simultaneously (box corners)
   # Injected BELIEF error bounds, uncertain_sampling's convention: ABSOLUTE lower/upper per DOF
   # [x, y, z (m), roll, pitch, yaw (deg)], applied in the HELD part's OWN frame -- the same
   # right-multiplied frame the estimator corrects in. As set: x +/-5 mm, z +/-5 mm, pitch +/-5 deg.
@@ -68,6 +71,11 @@ eval:
     pos_mm: 0.25
     rot_deg: 0.25
   stop_when_converged: true
+
+  # PHYSICAL success: the measured (TRUE) connector pose wrt the TARGET connector at the end
+  # of an insertion within these per-DOF tolerances [x, y, z (mm), roll, pitch, yaw (deg)].
+  # Success TERMINATES the trial; the live figure shows the running success rate.
+  success_pose_tol: [2.0, 1.0, 5.0, 5.0, 5.0, 1.0]
 
   random_seed: 7                 # >0 = replayable perturbation stream; 0 = nondeterministic
   log_decimation: 5              # observation every Nth servo cycle (125 Hz / N -> ~25 Hz)
@@ -108,7 +116,7 @@ eval:
   # from summary.csv).
   final_insertion:
     enabled: true
-    stiffness: [250.0, 1500.0, 250.0, 10.0, 10.0, 10.0]
+    stiffness: [250.0, 1000.0, 250.0, 10.0, 10.0, 10.0]
 
 # ===================================================================================================
 # ESTIMATION -- the contact-manifold ICP under test. KEEP IN SYNC with the values
@@ -127,9 +135,9 @@ estimation:
   init_guess_range:
     x_mm: 0.0
     y_mm: 0.0
-    z_mm: 1.0
+    z_mm: 5.0
     roll_deg: 0.0
-    pitch_deg: 1.0
+    pitch_deg: 5.0
     yaw_deg: 0.0
   step_gain: 1.0
   ransac_iters: 200
@@ -142,8 +150,8 @@ estimation:
   aggregator: softmax
   softmax_temp: 0.15
   residual_gate: None
-  recency_half_life_frac: 0.8
-  interp_neighbors: 16
+  recency_half_life_frac: 0.0
+  interp_neighbors: 4
   interp_softness: 1.0
   random_seed: 0
 
@@ -153,7 +161,7 @@ compliance:
   enabled: true
   tare_before: true
   mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
-  stiffness:     [250.0, 1500.0, 250.0, 10.0, 10.0, 10.0]
+  stiffness:     [250.0, 1000.0, 250.0, 10.0, 10.0, 10.0]
   damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0
@@ -171,7 +179,7 @@ force_guard:
 
 speed:
   # Free-space moves (the approach to each attempt's start and the between-trial stand-off).
-  max_joint_velocity_deg_s: 100.0
+  max_joint_velocity_deg_s: 30.0
   joint_acceleration_rad_s2: 5.0
   max_cartesian_velocity_m_s: 0.25
   # INSERT reference pacing -- matches the pick app's effective assemble speed

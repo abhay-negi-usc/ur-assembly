@@ -53,9 +53,10 @@ computable, so every correction can be scored instead of eyeballed.
 |---|---|
 | `held_frame` | catalogue frame = the ground-truth in-hand pose AND (via `targets:`) the mate |
 | `eval.num_trials` / `eval.max_attempts` | N trials (default 50) × M estimate updates each (default 5) |
-| `eval.mode` | `random` draws inside the bounds; `grid` sweeps them (count derived); `bounds` tests each nonzero bound endpoint one DOF at a time (± extremes, count derived) |
+| `eval.mode` | `random` draws inside the bounds; `grid` sweeps them (count derived); `bounds` tests the ± bound extremes (count derived) — one DOF at a time by default, or every box corner at once with `eval.bounds_simultaneous: true` |
 | `eval.perturbation.lower/upper` | injected belief-error bounds, `[x,y,z (m), r,p,y (deg)]` in the part's own frame — default x/z ±5 mm, pitch ±5 deg |
 | `eval.success_tolerance` | convergence gate on the **ground-truth** error (not the believed check) |
+| `eval.success_pose_tol` | per-DOF physical-success gate `[x,y,z (mm), r,p,y (deg)]` on the **true** connector-wrt-target pose at the end of an insertion (default 2, 1, 5, 5, 5, 1); success **terminates the trial**, `seat_*`/`success` columns land in trials.csv, and the live figure shows the running success rate |
 | `eval.stop_when_converged` | skip a trial's remaining attempts once converged |
 | `eval.save_observations` / `save_plots` | per-attempt raw CSVs / the per-trial error figure (both default on) |
 | `eval.live_plot` | mirror the current trial's figure to ONE fixed path outside the experiment folder (atomic overwrite — keep it open in an image viewer); `true` = `data/experiments/estimator_eval_live.png`, a string = explicit path |
@@ -79,8 +80,10 @@ computable, so every correction can be scored instead of eyeballed.
   residuals per attempt on a log y axis — **every guess's final residual** as a faint column
   (the population the aggregator votes over, so consensus spread and outlier guesses are
   visible) with the aggregated residual bold on top — then a scatter of residual vs the L2 error left
-  **after** that attempt's update (points labelled by attempt) — the residual is only
-  trustworthy if that scatter trends up-right.
+  **after** that attempt's update: **every guess as a faint point** (the error its own
+  correction would have left — computable because the truth is known) with the aggregated
+  pick bold and labelled by attempt — the residual is only trustworthy if that cloud trends
+  up-right.
 - `estimator_eval_live.png` (outside the experiment folder, with `eval.live_plot`) — the current
   trial's figure, atomically overwritten after every attempt.
 - `trial_TTT_final_insertion_observations.csv` (with `eval.final_insertion`) — the seat-check

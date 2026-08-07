@@ -20,6 +20,9 @@ exactly. Each trial then INJECTS a known belief error and lets the estimator try
                        the current belief) -> T_corr;  T_believed <- T_believed @ T_corr
             score      remaining GROUND-TRUTH error = inverse(T_true) @ T_believed -- logged
                        per attempt; within eval.success_tolerance -> converged (early stop)
+            success    the TRUE connector pose wrt the TARGET at the end of the hold within
+                       eval.success_pose_tol per DOF -> the trial TERMINATES; the live figure
+                       shows the running trial count + success rate
         final      OPTIONAL (eval.final_insertion): ONE more guarded insertion from the FINAL
                    corrected belief under a DIFFERENT stiffness -- seats-or-not, no estimation
         disassemble: back at the stand-off (free space) before the next trial
@@ -134,6 +137,7 @@ def _save_observations(path, rows):
 def _fieldnames(dims):
     """trials.csv schema -- fixed up-front so the file is written incrementally, row by row."""
     return (['trial', 'attempt', 'n_observations', 'seated', 'check_pos_mm', 'check_rot_deg']
+            + [f'seat_{s}' for s in _ERR] + ['success']
             + [f'inj_{s}' for s in _ERR]
             + [f'err_before_{s}' for s in _ERR] + ['err_before_pos_mm', 'err_before_rot_deg']
             + [f'corr_{d}' for d in dims] + ['icp_inliers', 'icp_residual', 'estimate']
@@ -142,7 +146,7 @@ def _fieldnames(dims):
 
 
 def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None,
-                       res_all=None):
+                       res_all=None, l2_all=None, status=None):
     """ONE figure per trial, RE-SAVED after every attempt: the GROUND-TRUTH error, all attempts
     co-plotted (x = 0 is the injected error, x = k the error left after attempt k's update).
 
@@ -153,8 +157,10 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None
     (res_all, one array per attempt: the population the aggregator votes over, so consensus
     spread and outlier guesses are visible) with the AGGREGATED residual bold on top (nan =
     estimation skipped) -- then
-    residual vs the L2 error LEFT AFTER applying that attempt's correction, points labelled by
-    attempt -- the residual is only trustworthy if that scatter trends up-right. If live_path is
+    residual vs the L2 error LEFT AFTER applying that attempt's correction -- EVERY guess as a
+    faint point (l2_all: the error each guess's own correction WOULD have left, computable here
+    because the truth is known) with the aggregated pick bold and labelled by attempt. The
+    residual is only trustworthy if that cloud trends up-right. If live_path is
     given, the same figure is ALSO written there ATOMICALLY (temp file + os.replace), so one
     fixed file outside the experiment folder can stay open in an image viewer. BEST-EFFORT: a
     plotting problem (e.g. matplotlib missing on the robot box) is logged and skipped, never
@@ -216,9 +222,16 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None
         ax_r.set_xlabel('attempt')
         ax_r.set_ylabel('ICP residual [mm-eq]')
 
-        # Residual vs the L2 error LEFT AFTER that attempt's update: attempt k's residual pairs
-        # with l2[k] (the outcome of applying its correction).
+        # Residual vs the L2 error LEFT AFTER that attempt's update: every guess faint (its own
+        # would-be outcome), the aggregated pick bold -- attempt k's aggregate pairs with l2[k].
         ax_s = fig.add_subplot(gs[n_left:, 1])
+        for rg, lg in zip(res_all or [], l2_all or []):
+            rg = np.maximum(np.asarray(rg, dtype=float), 1e-6)
+            lg = np.asarray(lg, dtype=float)
+            m2 = min(len(rg), len(lg))
+            if m2:
+                ax_s.scatter(rg[:m2], lg[:m2], s=7, color='#55A868', alpha=0.25, lw=0,
+                             zorder=1)
         m = min(len(res), len(l2) - 1)
         fin = np.flatnonzero(np.isfinite(res[:m]))
         ax_s.scatter(res[fin], l2[fin + 1], color='#55A868', zorder=2)
@@ -231,6 +244,8 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None
         ax_s.set_ylabel('L2 error after update [mm-eq]')
 
         fig.suptitle(f'trial {trial}: ground-truth belief error per attempt', y=0.995)
+        if status:                                 # run progress: trials done + success rate
+            fig.text(0.99, 0.965, status, ha='right', fontsize=9, color='#333333')
         fig.tight_layout()
         fig.savefig(path, dpi=110)
         if live_path:
@@ -254,7 +269,8 @@ def _write_summary(out_dir, rows, dims):
 
     def agg(label, rs):
         rec = {'attempt': label, 'n': len(rs),
-               'converged_frac': float(np.mean([bool(r['converged']) for r in rs]))}
+               'converged_frac': float(np.mean([bool(r['converged']) for r in rs])),
+               'success_frac': float(np.mean([bool(r.get('success')) for r in rs]))}
         for d in dims:
             v = np.abs([float(r[f'err_after_{d}']) for r in rs])
             rec[f'mean_abs_{d}'] = float(v.mean())
@@ -313,9 +329,9 @@ def build_and_run(cfg, robot, camera, args):
     # ---- The injected belief errors. Bounds follow uncertain_sampling's convention: ABSOLUTE
     # lower/upper per DOF [x, y, z (m), roll, pitch, yaw (deg)], applied in the HELD part's OWN
     # frame (right-multiplied) -- the same frame the estimator corrects in. 'grid' sweeps every
-    # combination at eval.grid_resolution and DERIVES the trial count; 'bounds' tests each
-    # nonzero bound endpoint one DOF at a time (the +/- extremes, count derived); 'random'
-    # draws uniformly.
+    # combination at eval.grid_resolution and DERIVES the trial count; 'bounds' tests the +/-
+    # bound extremes (count derived) -- one DOF at a time by default, or every corner of the
+    # box at once with eval.bounds_simultaneous; 'random' draws uniformly.
     pert = ev.get('perturbation', {}) or {}
     lo = pert.get('lower', [-0.005, 0.0, -0.005, 0.0, -5.0, 0.0])
     hi = pert.get('upper', [0.005, 0.0, 0.005, 0.0, 5.0, 0.0])
@@ -327,7 +343,8 @@ def build_and_run(cfg, robot, camera, args):
         if mode == 'grid':
             fixed = traj.grid_deltas(lo, hi, ev.get('grid_resolution', [0.0] * 6))
         elif mode == 'bounds':
-            fixed = traj.bounds_deltas(lo, hi)
+            fixed = traj.bounds_deltas(lo, hi,
+                                       simultaneous=bool(ev.get('bounds_simultaneous', False)))
         else:
             fixed = None
     except ValueError as exc:
@@ -344,6 +361,14 @@ def build_and_run(cfg, robot, camera, args):
     tol_pos_mm = float(tol.get('pos_mm', 2.0))
     tol_rot_deg = float(tol.get('rot_deg', 3.0))
     stop_conv = bool(ev.get('stop_when_converged', True))
+    # PHYSICAL success: the TRUE connector pose wrt the TARGET within these per-DOF tolerances
+    # [x, y, z (mm), roll, pitch, yaw (deg)] at the end of an insertion. Success TERMINATES
+    # the trial (independent of the belief-convergence gate above).
+    succ_tol = [float(v) for v in
+                (ev.get('success_pose_tol') or [2.0, 1.0, 5.0, 5.0, 5.0, 1.0])]
+    if len(succ_tol) != 6:
+        log.error('eval.success_pose_tol must have 6 entries [x,y,z (mm), r,p,y (deg)].')
+        return False
     decim = max(1, int(ev.get('log_decimation', 5)))
     save_obs = bool(ev.get('save_observations', True))
     log.info('%d trials x max %d attempts (%s perturbations, bounds lower=%s upper=%s).',
@@ -446,14 +471,17 @@ def build_and_run(cfg, robot, camera, args):
                 break
         adm_ctl.hold(last_ref, settle_s, guard, on_step=log_cb)
 
-        # Kinematic check numbers, for the record only -- the GROUND-TRUTH error is the metric
-        # this app exists for.
+        # Kinematic check numbers (BELIEVED pose), for the record only.
         lin, ang = pose_error(robot.tool0() @ T_bel, T_base_tconn)
+        # PHYSICAL seat pose: the TRUE connector wrt the TARGET connector at the end of the
+        # hold (the part is fixtured, so T_true is exact) -- the per-DOF success measure.
+        xyz, rpy = matrix_to_xyzrpy(inverse(T_base_tconn) @ robot.tool0() @ T_true)
+        seat6 = list(xyz * 1000.0) + list(np.degrees(rpy))
 
         T_out = _retract_ref(last_ref, T_bel, retract_m)
         adm_ctl.ramp(last_ref, T_out, seg_time(last_ref, T_out, rv_mm_s, rw_deg_s), guard=None)
         adm_ctl.stop()
-        return obs, seated, lin, ang
+        return obs, seated, lin, ang, seat6
 
     out_dir = os.path.join(cfg.get('data_dir', 'data'), 'experiments',
                            f'estimator_eval_{datetime.now():%Y%m%d_%H%M%S}')
@@ -487,9 +515,10 @@ def build_and_run(cfg, robot, camera, args):
         return False
     seed_q = q
 
-    rows, ok, durations = [], True, []
+    rows, ok, durations, n_succ = [], True, [], 0
     try:
         for trial in range(1, num_trials + 1):
+            trial_succ = False
             t_trial = time.time()
             # Corrupt the BELIEF only -- the part never moves in the fingers. The robot plans
             # from T_believed, so the true part physically rides the path offset by exactly the
@@ -502,9 +531,10 @@ def build_and_run(cfg, robot, camera, args):
             # The trial's error track for the co-plot: index 0 = the injected error, index k =
             # the error left after attempt k's update. trackr = the AGGREGATED ICP residual per
             # attempt (nan where estimation was skipped); trackg = every guess's final residual
-            # per attempt (the population the aggregator votes over). acc = this trial's
-            # accumulated observations, always expressed in the CURRENT belief.
-            track6, trackr, trackg = [inj], [], []
+            # per attempt (the population the aggregator votes over); trackl2 = the L2 error
+            # each guess's OWN correction would have left (computable: the truth is known).
+            # acc = this trial's accumulated observations, always in the CURRENT belief.
+            track6, trackr, trackg, trackl2 = [inj], [], [], []
             acc = np.zeros((0, 12))
 
             abandoned = False
@@ -523,7 +553,11 @@ def build_and_run(cfg, robot, camera, args):
                 seed_q = q
 
                 # ASSEMBLE under admittance (same law as the pick app), check, retract.
-                obs, seated, lin, ang = run_insertion(adm, refs, T_believed)
+                obs, seated, lin, ang, seat6 = run_insertion(adm, refs, T_believed)
+                succ = all(abs(v) <= t for v, t in zip(seat6, succ_tol))
+                if succ and not trial_succ:
+                    trial_succ = True
+                    n_succ += 1
 
                 if save_obs:
                     _save_observations(os.path.join(
@@ -543,8 +577,9 @@ def build_and_run(cfg, robot, camera, args):
                 T_corr_mm, info = estimator.estimate(vec6, w6)
                 row = {'trial': trial, 'attempt': attempt, 'n_observations': len(obs),
                        'seated': seated, 'check_pos_mm': lin * 1000.0,
-                       'check_rot_deg': float(np.degrees(ang)),
+                       'check_rot_deg': float(np.degrees(ang)), 'success': succ,
                        'err_before_pos_mm': errb_pos, 'err_before_rot_deg': errb_rot}
+                row.update({f'seat_{s}': v for s, v in zip(_ERR, seat6)})
                 row.update({f'inj_{s}': v for s, v in zip(_ERR, inj)})
                 row.update({f'err_before_{s}': v for s, v in zip(_ERR, errb)})
                 if T_corr_mm is None:
@@ -552,6 +587,7 @@ def build_and_run(cfg, robot, camera, args):
                     row['estimate'] = f'skipped: {info}'
                     trackr.append(float('nan'))
                     trackg.append(np.zeros(0))
+                    trackl2.append(np.zeros(0))
                     if accumulate:
                         acc = full                 # belief unchanged -- rows stay valid as-is
                 else:
@@ -565,23 +601,35 @@ def build_and_run(cfg, robot, camera, args):
                                 'icp_residual': info['final_residual']})
                     trackr.append(float(info['final_residual']))
                     trackg.append(np.asarray(info['res_hist'], dtype=float)[:, -1])
+                    # Per-guess would-be OUTCOME: the ground-truth L2 error left if guess g's
+                    # correction had been applied to the PRE-update belief (errb, mm/deg).
+                    th6 = np.zeros((len(info['theta_hist']), 6))
+                    th6[:, estimator.idx] = info['theta_hist'][:, -1]
+                    rem6 = vec6_from_mats(
+                        mats_from_vec6(np.asarray(errb)) @ mats_from_vec6(th6))
+                    trackl2.append(np.sqrt(
+                        (rem6[:, :3] ** 2).sum(axis=1)
+                        + ((estimator.s_rot * rem6[:, 3:]) ** 2).sum(axis=1)))
                 erra, erra_pos, erra_rot = _gt_error(T_true, T_believed)
                 track6.append(erra)
                 if save_plots:                     # re-saved after EVERY attempt of this trial
+                    status = (f'trial {trial}/{num_trials}  |  successes {n_succ}/{trial} '
+                              f'({n_succ / trial:.0%})')
                     _plot_trial_errors(os.path.join(out_dir, f'trial_{trial:03d}_errors.png'),
                                        trial, estimator.estimate_dims, track6, trackr,
-                                       estimator.s_rot, live_path, trackg)
+                                       estimator.s_rot, live_path, trackg, trackl2, status)
                 row.update({f'err_after_{s}': v for s, v in zip(_ERR, erra)})
                 row.update({'err_after_pos_mm': erra_pos, 'err_after_rot_deg': erra_rot})
                 row['converged'] = bool(erra_pos <= tol_pos_mm and erra_rot <= tol_rot_deg)
                 log.info('trial %d attempt %d: gt error %.2f mm / %.2f deg -> %.2f mm / %.2f deg'
-                         '%s', trial, attempt, errb_pos, errb_rot, erra_pos, erra_rot,
-                         '  (CONVERGED)' if row['converged'] else '')
+                         '%s%s', trial, attempt, errb_pos, errb_rot, erra_pos, erra_rot,
+                         '  (CONVERGED)' if row['converged'] else '',
+                         '  (SUCCESS -- seated within tolerance)' if succ else '')
                 rows.append(row)
                 writer.writerow(row)
                 fout.flush()                       # a 50-trial run must survive an abort mid-way
                 os.fsync(fout.fileno())
-                if row['converged'] and stop_conv:
+                if succ or (row['converged'] and stop_conv):
                     break
 
             # OPTIONAL FINAL INSERTION: from the FINAL corrected belief, the NOMINAL (un-noised)
@@ -595,7 +643,7 @@ def build_and_run(cfg, robot, camera, args):
                     log.warning('IK/approach failed for the final insertion of trial %d.', trial)
                 else:
                     seed_q = q
-                    obs, seated, lin, ang = run_insertion(adm_final, refs, T_believed)
+                    obs, seated, lin, ang, seat6 = run_insertion(adm_final, refs, T_believed)
                     if save_obs:
                         _save_observations(os.path.join(
                             out_dir, f'trial_{trial:03d}_final_insertion_observations.csv'), obs)
@@ -604,8 +652,10 @@ def build_and_run(cfg, robot, camera, args):
                             'n_observations': len(obs), 'seated': seated,
                             'check_pos_mm': lin * 1000.0,
                             'check_rot_deg': float(np.degrees(ang)),
+                            'success': all(abs(v) <= t for v, t in zip(seat6, succ_tol)),
                             'estimate': 'none (final insertion)',
                             'err_before_pos_mm': errf_pos, 'err_before_rot_deg': errf_rot}
+                    frow.update({f'seat_{s}': v for s, v in zip(_ERR, seat6)})
                     frow.update({f'err_before_{s}': v for s, v in zip(_ERR, errf)})
                     writer.writerow(frow)
                     fout.flush()

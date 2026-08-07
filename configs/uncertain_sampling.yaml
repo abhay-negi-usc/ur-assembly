@@ -39,13 +39,13 @@ trajectory_angles_deg: false
 # Stand-off: the free-space pose approached ONCE before the trial loop. Measured from the START of
 # the assembly trajectory (its first row), backed off a further standoff_distance_m along
 # standoff_axis -- so it is always clear of the path, whatever the trajectory's first row is.
-standoff_distance_m: 0.0        # 10 mm beyond the trajectory start
+standoff_distance_m: 0.010        # 10 mm beyond the trajectory start
 standoff_axis: [-1.0, 0.0, 0.0]   # assembly is a direct -X -> 0 insertion
 
 # RETRACT: after each trial, back straight out along the CONNECTOR's OWN -X by this distance, from
 # wherever the insert stopped -- so a perturbed (tilted) part retreats along its own axis, not the
 # target's. Speed comes from speed.retract_* below.
-retract_distance_m: 0.0
+retract_distance_m: 0.050
 
 # COMPLIANCE (software admittance): the arm FOLLOWS the assembly trajectory (position reference) and
 # YIELDS to contact via a virtual spring-mass-damper with finite restoring stiffness, springing back
@@ -92,7 +92,7 @@ sampling:
   # degenerate DOF contributes a single value), so all-zero DOFs cost nothing. The step is nudged so
   # both endpoints are hit exactly.
   # As set: z 11 values (-5..+5 mm by 1 mm) x pitch 31 values (-15..+15 deg by 1 deg) = 341 trials.
-  grid_resolution: [0.0, 0.025, 0.001, 0.0, 1.0, 0.0]
+  grid_resolution: [0.0, 0.025, 0.005, 0.0, 1.0, 0.0]
 
   # UNCERTAINTY RANGE per DOF, as ABSOLUTE LOWER/UPPER bounds [x, y, z (m), roll, pitch, yaw (deg)]
   # in the frame selected above -- NOT half-widths, so a range need not be centred on zero.
@@ -126,7 +126,7 @@ speed:
   max_cartesian_rotation_deg_s: 50.0
   # RETRACT -- free-space escape back along a path just proven clear, so it need NOT crawl at the
   # insertion speed. Still compliant, so it yields if it does catch. Omit to reuse the insert limits.
-  retract_translation_mm_s: 50.0       # 50 mm in ~0.5 s
+  retract_translation_mm_s: 100.0       # 50 mm in ~0.5 s
   retract_rotation_deg_s: 50.0
 
 move_timeout_s: 120.0

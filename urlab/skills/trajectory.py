@@ -113,15 +113,24 @@ def _axis_values(lo, hi, step):
     return [lo + i * (hi - lo) / n for i in range(n + 1)]
 
 
-def bounds_deltas(lower, upper):
-    """One delta per NONZERO bound endpoint, one DOF at a time (zeros elsewhere) -- the +/-
-    extremes of the uncertainty box along each axis, without the 2^n corner blow-up of a full
-    grid. A degenerate DOF (lower == upper != 0) contributes a single delta. Deterministic
-    order: DOF 0..5, lower endpoint then upper; `len()` IS the trial count."""
+def bounds_deltas(lower, upper, simultaneous=False):
+    """Deltas at the +/- extremes of the uncertainty box.
+
+    simultaneous=False (default): one delta per NONZERO bound endpoint, ONE DOF AT A TIME
+    (zeros elsewhere) -- linear count, no corner blow-up. simultaneous=True: every COMBINATION
+    of the DOFs' endpoints (the box CORNERS -- all active DOFs at an extreme at once), 2^k
+    deltas for k two-sided DOFs, the pure-identity corner dropped. A degenerate DOF
+    (lower == upper != 0) contributes its single value either way; all-zero DOFs stay zero.
+    Deterministic order; `len()` IS the trial count."""
     lo = np.asarray(lower, dtype=float)
     hi = np.asarray(upper, dtype=float)
     if np.any(hi < lo):
         raise ValueError(f'uncertainty upper < lower on DOF {list(np.where(hi < lo)[0])}')
+    if simultaneous:
+        axes = [[lo[i]] if math.isclose(lo[i], hi[i]) else [lo[i], hi[i]] for i in range(6)]
+        combos = [v for v in itertools.product(*axes)
+                  if any(not math.isclose(x, 0.0) for x in v)]
+        return [delta_from(v) for v in combos]
     out = []
     for i in range(6):
         ends = [lo[i]] if math.isclose(lo[i], hi[i]) else [lo[i], hi[i]]

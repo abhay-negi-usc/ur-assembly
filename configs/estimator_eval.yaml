@@ -82,12 +82,20 @@ eval:
   # false disables. (Needs save_plots: true.)
   live_plot: true
 
+  # ACCUMULATE observations across a trial's attempts (the part is FIXTURED, so the rigid
+  # belief-error assumption holds for the whole trial): each estimate uses ALL of the trial's
+  # observations so far -- prior attempts RE-PROJECTED into the current belief after every
+  # correction (rel_new = rel_old @ T_corr; wrench re-based likewise). Earlier attempts sample
+  # different manifold regions (extra constraint where one attempt is degenerate, e.g. the
+  # z-pitch valley) and recency weighting decays them naturally. false = current attempt only.
+  accumulate_observations: true
+
   # OPTIONAL trajectory noising: smoothed zero-mean Gaussian offsets applied to EVERY waypoint
   # in the connector's OWN frame, REDRAWN per attempt -- exercises the estimator with varied
   # contact instead of the same nominal path every time. Uses its OWN random stream, so
   # toggling it does not change the injected-error draws (noised/nominal runs stay pairable).
   trajectory_noise:
-    enabled: true
+    enabled: false
     translation_m: 0.0005        # per-waypoint std, metres (after smoothing)
     rotation_deg: 0.5            # per-waypoint std, degrees (after smoothing)
     smooth_window: 25            # moving-average window (waypoints) -- keeps the reference smooth
@@ -98,17 +106,17 @@ eval:
   # estimation, no belief update; logged to trials.csv as attempt='final_insertion' (excluded
   # from summary.csv).
   final_insertion:
-    enabled: false
-    stiffness: [2000.0, 2000.0, 2000.0, 50.0, 50.0, 50.0]
+    enabled: true
+    stiffness: [250.0, 250.0, 2000.0, 10.0, 10.0, 10.0]
 
 # ===================================================================================================
 # ESTIMATION -- the contact-manifold ICP under test. KEEP IN SYNC with the values
 # cable_pick_estimate_assemble runs with -- this app exists to score exactly that configuration.
 # ===================================================================================================
 estimation:
-  manifold_csv: ./configs/data/banana_manifold_20260806.csv
-  scaling_constant_deg_to_mm: 0.2
-  scaling_constant_unit_force_to_mm: 3.0
+  manifold_csv: ./configs/data/banana_manifold_20260807.csv
+  scaling_constant_deg_to_mm: 1.0
+  scaling_constant_unit_force_to_mm: 1.0
   scaling_constant_unit_torque_to_mm: 1.0
   min_force_n: 3.0
   min_observations: 20

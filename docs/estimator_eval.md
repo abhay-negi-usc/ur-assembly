@@ -59,6 +59,7 @@ computable, so every correction can be scored instead of eyeballed.
 | `eval.stop_when_converged` | skip a trial's remaining attempts once converged |
 | `eval.save_observations` / `save_plots` | per-attempt raw CSVs / the per-trial error figure (both default on) |
 | `eval.live_plot` | mirror the current trial's figure to ONE fixed path outside the experiment folder (atomic overwrite — keep it open in an image viewer); `true` = `data/experiments/estimator_eval_live.png`, a string = explicit path |
+| `eval.accumulate_observations` | (default **on**) each estimate uses ALL of the trial's observations so far, prior attempts re-projected into the current belief (`rel_new = rel_old @ T_corr`, wrench re-based likewise); recency weighting decays the older attempts. `false` = current attempt only |
 | `eval.trajectory_noise` | optional smoothed per-waypoint Gaussian noise in the connector's own frame, redrawn per attempt; its own random stream, so the injected-error draws are unchanged |
 | `eval.final_insertion` | optional extra guarded assemble per trial from the final corrected belief with a `stiffness` override — seat-check only, logged as `attempt=final_insertion`, excluded from `summary.csv` |
 | `estimation.*` | the estimator under test — same schema as `cable_pick_estimate_assemble` |

@@ -15,7 +15,9 @@ exactly. Each trial then INJECTS a known belief error and lets the estimator try
                        observations (believed connector-wrt-target pose + wrench in the believed
                        connector frame) -- same law and logging as cable_pick_estimate_assemble
             retract    straight back along the believed connector's own -X (peg-in-hole)
-            estimate   manifold ICP -> T_corr;  T_believed <- T_believed @ T_corr
+            estimate   manifold ICP over the trial's ACCUMULATED observations (default;
+                       eval.accumulate_observations -- prior attempts are RE-PROJECTED into
+                       the current belief) -> T_corr;  T_believed <- T_believed @ T_corr
             score      remaining GROUND-TRUTH error = inverse(T_true) @ T_believed -- logged
                        per attempt; within eval.success_tolerance -> converged (early stop)
         final      OPTIONAL (eval.final_insertion): ONE more guarded insertion from the FINAL
@@ -49,7 +51,8 @@ from .. import log as urlog
 from .. import tool_frames
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import trajectory as traj
-from ..skills.manifold import FORCE_COLS, ManifoldEstimator, POSE_COLS, TORQUE_COLS
+from ..skills.manifold import (FORCE_COLS, ManifoldEstimator, POSE_COLS, TORQUE_COLS,
+                               mats_from_vec6, vec6_from_mats)
 from ..transforms import (inverse, matrix_to_xyzrpy, pose_error, translation_matrix,
                           xyzrpy_to_matrix)
 from ._runner import run_app
@@ -78,6 +81,22 @@ def _corr_to_m(T_corr_mm):
     T = np.array(T_corr_mm, dtype=float)
     T[:3, 3] /= 1000.0
     return T
+
+
+def _rebase_rows(rows12, T_corr_mm):
+    """Re-express logged observation rows under the belief UPDATED by T_corr.
+
+    A logged pose is inverse(T_target) @ tool0 @ T_believed_old and the update is
+    T_believed_new = T_believed_old @ T_corr, so rel_new = rel_old @ T_corr exactly (the
+    physical robot pose in the log never changes). The wrench columns live in the believed
+    connector frame, which moves the same way: transform_wrench's convention with
+    T_ba = inverse(T_corr), vectorized over rows (metres for the cross term)."""
+    pose_new = vec6_from_mats(mats_from_vec6(rows12[:, :6]) @ np.asarray(T_corr_mm, dtype=float))
+    Tinv = inverse(_corr_to_m(np.asarray(T_corr_mm, dtype=float)))
+    R, p = Tinv[:3, :3], Tinv[:3, 3]
+    f_new = rows12[:, 6:9] @ R.T
+    tau_new = rows12[:, 9:12] @ R.T + np.cross(p, f_new)
+    return np.hstack([pose_new, f_new, tau_new])
 
 
 def _noised_rows(rows, rng, t_m, r_deg, window):
@@ -349,6 +368,14 @@ def build_and_run(cfg, robot, camera, args):
         log.info('Trajectory noise ON: std %.2f mm / %.2f deg per waypoint, smooth window %d.',
                  tn_t * 1000.0, tn_r, tn_w)
 
+    # ACCUMULATE observations across a trial's attempts (default ON): the part is FIXTURED, so
+    # the rigid-belief-error assumption holds for the whole trial, and earlier attempts sample
+    # DIFFERENT manifold regions -- extra constraint diversity exactly where one attempt is
+    # degenerate (the z-pitch valley). After each correction every stored row is RE-PROJECTED
+    # into the updated belief (_rebase_rows), and the estimator's recency weighting decays the
+    # older attempts naturally (they sit earlier in the concatenated sequence).
+    accumulate = bool(ev.get('accumulate_observations', True))
+
     # COMPLIANCE + guard + speeds: same shape as uncertain_sampling; the config mirrors the pick
     # app's assembly values so the estimator sees production-like observations.
     adm = AdmittanceController(robot.arm, cfg.section('compliance'))
@@ -466,8 +493,10 @@ def build_and_run(cfg, robot, camera, args):
             # The trial's error track for the co-plot: index 0 = the injected error, index k =
             # the error left after attempt k's update. trackr = the AGGREGATED ICP residual per
             # attempt (nan where estimation was skipped); trackg = every guess's final residual
-            # per attempt (the population the aggregator votes over).
+            # per attempt (the population the aggregator votes over). acc = this trial's
+            # accumulated observations, always expressed in the CURRENT belief.
             track6, trackr, trackg = [inj], [], []
+            acc = np.zeros((0, 12))
 
             abandoned = False
             for attempt in range(1, max_attempts + 1):
@@ -492,11 +521,16 @@ def build_and_run(cfg, robot, camera, args):
                         out_dir, f'trial_{trial:03d}_attempt_{attempt:02d}_observations.csv'), obs)
 
                 # ESTIMATE -- always, even on the last attempt: the estimate IS the thing under
-                # test, so every attempt's observations get scored.
-                obs_arr = np.asarray(obs, dtype=float)
+                # test, so every attempt's observations get scored. With accumulation the input
+                # is prior attempts (already re-projected into the current belief) + this one,
+                # oldest first, so recency weighting decays the carried rows.
+                obs_arr = np.asarray(obs, dtype=float).reshape(-1, 12)
+                full = np.vstack([acc, obs_arr]) if accumulate else obs_arr
+                if accumulate and len(acc):
+                    log.info('Estimating on %d observations (%d carried from prior attempts).',
+                             len(full), len(acc))
                 vec6, w6 = estimator.prepare_observations(
-                    obs_arr[:, :6], obs_arr[:, 6:9], obs_arr[:, 9:12]) if len(obs) else \
-                    (np.zeros((0, 6)), np.zeros((0, 6)))
+                    full[:, :6], full[:, 6:9], full[:, 9:12])
                 T_corr_mm, info = estimator.estimate(vec6, w6)
                 row = {'trial': trial, 'attempt': attempt, 'n_observations': len(obs),
                        'seated': seated, 'check_pos_mm': lin * 1000.0,
@@ -509,8 +543,13 @@ def build_and_run(cfg, robot, camera, args):
                     row['estimate'] = f'skipped: {info}'
                     trackr.append(float('nan'))
                     trackg.append(np.zeros(0))
+                    if accumulate:
+                        acc = full                 # belief unchanged -- rows stay valid as-is
                 else:
                     T_believed = T_believed @ _corr_to_m(T_corr_mm)   # believed @ corr ~= true
+                    if accumulate:
+                        # keep every stored row expressed in the belief JUST updated
+                        acc = _rebase_rows(full, T_corr_mm) if len(full) else full
                     row['estimate'] = 'ok'
                     row.update({f'corr_{k}': v for k, v in info['theta_corr'].items()})
                     row.update({'icp_inliers': info['inliers'],

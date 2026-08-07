@@ -29,7 +29,9 @@ nearest manifold points -- INTERPOLATING between close-enough samples instead of
 single nearest one of a finitely-sampled manifold. The correction transform is updated in the
 PERTURBED dims only (right-multiplied, like the offset itself), for a fixed number of iterations.
 Many random initial guesses are run in parallel
-and the final estimates are aggregated with RANSAC (consensus = mean of the largest inlier set).
+and the final estimates are aggregated with RANSAC (consensus = mean of the largest inlier set)
+-- or, with cfg 'aggregator': 'softmax', a residual-softmax weighted mean over ALL guesses
+(same option as skills/manifold.py).
 theta_est = perturbed-dim values of the corrected initial pose; perfect recovery -> theta_est ==
 theta_true, so the plotted per-dim ERROR converges to the dashed zero line.
 
@@ -90,6 +92,11 @@ CONFIG = {
     'step_gain': 1.5,                        # fraction of the mean NN delta applied per iteration
     'ransac_iters': 200,
     'ransac_tol': 1.0,                       # inlier radius around a candidate, mm-equivalent
+    # AGGREGATOR over the multi-start finals: 'ransac' (residual-gated consensus vote, below) or
+    # 'softmax' (weighted mean of ALL finals, weight exp(-(r - r_min)/(softmax_temp x r_min));
+    # ignores residual_gate / ransac_*) -- same option as skills/manifold.py.
+    'aggregator': 'ransac',
+    'softmax_temp': 0.15,
     # Before RANSAC votes, drop guesses whose FINAL residual exceeds gate x the best guess's --
     # a wrong local minimum can attract MANY guesses (a big cluster), but its alignment stays
     # visibly worse, so residual is the tie-breaker vote-counting alone does not have.
@@ -275,35 +282,48 @@ def solve_trial(vec6, w6, tree, M12, cfg, rng):
         T_corr = T_corr @ _mats(delta6 * float(cfg['step_gain']))
         theta_hist[:, k + 1] = _vec6(Y[0][None] @ T_corr)[:, idx]
 
-    # RANSAC over the final estimates (distance in the mm-equivalent theta space). Votes are
-    # counted only among RESIDUAL-GATED guesses: a wrong local minimum can capture the LARGER
-    # cluster, but its final alignment stays visibly worse, so residual breaks that tie.
+    # Aggregate the final estimates (distance in the mm-equivalent theta space).
     scale = np.array([s_rot if d.endswith('_deg') else 1.0 for d in dims])
     finals = theta_hist[:, -1] * scale
-    gate = cfg.get('residual_gate')
-    keep = (res_hist[:, -1] <= res_hist[:, -1].min() * float(gate) + 1e-12) if gate else \
-        np.ones(G, dtype=bool)
-    kept_ids = np.flatnonzero(keep)
-    best = np.zeros(G, dtype=bool)
-    for _ in range(int(cfg['ransac_iters'])):
-        cand = finals[kept_ids[rng.integers(len(kept_ids))]]
-        inl = keep & (np.linalg.norm(finals - cand, axis=1) < float(cfg['ransac_tol']))
-        if inl.sum() > best.sum():
-            best = inl
-    if not best.any():
-        best = keep.copy()                                        # degenerate: keep the gated set
-    est = finals[best].mean(axis=0)
-    refit = keep & (np.linalg.norm(finals - est, axis=1) < float(cfg['ransac_tol']))   # one refit
-    if refit.any():
-        best = refit
+    r_fin = res_hist[:, -1]
+    if str(cfg.get('aggregator', 'ransac')).lower() == 'softmax':
+        # Residual-softmax (same as skills/manifold.py): EVERY final contributes, weighted by
+        # how close its residual is to the best -- no vote, no gate.
+        temp = float(cfg.get('softmax_temp', 0.15))
+        r_min = float(r_fin.min())
+        w = np.exp(-(r_fin - r_min) / max(temp * r_min, 1e-12))
+        est = (finals * w[:, None]).sum(axis=0) / w.sum()
+        best = r_fin <= r_min * (1.0 + temp)                      # the >=~e^-1-weight guesses
+        final_residual = float(np.average(r_fin, weights=w))
+    else:
+        # RANSAC: votes are counted only among RESIDUAL-GATED guesses -- a wrong local minimum
+        # can capture the LARGER cluster, but its final alignment stays visibly worse, so
+        # residual breaks that tie.
+        gate = cfg.get('residual_gate')
+        keep = (r_fin <= r_fin.min() * float(gate) + 1e-12) if gate else \
+            np.ones(G, dtype=bool)
+        kept_ids = np.flatnonzero(keep)
+        best = np.zeros(G, dtype=bool)
+        for _ in range(int(cfg['ransac_iters'])):
+            cand = finals[kept_ids[rng.integers(len(kept_ids))]]
+            inl = keep & (np.linalg.norm(finals - cand, axis=1) < float(cfg['ransac_tol']))
+            if inl.sum() > best.sum():
+                best = inl
+        if not best.any():
+            best = keep.copy()                                    # degenerate: keep the gated set
         est = finals[best].mean(axis=0)
+        refit = keep & (np.linalg.norm(finals - est, axis=1) < float(cfg['ransac_tol']))  # refit
+        if refit.any():
+            best = refit
+            est = finals[best].mean(axis=0)
+        final_residual = float(r_fin[best].mean())
     theta_est = est / scale
 
     return {
         'dims': dims, 'n_points': len(vec6), 'theta_true': theta_true, 'theta_est': theta_est,
         'error': theta_est - theta_true, 'inliers': best,
         'err_hist': theta_hist - theta_true[None, None, :], 'res_hist': res_hist,
-        'final_residual': float(res_hist[best, -1].mean()),
+        'final_residual': final_residual,
     }
 
 

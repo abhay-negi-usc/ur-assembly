@@ -1111,9 +1111,7 @@ def test_tool_frames_shared_yaml_source():
     frames = load_frames()
     assert np.allclose(frames['tool0'], np.eye(4))
     for name in ('fingertip', 'camera', 'grasp', 'banana_connector_finger_holder'):
-    for name in ('fingertip', 'camera', 'grasp', 'banana_connector_finger_holder'):
         assert name in frames, f'missing frame {name!r}'
-    assert 'connector_holder' not in frames, 'the holder chain is retired'
     assert 'connector_holder' not in frames, 'the holder chain is retired'
     xyz, rpy = matrix_to_xyzrpy(frames['banana_connector_finger_holder'])
     d = np.degrees(rpy)
@@ -1121,10 +1119,6 @@ def test_tool_frames_shared_yaml_source():
     assert np.isclose(abs(d[0]), 180.0) and np.isclose(d[1], 0.0) and np.isclose(d[2], -90.0)
 
     # targets: the recorded base_link <- frame poses (the mate for uncertain_sampling's
-    # held_frame); every target must pair with a declared frame. The recorded NUMBERS are the
-    # user's to re-measure whenever the mate moves, so assert the UNIT round-trip against the
-    # yaml itself (monitor mm/deg -> m/rad), not a hard-coded pose.
-    import yaml
     # held_frame); every target must pair with a declared frame. The recorded NUMBERS are the
     # user's to re-measure whenever the mate moves, so assert the UNIT round-trip against the
     # yaml itself (monitor mm/deg -> m/rad), not a hard-coded pose.

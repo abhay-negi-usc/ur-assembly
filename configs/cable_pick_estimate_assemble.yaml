@@ -269,6 +269,13 @@ assembly:
     noise_decay_traj: 0.0        # shed linearly along the path: full -> x(1 - f) at the last row
     alternate_pitch_deg: 0.0     # initial pitch offset, sign ALTERNATING per attempt (+, -, ...)
 
+  # LIVE run figure (like estimator_eval's): the cumulative belief corrections, per-attempt
+  # residuals (all guesses + aggregated) and the correction phase plot, atomically overwritten
+  # at ONE fixed path after every estimate -- keep it open in an image viewer during a run.
+  # true = data/experiments/cable_pick_live.png; a string = explicit path; false disables.
+  # (The same figure is also written to the run folder as run_corrections.png.)
+  live_plot: true
+
   # After each attempt the believed-pose-vs-target numbers are LOGGED for the record, but SUCCESS
   # IS THE OPERATOR'S CALL at the prompt (y = done / Enter = retry / q = abort) -- the operator can
   # see the physical mate; the numbers only see the belief. These tolerances are the reference

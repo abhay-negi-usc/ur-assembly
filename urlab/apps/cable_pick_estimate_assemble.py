@@ -31,6 +31,7 @@ conversions happen only at the observation/correction boundary in this file.
 """
 
 import csv as _csv
+import itertools
 import os
 from datetime import datetime
 
@@ -43,7 +44,8 @@ from ..log import StepRunner
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import reset
 from ..skills import trajectory as traj
-from ..skills.manifold import FORCE_COLS, ManifoldEstimator, POSE_COLS, TORQUE_COLS
+from ..skills.manifold import (FORCE_COLS, ManifoldEstimator, POSE_COLS, TORQUE_COLS,
+                               vec6_from_mats)
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
                            GraspRecovery, retry_offset_x, verify_cable_held)
 from ..transforms import from_cfg, inverse, matrix_to_xyzrpy, pose_error, translation_matrix
@@ -123,6 +125,100 @@ def _plot_estimate(path, dims, info):
         plt.close(fig)
     except Exception as exc:                       # noqa: BLE001 -- plotting is never fatal
         log.warning('estimate plot skipped (%s)', exc)
+
+
+def _plot_run(path, dims, corr_track, res_agg, res_all, status=None, live_path=None):
+    """RUN-LEVEL figure, RE-SAVED after every estimate (+ optional atomic LIVE copy, like
+    estimator_eval's live figure). No ground truth exists after a real pick, so the tracks show
+    the BELIEF's movement instead: the CUMULATIVE applied correction per estimated dim
+    (x = attempt, 0 = the initial in-hand estimate), the ICP residual per attempt (every guess
+    faint, the aggregated pick bold, log y), and for 2+ dims a PHASE plot of the cumulative
+    correction pairs (origin = no correction). BEST-EFFORT: never fatal to a hardware run."""
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+
+        ct = np.asarray(corr_track, dtype=float)       # (attempts+1, len(dims)), row 0 = zeros
+        x = np.arange(len(ct))
+        n_left = len(dims)
+        pairs = list(itertools.combinations(range(len(dims)), 2))
+        ncols = 3 if pairs else 2
+        fig = plt.figure(figsize=(4.6 * ncols + 1.0, max(2.3 * n_left, 6.0)))
+        gs = fig.add_gridspec(2 * n_left, ncols, width_ratios=[1.2, 1.0, 0.95][:ncols])
+        axes = []
+        for i in range(n_left):
+            axes.append(fig.add_subplot(gs[2 * i:2 * i + 2, 0],
+                                        sharex=axes[0] if axes else None))
+        for j, (ax, dim) in enumerate(zip(axes, dims)):
+            unit = 'deg' if dim.endswith('_deg') else 'mm'
+            ax.axhline(0.0, ls='--', lw=1.0, color='#888888', zorder=1)
+            ax.plot(x, ct[:, j], 'o-', color='#4C72B0', zorder=2)
+            lim = max(float(np.abs(ct[:, j]).max()), 1e-3) * 1.15
+            ax.set_ylim(-lim, lim)
+            ax.set_ylabel(f'cumulative {dim} corr [{unit}]')
+            ax.tick_params(labelbottom=(j == n_left - 1))
+        axes[-1].set_xticks(x)
+        axes[-1].set_xlabel('attempt (0 = initial in-hand estimate)')
+
+        ax_r = fig.add_subplot(gs[:, 1])
+        labelled = False
+        for k, rg in enumerate(res_all or []):
+            rg = np.maximum(np.asarray(rg, dtype=float), 1e-6)
+            if not len(rg):
+                continue
+            jit = (np.arange(len(rg)) / max(len(rg) - 1, 1) - 0.5) * 0.3
+            ax_r.scatter(k + 1 + jit, rg, s=7, color='#55A868', alpha=0.25, lw=0, zorder=1,
+                         label=None if labelled else 'all guesses')
+            labelled = True
+        r = np.maximum(np.asarray(res_agg, dtype=float), 1e-6)
+        ax_r.plot(np.arange(1, len(r) + 1), r, 'o-', color='#55A868', zorder=2,
+                  label='aggregated')
+        if labelled:
+            ax_r.legend(fontsize=8)
+        ax_r.set_yscale('log')
+        ax_r.set_xticks(np.arange(1, len(r) + 1))
+        ax_r.set_xlabel('attempt')
+        ax_r.set_ylabel('ICP residual [mm-eq]')
+
+        bounds = np.linspace(0, 2 * n_left, len(pairs) + 1).astype(int) if pairs else []
+        for pi, (pa, pb) in enumerate(pairs):
+            axp = fig.add_subplot(gs[bounds[pi]:bounds[pi + 1], 2])
+            axp.axhline(0.0, ls=':', lw=0.8, color='#aaaaaa', zorder=1)
+            axp.axvline(0.0, ls=':', lw=0.8, color='#aaaaaa', zorder=1)
+            axp.plot(ct[:, pa], ct[:, pb], '-', color='#4C72B0', lw=1.0, zorder=2)
+            axp.scatter(ct[1:, pa], ct[1:, pb], s=20, color='#4C72B0', zorder=3)
+            axp.scatter([0.0], [0.0], s=40, marker='s', color='#DD8452', zorder=4,
+                        label='initial')
+            axp.scatter([ct[-1, pa]], [ct[-1, pb]], s=80, marker='*', color='#55A868',
+                        zorder=5, label='latest')
+            for k in range(1, len(ct)):
+                axp.annotate(str(k), (ct[k, pa], ct[k, pb]), textcoords='offset points',
+                             xytext=(4, 3), fontsize=7, color='#444444')
+            la = max(float(np.abs(ct[:, pa]).max()), 1e-3) * 1.15
+            lb = max(float(np.abs(ct[:, pb]).max()), 1e-3) * 1.15
+            axp.set_xlim(-la, la)                  # symmetric: no-correction is the centre
+            axp.set_ylim(-lb, lb)
+            axp.set_xlabel(f'{dims[pa]} corr '
+                           f'[{"deg" if dims[pa].endswith("_deg") else "mm"}]', fontsize=8)
+            axp.set_ylabel(f'{dims[pb]} corr '
+                           f'[{"deg" if dims[pb].endswith("_deg") else "mm"}]', fontsize=8)
+            axp.tick_params(labelsize=7)
+            if pi == 0:
+                axp.legend(fontsize=7, loc='best')
+
+        fig.suptitle('assembly run: belief corrections per attempt (no ground truth)', y=0.995)
+        if status:
+            fig.text(0.99, 0.965, status, ha='right', fontsize=9, color='#333333')
+        fig.tight_layout()
+        fig.savefig(path, dpi=110)
+        if live_path:
+            tmp = live_path + '.tmp'               # temp + os.replace: viewers never see a
+            fig.savefig(tmp, dpi=110, format='png')   # half-written PNG
+            os.replace(tmp, live_path)
+        plt.close(fig)
+    except Exception as exc:                       # noqa: BLE001 -- plotting is never fatal
+        log.warning('run plot skipped (%s)', exc)
 
 
 def build_and_run(cfg, robot, camera, args):
@@ -233,6 +329,16 @@ def build_and_run(cfg, robot, camera, args):
     if tn_on:
         log.info('Trajectory noise ON: std %s, smooth %d, decay/attempt %.2f, decay/traj %.2f,'
                  ' alternate pitch %.2f deg.', tn_std, tn_w, tn_da, tn_dt, tn_alt)
+
+    # LIVE run figure (like estimator_eval's): ONE fixed path outside the experiment folder,
+    # atomically overwritten after every estimate. true = data/experiments/cable_pick_live.png;
+    # a string = explicit path; false disables.
+    live = a.get('live_plot', True)
+    live_path = None
+    if live:
+        live_path = live if isinstance(live, str) else os.path.join(
+            cfg.get('data_dir', 'data'), 'experiments', 'cable_pick_live.png')
+        os.makedirs(os.path.dirname(live_path) or '.', exist_ok=True)
 
     # Every run gets its own EXPERIMENT subdirectory: per-attempt observation CSVs, per-attempt
     # convergence plots, and estimates.csv.
@@ -348,6 +454,12 @@ def build_and_run(cfg, robot, camera, args):
     # ---- The assemble / check / retract / estimate loop ----
     est_rows, success = [], False
     try:
+        # Run-level tracks for _plot_run: the cumulative applied correction (row 0 = the
+        # initial in-hand estimate) + per-attempt residuals (aggregated and every guess).
+        T_cum = np.eye(4)
+        trackc = [np.zeros(len(estimator.estimate_dims))]
+        trackr, trackg = [], []
+
         for it in range(1, max_attempts + 1):
             T_tool0_conn = robot.T_tool0_fingertip @ T_ftip_conn
             e_xyz, e_rpy = matrix_to_xyzrpy(T_ftip_conn)
@@ -454,6 +566,12 @@ def build_and_run(cfg, robot, camera, args):
                 log.warning('Estimation skipped (%s) -- retrying with the UNCHANGED estimate.', info)
                 row['estimate'] = f'skipped: {info}'
                 est_rows.append(row)
+                trackc.append(trackc[-1])          # belief unchanged this attempt
+                trackr.append(float('nan'))
+                trackg.append(np.zeros(0))
+                _plot_run(os.path.join(out_dir, 'run_corrections.png'),
+                          estimator.estimate_dims, trackc, trackr, trackg,
+                          f'attempt {it}/{max_attempts} (estimate skipped)', live_path)
                 continue
             log.info('estimated belief correction: %s  (inliers %d/%d, residual %.3f, %d obs)',
                      {k: round(v, 3) for k, v in info['theta_corr'].items()},
@@ -462,6 +580,14 @@ def build_and_run(cfg, robot, camera, args):
             _plot_estimate(os.path.join(out_dir, f'attempt_{it:02d}_estimate.png'),
                            estimator.estimate_dims, info)
             T_ftip_conn = T_ftip_conn @ _corr_to_m(T_corr_mm)     # believed @ corr ~= true
+            T_cum = T_cum @ np.asarray(T_corr_mm, dtype=float)    # cumulative, mm units
+            trackc.append(vec6_from_mats(T_cum)[estimator.idx])
+            trackr.append(float(info['final_residual']))
+            trackg.append(np.asarray(info['res_hist'], dtype=float)[:, -1])
+            _plot_run(os.path.join(out_dir, 'run_corrections.png'),
+                      estimator.estimate_dims, trackc, trackr, trackg,
+                      f'attempt {it}/{max_attempts} | check {lin * 1000:.1f} mm / '
+                      f'{np.degrees(ang):.1f} deg', live_path)
             row.update({f'corr_{k}': v for k, v in info['theta_corr'].items()})
             row.update({'icp_inliers': info['inliers'], 'icp_residual': info['final_residual']})
             est_rows.append(row)

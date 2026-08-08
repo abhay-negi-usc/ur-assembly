@@ -113,6 +113,33 @@ def _axis_values(lo, hi, step):
     return [lo + i * (hi - lo) / n for i in range(n + 1)]
 
 
+def noised(rows, rng, std6, window, decay_traj=0.0, scale=1.0, bias6=None):
+    """Trajectory rows with SMOOTHED zero-mean Gaussian noise, plus an optional deterministic
+    bias, applied in each row's OWN frame (right-multiplied).
+
+    `std6` / `bias6` are per-DOF [x, y, z (m), roll, pitch, yaw (deg)]. std6 is the
+    per-waypoint std AFTER smoothing (the moving average shrinks white noise by ~sqrt(window),
+    so the draw is pre-scaled back up); bias6 is added UN-smoothed (a constant offset, e.g. an
+    alternating initial pitch). `scale` multiplies the WHOLE perturbation (the per-attempt
+    decay hook); `decay_traj` sheds it linearly along the path -- full at the first row,
+    x(1 - decay_traj) at the last -- so the reference converges onto the nominal path as the
+    part approaches the seat."""
+    n = len(rows)
+    std = np.concatenate([np.asarray(std6[:3], dtype=float),
+                          np.radians(np.asarray(std6[3:], dtype=float))])
+    d = rng.normal(size=(n, 6)) * std
+    if window > 1:
+        k = np.ones(window) / window
+        d = np.column_stack([np.convolve(d[:, j], k, mode='same') for j in range(6)])
+        d *= np.sqrt(window)
+    if bias6 is not None:
+        d = d + np.concatenate([np.asarray(bias6[:3], dtype=float),
+                                np.radians(np.asarray(bias6[3:], dtype=float))])
+    ramp = 1.0 - float(decay_traj) * np.linspace(0.0, 1.0, max(n, 2))[:n]
+    d *= float(scale) * ramp[:, None]
+    return [row @ xyzrpy_to_matrix(di[:3], di[3:]) for row, di in zip(rows, d)]
+
+
 def bounds_deltas(lower, upper, simultaneous=False):
     """Deltas at the +/- extremes of the uncertainty box.
 

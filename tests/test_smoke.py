@@ -1462,6 +1462,22 @@ def test_bounds_deltas_hit_extremes():
     assert not traj.bounds_deltas([0.0] * 6, [0.0] * 6, simultaneous=True)
 
 
+def test_trajectory_noise_decay_and_bias():
+    """traj.noised(): with zero std and a pitch bias, the delta is deterministic -- the bias
+    times the per-attempt `scale`, shed linearly along the path by `decay_traj` (full at the
+    first row, x(1 - f) at the last)."""
+    from urlab.skills import trajectory as traj
+    from urlab.transforms import matrix_to_xyzrpy
+
+    rows = [np.eye(4)] * 5
+    out = traj.noised(rows, np.random.default_rng(0), [0.0] * 6, 1,
+                      decay_traj=0.5, scale=0.5, bias6=[0, 0, 0, 0, 4.0, 0])
+    p = [np.degrees(matrix_to_xyzrpy(m)[1][1]) for m in out]
+    assert np.isclose(p[0], 2.0), p          # 4 deg x scale 0.5 at the first waypoint
+    assert np.isclose(p[-1], 1.0), p         # x (1 - 0.5) by the last waypoint
+    assert np.all(np.diff(p) < 0)            # monotone linear shed in between
+
+
 def test_estimator_eval_accumulation_rebase():
     """accumulate_observations re-projects stored rows into the updated belief. A logged pose
     is inverse(T_target) @ tool0 @ T_believed_old with T_believed_new = T_believed_old @ T_corr,

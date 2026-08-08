@@ -61,7 +61,7 @@ computable, so every correction can be scored instead of eyeballed.
 | `eval.save_observations` / `save_plots` | per-attempt raw CSVs / the per-trial error figure (both default on) |
 | `eval.live_plot` | mirror the current trial's figure to ONE fixed path outside the experiment folder (atomic overwrite — keep it open in an image viewer); `true` = `data/experiments/estimator_eval_live.png`, a string = explicit path |
 | `eval.accumulate_observations` | (default **on**) each estimate uses ALL of the trial's observations so far, prior attempts re-projected into the current belief (`rel_new = rel_old @ T_corr`, wrench re-based likewise); recency weighting decays the older attempts. `false` = current attempt only |
-| `eval.trajectory_noise` | optional smoothed per-waypoint Gaussian noise in the connector's own frame, redrawn per attempt; its own random stream, so the injected-error draws are unchanged |
+| `eval.trajectory_noise` | optional smoothed per-waypoint Gaussian noise in the connector's own frame, redrawn per attempt; `std` sets the **per-dimension** std `[x,y,z (m), r,p,y (deg)]` (zero = DOF untouched; legacy scalar keys broadcast); its own random stream, so the injected-error draws are unchanged |
 | `eval.final_insertion` | optional extra guarded assemble per trial from the final corrected belief with a `stiffness` override — seat-check only, logged as `attempt=final_insertion`, excluded from `summary.csv` |
 | `estimation.*` | the estimator under test — same schema as `cable_pick_estimate_assemble` |
 | `estimation.aggregator` | `ransac` (residual-gated consensus vote, default) or `softmax` (residual-softmax weighted mean over all starts, `softmax_temp` relative to the best residual — the offline ablation's winner) |
@@ -83,7 +83,10 @@ computable, so every correction can be scored instead of eyeballed.
   **after** that attempt's update: **every guess as a faint point** (the error its own
   correction would have left — computable because the truth is known) with the aggregated
   pick bold and labelled by attempt — the residual is only trustworthy if that cloud trends
-  up-right.
+  up-right. Third column (2+ estimated dims): **phase plots**, one per pairwise dim
+  combination — the trial's error trajectory in that error plane (square = injected,
+  numbered dots = per attempt, star = latest), axes symmetric so zero error sits at the
+  centre crosshair.
 - `estimator_eval_live.png` (outside the experiment folder, with `eval.live_plot`) — the current
   trial's figure, atomically overwritten after every attempt.
 - `trial_TTT_final_insertion_observations.csv` (with `eval.final_insertion`) — the seat-check

@@ -105,8 +105,10 @@ eval:
   # toggling it does not change the injected-error draws (noised/nominal runs stay pairable).
   trajectory_noise:
     enabled: false
-    translation_m: 0.0005        # per-waypoint std, metres (after smoothing)
-    rotation_deg: 0.5            # per-waypoint std, degrees (after smoothing)
+    # PER-DIMENSION per-waypoint std [x, y, z (m), roll, pitch, yaw (deg)], applied after
+    # smoothing; a zero entry leaves that DOF unperturbed. (Legacy scalar keys translation_m /
+    # rotation_deg still work when 'std' is absent.)
+    std: [0.0005, 0.0005, 0.0005, 0.5, 0.5, 0.5]
     smooth_window: 25            # moving-average window (waypoints) -- keeps the reference smooth
 
   # OPTIONAL final insertion: after a trial's estimation attempts, ONE more guarded assemble
@@ -124,8 +126,8 @@ eval:
 # ===================================================================================================
 estimation:
   manifold_csv: ./configs/data/banana_manifold_20260807_clean.csv
-  scaling_constant_deg_to_mm: 1.0
-  scaling_constant_unit_force_to_mm: 1.0
+  scaling_constant_deg_to_mm: 0.2
+  scaling_constant_unit_force_to_mm: 3.0
   scaling_constant_unit_torque_to_mm: 1.0
   min_force_n: 3.0
   min_observations: 20

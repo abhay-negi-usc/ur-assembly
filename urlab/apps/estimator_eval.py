@@ -43,6 +43,7 @@ are mm/deg -- conversions happen only at the observation/logging boundary in thi
 """
 
 import csv as _csv
+import itertools
 import os
 import time
 from datetime import datetime
@@ -102,14 +103,16 @@ def _rebase_rows(rows12, T_corr_mm):
     return np.hstack([pose_new, f_new, tau_new])
 
 
-def _noised_rows(rows, rng, t_m, r_deg, window):
+def _noised_rows(rows, rng, std6, window):
     """Trajectory rows with SMOOTHED zero-mean Gaussian noise applied in each row's OWN frame
-    (right-multiplied -- the same frame the injected belief error lives in). The moving average
-    keeps the reference servo-smooth but shrinks white noise by ~sqrt(window), so the draw is
-    pre-scaled back up: translation_m / rotation_deg are the PER-WAYPOINT std as configured."""
-    d = rng.normal(size=(len(rows), 6))
-    d[:, :3] *= t_m
-    d[:, 3:] *= np.radians(r_deg)
+    (right-multiplied -- the same frame the injected belief error lives in). `std6` is the
+    PER-DIMENSION per-waypoint std [x, y, z (m), roll, pitch, yaw (deg)]; a zero entry leaves
+    that DOF untouched. The moving average keeps the reference servo-smooth but shrinks white
+    noise by ~sqrt(window), so the draw is pre-scaled back up: the configured stds hold AFTER
+    smoothing."""
+    scale = np.concatenate([np.asarray(std6[:3], dtype=float),
+                            np.radians(np.asarray(std6[3:], dtype=float))])
+    d = rng.normal(size=(len(rows), 6)) * scale
     if window > 1:
         k = np.ones(window) / window
         d = np.column_stack([np.convolve(d[:, j], k, mode='same') for j in range(6)])
@@ -160,7 +163,11 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None
     residual vs the L2 error LEFT AFTER applying that attempt's correction -- EVERY guess as a
     faint point (l2_all: the error each guess's own correction WOULD have left, computable here
     because the truth is known) with the aggregated pick bold and labelled by attempt. The
-    residual is only trustworthy if that cloud trends up-right. If live_path is
+    residual is only trustworthy if that cloud trends up-right. THIRD column (2+ estimated
+    dims): PHASE plots, one per pairwise dim combination -- the trial's error TRAJECTORY in
+    that error plane (square = injected, numbered dots = after each attempt, star = latest),
+    axes symmetric so the ORIGIN (zero error in both dims) sits at the centre; convergence
+    reads as the path spiralling into the crosshair. If live_path is
     given, the same figure is ALSO written there ATOMICALLY (temp file + os.replace), so one
     fixed file outside the experiment folder can stay open in an image viewer. BEST-EFFORT: a
     plotting problem (e.g. matplotlib missing on the robot box) is logged and skipped, never
@@ -178,8 +185,10 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None
         res = np.maximum(np.asarray(residuals, dtype=float), 1e-6)   # nan stays nan (gaps)
 
         n_left = len(dims) + 1
-        fig = plt.figure(figsize=(11.0, max(2.1 * n_left, 6.5)))
-        gs = fig.add_gridspec(2 * n_left, 2, width_ratios=[1.25, 1.0])
+        pairs = list(itertools.combinations(range(len(dims)), 2))
+        ncols = 3 if pairs else 2
+        fig = plt.figure(figsize=(11.0 + (4.2 if pairs else 0.0), max(2.1 * n_left, 6.5)))
+        gs = fig.add_gridspec(2 * n_left, ncols, width_ratios=[1.25, 1.0, 0.95][:ncols])
         axes = []
         for i in range(n_left):
             axes.append(fig.add_subplot(gs[2 * i:2 * i + 2, 0],
@@ -242,6 +251,35 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None
         ax_s.set_ylim(bottom=0.0)
         ax_s.set_xlabel('ICP residual [mm-eq]')
         ax_s.set_ylabel('L2 error after update [mm-eq]')
+
+        # PHASE plots: the error trajectory per pairwise dim combination, origin = zero error.
+        bounds = np.linspace(0, 2 * n_left, len(pairs) + 1).astype(int) if pairs else []
+        for pi, (a, b) in enumerate(pairs):
+            axp = fig.add_subplot(gs[bounds[pi]:bounds[pi + 1], 2])
+            ja, jb = _ERR.index(dims[a]), _ERR.index(dims[b])
+            ea, eb = err6[:, ja], err6[:, jb]
+            axp.axhline(0.0, ls=':', lw=0.8, color='#aaaaaa', zorder=1)
+            axp.axvline(0.0, ls=':', lw=0.8, color='#aaaaaa', zorder=1)
+            axp.plot(ea, eb, '-', color='#4C72B0', lw=1.0, zorder=2)
+            axp.scatter(ea[1:], eb[1:], s=20, color='#4C72B0', zorder=3)
+            axp.scatter([ea[0]], [eb[0]], s=40, marker='s', color='#DD8452', zorder=4,
+                        label='injected')
+            axp.scatter([ea[-1]], [eb[-1]], s=80, marker='*', color='#55A868', zorder=5,
+                        label='latest')
+            for k in range(1, len(ea)):
+                axp.annotate(str(k), (ea[k], eb[k]), textcoords='offset points',
+                             xytext=(4, 3), fontsize=7, color='#444444')
+            la = max(float(np.abs(ea).max()), 1e-3) * 1.15
+            lb = max(float(np.abs(eb).max()), 1e-3) * 1.15
+            axp.set_xlim(-la, la)                  # symmetric: the origin is the centre
+            axp.set_ylim(-lb, lb)
+            axp.set_xlabel(f'{dims[a]} error '
+                           f'[{"deg" if dims[a].endswith("_deg") else "mm"}]', fontsize=8)
+            axp.set_ylabel(f'{dims[b]} error '
+                           f'[{"deg" if dims[b].endswith("_deg") else "mm"}]', fontsize=8)
+            axp.tick_params(labelsize=7)
+            if pi == 0:
+                axp.legend(fontsize=7, loc='best')
 
         fig.suptitle(f'trial {trial}: ground-truth belief error per attempt', y=0.995)
         if status:                                 # run progress: trials done + success rate
@@ -394,13 +432,22 @@ def build_and_run(cfg, robot, camera, args):
     # nominal runs stay pairable trial-for-trial.
     tn = ev.get('trajectory_noise', {}) or {}
     tn_on = bool(tn.get('enabled', False))
-    tn_t = float(tn.get('translation_m', 0.0005))
-    tn_r = float(tn.get('rotation_deg', 0.5))
+    # Per-DIMENSION std [x, y, z (m), roll, pitch, yaw (deg)]; the legacy scalar keys
+    # (translation_m / rotation_deg) broadcast to their three axes when 'std' is absent.
+    tn_std = tn.get('std')
+    if tn_std is None:
+        tn_std = [float(tn.get('translation_m', 0.0005))] * 3 \
+            + [float(tn.get('rotation_deg', 0.5))] * 3
+    tn_std = [float(v) for v in tn_std]
+    if len(tn_std) != 6:
+        log.error('eval.trajectory_noise.std must have 6 entries [x,y,z (m), r,p,y (deg)].')
+        return False
     tn_w = max(1, int(tn.get('smooth_window', 25)))
     noise_rng = np.random.default_rng(seed + 1 if seed > 0 else None)
     if tn_on:
-        log.info('Trajectory noise ON: std %.2f mm / %.2f deg per waypoint, smooth window %d.',
-                 tn_t * 1000.0, tn_r, tn_w)
+        log.info('Trajectory noise ON: std [%.2f, %.2f, %.2f] mm / [%.2f, %.2f, %.2f] deg '
+                 'per waypoint, smooth window %d.', tn_std[0] * 1000.0, tn_std[1] * 1000.0,
+                 tn_std[2] * 1000.0, tn_std[3], tn_std[4], tn_std[5], tn_w)
 
     # ACCUMULATE observations across a trial's attempts (default ON): the part is FIXTURED, so
     # the rigid-belief-error assumption holds for the whole trial, and earlier attempts sample
@@ -540,7 +587,7 @@ def build_and_run(cfg, robot, camera, args):
             abandoned = False
             for attempt in range(1, max_attempts + 1):
                 errb, errb_pos, errb_rot = _gt_error(T_true, T_believed)
-                rows_t = _noised_rows(dense, noise_rng, tn_t, tn_r, tn_w) if tn_on else dense
+                rows_t = _noised_rows(dense, noise_rng, tn_std, tn_w) if tn_on else dense
                 refs = [T_base_tconn @ row @ inverse(T_believed) for row in rows_t]
 
                 # To the attempt's start -- stiff, free space (the retract/stand-off cleared it).

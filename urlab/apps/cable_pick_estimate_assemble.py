@@ -209,6 +209,31 @@ def build_and_run(cfg, robot, camera, args):
     tol_rot_rad = np.radians(float(tol.get('rot_deg', 3.0)))
     max_attempts = int(a.get('max_attempts', 5))
 
+    # OPTIONAL trajectory noising (same semantics as estimator_eval's eval.trajectory_noise):
+    # smoothed per-waypoint Gaussian offsets in the connector's OWN frame, redrawn per attempt,
+    # per-DOF std [x,y,z (m), r,p,y (deg)]; noise_decay_attempt shrinks the whole perturbation
+    # by (1-f)^(attempt-1); noise_decay_traj sheds it linearly along the path (converge onto
+    # the nominal reference near the seat); alternate_pitch_deg adds an initial pitch offset
+    # whose SIGN alternates per attempt (probe the z-pitch valley from both sides).
+    tn = a.get('trajectory_noise', {}) or {}
+    tn_on = bool(tn.get('enabled', False))
+    tn_std = tn.get('std')
+    if tn_std is None:
+        tn_std = [float(tn.get('translation_m', 0.0005))] * 3 \
+            + [float(tn.get('rotation_deg', 0.5))] * 3
+    tn_std = [float(v) for v in tn_std]
+    if len(tn_std) != 6:
+        log.error('assembly.trajectory_noise.std must have 6 entries [x,y,z (m), r,p,y (deg)].')
+        return False
+    tn_w = max(1, int(tn.get('smooth_window', 25)))
+    tn_da = float(tn.get('noise_decay_attempt', 0.0))
+    tn_dt = float(tn.get('noise_decay_traj', 0.0))
+    tn_alt = float(tn.get('alternate_pitch_deg', 0.0))
+    noise_rng = np.random.default_rng()
+    if tn_on:
+        log.info('Trajectory noise ON: std %s, smooth %d, decay/attempt %.2f, decay/traj %.2f,'
+                 ' alternate pitch %.2f deg.', tn_std, tn_w, tn_da, tn_dt, tn_alt)
+
     # Every run gets its own EXPERIMENT subdirectory: per-attempt observation CSVs, per-attempt
     # convergence plots, and estimates.csv.
     out_dir = os.path.join(cfg.get('data_dir', 'data'), 'experiments',
@@ -328,7 +353,14 @@ def build_and_run(cfg, robot, camera, args):
             e_xyz, e_rpy = matrix_to_xyzrpy(T_ftip_conn)
             log.info('--- attempt %d/%d --- in-hand estimate xyz=%s mm rpy=%s deg', it, max_attempts,
                      np.round(e_xyz * 1000, 2).tolist(), np.round(np.degrees(e_rpy), 2).tolist())
-            refs = [tool0_ref(row, T_tool0_conn) for row in dense]
+            if tn_on:
+                bias = ([0.0, 0.0, 0.0, 0.0, tn_alt * (1.0 if it % 2 else -1.0), 0.0]
+                        if tn_alt else None)
+                rows_t = traj.noised(dense, noise_rng, tn_std, tn_w, tn_dt,
+                                     (1.0 - tn_da) ** (it - 1), bias)
+            else:
+                rows_t = dense
+            refs = [tool0_ref(row, T_tool0_conn) for row in rows_t]
 
             # Realign with the START of the (re-estimated) trajectory -- stiff, free space, guarded.
             phase('standoff')

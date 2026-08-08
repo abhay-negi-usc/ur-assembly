@@ -259,6 +259,16 @@ assembly:
   # The loop: assemble -> check -> retract -> estimate -> realign, at most this many attempts.
   max_attempts: 10
 
+  # OPTIONAL trajectory noising (same semantics as estimator_eval's eval.trajectory_noise):
+  # smoothed per-waypoint Gaussian offsets in the connector's OWN frame, redrawn per attempt.
+  trajectory_noise:
+    enabled: false
+    std: [0.0, 0.0, 0.0005, 0.0, 0.5, 0.0]   # per-DOF std [x,y,z (m), r,p,y (deg)], 0 = untouched
+    smooth_window: 25            # moving-average window (waypoints) -- keeps the reference smooth
+    noise_decay_attempt: 0.0     # shrink the WHOLE perturbation (1 - f)^(attempt-1)
+    noise_decay_traj: 0.0        # shed linearly along the path: full -> x(1 - f) at the last row
+    alternate_pitch_deg: 0.0     # initial pitch offset, sign ALTERNATING per attempt (+, -, ...)
+
   # After each attempt the believed-pose-vs-target numbers are LOGGED for the record, but SUCCESS
   # IS THE OPERATOR'S CALL at the prompt (y = done / Enter = retry / q = abort) -- the operator can
   # see the physical mate; the numbers only see the belief. These tolerances are the reference
@@ -301,7 +311,10 @@ assembly:
 # ===================================================================================================
 estimation:
   # The contact manifold for THIS connector type (built by analysis/contact_manifold.py).
-  manifold_csv: ./configs/data/banana_manifold.csv
+  # SYNCED 2026-08-07 with configs/estimator_eval.yaml (the offline-tuned configuration the
+  # eval app validated): single-calibration clean map, scalings 0.2/3/1, min_force 3 N,
+  # [z, pitch] correction dims, widened starts, step gain 1.0, softmax aggregation.
+  manifold_csv: ./configs/data/banana_manifold_20260807_clean.csv
 
   # Optional override of the initial in-hand estimate (fingertip -> connector, m / rad).
   # Default (absent): the grasp geometry, <cable>.junction_in_fingertip from cables.yaml.
@@ -311,13 +324,13 @@ estimation:
 
   # The common mm-equivalent 12-D space (weights of the nearest-neighbour match).
   scaling_constant_deg_to_mm: 0.2
-  scaling_constant_unit_force_to_mm: 0.0
+  scaling_constant_unit_force_to_mm: 3.0
   scaling_constant_unit_torque_to_mm: 1.0
-  min_force_n: 0.0               # observations/manifold rows below this |f| carry no contact info
+  min_force_n: 3.0               # observations/manifold rows below this |f| carry no contact info
   min_observations: 20           # skip estimation (keep the old belief) with fewer contact samples
 
   # WHICH belief dims to correct (the dims the grasp can be wrong in).
-  estimate_dims: [x_mm, z_mm, pitch_deg]
+  estimate_dims: [z_mm, pitch_deg]
 
   # ICP / RANSAC (same meanings as analysis/manifold_icp_validation.py).
   icp_iterations: 50
@@ -325,11 +338,11 @@ estimation:
   init_guess_range:
     x_mm: 0.0
     y_mm: 0.0
-    z_mm: 0.0
+    z_mm: 3.0
     roll_deg: 0.0
-    pitch_deg: 0.0
+    pitch_deg: 10.0
     yaw_deg: 0.0
-  step_gain: 1.5
+  step_gain: 1.0
   ransac_iters: 200
   ransac_tol: 1.0
   # AGGREGATOR over the multi-start finals: 'ransac' = residual-gated consensus vote (the
@@ -337,7 +350,7 @@ estimation:
   # (softmax_temp x r_min)) -- the 2026-08 offline ablation's winner (residual carries more
   # information than cluster mass; ignores residual_gate / ransac_*). softmax_temp is RELATIVE
   # to the best residual: 0.15 = a final 15% worse than the best carries ~0.37x its weight.
-  aggregator: ransac
+  aggregator: softmax
   softmax_temp: 0.15
   residual_gate: None             # drop guesses whose final residual > gate x best before voting;
                                   # None/null disables the gate (like manifold_icp_validation)
@@ -345,7 +358,9 @@ estimation:
   # between the finger pads, breaking the rigid-belief-error assumption), so newer observations
   # describe the CURRENT pose better. Half-life as a fraction of the attempt's observation
   # window (0.5 = moderate: the oldest sample carries 0.25x the newest's weight). None disables.
-  recency_half_life_frac: 0.8
+  # 0.0 synced from estimator_eval's tuning (fixtured part, no slip); if real grasps show
+  # in-hand drift, 0.8 is the slip guard this knob was built for.
+  recency_half_life_frac: 0.0
   # INTERPOLATED correspondence (OPTIONAL, off by default): the manifold is a FINITE sample of a
   # continuous surface, so exact-NN matching can LATCH onto the single closest sample and quantise
   # the correction by the local sample spacing. With interp_neighbors > 1 the match target blends

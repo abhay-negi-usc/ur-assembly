@@ -57,8 +57,7 @@ from ..robot import AdmittanceController, ForceGuard
 from ..skills import trajectory as traj
 from ..skills.manifold import (FORCE_COLS, ManifoldEstimator, POSE_COLS, TORQUE_COLS,
                                mats_from_vec6, vec6_from_mats)
-from ..transforms import (inverse, matrix_to_xyzrpy, pose_error, translation_matrix,
-                          xyzrpy_to_matrix)
+from ..transforms import inverse, matrix_to_xyzrpy, pose_error, translation_matrix
 from ._runner import run_app
 from .uncertain_sampling import _clock, _fmt_dur, _retract_ref
 
@@ -101,23 +100,6 @@ def _rebase_rows(rows12, T_corr_mm):
     f_new = rows12[:, 6:9] @ R.T
     tau_new = rows12[:, 9:12] @ R.T + np.cross(p, f_new)
     return np.hstack([pose_new, f_new, tau_new])
-
-
-def _noised_rows(rows, rng, std6, window):
-    """Trajectory rows with SMOOTHED zero-mean Gaussian noise applied in each row's OWN frame
-    (right-multiplied -- the same frame the injected belief error lives in). `std6` is the
-    PER-DIMENSION per-waypoint std [x, y, z (m), roll, pitch, yaw (deg)]; a zero entry leaves
-    that DOF untouched. The moving average keeps the reference servo-smooth but shrinks white
-    noise by ~sqrt(window), so the draw is pre-scaled back up: the configured stds hold AFTER
-    smoothing."""
-    scale = np.concatenate([np.asarray(std6[:3], dtype=float),
-                            np.radians(np.asarray(std6[3:], dtype=float))])
-    d = rng.normal(size=(len(rows), 6)) * scale
-    if window > 1:
-        k = np.ones(window) / window
-        d = np.column_stack([np.convolve(d[:, j], k, mode='same') for j in range(6)])
-        d *= np.sqrt(window)
-    return [row @ xyzrpy_to_matrix(di[:3], di[3:]) for row, di in zip(rows, d)]
 
 
 def _observe(robot, T_tool0_conn, T_base_tconn):
@@ -443,6 +425,13 @@ def build_and_run(cfg, robot, camera, args):
         log.error('eval.trajectory_noise.std must have 6 entries [x,y,z (m), r,p,y (deg)].')
         return False
     tn_w = max(1, int(tn.get('smooth_window', 25)))
+    # DECAYS + alternation: shrink the whole perturbation by noise_decay_attempt each attempt
+    # ((1-f)^(k-1)), shed it linearly along the path by noise_decay_traj (1 -> 1-f at the last
+    # waypoint), and optionally add a deterministic initial pitch offset whose SIGN alternates
+    # per attempt (probe the valley from both sides).
+    tn_da = float(tn.get('noise_decay_attempt', 0.0))
+    tn_dt = float(tn.get('noise_decay_traj', 0.0))
+    tn_alt = float(tn.get('alternate_pitch_deg', 0.0))
     noise_rng = np.random.default_rng(seed + 1 if seed > 0 else None)
     if tn_on:
         log.info('Trajectory noise ON: std [%.2f, %.2f, %.2f] mm / [%.2f, %.2f, %.2f] deg '
@@ -587,7 +576,14 @@ def build_and_run(cfg, robot, camera, args):
             abandoned = False
             for attempt in range(1, max_attempts + 1):
                 errb, errb_pos, errb_rot = _gt_error(T_true, T_believed)
-                rows_t = _noised_rows(dense, noise_rng, tn_std, tn_w) if tn_on else dense
+                if tn_on:
+                    bias = ([0.0, 0.0, 0.0, 0.0,
+                             tn_alt * (1.0 if attempt % 2 else -1.0), 0.0]
+                            if tn_alt else None)
+                    rows_t = traj.noised(dense, noise_rng, tn_std, tn_w, tn_dt,
+                                         (1.0 - tn_da) ** (attempt - 1), bias)
+                else:
+                    rows_t = dense
                 refs = [T_base_tconn @ row @ inverse(T_believed) for row in rows_t]
 
                 # To the attempt's start -- stiff, free space (the retract/stand-off cleared it).

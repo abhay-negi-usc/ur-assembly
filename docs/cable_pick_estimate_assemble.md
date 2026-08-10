@@ -49,7 +49,7 @@ it — multi-start ICP across the 12-D pose+wrench space, correction restricted 
 
 ## Prerequisites
 1. A **contact manifold** for this connector type (`analysis/contact_manifold.py` over
-   uncertain_sampling runs) at `estimation.manifold_csv`.
+   uncertain_sampling runs and/or estimator_eval experiment folders) at `estimation.manifold_csv`.
 2. The **target connector pose** recorded in the shared frames catalogue: `assembly.target_frame`
    names a `configs/frames.yaml` frame whose `targets:` entry is the mate — the same record
    uncertain_sampling and estimator_eval assemble to (paste `base_link <- <frame>` off the

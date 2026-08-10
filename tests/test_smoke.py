@@ -677,7 +677,7 @@ def test_contact_manifold_extracts_and_concatenates():
     import tempfile
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from analysis.contact_manifold import MANIFOLD_COLS, build, expand_inputs, infer_cable
+    from analysis.contact_manifold import MANIFOLD_COLS, build, expand_inputs
 
     tmp = tempfile.mkdtemp()
     try:
@@ -690,7 +690,6 @@ def test_contact_manifold_extracts_and_concatenates():
 
         paths = expand_inputs([d])
         assert len(paths) == 2, paths
-        assert infer_cable(paths)[0] == 'banana'
 
         out = os.path.join(tmp, 'banana_connector_contact_manifold.csv')
         assert build(paths, out) == 5, 'all rows from both runs'
@@ -730,6 +729,81 @@ def test_contact_manifold_never_ingests_its_own_output():
         assert out not in expand_inputs([d]), 'sweep must exclude existing manifolds'
         # Naming one explicitly is still allowed (deliberately merging manifolds).
         assert expand_inputs([out]) == [out]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_contact_manifold_ingests_estimator_eval_runs():
+    """estimator_eval observation files are logged in the BELIEVED frame; the builder must rebase
+    them into the TRUE frame via the run's own trials.csv (err_before_* = the belief error E during
+    that attempt) and emit the full 16-column manifold schema (quaternion included). trials.csv /
+    summary.csv are the rebase's metadata and must never be ingested as samples."""
+    import csv as _csv
+    import shutil
+    import tempfile
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from analysis.contact_manifold import (ERR_BEFORE_COLS, EVAL_OBS_COLS, MANIFOLD_COLS,
+                                           _rebase_to_truth, build, expand_inputs)
+
+    tmp = tempfile.mkdtemp()
+    try:
+        d = os.path.join(tmp, 'estimator_eval_20260810_000000')
+        os.makedirs(d)
+        # Attempt 1 ran with a +2 mm z belief error; the final insertion with the belief perfect.
+        with open(os.path.join(d, 'trials.csv'), 'w', newline='') as fh:
+            w = _csv.writer(fh)
+            w.writerow(['trial', 'attempt'] + ERR_BEFORE_COLS)
+            w.writerow([1, 1, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0])
+            w.writerow([1, 'final_insertion', 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        with open(os.path.join(d, 'trial_001_attempt_01_observations.csv'), 'w',
+                  newline='') as fh:
+            w = _csv.writer(fh)
+            w.writerow(EVAL_OBS_COLS)
+            w.writerow([0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            w.writerow([0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0])  # free space
+        with open(os.path.join(d, 'trial_001_final_insertion_observations.csv'), 'w',
+                  newline='') as fh:
+            w = _csv.writer(fh)
+            w.writerow(EVAL_OBS_COLS)
+            w.writerow([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        with open(os.path.join(d, 'summary.csv'), 'w', newline='') as fh:
+            fh.write('attempt,n\nfinal,1\n')
+
+        paths = expand_inputs([d])
+        assert all(os.path.basename(p).endswith('_observations.csv') for p in paths), \
+            'trials.csv / summary.csv must be swept out as metadata'
+        out = os.path.join(tmp, 'eval_contact_manifold.csv')
+        assert build(paths, out) == 3
+        with open(out, newline='') as fh:
+            recs = list(_csv.DictReader(fh))
+        assert list(recs[0]) == MANIFOLD_COLS, 'eval rows must land in the full manifold schema'
+        # +2 mm z belief error: rel_true = rel_logged @ inverse(E) -> z = 5 - 2 = 3 mm. The wrench
+        # moves to the true connector frame: rotation is identity, so f is unchanged and tau picks
+        # up the metre lever arm, p x f = [0, 0, 0.002] x [10, 0, 0] = [0, 0.02, 0] Nm.
+        r = recs[0]
+        assert abs(float(r['connector_target_z_mm']) - 3.0) < 1e-6
+        assert abs(float(r['connector_target_qw']) - 1.0) < 1e-9, 'identity rotation -> qw = 1'
+        assert abs(float(r['wrench_connector_fx']) - 10.0) < 1e-6
+        assert abs(float(r['wrench_connector_ty']) - 0.02) < 1e-6
+        # The error-free final insertion passes through untouched.
+        assert abs(float(recs[2]['connector_target_x_mm']) - 1.0) < 1e-6
+        # The force filter applies to eval rows too (drops the 0.1 N free-space row).
+        assert build(paths, out, min_force=1.0) == 2
+
+        # Rebase self-consistency with a rotation-ful error: rebasing by E then by inverse(E)
+        # must return the original rows exactly -- pins the pose AND wrench frame math.
+        from scipy.spatial.transform import Rotation as _R
+        rows = np.random.default_rng(3).normal(size=(5, 12)) * [5, 5, 5, 8, 8, 8, 10, 10, 10,
+                                                                1, 1, 1]
+        e6 = [1.0, -2.0, 3.0, 4.0, -5.0, 6.0]
+        Rm = _R.from_euler('xyz', e6[3:], degrees=True).as_matrix()
+        e6_inv = (list(-Rm.T @ np.asarray(e6[:3]))
+                  + list(_R.from_matrix(Rm.T).as_euler('xyz', degrees=True)))
+        fwd = _rebase_to_truth(rows, e6)           # (N, 16): [xyz | quat | yaw,pitch,roll | f,tau]
+        as12 = lambda a: np.hstack([a[:, :3], a[:, [9, 8, 7]], a[:, 10:16]])   # noqa: E731
+        back = _rebase_to_truth(as12(fwd), e6_inv)
+        assert np.allclose(as12(back), rows, atol=1e-9), 'rebase(E) then rebase(inv(E)) != id'
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

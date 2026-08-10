@@ -188,28 +188,46 @@ from everything else, so a seeded run is reproducible.
 ## Building the contact manifold
 `analysis/contact_manifold.py` concatenates a set of runs into one CSV of just the **frame-invariant**
 pair — `connector_target_*` (the misalignment) and `wrench_connector_*` (the response along the
-part's own axes):
+part's own axes). Inputs are files, directories, or globs; the output path **and filename are
+yours** via the required `--out`:
 
 ```bash
-python analysis/contact_manifold.py data/uncertain_assembly_sampling/banana
-#  -> banana_connector_contact_manifold.csv
+# every sampling run for the banana connector
+python analysis/contact_manifold.py data/uncertain_assembly_sampling/banana \
+    --out data/uncertain_assembly_sampling/banana/banana_connector_contact_manifold.csv
+
+# sampling runs + estimator_eval campaigns, contact samples only (the estimator's own threshold)
+python analysis/contact_manifold.py data/uncertain_assembly_sampling/banana \
+    "data/experiments/estimator_eval_2026*" --min-force 3.0 \
+    --out configs/data/banana_manifold_augmented.csv
 ```
+
+Two source formats are understood, freely mixed in one build:
+
+- **uncertain_sampling runs** — the manifold columns copy out directly: the sampler logs the
+  *true* relative pose (the part is fixtured, the belief is never wrong).
+- **estimator_eval experiment folders** (`data/experiments/estimator_eval_*/`) — each
+  `trial_TTT_attempt_AA_observations.csv` is logged in the **believed** frame, wrong by exactly
+  that attempt's belief error, which is known because the part is fixtured. The builder **rebases**
+  every file into the true frame using the `err_before_*` columns of the run's own `trials.csv`
+  (`rel_true = rel_logged @ inverse(E)`; the wrench changes frames the same way) — the recipe that
+  built the augmented manifold. `trials.csv`/`summary.csv` are read as metadata, never as samples;
+  a run folder missing its `trials.csv` is skipped (believed-frame rows can't be rebased).
 
 Because both column groups are relative to the connector and its target, runs recorded on different
 days at different socket positions concatenate directly. The cell-specific `tool0_base_*` and
-`wrench_base_*` columns are deliberately dropped. The cable name is taken from the `<cable>/`
-directory the sampler writes into (override with `--cable`); mixing cables is an error rather than a
-silent merge.
+`wrench_base_*` columns are deliberately dropped.
 
 | flag | effect |
 |---|---|
+| `--out PATH` | **required** — the output CSV, path and filename included |
 | `--min-force N` | keep only samples with `|f| >= N` in the connector frame — drops the free-space approach, leaving actual contact |
-| `--with-source` | prepend `source_file` and `trial` for provenance |
-| `--out-dir` / `--out` | where to write (default: beside the inputs) |
+| `--with-source` | prepend `source_file` and `trial` for provenance (eval rows: `trial/attempt`) |
 
 Rebuilds are **idempotent** — an existing `*_contact_manifold.csv` is skipped when sweeping a
-directory, so re-running can't read its own output back in and double every sample. Logs in an older
-column format are skipped with a warning rather than failing the batch.
+directory, so re-running can't read its own output back in and double every sample (keep that
+suffix on `--out` when the output lands beside its inputs). Logs in an older column format are
+skipped with a warning rather than failing the batch.
 
 ## Validating the manifold — ICP offset recovery
 `analysis/manifold_icp_validation.py` checks whether the manifold carries enough information to

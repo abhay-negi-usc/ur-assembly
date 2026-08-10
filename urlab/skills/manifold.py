@@ -1,6 +1,7 @@
 """Contact-manifold pose estimation -- localise a held part from touch, against recorded data.
 
-The CONTACT MANIFOLD (built by analysis/contact_manifold.py from uncertain_sampling runs) pairs
+The CONTACT MANIFOLD (built by analysis/contact_manifold.py from uncertain_sampling and/or
+truth-rebased estimator_eval runs) pairs
 "connector pose w.r.t. its target" with "wrench in the connector frame" over many recorded
 insertions. If the robot's BELIEF of where the held connector sits is wrong, the observations it
 collects while inserting land OFF the manifold by exactly that (rigid) belief error -- so aligning

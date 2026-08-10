@@ -1680,6 +1680,21 @@ def test_check_app_config_is_wired():
     from urlab.apps import cable_pick_estimate_assemble_check as app
     assert callable(app.build_and_run) and callable(app.main)
 
+    # estimator_eval carries the SAME estimator + check stack: the trust scores must have
+    # trials.csv columns (next to the ground truth -- that is where they get validated),
+    # and its estimation block must name the augmented map + rawcap + a check block.
+    from urlab.apps.estimator_eval import _fieldnames
+    f = _fieldnames(['z_mm', 'pitch_deg'])
+    for col in ('trust_rankavg2', 'trust_cauchy', 'trust_u_post', 'trust_u_split'):
+        assert col in f, col
+    with open(os.path.join(ROOT, 'configs', 'estimator_eval.yaml')) as fh:
+        ecfg = yaml.safe_load(fh)
+    eest = ecfg['estimation']
+    assert str(eest['manifold_csv']).endswith('banana_manifold_augmented.csv')
+    assert eest.get('wrench_representation') == 'rawcap'
+    assert str(eest['check']['method']) in ('cauchy', 'rankavg2')
+    assert 'on_flag' not in eest['check']
+
 
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]

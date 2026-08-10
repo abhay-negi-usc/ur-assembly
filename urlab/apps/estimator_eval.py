@@ -55,8 +55,9 @@ from .. import log as urlog
 from .. import tool_frames
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import trajectory as traj
-from ..skills.manifold import (FORCE_COLS, ManifoldEstimator, POSE_COLS, TORQUE_COLS,
+from ..skills.manifold import (FORCE_COLS, POSE_COLS, TORQUE_COLS,
                                mats_from_vec6, vec6_from_mats)
+from ..skills.solution_check import CheckedManifoldEstimator
 from ..transforms import inverse, matrix_to_xyzrpy, pose_error, translation_matrix
 from ._runner import run_app
 from .uncertain_sampling import _clock, _fmt_dur, _retract_ref
@@ -119,6 +120,12 @@ def _save_observations(path, rows):
         w.writerows(rows)
 
 
+# The solution check's signal names (urlab/skills/solution_check.py) -- fixed here so the
+# trials.csv schema is stable whether or not a given signal is available on an attempt
+# (u_cfg needs check.config_disagreement; absent signals write as '').
+_TRUST_SIGNALS = ('u_post', 'u_spread', 'u_split', 'u_res', 'u_depth', 'u_cfg')
+
+
 def _fieldnames(dims):
     """trials.csv schema -- fixed up-front so the file is written incrementally, row by row."""
     return (['trial', 'attempt', 'n_observations', 'seated', 'check_pos_mm', 'check_rot_deg']
@@ -126,6 +133,7 @@ def _fieldnames(dims):
             + [f'inj_{s}' for s in _ERR]
             + [f'err_before_{s}' for s in _ERR] + ['err_before_pos_mm', 'err_before_rot_deg']
             + [f'corr_{d}' for d in dims] + ['icp_inliers', 'icp_residual', 'estimate']
+            + ['trust_rankavg2', 'trust_cauchy'] + [f'trust_{s}' for s in _TRUST_SIGNALS]
             + [f'err_after_{s}' for s in _ERR] + ['err_after_pos_mm', 'err_after_rot_deg']
             + ['converged'])
 
@@ -317,7 +325,11 @@ def build_and_run(cfg, robot, camera, args):
     ev = cfg.section('eval')
 
     # Build the ESTIMATOR first -- a missing/stale manifold CSV must fail before the robot moves.
-    estimator = ManifoldEstimator(cfg.section('estimation'))
+    # The CHECKED estimator (estimation.check) is OBSERVATIONAL: it computes the rankavg2 +
+    # Cauchy trust scores after every estimate, which land in trials.csv (trust_* columns) --
+    # here, with the ground truth known, is exactly where those scores get VALIDATED against
+    # the realized error. The correction is always applied, same as the plain estimator.
+    estimator = CheckedManifoldEstimator(cfg.section('estimation'))
 
     # ---- GROUND TRUTH from the shared catalogue: the part is fixtured between the closed
     # fingers, so frames.yaml's tool0->frame pose IS the true in-hand pose, and its targets:
@@ -642,6 +654,14 @@ def build_and_run(cfg, robot, camera, args):
                     row.update({f'corr_{k}': v for k, v in info['theta_corr'].items()})
                     row.update({'icp_inliers': info['inliers'],
                                 'icp_residual': info['final_residual']})
+                    # TRUST readout (observational): both scores + the raw signals, so the
+                    # run's ground truth can score the uncertainty estimates themselves.
+                    chk = info.get('check')
+                    if chk:
+                        row['trust_rankavg2'] = chk['rankavg2']
+                        row['trust_cauchy'] = chk['cauchy']
+                        row.update({f'trust_{k}': v for k, v in chk['signals'].items()
+                                    if k in _TRUST_SIGNALS})
                     trackr.append(float(info['final_residual']))
                     trackg.append(np.asarray(info['res_hist'], dtype=float)[:, -1])
                     # Per-guess would-be OUTCOME: the ground-truth L2 error left if guess g's

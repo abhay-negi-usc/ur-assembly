@@ -129,13 +129,20 @@ eval:
 
 # ===================================================================================================
 # ESTIMATION -- the contact-manifold ICP under test. KEEP IN SYNC with the values
-# cable_pick_estimate_assemble runs with -- this app exists to score exactly that configuration.
+# cable_pick_estimate_assemble_check runs with -- this app exists to score exactly that
+# configuration (and, with the ground truth known, to VALIDATE its trust scores: both land
+# in trials.csv as trust_* columns).
 # ===================================================================================================
 estimation:
-  manifold_csv: ./configs/data/banana_manifold_20260807_clean.csv
+  # The AUGMENTED manifold (clean map + 30k truth-corrected production-process rows) and the
+  # rawcap wrench representation -- the 2026-08-09 offline winners. Fall back to the classic
+  # setup with: manifold_csv ./configs/data/banana_manifold_20260807_clean.csv,
+  # wrench_representation unit, s_force 3.0, s_torque 1.0.
+  manifold_csv: ./configs/data/banana_manifold_augmented.csv
+  wrench_representation: rawcap
   scaling_constant_deg_to_mm: 0.2
-  scaling_constant_unit_force_to_mm: 3.0
-  scaling_constant_unit_torque_to_mm: 1.0
+  scaling_constant_unit_force_to_mm: 1.5
+  scaling_constant_unit_torque_to_mm: 0.0
   min_force_n: 3.0
   min_observations: 20
   estimate_dims: [z_mm, pitch_deg]
@@ -163,6 +170,23 @@ estimation:
   interp_neighbors: 16
   interp_softness: 1.0
   random_seed: 0
+
+  # ---- SOLUTION CHECK (urlab/skills/solution_check.py) -- OBSERVATIONAL trust scoring. ----
+  # Same block as cable_pick_estimate_assemble_check: after every estimate, candidate
+  # corrections are re-scored against the observations and BOTH trust scores (rankavg2 +
+  # cauchy) are computed and logged -- here they ALSO land in trials.csv (trust_* columns)
+  # next to the known ground-truth error, which is how the scores get validated/recalibrated.
+  # The correction is always applied; `method` only picks which score carries the LOW label.
+  check:
+    enabled: true
+    method: cauchy
+    flag_threshold: 0.75
+    n_candidates: 128
+    candidate_range:
+      z_mm: 6.0
+      pitch_deg: 12.0
+    calibration_file: ./configs/data/check_calibration.json
+    config_disagreement: false
 
 # COMPLIANCE (software admittance) for the insertion -- MIRRORS cable_pick_estimate_assemble's
 # assembly.compliance so the estimator sees production-like observations.

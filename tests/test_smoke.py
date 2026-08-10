@@ -1531,6 +1531,156 @@ def test_estimator_eval_config_is_wired_to_the_catalogue():
         assert f'corr_{d}' in fields and f'err_after_{d}' in fields
 
 
+def test_manifold_rawcap_wrench_representation():
+    """'rawcap' must scale the force feature by SATURATED magnitude (f/10 N capped at 3),
+    identically in the manifold load and prepare_observations, self-adapt interp_tau, and
+    still solve the synthetic alignment; bad names must fail at construction (pre-motion)."""
+    import csv as _csv
+    import shutil
+    import tempfile
+
+    from urlab.skills.manifold import (FORCE_COLS, POSE_COLS, TORQUE_COLS, ManifoldEstimator,
+                                       mats_from_vec6, vec6_from_mats)
+
+    tmp = tempfile.mkdtemp()
+    try:
+        u_f, u_t = np.array([0.6, 0.0, -0.8]), np.array([0.0, 1.0, 0.0])
+        rows = []
+        for x in np.linspace(-20.0, 0.0, 80):
+            rows.append([x, 0.0, 0.0, 0.0, 0.0, 0.0] + list(5.0 * u_f) + list(0.5 * u_t))
+        path = os.path.join(tmp, 'manifold.csv')
+        with open(path, 'w', newline='') as fh:
+            w = _csv.writer(fh)
+            w.writerow(POSE_COLS + FORCE_COLS + TORQUE_COLS)
+            w.writerows(rows)
+
+        base_cfg = {'manifold_csv': path, 'estimate_dims': ['z_mm', 'pitch_deg'],
+                    'icp_iterations': 10, 'num_initial_guesses': 30, 'random_seed': 5,
+                    'scaling_constant_unit_force_to_mm': 1.5,
+                    'scaling_constant_unit_torque_to_mm': 0.0}
+        est = ManifoldEstimator({**base_cfg, 'wrench_representation': 'rawcap'})
+        # |f| = 5 N -> magnitude factor min(5/10, 3) = 0.5 -> force-feature norm 0.5 * 1.5.
+        fn = np.linalg.norm(est.M12[:, 6:9], axis=1)
+        assert np.allclose(fn, 0.75, atol=1e-6), fn[:3]
+        # torque dropped: s_torque 0 -> zero columns
+        assert np.allclose(est.M12[:, 9:12], 0.0)
+        # saturation: a 100 N observation row caps at 3 (not 10)
+        v6s, w6s = est.prepare_observations(np.zeros((2, 6)),
+                                            np.array([100.0 * u_f, 5.0 * u_f]),
+                                            np.array([0.5 * u_t, 0.5 * u_t]))
+        assert np.isclose(np.linalg.norm(w6s[0, :3]), 3.0 * 1.5, atol=1e-6)
+        assert np.isclose(np.linalg.norm(w6s[1, :3]), 0.5 * 1.5, atol=1e-6)
+        # the synthetic belief error must still be recovered under rawcap
+        true6 = np.array([r[:6] for r in rows])[::2]
+        D = T.inverse(mats_from_vec6([0.0, 0.0, -2.5, 0.0, 6.0, 0.0]))
+        obs6 = vec6_from_mats(mats_from_vec6(true6) @ D)
+        f_raw = np.tile(5.0 * u_f, (len(obs6), 1))
+        tau_raw = np.tile(0.5 * u_t, (len(obs6), 1))
+        v6, w6 = est.prepare_observations(obs6, f_raw, tau_raw)
+        T_corr, info = est.estimate(v6, w6)
+        assert T_corr is not None, info
+        undone = vec6_from_mats(D @ T_corr)
+        assert np.all(np.abs(undone) < 0.3), f'rawcap correction off: {np.round(undone, 3)}'
+        # unknown representation fails at CONSTRUCTION, never mid-run
+        try:
+            ManifoldEstimator({**base_cfg, 'wrench_representation': 'sqrtmag'})
+            raise AssertionError('bad wrench_representation must raise')
+        except ValueError:
+            pass
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_solution_check_scores_and_gate():
+    """The check must compute BOTH scores and label trust, but stay OBSERVATIONAL: the
+    correction is ALWAYS applied (identical loop flow to the base app), and without
+    calibration the scores read None while the estimate still passes through."""
+    import csv as _csv
+    import json as _json
+    import shutil
+    import tempfile
+
+    from urlab.skills.manifold import FORCE_COLS, POSE_COLS, TORQUE_COLS, mats_from_vec6, \
+        vec6_from_mats
+    from urlab.skills.solution_check import CheckedManifoldEstimator
+
+    tmp = tempfile.mkdtemp()
+    try:
+        u_f, u_t = np.array([0.6, 0.0, -0.8]), np.array([0.0, 1.0, 0.0])
+        rows = []
+        for x in np.linspace(-20.0, 0.0, 80):
+            rows.append([x, 0.0, 0.0, 0.0, 0.0, 0.0] + list(5.0 * u_f) + list(0.5 * u_t))
+        path = os.path.join(tmp, 'manifold.csv')
+        with open(path, 'w', newline='') as fh:
+            w = _csv.writer(fh)
+            w.writerow(POSE_COLS + FORCE_COLS + TORQUE_COLS)
+            w.writerows(rows)
+        calib = os.path.join(tmp, 'calib.json')
+        with open(calib, 'w') as fh:                     # wide reference spreads
+            _json.dump({k: list(np.linspace(0.0, 50.0, 40)) for k in
+                        ('u_post', 'u_spread', 'u_split', 'u_res', 'u_depth')}, fh)
+
+        cfg = {'manifold_csv': path, 'estimate_dims': ['z_mm', 'pitch_deg'],
+               'icp_iterations': 8, 'num_initial_guesses': 20, 'random_seed': 5,
+               'check': {'enabled': True, 'method': 'cauchy', 'flag_threshold': 0.99,
+                         'n_candidates': 32, 'calibration_file': calib}}
+        est = CheckedManifoldEstimator(cfg)
+        true6 = np.array([r[:6] for r in rows])[::2]
+        D = T.inverse(mats_from_vec6([0.0, 0.0, -1.5, 0.0, 3.0, 0.0]))
+        obs6 = vec6_from_mats(mats_from_vec6(true6) @ D)
+        f_raw = np.tile(5.0 * u_f, (len(obs6), 1))
+        tau_raw = np.tile(0.5 * u_t, (len(obs6), 1))
+        v6, w6 = est.prepare_observations(obs6, f_raw, tau_raw)
+        T_corr, info = est.estimate(v6, w6)
+        assert T_corr is not None, info
+        chk = info['check']
+        assert chk['rankavg2'] is not None and chk['cauchy'] is not None
+        assert 0.0 <= chk['rankavg2'] <= 1.0 and 0.0 <= chk['cauchy'] <= 1.0
+        assert set(chk['signals']) >= {'u_post', 'u_spread', 'u_res', 'u_depth'}
+        assert chk['flagged'] is False
+
+        # OBSERVATIONAL: even a threshold below any score must NOT block the correction --
+        # the trust label flips to LOW but the estimate is applied, exactly like the base app.
+        est.flag_threshold = -1.0
+        T2, info2 = est.estimate(v6, w6)
+        assert T2 is not None and info2['check']['flagged'] is True
+        # method selection only changes WHICH score carries the label
+        est.check_method = 'rankavg2'
+        T3, info3 = est.estimate(v6, w6)
+        assert T3 is not None and info3['check']['score'] == info3['check']['rankavg2']
+
+        # WITHOUT calibration: signals logged, scores None, label never LOW (even at -1)
+        cfg2 = dict(cfg)
+        cfg2['check'] = {**cfg['check'], 'calibration_file': None, 'flag_threshold': -1.0}
+        est2 = CheckedManifoldEstimator(cfg2)
+        v6b, w6b = est2.prepare_observations(obs6, f_raw, tau_raw)
+        T4, info4 = est2.estimate(v6b, w6b)
+        assert T4 is not None and info4['check']['score'] is None
+        assert info4['check']['flagged'] is False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_check_app_config_is_wired():
+    """The check app's yaml must name the augmented manifold, the rawcap representation and
+    a valid check block; the app module must expose the wrapped build_and_run."""
+    import yaml
+
+    with open(os.path.join(ROOT, 'configs', 'cable_pick_estimate_assemble_check.yaml')) as fh:
+        cfg = yaml.safe_load(fh)
+    est = cfg['estimation']
+    assert str(est['manifold_csv']).endswith('banana_manifold_augmented.csv')
+    assert est.get('wrench_representation') == 'rawcap'
+    assert float(est['scaling_constant_unit_torque_to_mm']) == 0.0
+    chk = est['check']
+    assert str(chk['method']) in ('cauchy', 'rankavg2')
+    assert 'on_flag' not in chk, 'the check is observational -- no gating key'
+    assert 0.0 < float(chk['flag_threshold']) <= 1.0
+    assert int(chk['n_candidates']) >= 8
+    from urlab.apps import cable_pick_estimate_assemble_check as app
+    assert callable(app.build_and_run) and callable(app.main)
+
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     failed = 0

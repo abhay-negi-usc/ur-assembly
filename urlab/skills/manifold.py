@@ -98,6 +98,22 @@ class ManifoldEstimator:
         self.s_rot = float(c.get('scaling_constant_deg_to_mm', 1.0))
         self.s_force = float(c.get('scaling_constant_unit_force_to_mm', 0.1))
         self.s_torque = float(c.get('scaling_constant_unit_torque_to_mm', 0.1))
+        # WRENCH REPRESENTATION (2026-08 offline wrench-lab winner): 'unit' = direction
+        # only (the original); 'rawcap' = direction x saturated magnitude -- f/10 N capped
+        # at 30 N, tau/1 Nm capped at 3 Nm -- so a 30 N wedge press carries a 3x larger
+        # feature vector than a 10 N touch. Magnitude IS informative once the manifold
+        # holds production-process data (rawcap: 0.28 mm median vs unit's 0.34 on the
+        # augmented map; harmless-to-mildly-positive on the wiggle-only map). Applied
+        # IDENTICALLY to the manifold rows and the observations; interp_tau self-adapts
+        # because it is derived from the manifold's own spacing AFTER representation.
+        rep = str(c.get('wrench_representation', 'unit')).strip().lower()
+        if rep not in ('unit', 'rawcap'):
+            raise ValueError(f"estimation.wrench_representation {rep!r} must be "
+                             "'unit' or 'rawcap'")
+        self.wrench_representation = rep               # bad values fail HERE, pre-motion
+        self.rawcap_force_ref_n = float(c.get('rawcap_force_ref_n', 10.0))
+        self.rawcap_torque_ref_nm = float(c.get('rawcap_torque_ref_nm', 1.0))
+        self.rawcap_cap = float(c.get('rawcap_cap', 3.0))
         self.min_force_n = c.get('min_force_n')
         self.estimate_dims = list(c.get('estimate_dims', ['x_mm', 'z_mm', 'pitch_deg']))
         bad = [d for d in self.estimate_dims if d not in DIMS]
@@ -190,8 +206,19 @@ class ManifoldEstimator:
             v6, f, tau = v6[keep], f[keep], tau[keep]
         if len(v6) < 10:
             raise ValueError(f'{path}: only {len(v6)} usable manifold rows')
-        w6 = np.hstack([unit_rows(f, self.s_force), unit_rows(tau, self.s_torque)])
-        return scaled12(v6, w6, self.s_rot)
+        return scaled12(v6, self._wrench6(f, tau), self.s_rot)
+
+    def _wrench6(self, f, tau):
+        """The 6 wrench feature columns under the configured representation, scales applied."""
+        if self.wrench_representation == 'rawcap':
+            fm = np.linalg.norm(np.asarray(f, dtype=float), axis=-1)
+            tm = np.linalg.norm(np.asarray(tau, dtype=float), axis=-1)
+            wf = unit_rows(f, 1.0) * np.minimum(fm / self.rawcap_force_ref_n,
+                                                self.rawcap_cap)[..., None]
+            wt = unit_rows(tau, 1.0) * np.minimum(tm / self.rawcap_torque_ref_nm,
+                                                  self.rawcap_cap)[..., None]
+            return np.hstack([wf * self.s_force, wt * self.s_torque])
+        return np.hstack([unit_rows(f, self.s_force), unit_rows(tau, self.s_torque)])
 
     def prepare_observations(self, vec6, f_raw, tau_raw):
         """Filter (min force) + normalize raw observations -> (vec6, w6) ready for estimate()."""
@@ -200,8 +227,7 @@ class ManifoldEstimator:
         if self.min_force_n is not None:
             keep = np.linalg.norm(f_raw, axis=1) >= float(self.min_force_n)
             vec6, f_raw, tau_raw = vec6[keep], f_raw[keep], tau_raw[keep]
-        w6 = np.hstack([unit_rows(f_raw, self.s_force), unit_rows(tau_raw, self.s_torque)])
-        return vec6, w6
+        return vec6, self._wrench6(f_raw, tau_raw)
 
     # ------------------------------------------------------------------ solver
     def estimate(self, vec6, w6):

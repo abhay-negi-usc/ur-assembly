@@ -80,6 +80,33 @@ eval:
   random_seed: 1                 # >0 = replayable perturbation stream; 0 = nondeterministic
   log_decimation: 5              # observation every Nth servo cycle (125 Hz / N -> ~25 Hz)
   save_observations: true        # per-attempt observation CSVs (the post-analysis raw data)
+  # ---- P(SEAT) GATE + the single definition of SUCCESS -------------------------------------
+  # The manifold's own trials are labelled by how deep they got, which turns it into a dataset
+  # of (offset -> seated?) and gives P(seat | offset) by k-NN. The estimator never knows its
+  # remaining error, so the gate uses the POSTERIOR quantity E_p[P(seat)] over the energy
+  # landscape -- not P(seat) at the point estimate. Once it clears p_seat_threshold the trial
+  # stops probing and commits to ONE insertion with NO trajectory noise. The SAME depth rule
+  # then decides whether that insertion actually seated, so gate and verdict cannot disagree.
+  seat_gate:
+    enabled: true
+    # Commit once the posterior says the belief will seat this often. CEILING WARNING: P(seat)
+    # is bounded by how repeatably the PROCESS seats, not just by the estimate. On the 2026-08
+    # hose map, trials at near-identical offsets agree on seated/not only 67% of the time (a
+    # ~83% per-trial ceiling) and P(seat) at ZERO offset is 72% with the settings below -- so a
+    # 0.95 gate would never open even from a perfect estimate. The startup log prints both
+    # ceilings; keep this below the ZERO-offset one, or relax seat_margin_mm to raise it
+    # (margin 6.0 -> 84% at zero offset, margin 10.0 -> 96%).
+    p_seat_threshold: 0.80
+    seat_margin_mm: 4.0          # seated := reached within this of the reference depth
+    # WHICH depth counts as fully inserted: 'max' is the literal deepest manifold row, a NUMBER
+    # is that percentile of the per-trial maxima. MEASURED on the 2026-08 hose map: 'max' sets
+    # the threshold at +24.9 mm -- a crush-through outlier that NOTHING reaches, so 0% of trials
+    # count as seated and the gate can never open; p95 sets it at -5.1 mm with 61% seating,
+    # which matches the force-verified seat rate. Hence the percentile default. The startup log
+    # prints the seat rate for 'max' and for 99.9/99/95/90 so this can be re-checked per map.
+    depth_reference: 95.0
+    neighbors: 25                # k for the P(seat) vote
+    posterior_temp: 0.05         # Gibbs temperature (relative to E_min) for the posterior
   # Extra column on the trial/live figure: the ICP energy over a DENSE GRID of candidate
   # corrections, with the APPLIED estimate and its +/- sigma (from the curvature at the minimum,
   # in each dim's own units) against the TRUE correction, plus every multi-start final. This is

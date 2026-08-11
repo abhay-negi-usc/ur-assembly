@@ -50,6 +50,8 @@ from ..robot import AdmittanceController, ForceGuard
 from ..skills import trajectory as traj
 from ..skills.grid_estimator import GridManifoldEstimator
 from ..skills.manifold import mats_from_vec6, vec6_from_mats
+from ..skills.success_basin import SuccessBasin
+from .estimator_eval import _basin_contour
 from ..transforms import inverse, matrix_to_xyzrpy, pose_error, translation_matrix
 from ._runner import run_app
 from .estimator_eval import _ERR, _corr_to_m, _gt_error, _observe, _save_observations
@@ -67,18 +69,21 @@ def _fieldnames(dims, n_probes):
     for k in range(1, n_probes + 1):
         cols += [f'probe{k}_bias_pitch_deg', f'probe{k}_bias_z_mm', f'probe{k}_n_obs',
                  f'probe{k}_seated', f'probe{k}_settled_rows', f'probe{k}_max_force_n',
-                 f'probe{k}_residual']
+                 f'probe{k}_residual', f'probe{k}_p_seat']
     cols += [f'corr_{d}' for d in dims]
     cols += ['fused_residual', 'uncertainty', 'modes', 'multimodal', 'width_frac']
     cols += [f'unc_{d}' for d in dims]             # 1/curvature -- the ranking metric
-    cols += [f'sigma_{d}' for d in dims]           # sqrt(E_min/curvature) -- mm / deg, plottable
+    cols += [f'sigma_{d}' for d in dims]           # marginal width, mm / deg -- plottable
+    cols += [f'cov_{a}{b}' for a in range(len(dims)) for b in range(a, len(dims))]
     cols += [f'err_after_{s}' for s in _ERR] + ['err_after_pos_mm', 'err_after_rot_deg']
-    cols += ['converged', 'insert_seated', 'insert_success', 'insert_check_pos_mm',
-             'insert_check_rot_deg'] + [f'seat_{s}' for s in _ERR]
+    cols += ['converged', 'p_seat', 'gate_opened', 'insert_seated', 'insert_success',
+             'insert_success_tolwise', 'insert_depth_mm', 'seat_depth_mm',
+             'insert_check_pos_mm', 'insert_check_rot_deg'] + [f'seat_{s}' for s in _ERR]
     return cols
 
 
-def _plot_trial(path, est, fused, dims, truth_corr, hist, status=None, live_path=None):
+def _plot_trial(path, est, fused, dims, truth_corr, hist, status=None, live_path=None,
+                basin=None, seat_gate=None):
     """ONE figure per trial, mirrored ATOMICALLY to a fixed live path (like estimator_eval's).
 
     LEFT: the FUSED energy landscape the estimate came from -- a curve for one estimated dim, a
@@ -96,11 +101,12 @@ def _plot_trial(path, est, fused, dims, truth_corr, hist, status=None, live_path
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
 
-        fig = plt.figure(figsize=(14.0, 6.4))
-        gs = fig.add_gridspec(2, 2, width_ratios=[1.15, 1.0])
+        fig = plt.figure(figsize=(14.5, 7.6))
+        gs = fig.add_gridspec(3, 2, width_ratios=[1.15, 1.0], height_ratios=[1.0, 1.0, 0.7])
         axL = fig.add_subplot(gs[:, 0])
         axT = fig.add_subplot(gs[0, 1])
         axB = fig.add_subplot(gs[1, 1])
+        axP = fig.add_subplot(gs[2, 1])
 
         info = hist[-1] if hist else None
         sig = (info or {}).get('sigma', {})
@@ -112,6 +118,7 @@ def _plot_trial(path, est, fused, dims, truth_corr, hist, status=None, live_path
         # the origin, and earlier trials' outcomes can be overlaid in the same coordinates.
         errb_l = (info or {}).get('errb')
         idx_l = list(est.idx)
+        estimator_idx = idx_l
         unit = [('deg' if d.endswith('_deg') else 'mm') for d in dims]
 
         def as_err(theta):
@@ -156,14 +163,36 @@ def _plot_trial(path, est, fused, dims, truth_corr, hist, status=None, live_path
                 if len(past):
                     axL.scatter(past[:, 1], past[:, 0], s=16, color='#7fb3ff', alpha=0.75,
                                 zorder=3, label='earlier trials')
-                s0, s1 = sig.get(dims[0], np.nan), sig.get(dims[1], np.nan)
-                axL.errorbar([e_app[1]], [e_app[0]],
-                             xerr=[[s1], [s1]] if np.isfinite(s1) else None,
-                             yerr=[[s0], [s0]] if np.isfinite(s0) else None,
-                             fmt='o', ms=9, mfc='#DD8452', mec='white', ecolor='#DD8452',
-                             elinewidth=2, capsize=4, zorder=5, label='estimate +/- 1 sigma')
+                cov = (info or {}).get('cov')
+                if cov is not None and len(cov) >= 2:
+                    sub = np.array([[cov[0][0], cov[0][1]], [cov[1][0], cov[1][1]]])
+                    try:
+                        wv, Vv = np.linalg.eigh(sub)
+                        wv = np.maximum(wv, 0.0)
+                        th = np.linspace(0, 2 * np.pi, 120)
+                        pts = (Vv * np.sqrt(wv)) @ np.vstack([np.cos(th), np.sin(th)])
+                        axL.plot(e_app[1] + pts[1], e_app[0] + pts[0], color='#DD8452', lw=1.8,
+                                 zorder=5, label='1-sigma covariance')
+                        for a2 in range(2):    # eigen-axes: the stiff / sloppy directions
+                            v = Vv[:, a2] * np.sqrt(wv[a2])
+                            axL.plot([e_app[1] - v[1], e_app[1] + v[1]],
+                                     [e_app[0] - v[0], e_app[0] + v[0]], color='#DD8452',
+                                     lw=1.0, ls='--', alpha=0.85, zorder=5)
+                        axL.plot([], [], ' ', label='sloppy/stiff = '
+                                 f'{np.sqrt(wv[1] / max(wv[0], 1e-12)):.1f}x')
+                    except np.linalg.LinAlgError:
+                        pass
+                axL.plot([e_app[1]], [e_app[0]], 'o', ms=8, mfc='#DD8452', mec='white',
+                         zorder=6, label='estimate')
                 axL.axhline(0.0, ls=':', lw=0.9, color='#ffffff', alpha=0.6)
                 axL.axvline(0.0, ls=':', lw=0.9, color='#ffffff', alpha=0.6)
+                # SUCCESS BASIN outline in the same error coordinates -- the region the estimate
+                # actually has to land in (z and pitch error need not be small individually).
+                if basin is not None:
+                    _basin_contour(axL, basin, dims, estimator_idx[0], estimator_idx[1],
+                                   axL.get_xlim(), axL.get_ylim(),
+                                   [0.5, seat_gate if seat_gate is not None else 0.9],
+                                   rest=np.asarray(errb_l, dtype=float))
                 axL.plot([0.0], [0.0], '*', ms=18, mfc='#55A868', mec='white', zorder=6,
                          label='truth (origin)')
                 axL.set_xlabel(f'{dims[1]} ERROR remaining [{unit[1]}]   (0 = truth)')
@@ -218,6 +247,28 @@ def _plot_trial(path, est, fused, dims, truth_corr, hist, status=None, live_path
                              textcoords='offset points', xytext=(0, 3), ha='center',
                              fontsize=7, color='#C44E52')
 
+        # ---- RIGHT BOTTOM STRIP: P(SEAT) per trial vs the gate that ended the probing ----
+        # The decision quantity in its own panel: green where the insertion actually seated,
+        # so gate-said-yes / did-it-seat disagreements are visible at a glance.
+        ps = np.array([h.get('p_seat', np.nan) for h in hist], dtype=float)
+        if np.isfinite(ps).any():
+            cols2 = ['#55A868' if h.get('insert_success') else '#C44E52' for h in hist]
+            axP.bar(n, np.nan_to_num(ps), width=0.55, color=cols2, alpha=0.8)
+            if seat_gate is not None:
+                axP.axhline(seat_gate, ls='--', lw=1.2, color='#333333')
+                axP.annotate(f'gate {seat_gate:.0%}', (0.01, seat_gate),
+                             xycoords=('axes fraction', 'data'), textcoords='offset points',
+                             xytext=(0, 3), fontsize=7, color='#333333')
+            last = ps[np.isfinite(ps)][-1]
+            axP.set_title(f'P(seat) per trial -- latest {last:.0%}  '
+                          '(green = actually seated)', fontsize=9)
+        else:
+            axP.text(0.5, 0.5, 'P(seat) unavailable', ha='center', va='center', fontsize=9)
+        axP.set_ylim(0.0, 1.02)
+        axP.set_xlabel('trial')
+        axP.set_ylabel('P(seat)')
+        axP.set_xticks(n if len(n) <= 20 else n[:: max(len(n) // 20, 1)])
+
         fig.suptitle('estimator eval: probe phase + insertion phase', y=0.99)
         if status:
             fig.text(0.99, 0.965, status, ha='right', fontsize=9, color='#333333')
@@ -230,6 +281,22 @@ def _plot_trial(path, est, fused, dims, truth_corr, hist, status=None, live_path
         plt.close(fig)
     except Exception as exc:                       # noqa: BLE001 -- plotting is never fatal
         log.warning('trial plot skipped (%s)', exc)
+
+
+def _p_seat_of(basin, estimator, fused, theta_applied, temp):
+    """E_p[P(seat)] over the fused landscape's posterior, if `theta_applied` is applied.
+
+    The robot never knows its remaining error, so the decision quantity is P(seat) AVERAGED over
+    the posterior, not evaluated at the point estimate. Hypothesis "theta was the right
+    correction" leaves remaining error inverse(theta) (.) theta_applied; the basin is indexed by
+    the PHYSICAL offset, which SuccessBasin.offset_of_error derives from that."""
+    Ef = np.asarray(fused, dtype=float).ravel()
+    a6 = np.zeros(6)
+    a6[estimator.idx] = [theta_applied[d] for d in estimator.estimate_dims]
+    rem = vec6_from_mats(np.linalg.inv(mats_from_vec6(estimator.grid6))
+                         @ mats_from_vec6(a6)[None, :, :])
+    w = np.exp(-(Ef - Ef.min()) / max(temp * float(Ef.min()), 1e-12))
+    return basin.p_seat_posterior(basin.offset_of_error(rem), w)
 
 
 def _write_summary(out_dir, rows, dims):
@@ -272,6 +339,29 @@ def build_and_run(cfg, robot, camera, args):
     # The estimator first -- a bad grid/manifold config must fail before the robot moves.
     estimator = GridManifoldEstimator(cfg.section('estimation'))
     dims = estimator.estimate_dims
+
+    # SUCCESS BASIN: P(seat | offset) from the same manifold, and ONE definition of success used
+    # both to decide when to stop probing and to score the insertion afterwards.
+    sg = ev.get('seat_gate', {}) or {}
+    basin, seat_gate, seat_temp = None, 1.0, 0.05
+    if bool(sg.get('enabled', True)):
+        try:
+            basin = SuccessBasin(urconfig.resolve(cfg, cfg.get_path('estimation.manifold_csv')),
+                                 dims, dict(sg, scaling_constant_deg_to_mm=estimator.s_rot))
+            seat_gate = float(sg.get('p_seat_threshold', 0.95))
+            seat_temp = float(sg.get('posterior_temp', 0.05))
+            log.info('P(seat) gate at %.0f%%: probing STOPS as soon as the posterior clears it, '
+                     'then one insertion runs with NO trajectory noise.', 100 * seat_gate)
+            if seat_gate > basin.p_seat_zero:
+                log.warning('The gate (%.0f%%) is above P(seat) at ZERO offset (%.0f%%) -- even '
+                            'a PERFECT estimate would not clear it, so every trial will run all '
+                            '%d probes. Lower p_seat_threshold below %.0f%%, or raise '
+                            'seat_margin_mm / lower depth_reference.', 100 * seat_gate,
+                            100 * basin.p_seat_zero, int(pb.get('attempts', 3)),
+                            100 * basin.p_seat_zero)
+        except Exception as exc:                   # noqa: BLE001
+            log.error('Success basin unavailable (%s) -- gating disabled.', exc)
+            basin = None
 
     held_name = cfg.get('held_frame')
     if not held_name:
@@ -510,6 +600,8 @@ def build_and_run(cfg, robot, camera, args):
             fused = None
             n_obs_total = 0
             abandoned = False
+            gate_open = False
+            p_seat = float('nan')
             for k in range(1, n_probes + 1):
                 sign = 1.0 if k % 2 else -1.0
                 bias = [0.0, 0.0, sign * z_jog_mm / 1000.0, 0.0, sign * alt_pitch, 0.0] \
@@ -561,6 +653,25 @@ def build_and_run(cfg, robot, camera, args):
                 log.info('  probe %d (bias pitch %+.1f deg): %d obs (%d settled), '
                          'max |f| %.1f N, this-probe corr %s', k, sign * alt_pitch, n, settled,
                          fmax, {d: round(v, 2) for d, v in pinfo['theta_corr'].items()})
+                # P(SEAT) GATE on the FUSED evidence so far: stop probing the moment the belief
+                # is good enough to commit. Probing past that point costs cycle time and, worse,
+                # risks a bad probe degrading a belief that was already good enough.
+                if basin is not None:
+                    _, finfo = estimator.solve(fused, n_obs_total)
+                    try:
+                        p_seat = _p_seat_of(basin, estimator, fused, finfo['theta_corr'],
+                                            seat_temp)
+                    except Exception as exc:       # noqa: BLE001
+                        log.warning('P(seat) skipped (%s)', exc)
+                        p_seat = float('nan')
+                    row[f'probe{k}_p_seat'] = p_seat
+                    if np.isfinite(p_seat):
+                        log.info('     P(seat) after %d probe(s): %.0f%%', k, 100 * p_seat)
+                        if p_seat >= seat_gate:
+                            log.info('     >= %.0f%% -- stopping the probe phase and '
+                                     'committing.', 100 * seat_gate)
+                            gate_open = True
+                            break
             if abandoned:
                 rows.append(row)
                 writer.writerow(row)
@@ -587,7 +698,10 @@ def build_and_run(cfg, robot, camera, args):
                 row.update({f'unc_{d}': v for d, v in info['curvature_uncertainty'].items()})
                 row.update({f'sigma_{d}': v for d, v in info['sigma'].items()})
                 rec.update({'corr': info['theta_corr'], 'sigma': info['sigma'],
+                            'cov': np.asarray(info['covariance']).tolist(),
                             'multimodal': info['multimodal']})
+                row.update({f'cov_{a}{b}': float(info['covariance'][a][b])
+                            for a in range(len(dims)) for b in range(a, len(dims))})
                 log.info('FUSED estimate over %d probes: %s | sigma %s | residual %.3f  '
                          'modes %d%s', n_probes,
                          {d: round(v, 3) for d, v in info['theta_corr'].items()},
@@ -605,6 +719,7 @@ def build_and_run(cfg, robot, camera, args):
             # be overlaid on the landscape panel in the same coordinates
             rec['err_dims'] = {d: float(np.asarray(erra, dtype=float)[j])
                                for d, j in zip(dims, estimator.idx)}
+            rec['p_seat'] = p_seat
             hist.append(rec)
             log.info('gt error %.2f mm / %.2f deg -> %.2f mm / %.2f deg%s',
                      errb_pos, errb_rot, erra_pos, erra_rot,
@@ -623,11 +738,29 @@ def build_and_run(cfg, robot, camera, args):
                 if save_obs:
                     _save_observations(os.path.join(
                         out_dir, f'trial_{trial:03d}_insertion_observations.csv'), obs)
-                succ = all(abs(v) <= t for v, t in zip(seat6, succ_tol))
+                # SUCCESS by the SAME rule that labels the basin: the true depth reached vs the
+                # manifold's deepest insertion less seat_margin_mm. Gate and verdict agree by
+                # construction. (The per-DOF pose tolerance is kept as a fallback/secondary.)
+                depth = float('nan')
+                if len(obs):
+                    oa = np.asarray(obs, dtype=float).reshape(-1, 12)
+                    rel = vec6_from_mats(mats_from_vec6(oa[:, :6])
+                                         @ np.linalg.inv(mats_from_vec6(np.asarray(erra))))
+                    depth = float(rel[:, 0].max())
+                succ_tolwise = all(abs(v) <= t for v, t in zip(seat6, succ_tol))
+                succ = (basin.is_seated(depth) if (basin is not None and np.isfinite(depth))
+                        else succ_tolwise)
                 n_succ += int(succ)
                 row.update({'insert_seated': seated, 'insert_success': succ,
+                            'insert_success_tolwise': succ_tolwise,
+                            'insert_depth_mm': depth, 'p_seat': p_seat,
+                            'gate_opened': gate_open,
+                            'seat_depth_mm': (basin.seat_depth if basin is not None else ''),
                             'insert_check_pos_mm': lin * 1000.0,
                             'insert_check_rot_deg': float(np.degrees(ang))})
+                if basin is not None and np.isfinite(depth):
+                    log.info('   depth %+.2f mm vs seat threshold %+.2f mm -> %s',
+                             depth, basin.seat_depth, 'SEATED' if succ else 'NOT seated')
                 row.update({f'seat_{s}': v for s, v in zip(_ERR, seat6)})
                 rec['insert_success'] = bool(succ)
                 log.info('INSERTION: seated=%s success=%s  seat xyz=[%+5.2f, %+5.2f, %+5.2f] mm '
@@ -638,7 +771,8 @@ def build_and_run(cfg, robot, camera, args):
                 status = (f'trial {trial}/{num_trials}  |  seated {n_succ}/{trial} '
                           f'({n_succ / max(trial, 1):.0%})')
                 _plot_trial(os.path.join(out_dir, f'trial_{trial:03d}.png'), estimator, fused,
-                            dims, truth_corr, hist, status, live_path)
+                            dims, truth_corr, hist, status, live_path, basin,
+                            seat_gate if basin is not None else None)
 
             rows.append(row)
             writer.writerow(row)

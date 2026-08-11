@@ -519,8 +519,6 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None
                             axl.plot([e_app[1] - v[1], e_app[1] + v[1]],
                                      [e_app[0] - v[0], e_app[0] + v[0]], color='#DD8452',
                                      lw=1.0, ls='--', alpha=0.85, zorder=6)
-                        ratio = (np.sqrt(wv[1] / max(wv[0], 1e-12)) if wv[0] > 0 else np.inf)
-                        axl.plot([], [], ' ', label=f'sloppy/stiff = {ratio:.1f}x')
                     except np.linalg.LinAlgError:
                         pass
                 axl.plot([e_app[1]], [e_app[0]], 'o', ms=8, mfc='#DD8452', mec='white',

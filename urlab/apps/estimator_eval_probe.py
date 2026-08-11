@@ -178,8 +178,6 @@ def _plot_trial(path, est, fused, dims, truth_corr, hist, status=None, live_path
                             axL.plot([e_app[1] - v[1], e_app[1] + v[1]],
                                      [e_app[0] - v[0], e_app[0] + v[0]], color='#DD8452',
                                      lw=1.0, ls='--', alpha=0.85, zorder=5)
-                        axL.plot([], [], ' ', label='sloppy/stiff = '
-                                 f'{np.sqrt(wv[1] / max(wv[0], 1e-12)):.1f}x')
                     except np.linalg.LinAlgError:
                         pass
                 axL.plot([e_app[1]], [e_app[0]], 'o', ms=8, mfc='#DD8452', mec='white',

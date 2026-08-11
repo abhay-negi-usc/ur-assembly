@@ -327,6 +327,32 @@ def build_and_run(cfg, robot, camera, args):
                     probe_settle_s)
     probe_retract_m = float(pb.get('retract_distance_m', cfg.get('retract_distance_m', 0.05)))
 
+    # PER-WAYPOINT TRAJECTORY NOISE -- process-critical, not a nicety. The manifold was collected
+    # by uncertain_sampling with a fresh random offset on EVERY waypoint, and that jitter is what
+    # walks a misaligned cylindrical peg off the hole's rim and into the bore. A clean path does
+    # not: the peg's leading face lands on the rim and the insertion stops dead. Measured on the
+    # 2026-08-11 runs -- early-landing (max true x < -14 mm) was 6% for the manifold, 32% for the
+    # noised estimator_eval, and 68% for the first, NOISE-FREE version of this app. Keep this
+    # matched to the map's collection process or the probes never reach the contact the map
+    # describes.
+    tn = pb.get('trajectory_noise', {}) or {}
+    tn_on = bool(tn.get('enabled', True))
+    tn_std = [float(v) for v in (tn.get('std') or [0.0, 0.0005, 0.005, 0.0, 5.0, 0.0])]
+    if len(tn_std) != 6:
+        log.error('probe.trajectory_noise.std must have 6 entries [x,y,z (m), r,p,y (deg)].')
+        return False
+    tn_w = max(1, int(tn.get('smooth_window', 1)))
+    tn_dt = float(tn.get('decay_traj', 0.0))
+    noise_rng = np.random.default_rng(seed + 17 if seed > 0 else None)
+    if tn_on:
+        log.info('Probe trajectory noise ON: per-waypoint std [%.1f, %.1f, %.1f] mm / '
+                 '[%.1f, %.1f, %.1f] deg, smooth window %d.', tn_std[0] * 1000,
+                 tn_std[1] * 1000, tn_std[2] * 1000, tn_std[3], tn_std[4], tn_std[5], tn_w)
+    else:
+        log.warning('Probe trajectory noise is OFF. A clean path lands a misaligned peg on the '
+                    'hole RIM instead of walking it in -- expect most probes to stop ~15 mm '
+                    'short of the contact the manifold describes.')
+
     comp_probe = dict(cfg.section('compliance'))
     if pb.get('stiffness') is not None:
         comp_probe['stiffness'] = [float(v) for v in pb['stiffness']]
@@ -463,8 +489,13 @@ def build_and_run(cfg, robot, camera, args):
                 sign = 1.0 if k % 2 else -1.0
                 bias = [0.0, 0.0, sign * z_jog_mm / 1000.0, 0.0, sign * alt_pitch, 0.0] \
                     if (alt_pitch or z_jog_mm) else None
-                rows_t = traj.noised(dense, np.random.default_rng(0), [0.0] * 6, 1, 0.0, 1.0,
-                                     bias) if bias else dense
+                # The deliberate bias AND the per-waypoint jitter, redrawn for every probe (the
+                # jitter is what gets the peg past the rim -- see the note where it is read).
+                if tn_on or bias:
+                    rows_t = traj.noised(dense, noise_rng, tn_std if tn_on else [0.0] * 6,
+                                         tn_w, tn_dt, 1.0, bias)
+                else:
+                    rows_t = dense
                 refs = [T_base_tconn @ r @ inverse(T_believed) for r in rows_t]
                 q = robot.arm.ik(refs[0], seed_q)
                 if q is None or not robot.arm.move_j(q, label=f'trial {trial} probe {k} start'):

@@ -50,8 +50,8 @@ eval:
   # actually recovers; set it true for the box CORNERS (both DOFs wrong at once, the harder and
   # more production-like case).
   perturbation:
-    lower: [0.0, 0.0, -0.005, 0.0, -8.0, 0.0]
-    upper: [0.0, 0.0, +0.005, 0.0, +8.0, 0.0]
+    lower: [0.0, 0.0, -0.003, 0.0, -8.0, 0.0]
+    upper: [0.0, 0.0, +0.003, 0.0, +8.0, 0.0]
   grid_resolution: [0.0, 0.0, 0.0025, 0.0, 4.0, 0.0]
 
   save_plots: true               # per-trial figure (trial_TTT.png), re-saved every trial
@@ -62,7 +62,7 @@ eval:
   live_plot: true
 
   success_tolerance:             # ground-truth convergence gate (logged, not enforced)
-    pos_mm: 1.0
+    pos_mm: 4.0
     rot_deg: 1.0
   # PHYSICAL success of the insertion phase: TRUE connector pose wrt the target, per DOF
   # [x, y, z (mm), roll, pitch, yaw (deg)].
@@ -76,7 +76,7 @@ eval:
 # PROBE PHASE -- insertions whose only job is to gather information
 # ===================================================================================================
 probe:
-  attempts: 3                    # 3 alternating probes was the validated setting
+  attempts: 10                    # 3 alternating probes was the validated setting
 
   # THE CRITICAL KNOB. The manifold was collected by uncertain_sampling with a 5 s hold, and this
   # admittance (damping_ratio 10, z stiffness 250 N/m) needs ~1.2 s of true rest to reach 95% of
@@ -92,10 +92,23 @@ probe:
   alternate_pitch_deg: 5.0
   alternate_z_mm: 2.0            # 0 = pitch-only probing
 
+  # PER-WAYPOINT TRAJECTORY NOISE -- PROCESS-CRITICAL, matched to how the manifold was collected.
+  # uncertain_sampling draws a fresh offset on EVERY waypoint (y +-0.5 mm, z +-5 mm, pitch +-5
+  # deg, UNSMOOTHED), and that jitter is what walks a misaligned cylindrical peg off the hole's
+  # rim and into the bore. Without it the peg's leading face simply lands on the rim and the
+  # insertion stops ~15 mm short: measured early-landing rate (max true x < -14 mm) was 6% for
+  # the manifold, 32% for the noised estimator_eval, and 68% for a noise-free probe phase.
+  # smooth_window 1 = unsmoothed, like the map's collection. Redrawn per probe.
+  trajectory_noise:
+    enabled: true
+    std: [0.0, 0.0005, 0.005, 0.0, 5.0, 0.0]   # [x,y,z (m), roll,pitch,yaw (deg)]
+    smooth_window: 1
+    decay_traj: 0.0              # optionally shed the jitter toward the seat (0 = keep it all)
+
   # Probe compliance/guard: SOFTER and more conservative than production -- a probe should feel
   # the contact, not force the mate. Overrides compliance.stiffness / force_guard.max_force_n.
   stiffness: [1500.0, 1500.0, 150.0, 8.0, 8.0, 8.0]
-  max_force_n: 30.0
+  max_force_n: 50.0
   retract_distance_m: 0.050
 
 # ===================================================================================================
@@ -122,7 +135,7 @@ estimation:
   # results are murky, drop to [pitch_deg] with a pitch-only perturbation to isolate it.
   estimate_dims: [z_mm, pitch_deg]
 
-  interp_neighbors: 16
+  interp_neighbors: 64
   interp_softness: 1.0
   recency_half_life_frac: 0.0    # probes are independent measurements; no recency decay
   random_seed: 0

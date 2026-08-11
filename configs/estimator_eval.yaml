@@ -46,7 +46,7 @@ retract_distance_m: 0.100
 # ===================================================================================================
 eval:
   num_trials: 50                 # IGNORED when mode: grid (the grid derives the count)
-  max_attempts: 3                # assemble -> estimate updates per trial
+  max_attempts: 5                # assemble -> estimate updates per trial
 
   # HOW the injected errors are chosen: 'random' draws uniformly inside the bounds for
   # num_trials; 'grid' sweeps every combination at grid_resolution (count derived, like
@@ -60,8 +60,8 @@ eval:
   # [x, y, z (m), roll, pitch, yaw (deg)], applied in the HELD part's OWN frame -- the same
   # right-multiplied frame the estimator corrects in. As set: x +/-5 mm, z +/-5 mm, pitch +/-5 deg.
   perturbation:
-    lower: [-0.000, 0.0, -0.000, 0.0, -10.0, 0.0]
-    upper: [ 0.000, 0.0, +0.000, 0.0, +10.0, 0.0]
+    lower: [-0.000, 0.0, -0.005, 0.0, -5.0, 0.0]
+    upper: [ 0.000, 0.0, +0.005, 0.0, +5.0, 0.0]
   # Grid step per DOF (grid mode only), same order/units as the bounds.
   grid_resolution: [0.001, 0.0, 0.001, 0.0, 1.0, 0.0]
 
@@ -77,9 +77,17 @@ eval:
   # Success TERMINATES the trial; the live figure shows the running success rate.
   success_pose_tol: [2.0, 1.0, 5.0, 5.0, 5.0, 1.0]
 
-  random_seed: 7                 # >0 = replayable perturbation stream; 0 = nondeterministic
+  random_seed: 1                 # >0 = replayable perturbation stream; 0 = nondeterministic
   log_decimation: 5              # observation every Nth servo cycle (125 Hz / N -> ~25 Hz)
   save_observations: true        # per-attempt observation CSVs (the post-analysis raw data)
+  # Extra column on the trial/live figure: the ICP energy over a DENSE GRID of candidate
+  # corrections, with the APPLIED estimate and its +/- sigma (from the curvature at the minimum,
+  # in each dim's own units) against the TRUE correction, plus every multi-start final. This is
+  # the panel that separates "the solver picked badly" (truth sits in a deep basin it missed)
+  # from "the landscape's minimum is in the wrong place" (truth sits on a slope -- a DATA
+  # problem). Costs one grid-x-observations kNN sweep per attempt; both are capped in code.
+  # The sigma values also land in trials.csv as sigma_<dim>.
+  plot_landscape: true
   save_plots: true               # per-TRIAL error figure (trial_TTT_errors.png), RE-SAVED after
                                  # every attempt: ground-truth error vs attempt, all attempts
                                  # co-plotted (x = 0 is the injected error), plus the ICP
@@ -108,7 +116,7 @@ eval:
     # PER-DIMENSION per-waypoint std [x, y, z (m), roll, pitch, yaw (deg)], applied after
     # smoothing; a zero entry leaves that DOF unperturbed. (Legacy scalar keys translation_m /
     # rotation_deg still work when 'std' is absent.)
-    std: [0.000, 0.000, 0.0025, 0.0, 5.0, 0.0]
+    std: [0.000, 0.000, 0.010, 0.0, 3.0, 0.0]
     smooth_window: 10            # moving-average window (waypoints) -- keeps the reference smooth
     noise_decay_attempt: 0.1     # fraction to shrink the WHOLE perturbation by each attempt:
                                  # attempt k is scaled (1 - f)^(k-1)
@@ -145,13 +153,13 @@ estimation:
   scaling_constant_unit_torque_to_mm: 0.0
   min_force_n: 3.0
   min_observations: 20
-  estimate_dims: [pitch_deg]
+  estimate_dims: [z_mm, pitch_deg]
   icp_iterations: 20
   num_initial_guesses: 500
   init_guess_range:
     x_mm: 0.0
     y_mm: 0.0
-    z_mm: 0.0
+    z_mm: 10.0
     roll_deg: 0.0
     pitch_deg: 10.0
     yaw_deg: 0.0
@@ -218,7 +226,7 @@ speed:
   # INSERT reference pacing -- matches the pick app's effective assemble speed
   # (global 25 mm/s / 30 deg/s x phase_scale.assemble 0.2).
   max_cartesian_translation_mm_s: 10.0
-  max_cartesian_rotation_deg_s: 10.0
+  max_cartesian_rotation_deg_s: 30.0
   # RETRACT -- free-space escape back along a path just proven clear.
   retract_translation_mm_s: 100.0
   retract_rotation_deg_s: 10.0

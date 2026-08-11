@@ -49,6 +49,7 @@ from .. import tool_frames
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import trajectory as traj
 from ..skills.grid_estimator import GridManifoldEstimator
+from ..skills.manifold import mats_from_vec6, vec6_from_mats
 from ..transforms import inverse, matrix_to_xyzrpy, pose_error, translation_matrix
 from ._runner import run_app
 from .estimator_eval import _ERR, _corr_to_m, _gt_error, _observe, _save_observations
@@ -69,11 +70,141 @@ def _fieldnames(dims, n_probes):
                  f'probe{k}_residual']
     cols += [f'corr_{d}' for d in dims]
     cols += ['fused_residual', 'uncertainty', 'modes', 'multimodal', 'width_frac']
-    cols += [f'unc_{d}' for d in dims]
+    cols += [f'unc_{d}' for d in dims]             # 1/curvature -- the ranking metric
+    cols += [f'sigma_{d}' for d in dims]           # sqrt(E_min/curvature) -- mm / deg, plottable
     cols += [f'err_after_{s}' for s in _ERR] + ['err_after_pos_mm', 'err_after_rot_deg']
     cols += ['converged', 'insert_seated', 'insert_success', 'insert_check_pos_mm',
              'insert_check_rot_deg'] + [f'seat_{s}' for s in _ERR]
     return cols
+
+
+def _plot_trial(path, est, fused, dims, truth_corr, hist, status=None, live_path=None):
+    """ONE figure per trial, mirrored ATOMICALLY to a fixed live path (like estimator_eval's).
+
+    LEFT: the FUSED energy landscape the estimate came from -- a curve for one estimated dim, a
+    heatmap for two -- with the chosen correction, its per-dim +/- sigma (from the curvature, in
+    the dim's own units), and the TRUE correction marked, so a wrong pick is instantly visible as
+    "truth sits in a different basin" vs "truth is inside the bar".
+    RIGHT (top): estimated vs TRUE correction over every trial so far, with sigma error bars and
+    the ideal y = x line -- the single plot that answers "does the estimator track truth?".
+    RIGHT (bottom): per-trial ground-truth error before -> after, and the uncertainty reported
+    for each trial (bar), coloured by whether that trial's insertion seated.
+
+    BEST-EFFORT: a plotting problem is logged and never allowed to kill a hardware run."""
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+
+        fig = plt.figure(figsize=(14.0, 6.4))
+        gs = fig.add_gridspec(2, 2, width_ratios=[1.15, 1.0])
+        axL = fig.add_subplot(gs[:, 0])
+        axT = fig.add_subplot(gs[0, 1])
+        axB = fig.add_subplot(gs[1, 1])
+
+        info = hist[-1] if hist else None
+        sig = (info or {}).get('sigma', {})
+        est_corr = (info or {}).get('corr', {})
+
+        # ---- LEFT: the fused energy landscape --------------------------------------------
+        if fused is not None and len(dims) == 1:
+            ax0 = est.grid_axes[0]
+            axL.plot(ax0, fused, color='#4C72B0', lw=1.6)
+            e = est_corr.get(dims[0])
+            s = sig.get(dims[0])
+            if e is not None:
+                axL.axvline(e, color='#DD8452', lw=2.0, label=f'estimate {e:+.2f}')
+                if s is not None and np.isfinite(s):
+                    axL.axvspan(e - s, e + s, color='#DD8452', alpha=0.18,
+                                label=f'+/- sigma ({s:.2f})')
+            t = truth_corr.get(dims[0])
+            if t is not None:
+                axL.axvline(t, color='#55A868', ls='--', lw=2.0, label=f'truth {t:+.2f}')
+            axL.set_xlabel(f'{dims[0]} correction')
+            axL.set_ylabel('fused energy [mm-eq]')
+            axL.legend(fontsize=8)
+        elif fused is not None and len(dims) >= 2:
+            a0, a1 = est.grid_axes[0], est.grid_axes[1]
+            Eg = np.asarray(fused).reshape(est.grid_shape)
+            if Eg.ndim > 2:                       # collapse any extra dims at their best slice
+                Eg = Eg.reshape(len(a0), len(a1), -1).min(axis=2)
+            im = axL.pcolormesh(a1, a0, Eg, shading='auto', cmap='viridis')
+            fig.colorbar(im, ax=axL, label='fused energy [mm-eq]')
+            e0, e1 = est_corr.get(dims[0]), est_corr.get(dims[1])
+            if e0 is not None and e1 is not None:
+                s0, s1 = sig.get(dims[0], np.nan), sig.get(dims[1], np.nan)
+                axL.errorbar([e1], [e0],
+                             xerr=[[s1], [s1]] if np.isfinite(s1) else None,
+                             yerr=[[s0], [s0]] if np.isfinite(s0) else None,
+                             fmt='o', ms=9, mfc='#DD8452', mec='white', ecolor='#DD8452',
+                             elinewidth=2, capsize=4, label='estimate +/- sigma')
+            t0, t1 = truth_corr.get(dims[0]), truth_corr.get(dims[1])
+            if t0 is not None and t1 is not None:
+                axL.plot([t1], [t0], '*', ms=18, mfc='#55A868', mec='white', label='truth')
+            axL.set_xlabel(f'{dims[1]} correction')
+            axL.set_ylabel(f'{dims[0]} correction')
+            axL.legend(fontsize=8, loc='upper right')
+        else:
+            axL.text(0.5, 0.5, 'no fused energy', ha='center', va='center')
+        axL.set_title('fused probe energy (the landscape the estimate came from)', fontsize=10)
+
+        # ---- RIGHT TOP: estimated vs true correction, with sigma bars ---------------------
+        d0 = dims[0]
+        tv = [h['truth'].get(d0) for h in hist if h.get('corr')]
+        ev = [h['corr'].get(d0) for h in hist if h.get('corr')]
+        sv = [h.get('sigma', {}).get(d0, np.nan) for h in hist if h.get('corr')]
+        if tv:
+            sv = np.array([s if np.isfinite(s) else 0.0 for s in sv], dtype=float)
+            axT.errorbar(tv, ev, yerr=sv, fmt='o', ms=5, color='#4C72B0',
+                         ecolor='#9ab4d4', elinewidth=1.2, capsize=2)
+            lim = max(np.max(np.abs(tv)), np.max(np.abs(ev)), 1e-3) * 1.15
+            axT.plot([-lim, lim], [-lim, lim], ls='--', lw=1.0, color='#888888')
+            axT.set_xlim(-lim, lim)
+            axT.set_ylim(-lim, lim)
+            if len(tv) > 2 and np.std(tv) > 1e-9 and np.std(ev) > 1e-9:
+                axT.set_title(f'estimate vs truth ({d0}): corr '
+                              f'{np.corrcoef(tv, ev)[0, 1]:+.2f}, n={len(tv)}', fontsize=10)
+            else:
+                axT.set_title(f'estimate vs truth ({d0}), n={len(tv)}', fontsize=10)
+        axT.set_xlabel(f'TRUE {d0} correction')
+        axT.set_ylabel('estimated')
+
+        # ---- RIGHT BOTTOM: error before/after + the reported uncertainty ------------------
+        n = np.arange(1, len(hist) + 1)
+        eb = [h['err_before'] for h in hist]
+        ea = [h['err_after'] for h in hist]
+        axB.plot(n, eb, 'o-', color='#C44E52', lw=1.2, ms=4, label='|err| before')
+        axB.plot(n, ea, 'o-', color='#55A868', lw=1.6, ms=5, label='|err| after')
+        axB.set_xlabel('trial')
+        axB.set_ylabel('ground-truth error [mm]')
+        axB.set_ylim(bottom=0.0)
+        axB.set_xticks(n if len(n) <= 20 else n[:: max(len(n) // 20, 1)])
+        axB.legend(fontsize=8, loc='upper left')
+        axU = axB.twinx()
+        unc = [h.get('sigma', {}).get(d0, np.nan) for h in hist]
+        cols = ['#4C72B0' if h.get('insert_success') else '#bbbbbb' for h in hist]
+        axU.bar(n, unc, width=0.55, color=cols, alpha=0.45, zorder=0)
+        axU.set_ylabel(f'reported sigma [{ "deg" if d0.endswith("_deg") else "mm" }]  '
+                       '(blue = seated)', fontsize=8)
+        axU.set_ylim(bottom=0.0)
+        for i, h in enumerate(hist):
+            if h.get('multimodal'):
+                axU.annotate('M', (i + 1, unc[i] if np.isfinite(unc[i]) else 0.0),
+                             textcoords='offset points', xytext=(0, 3), ha='center',
+                             fontsize=7, color='#C44E52')
+
+        fig.suptitle('estimator eval: probe phase + insertion phase', y=0.99)
+        if status:
+            fig.text(0.99, 0.965, status, ha='right', fontsize=9, color='#333333')
+        fig.tight_layout()
+        fig.savefig(path, dpi=110)
+        if live_path:
+            tmp = live_path + '.tmp'               # temp + replace: viewers never see a
+            fig.savefig(tmp, dpi=110, format='png')   # half-written PNG
+            os.replace(tmp, live_path)
+        plt.close(fig)
+    except Exception as exc:                       # noqa: BLE001 -- plotting is never fatal
+        log.warning('trial plot skipped (%s)', exc)
 
 
 def _write_summary(out_dir, rows, dims):
@@ -171,6 +302,18 @@ def build_and_run(cfg, robot, camera, args):
         return False
     decim = max(1, int(ev.get('log_decimation', 5)))
     save_obs = bool(ev.get('save_observations', True))
+    save_plots = bool(ev.get('save_plots', True))
+    # LIVE figure: ONE fixed path OUTSIDE the per-experiment folder, atomically overwritten after
+    # every trial -- keep it open in an image viewer across trials and runs. true =
+    # data/experiments/estimator_eval_live.png (the SAME file estimator_eval writes, so one
+    # viewer serves both apps); a string = explicit path; false disables.
+    live = ev.get('live_plot', True)
+    live_path = None
+    if save_plots and live:
+        live_path = live if isinstance(live, str) else os.path.join(
+            cfg.get('data_dir', 'data'), 'experiments', 'estimator_eval_live.png')
+        os.makedirs(os.path.dirname(live_path) or '.', exist_ok=True)
+        log.info('Live figure: %s', live_path)
 
     # ---- PROBE phase settings ----
     n_probes = max(1, int(pb.get('attempts', 3)))
@@ -296,6 +439,7 @@ def build_and_run(cfg, robot, camera, args):
     seed_q = q
 
     rows, ok, durations, n_succ = [], True, [], 0
+    hist = []                                      # per-trial plot record (see _plot_trial)
     try:
         for trial in range(1, num_trials + 1):
             t_trial = time.time()
@@ -369,6 +513,10 @@ def build_and_run(cfg, robot, camera, args):
 
             # ---------------- FUSED ESTIMATE (one correction) ----------------
             row['n_observations'] = n_obs_total
+            # The TRUE correction: believed @ C = true, so C = inverse(err_before).
+            truth6 = vec6_from_mats(inverse(mats_from_vec6(np.asarray(errb, dtype=float))))
+            truth_corr = {d: float(truth6[j]) for d, j in zip(dims, estimator.idx)}
+            rec = {'truth': truth_corr, 'err_before': errb_pos, 'err_after': errb_pos}
             if fused is None:
                 log.error('trial %d: no usable probe observations -- belief unchanged.', trial)
             else:
@@ -380,15 +528,23 @@ def build_and_run(cfg, robot, camera, args):
                             'multimodal': info['multimodal'],
                             'width_frac': info['width_frac']})
                 row.update({f'unc_{d}': v for d, v in info['curvature_uncertainty'].items()})
-                log.info('FUSED estimate over %d probes: %s | residual %.3f  uncertainty %.3f  '
+                row.update({f'sigma_{d}': v for d, v in info['sigma'].items()})
+                rec.update({'corr': info['theta_corr'], 'sigma': info['sigma'],
+                            'multimodal': info['multimodal']})
+                log.info('FUSED estimate over %d probes: %s | sigma %s | residual %.3f  '
                          'modes %d%s', n_probes,
                          {d: round(v, 3) for d, v in info['theta_corr'].items()},
-                         info['final_residual'], info['uncertainty'], info['modes'],
+                         {d: round(v, 2) for d, v in info['sigma'].items()},
+                         info['final_residual'], info['modes'],
                          '  *** MULTI-MODAL: treat as suspect ***' if info['multimodal'] else '')
+                log.info('   truth would be %s',
+                         {d: round(v, 3) for d, v in truth_corr.items()})
             erra, erra_pos, erra_rot = _gt_error(T_true, T_believed)
             row.update({f'err_after_{s}': v for s, v in zip(_ERR, erra)})
             row.update({'err_after_pos_mm': erra_pos, 'err_after_rot_deg': erra_rot})
             row['converged'] = bool(erra_pos <= tol_pos_mm and erra_rot <= tol_rot_deg)
+            rec['err_after'] = erra_pos
+            hist.append(rec)
             log.info('gt error %.2f mm / %.2f deg -> %.2f mm / %.2f deg%s',
                      errb_pos, errb_rot, erra_pos, erra_rot,
                      '  (CONVERGED)' if row['converged'] else '')
@@ -412,9 +568,16 @@ def build_and_run(cfg, robot, camera, args):
                             'insert_check_pos_mm': lin * 1000.0,
                             'insert_check_rot_deg': float(np.degrees(ang))})
                 row.update({f'seat_{s}': v for s, v in zip(_ERR, seat6)})
+                rec['insert_success'] = bool(succ)
                 log.info('INSERTION: seated=%s success=%s  seat xyz=[%+5.2f, %+5.2f, %+5.2f] mm '
                          'rpy=[%+5.2f, %+5.2f, %+5.2f] deg  (running %d/%d)',
                          seated, succ, *seat6, n_succ, trial)
+
+            if save_plots:
+                status = (f'trial {trial}/{num_trials}  |  seated {n_succ}/{trial} '
+                          f'({n_succ / max(trial, 1):.0%})')
+                _plot_trial(os.path.join(out_dir, f'trial_{trial:03d}.png'), estimator, fused,
+                            dims, truth_corr, hist, status, live_path)
 
             rows.append(row)
             writer.writerow(row)

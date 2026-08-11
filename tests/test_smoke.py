@@ -1166,6 +1166,9 @@ def test_grid_estimator_fuses_probes_and_flags_uncertainty():
         assert abs(info['theta_corr']['pitch_deg'] + 4.0) <= 0.5, info['theta_corr']
         assert info['aggregator'] == 'grid' and info['candidates'] == 113
         assert info['modes'] >= 1 and 'pitch_deg' in info['curvature_uncertainty']
+        # sigma is the same information in the DIM'S OWN UNITS (what the plot's bars show), so it
+        # must be finite, positive, and inside the searched box for a well-determined estimate.
+        assert 0.0 < info['sigma']['pitch_deg'] < 14.0, info['sigma']
 
         # (b) FUSION: the same belief error probed at two DIFFERENT true pitches (i.e. two
         # commanded biases) must fuse by ADDING energies and still yield that one correction.
@@ -1205,13 +1208,29 @@ def test_grid_estimator_fuses_probes_and_flags_uncertainty():
         assert alias_info['uncertainty'] > 5.0 * info['uncertainty'], \
             f"aliased manifold must read as far more uncertain: {info['uncertainty']:.3g} " \
             f"vs {alias_info['uncertainty']:.3g}"
+        assert alias_info['sigma']['pitch_deg'] > info['sigma']['pitch_deg']
+
+        # (e) TWO estimated dims: the grid is the product, and every per-dim output follows.
+        two = GridManifoldEstimator(dict(
+            cfg, estimate_dims=['z_mm', 'pitch_deg'],
+            grid={'range': {'z_mm': 8.0, 'pitch_deg': 14.0},
+                  'step': {'z_mm': 0.5, 'pitch_deg': 0.5},
+                  'curvature_probe': {'z_mm': 3.0, 'pitch_deg': 3.0}, 'mode_threshold': 1.1}))
+        assert two.grid_shape == (33, 57) and len(two.grid6) == 33 * 57
+        _, i2 = two.estimate(*two.prepare_observations(pose, f, tau))
+        assert set(i2['theta_corr']) == {'z_mm', 'pitch_deg'}
+        assert set(i2['sigma']) == {'z_mm', 'pitch_deg'}
+        assert abs(i2['theta_corr']['pitch_deg'] + 4.0) <= 1.0, i2['theta_corr']
 
         # Too few observations must SKIP, never guess.
         none_corr, reason = est.estimate(v6[:2], w6[:2])
         assert none_corr is None and 'observations' in reason
 
-        # A bad grid config must fail at CONSTRUCTION, before any robot motion.
-        for bad in ({'range': {'pitch_deg': 0.0}}, {'step': {'pitch_deg': 0.0}}):
+        # A bad grid config must fail at CONSTRUCTION, before any robot motion -- including a
+        # curvature probe too small to clear interpolation noise (the 1-deg failure mode).
+        for bad in ({'range': {'pitch_deg': 0.0}}, {'step': {'pitch_deg': 0.0}},
+                    {'curvature_probe': {'pitch_deg': 0.25}},
+                    {'curvature_probe': {'pitch_deg': 99.0}}):
             try:
                 GridManifoldEstimator(dict(cfg, grid=dict(cfg['grid'], **bad)))
             except ValueError:
@@ -1255,10 +1274,27 @@ def test_probe_app_config_is_wired():
     dims = cfg['estimation']['estimate_dims']
     for d in dims:
         assert d in g['range'] and d in g['step'], f'grid range/step missing for {d}'
+        assert g.get('curvature_probe', {}).get(d, g['curvature_probe_deg']) >= 2 * g['step'][d]
+
+    # Both z and pitch: the perturbation must actually inject the dims being estimated, and the
+    # probe pattern must jog z too -- a pitch-only probe moves ALONG the z-pitch valley, the one
+    # direction that cannot disambiguate it.
+    pert = cfg['eval']['perturbation']
+    if 'z_mm' in dims and 'pitch_deg' in dims:
+        assert pert['lower'][2] < 0 < pert['upper'][2], 'z must be injected when it is estimated'
+        assert pert['lower'][4] < 0 < pert['upper'][4], 'pitch must be injected'
+        assert pb['alternate_z_mm'] > 0, 'probe z jog is required when estimating z'
+    n_cand = 1
+    for d in dims:
+        n_cand *= int(round(2 * g['range'][d] / g['step'][d])) + 1
+    assert n_cand <= 4000, f'{n_cand} grid candidates will be slow per probe -- coarsen the step'
+
+    assert cfg['eval'].get('live_plot', True), 'live_plot is how the run is watched'
 
     cols = _fieldnames(dims, pb['attempts'])
     for c in ['uncertainty', 'modes', 'multimodal', 'insert_success', 'err_after_pos_mm',
-              f'probe{pb["attempts"]}_settled_rows', f'corr_{dims[0]}']:
+              f'probe{pb["attempts"]}_settled_rows'] + [f'corr_{d}' for d in dims] \
+             + [f'sigma_{d}' for d in dims]:
         assert c in cols, f'{c} missing from trials.csv schema'
 
 
@@ -1903,8 +1939,10 @@ def test_check_app_config_is_wired():
     assert callable(app.build_and_run) and callable(app.main)
 
     # estimator_eval carries the SAME estimator + check stack: the trust scores must have
-    # trials.csv columns (next to the ground truth -- that is where they get validated),
-    # and its estimation block must name the augmented map + rawcap + a check block.
+    # trials.csv columns (next to the ground truth -- that is where they get validated), and its
+    # estimation block must stay STRUCTURALLY valid. The manifold FILE is deliberately not
+    # pinned: this config gets retargeted per connector (banana augmented map, hose map, ...),
+    # so pinning a filename here only breaks the suite whenever the rig changes parts.
     from urlab.apps.estimator_eval import _fieldnames
     f = _fieldnames(['z_mm', 'pitch_deg'])
     for col in ('trust_rankavg2', 'trust_cauchy', 'trust_u_post', 'trust_u_split'):
@@ -1912,8 +1950,9 @@ def test_check_app_config_is_wired():
     with open(os.path.join(ROOT, 'configs', 'estimator_eval.yaml')) as fh:
         ecfg = yaml.safe_load(fh)
     eest = ecfg['estimation']
-    assert str(eest['manifold_csv']).endswith('banana_manifold_augmented.csv')
-    assert eest.get('wrench_representation') == 'rawcap'
+    assert str(eest['manifold_csv']).endswith('.csv')
+    assert 'configs/data' in str(eest['manifold_csv']).replace('\\', '/')
+    assert eest.get('wrench_representation') in ('rawcap', 'unit')
     assert str(eest['check']['method']) in ('cauchy', 'rankavg2')
     assert 'on_flag' not in eest['check']
 

@@ -76,7 +76,23 @@ class GridManifoldEstimator(ManifoldEstimator):
         self.info_weighting = str(g.get('info_weighting', 'depth')).strip().lower()
         if self.info_weighting not in ('depth', 'none'):
             raise ValueError("grid.info_weighting must be 'depth' or 'none'")
-        self.curvature_probe_deg = float(g.get('curvature_probe_deg', 3.0))
+        # Curvature probe distance, PER DIM (mm for translations, deg for rotations). The scalar
+        # curvature_probe_deg is the fallback for every dim; `curvature_probe: {dim: value}`
+        # overrides it. 3 deg was validated for pitch -- 1 deg does NOT work (it measures
+        # interpolation noise), so anything below ~2 grid steps is rejected here.
+        base = float(g.get('curvature_probe_deg', 3.0))
+        per_dim = dict(g.get('curvature_probe') or {})
+        self.curvature_probe = {}
+        for d, ax in zip(self.estimate_dims, axes):
+            v = float(per_dim.get(d, base))
+            step = ax[1] - ax[0]
+            if v < 2 * step:
+                raise ValueError(f'grid.curvature_probe[{d!r}] = {v:g} is under two grid steps '
+                                 f'({2 * step:g}) -- it would measure interpolation noise')
+            if v > ax[-1]:
+                raise ValueError(f'grid.curvature_probe[{d!r}] = {v:g} exceeds the grid '
+                                 f'half-range {ax[-1]:g}')
+            self.curvature_probe[d] = v
         self.mode_threshold = float(g.get('mode_threshold', 1.1))
         log.info('Grid estimator: %s over %s = %d candidates, info_weighting=%s.',
                  ' x '.join(f'{d}+-{a[-1]:g}@{a[1] - a[0]:g}'
@@ -115,27 +131,34 @@ class GridManifoldEstimator(ManifoldEstimator):
 
     # ------------------------------------------------------------------ uncertainty
     def _curvature(self, E):
-        """1/(3-point curvature) per estimated dim at the minimum -- the campaign's winner.
+        """3-point curvature per estimated dim at the minimum -- the campaign's winner.
 
-        Large value = flat basin = uncertain. Returns (per-dim dict, worst value)."""
+        Returns (inv_curv, sigma, worst):
+          inv_curv[dim] = 1/curvature  -- the RANKING metric (big = flat basin = uncertain)
+          sigma[dim]    = sqrt(E_min / curvature) -- the same information in the DIM'S OWN UNITS
+                          (mm or deg), which is what error bars should show
+          worst         = max inv_curv over dims (one number for the CSV / gating)"""
         Eg = E.reshape(self.grid_shape)
         k = np.unravel_index(int(np.argmin(Eg)), self.grid_shape)
         Emin = float(Eg[k])
-        out = {}
+        inv_curv, sigma = {}, {}
         for a, (dim, ax) in enumerate(zip(self.estimate_dims, self.grid_axes)):
             step = ax[1] - ax[0]
-            off = max(int(round(self.curvature_probe_deg / step)), 1)
+            off = max(int(round(self.curvature_probe[dim] / step)), 1)
             lo = list(k)
             hi = list(k)
             lo[a] = max(k[a] - off, 0)
             hi[a] = min(k[a] + off, len(ax) - 1)
             h = 0.5 * (ax[hi[a]] - ax[lo[a]])
-            if h <= 0:
-                out[dim] = float('inf')
-                continue
-            curv = (float(Eg[tuple(lo)]) - 2.0 * Emin + float(Eg[tuple(hi)])) / (h ** 2)
-            out[dim] = float(1.0 / curv) if curv > 1e-12 else float('inf')
-        return out, max(out.values()) if out else float('inf')
+            curv = ((float(Eg[tuple(lo)]) - 2.0 * Emin + float(Eg[tuple(hi)])) / (h ** 2)
+                    if h > 0 else 0.0)
+            if curv > 1e-12:
+                inv_curv[dim] = float(1.0 / curv)
+                sigma[dim] = float(np.sqrt(max(Emin, 0.0) / curv))
+            else:
+                inv_curv[dim] = float('inf')
+                sigma[dim] = float(ax[-1])          # unbounded within the searched box
+        return inv_curv, sigma, (max(inv_curv.values()) if inv_curv else float('inf'))
 
     def _modes(self, E):
         """Number of connected components of {E <= mode_threshold * E_min} (the mode FLAG)."""
@@ -170,7 +193,7 @@ class GridManifoldEstimator(ManifoldEstimator):
         k = int(np.argmin(E))
         theta = self.grid6[k]
         Emin = float(E[k])
-        curv, worst = self._curvature(E)
+        curv, sigma, worst = self._curvature(E)
         modes = self._modes(E)
         width = float(np.mean(E <= Emin * 1.2))
         info = {
@@ -179,6 +202,7 @@ class GridManifoldEstimator(ManifoldEstimator):
             'n_observations': int(n_obs),
             'candidates': int(len(self.grid6)),
             'curvature_uncertainty': curv,       # per dim: 1/curvature (big = flat = uncertain)
+            'sigma': sigma,                      # per dim, in mm / deg -- for error bars
             'uncertainty': float(worst),
             'modes': int(modes),
             'multimodal': bool(modes > 1),

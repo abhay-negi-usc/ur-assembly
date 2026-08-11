@@ -45,12 +45,21 @@ eval:
   mode: bounds
   bounds_simultaneous: false     # false = one DOF at a time -- cleaner for reading the results
   # ABSOLUTE lower/upper per DOF [x, y, z (m), roll, pitch, yaw (deg)], in the held part's OWN
-  # frame. START PITCH-ONLY: pitch is the identifiable DOF (the campaign's 1-DOF result), so a
-  # pitch-only sweep is the cleanest first test. Add z back once pitch works.
+  # frame. BOTH z and pitch are injected. bounds_simultaneous: false sweeps one DOF at a time
+  # (4 trials: z+-5 mm, pitch+-8 deg) -- the cleanest way to read which DOF the estimator
+  # actually recovers; set it true for the box CORNERS (both DOFs wrong at once, the harder and
+  # more production-like case).
   perturbation:
-    lower: [0.0, 0.0, 0.0, 0.0, -8.0, 0.0]
-    upper: [0.0, 0.0, 0.0, 0.0, +8.0, 0.0]
-  grid_resolution: [0.0, 0.0, 0.001, 0.0, 2.0, 0.0]
+    lower: [0.0, 0.0, -0.005, 0.0, -8.0, 0.0]
+    upper: [0.0, 0.0, +0.005, 0.0, +8.0, 0.0]
+  grid_resolution: [0.0, 0.0, 0.0025, 0.0, 4.0, 0.0]
+
+  save_plots: true               # per-trial figure (trial_TTT.png), re-saved every trial
+  # LIVE figure: ONE fixed path OUTSIDE the experiment folder, atomically overwritten after every
+  # trial -- keep it open in an image viewer across runs. true =
+  # data/experiments/estimator_eval_live.png (the SAME file estimator_eval writes, so one open
+  # viewer serves both apps); a string = explicit path; false disables.
+  live_plot: true
 
   success_tolerance:             # ground-truth convergence gate (logged, not enforced)
     pos_mm: 1.0
@@ -77,9 +86,11 @@ probe:
   settle_s: 2.0
 
   # Deliberate per-probe bias, SIGN ALTERNATING (+, -, +, ...) in the connector's own frame.
-  # Diversity of probes -- not optimality of any one probe -- is what breaks aliases.
+  # Diversity of probes -- not optimality of any one probe -- is what breaks aliases. With BOTH
+  # z and pitch estimated, jog both: a pitch-only probe pattern moves the physical offset along
+  # the z-pitch valley, which is exactly the direction that does NOT disambiguate it.
   alternate_pitch_deg: 5.0
-  alternate_z_mm: 0.0            # optional z jog; 0 = pitch-only probing
+  alternate_z_mm: 2.0            # 0 = pitch-only probing
 
   # Probe compliance/guard: SOFTER and more conservative than production -- a probe should feel
   # the contact, not force the mate. Overrides compliance.stiffness / force_guard.max_force_n.
@@ -107,8 +118,9 @@ estimation:
   min_force_n: 3.0
   min_observations: 10
 
-  # START WITH PITCH ALONE -- the identifiable DOF. Add z_mm back once pitch tracks truth.
-  estimate_dims: [pitch_deg]
+  # BOTH DOFs. Pitch is the more identifiable one (the campaign's 1-DOF result), so if the
+  # results are murky, drop to [pitch_deg] with a pitch-only perturbation to isolate it.
+  estimate_dims: [z_mm, pitch_deg]
 
   interp_neighbors: 16
   interp_softness: 1.0
@@ -116,19 +128,26 @@ estimation:
   random_seed: 0
 
   grid:
-    # Half-width of the exhaustive search box per estimated dim, and its resolution.
+    # Half-width of the exhaustive search box per estimated dim, and its resolution. COST: the
+    # candidate count is the PRODUCT over dims and every candidate is scored against every
+    # observation row, so keep 2-D grids coarse. As set: 33 x 57 = 1881 candidates (~seconds per
+    # probe). At 0.25 steps it would be 65 x 113 = 7345 -- 4x slower for sub-noise resolution.
     range:
-      pitch_deg: 14.0
       z_mm: 8.0
+      pitch_deg: 14.0
     step:
-      pitch_deg: 0.25
-      z_mm: 0.25
+      z_mm: 0.5
+      pitch_deg: 0.5
     # Weight rows by informativeness vs insertion depth (d' 0.7 in the approach -> 2.4 at the
     # socket mouth). 'none' = uniform.
     info_weighting: depth
-    # Uncertainty = 1/curvature at the minimum, from two extra evaluations at theta* +- this.
-    # 3.0 deg validated (AUROC 0.89-0.91); 1.0 deg does NOT work (measures interpolation noise).
-    curvature_probe_deg: 3.0
+    # Uncertainty = 1/curvature at the minimum, from two extra evaluations at theta* +- this,
+    # PER DIM in that dim's own units (mm / deg). 3 deg validated for pitch (AUROC 0.89-0.91);
+    # 1 deg does NOT work (it measures interpolation noise). Must exceed two grid steps.
+    curvature_probe_deg: 3.0     # fallback for any dim not listed below
+    curvature_probe:
+      z_mm: 3.0
+      pitch_deg: 3.0
     # Sublevel factor for the multi-modality FLAG: >1 component => 44% failure rate vs 6%.
     mode_threshold: 1.1
 

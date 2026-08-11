@@ -56,7 +56,7 @@ from .. import tool_frames
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import trajectory as traj
 from ..skills.manifold import (FORCE_COLS, POSE_COLS, TORQUE_COLS,
-                               mats_from_vec6, vec6_from_mats)
+                               mats_from_vec6, scaled12, vec6_from_mats)
 from ..skills.solution_check import CheckedManifoldEstimator
 from ..transforms import inverse, matrix_to_xyzrpy, pose_error, translation_matrix
 from ._runner import run_app
@@ -132,14 +132,66 @@ def _fieldnames(dims):
             + [f'seat_{s}' for s in _ERR] + ['success']
             + [f'inj_{s}' for s in _ERR]
             + [f'err_before_{s}' for s in _ERR] + ['err_before_pos_mm', 'err_before_rot_deg']
-            + [f'corr_{d}' for d in dims] + ['icp_inliers', 'icp_residual', 'estimate']
+            + [f'corr_{d}' for d in dims] + [f'sigma_{d}' for d in dims]
+            + ['icp_inliers', 'icp_residual', 'estimate']
             + ['trust_rankavg2', 'trust_cauchy'] + [f'trust_{s}' for s in _TRUST_SIGNALS]
             + [f'err_after_{s}' for s in _ERR] + ['err_after_pos_mm', 'err_after_rot_deg']
             + ['converged'])
 
 
+def _landscape(estimator, vec6, w6, max_pts=2600, row_cap=120):
+    """The ICP energy over a DENSE GRID of candidate corrections, in the estimator's own metric.
+
+    The multi-start solver never builds this -- it only samples it from random starts -- so the
+    landscape is what shows whether the applied correction sits in the true basin, whether the
+    basin is flat (uncertain) and whether a rival mode is deeper. Returns
+    (axes, E, sigma, argmin) with E shaped like the mesh, sigma per dim in that dim's own units
+    (sqrt(E_min / curvature), the 2026-08 campaign's uncertainty winner) and argmin the grid's
+    best correction. Cost is bounded by subsampling the grid and the observation rows."""
+    dims = estimator.estimate_dims
+    halves = [max(float(estimator.init_range.get(d, 8.0)), 6.0 if d.endswith('_mm') else 10.0)
+              for d in dims]
+    n_per = max(int(round(max_pts ** (1.0 / max(len(dims), 1)))), 9)
+    axes = [np.linspace(-h, h, n_per) for h in halves]
+    mesh = np.meshgrid(*axes, indexing='ij')
+    G = np.zeros((mesh[0].size, 6))
+    for j, m in zip(estimator.idx, mesh):
+        G[:, j] = m.ravel()
+    v6, w = np.asarray(vec6, dtype=float), np.asarray(w6, dtype=float)
+    if len(v6) > row_cap:                          # bound the cost; the shape is unaffected
+        sel = np.linspace(0, len(v6) - 1, row_cap).astype(int)
+        v6, w = v6[sel], w[sel]
+    C = np.einsum('nij,kjl->knil', mats_from_vec6(v6), mats_from_vec6(G))
+    pts = scaled12(vec6_from_mats(C), w, estimator.s_rot).reshape(-1, 12)
+    dist, nn = estimator.tree.query(pts, k=estimator.interp_neighbors, workers=-1)
+    if estimator.interp_neighbors > 1:
+        bw = np.exp(-(dist - dist[:, :1]) / estimator.interp_tau)
+        bw /= bw.sum(axis=1, keepdims=True)
+        tgt = np.einsum('mk,mkd->md', bw, estimator.M12[nn])
+        d1 = np.linalg.norm(tgt - pts, axis=1)
+    else:
+        d1 = dist if dist.ndim == 1 else dist[:, 0]
+    E = d1.reshape(len(G), len(v6)).mean(axis=1).reshape(mesh[0].shape)
+
+    k = np.unravel_index(int(np.argmin(E)), E.shape)
+    Emin = float(E[k])
+    sigma, argmin = {}, {}
+    for a, (d, ax) in enumerate(zip(dims, axes)):
+        argmin[d] = float(ax[k[a]])
+        step = ax[1] - ax[0]
+        off = max(int(round(3.0 / step)), 1)       # +-3 mm / deg: validated probe distance
+        lo, hi = list(k), list(k)
+        lo[a] = max(k[a] - off, 0)
+        hi[a] = min(k[a] + off, len(ax) - 1)
+        h = 0.5 * (ax[hi[a]] - ax[lo[a]])
+        curv = ((float(E[tuple(lo)]) - 2.0 * Emin + float(E[tuple(hi)])) / (h ** 2)
+                if h > 0 else 0.0)
+        sigma[d] = float(np.sqrt(max(Emin, 0.0) / curv)) if curv > 1e-12 else float(ax[-1])
+    return axes, E, sigma, argmin
+
+
 def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None,
-                       res_all=None, l2_all=None, status=None):
+                       res_all=None, l2_all=None, status=None, land=None):
     """ONE figure per trial, RE-SAVED after every attempt: the GROUND-TRUTH error, all attempts
     co-plotted (x = 0 is the injected error, x = k the error left after attempt k's update).
 
@@ -176,9 +228,11 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None
 
         n_left = len(dims) + 1
         pairs = list(itertools.combinations(range(len(dims)), 2))
-        ncols = 3 if pairs else 2
-        fig = plt.figure(figsize=(11.0 + (4.2 if pairs else 0.0), max(2.1 * n_left, 6.5)))
-        gs = fig.add_gridspec(2 * n_left, ncols, width_ratios=[1.25, 1.0, 0.95][:ncols])
+        ncols = (3 if pairs else 2) + (1 if land else 0)
+        widths = ([1.25, 1.0] + ([0.95] if pairs else []) + ([1.15] if land else []))
+        fig = plt.figure(figsize=(11.0 + (4.2 if pairs else 0.0) + (5.0 if land else 0.0),
+                                  max(2.1 * n_left, 6.5)))
+        gs = fig.add_gridspec(2 * n_left, ncols, width_ratios=widths)
         axes = []
         for i in range(n_left):
             axes.append(fig.add_subplot(gs[2 * i:2 * i + 2, 0],
@@ -270,6 +324,65 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None
             axp.tick_params(labelsize=7)
             if pi == 0:
                 axp.legend(fontsize=7, loc='best')
+
+        # LANDSCAPE: the energy over every candidate correction, with the APPLIED estimate and
+        # its +/- sigma bars against the TRUE correction. This is the panel that separates "the
+        # solver picked badly" from "the landscape's minimum is in the wrong place" -- if truth
+        # sits in a deep basin the solver missed it, if truth is on a slope the DATA is at fault.
+        if land:
+            axes_l, E, sigma, argmin, est_corr, truth_corr, finals = land
+            col = ncols - 1
+            axl = fig.add_subplot(gs[:, col])
+            if len(dims) == 1:
+                d0 = dims[0]
+                axl.plot(axes_l[0], E, color='#4C72B0', lw=1.6, zorder=2)
+                if finals is not None and len(finals):
+                    axl.plot(finals[:, 0], np.full(len(finals), float(np.min(E))), '|',
+                             color='#999999', ms=8, alpha=0.5, zorder=1, label='ICP finals')
+                e = est_corr.get(d0)
+                if e is not None:
+                    axl.axvline(e, color='#DD8452', lw=2.0, zorder=3,
+                                label=f'applied {e:+.2f}')
+                    s = sigma.get(d0)
+                    if s is not None and np.isfinite(s):
+                        axl.axvspan(e - s, e + s, color='#DD8452', alpha=0.18, zorder=0,
+                                    label=f'+/- sigma ({s:.2f})')
+                t = truth_corr.get(d0)
+                if t is not None:
+                    axl.axvline(t, color='#55A868', ls='--', lw=2.0, zorder=4,
+                                label=f'truth {t:+.2f}')
+                axl.set_xlabel(f'{d0} correction '
+                               f'[{"deg" if d0.endswith("_deg") else "mm"}]')
+                axl.set_ylabel('ICP energy [mm-eq]')
+            else:
+                d0, d1 = dims[0], dims[1]
+                Eg = E if E.ndim == 2 else E.reshape(len(axes_l[0]), len(axes_l[1]), -1).min(2)
+                im = axl.pcolormesh(axes_l[1], axes_l[0], Eg, shading='auto', cmap='viridis')
+                fig.colorbar(im, ax=axl, label='ICP energy [mm-eq]')
+                if finals is not None and len(finals) and finals.shape[1] >= 2:
+                    axl.scatter(finals[:, 1], finals[:, 0], s=14, facecolors='none',
+                                edgecolors='#ff7f0e', linewidths=0.7, alpha=0.75, zorder=3,
+                                label='ICP finals')
+                e0, e1 = est_corr.get(d0), est_corr.get(d1)
+                if e0 is not None and e1 is not None:
+                    s0 = sigma.get(d0, np.nan)
+                    s1 = sigma.get(d1, np.nan)
+                    axl.errorbar([e1], [e0],
+                                 xerr=[[s1], [s1]] if np.isfinite(s1) else None,
+                                 yerr=[[s0], [s0]] if np.isfinite(s0) else None,
+                                 fmt='o', ms=9, mfc='#DD8452', mec='white', ecolor='#DD8452',
+                                 elinewidth=2, capsize=4, zorder=4, label='applied +/- sigma')
+                if argmin:
+                    axl.plot([argmin[d1]], [argmin[d0]], 'x', color='#C44E52', ms=9, mew=2,
+                             zorder=5, label='grid argmin')
+                t0, t1 = truth_corr.get(d0), truth_corr.get(d1)
+                if t0 is not None and t1 is not None:
+                    axl.plot([t1], [t0], '*', ms=18, mfc='#55A868', mec='white', zorder=6,
+                             label='truth')
+                axl.set_xlabel(f'{d1} correction [{"deg" if d1.endswith("_deg") else "mm"}]')
+                axl.set_ylabel(f'{d0} correction [{"deg" if d0.endswith("_deg") else "mm"}]')
+            axl.legend(fontsize=7, loc='best')
+            axl.set_title('energy landscape: estimate vs truth', fontsize=10)
 
         fig.suptitle(f'trial {trial}: ground-truth belief error per attempt', y=0.995)
         if status:                                 # run progress: trials done + success rate
@@ -409,6 +522,10 @@ def build_and_run(cfg, robot, camera, args):
     # ONE error figure per trial (trial_TTT_errors.png), re-saved after every attempt -- cheap
     # (N files, not N x M), and watchable live during a run.
     save_plots = bool(ev.get('save_plots', True))
+    # The dense energy landscape behind each estimate (an extra column on the trial figure and
+    # therefore on the live one). Costs one grid x observations kNN sweep per attempt -- both are
+    # capped in _landscape -- so it can be turned off on a slow box.
+    plot_land = bool(ev.get('plot_landscape', True))
     # LIVE figure: ONE fixed path OUTSIDE the per-experiment folder, atomically overwritten with
     # the current trial's figure after every attempt -- keep it open in an image viewer across
     # trials and runs. true = data/experiments/estimator_eval_live.png; a string = explicit path.
@@ -630,6 +747,7 @@ def build_and_run(cfg, robot, camera, args):
                 vec6, w6 = estimator.prepare_observations(
                     full[:, :6], full[:, 6:9], full[:, 9:12])
                 T_corr_mm, info = estimator.estimate(vec6, w6)
+                land = None                        # (axes, E, sigma, argmin, est, truth, finals)
                 row = {'trial': trial, 'attempt': attempt, 'n_observations': len(obs),
                        'seated': seated, 'check_pos_mm': lin * 1000.0,
                        'check_rot_deg': float(np.degrees(ang)), 'success': succ,
@@ -673,6 +791,20 @@ def build_and_run(cfg, robot, camera, args):
                     trackl2.append(np.sqrt(
                         (rem6[:, :3] ** 2).sum(axis=1)
                         + ((estimator.s_rot * rem6[:, 3:]) ** 2).sum(axis=1)))
+                    # The landscape the correction was picked from, with the TRUE correction
+                    # (believed @ C = true, so C = inverse(err_before)) for reference.
+                    if save_plots and plot_land:
+                        try:
+                            ax_l, E_l, sig_l, amin_l = _landscape(estimator, vec6, w6)
+                            t6 = vec6_from_mats(
+                                inverse(mats_from_vec6(np.asarray(errb, dtype=float))))
+                            land = (ax_l, E_l, sig_l, amin_l, dict(info['theta_corr']),
+                                    {d: float(t6[j]) for d, j in zip(estimator.estimate_dims,
+                                                                     estimator.idx)},
+                                    np.asarray(info['theta_hist'], dtype=float)[:, -1, :])
+                            row.update({f'sigma_{d}': v for d, v in sig_l.items()})
+                        except Exception as exc:   # noqa: BLE001 -- diagnostics never fatal
+                            log.warning('landscape skipped (%s)', exc)
                 erra, erra_pos, erra_rot = _gt_error(T_true, T_believed)
                 track6.append(erra)
                 if save_plots:                     # re-saved after EVERY attempt of this trial
@@ -680,7 +812,8 @@ def build_and_run(cfg, robot, camera, args):
                               f'({n_succ / trial:.0%})')
                     _plot_trial_errors(os.path.join(out_dir, f'trial_{trial:03d}_errors.png'),
                                        trial, estimator.estimate_dims, track6, trackr,
-                                       estimator.s_rot, live_path, trackg, trackl2, status)
+                                       estimator.s_rot, live_path, trackg, trackl2, status,
+                                       land)
                 row.update({f'err_after_{s}': v for s, v in zip(_ERR, erra)})
                 row.update({'err_after_pos_mm': erra_pos, 'err_after_rot_deg': erra_rot})
                 row['converged'] = bool(erra_pos <= tol_pos_mm and erra_rot <= tol_rot_deg)

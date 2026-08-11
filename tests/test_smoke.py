@@ -1266,6 +1266,17 @@ def test_probe_app_config_is_wired():
     assert pb['alternate_pitch_deg'] > 0, 'probes must alternate to break aliases'
     assert pb['attempts'] >= 2, 'fusion needs at least two probes'
 
+    # Per-waypoint trajectory noise is PROCESS-CRITICAL: the manifold was collected with fresh
+    # per-waypoint jitter, which is what walks a misaligned cylindrical peg off the hole rim and
+    # into the bore. A clean probe path lands face-on-face and stops ~15 mm short (measured
+    # early-landing 68% clean vs 6% for the map), so the probes never reach the contact the map
+    # describes and no estimate can work.
+    tn = pb.get('trajectory_noise') or {}
+    assert tn.get('enabled'), 'probe.trajectory_noise must be enabled to clear the hole rim'
+    assert len(tn['std']) == 6
+    assert tn['std'][2] > 0 or tn['std'][4] > 0, \
+        'the jitter must act in z and/or pitch -- the DOFs that walk the peg off the rim'
+
     g = cfg['estimation']['grid']
     assert g['curvature_probe_deg'] >= 2.0, \
         'curvature_probe_deg below ~2 deg measures interpolation noise (AUROC 0.66 at 1 deg)'

@@ -92,6 +92,19 @@ probe:
   alternate_pitch_deg: 5.0
   alternate_z_mm: 2.0            # 0 = pitch-only probing
 
+  # PER-WAYPOINT TRAJECTORY NOISE -- PROCESS-CRITICAL, matched to how the manifold was collected.
+  # uncertain_sampling draws a fresh offset on EVERY waypoint (y +-0.5 mm, z +-5 mm, pitch +-5
+  # deg, UNSMOOTHED), and that jitter is what walks a misaligned cylindrical peg off the hole's
+  # rim and into the bore. Without it the peg's leading face simply lands on the rim and the
+  # insertion stops ~15 mm short: measured early-landing rate (max true x < -14 mm) was 6% for
+  # the manifold, 32% for the noised estimator_eval, and 68% for a noise-free probe phase.
+  # smooth_window 1 = unsmoothed, like the map's collection. Redrawn per probe.
+  trajectory_noise:
+    enabled: true
+    std: [0.0, 0.0005, 0.005, 0.0, 5.0, 0.0]   # [x,y,z (m), roll,pitch,yaw (deg)]
+    smooth_window: 1
+    decay_traj: 0.0              # optionally shed the jitter toward the seat (0 = keep it all)
+
   # Probe compliance/guard: SOFTER and more conservative than production -- a probe should feel
   # the contact, not force the mate. Overrides compliance.stiffness / force_guard.max_force_n.
   stiffness: [1500.0, 1500.0, 150.0, 8.0, 8.0, 8.0]

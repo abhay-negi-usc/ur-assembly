@@ -80,6 +80,14 @@ eval:
   random_seed: 7                 # >0 = replayable perturbation stream; 0 = nondeterministic
   log_decimation: 5              # observation every Nth servo cycle (125 Hz / N -> ~25 Hz)
   save_observations: true        # per-attempt observation CSVs (the post-analysis raw data)
+  # Extra column on the trial/live figure: the ICP energy over a DENSE GRID of candidate
+  # corrections, with the APPLIED estimate and its +/- sigma (from the curvature at the minimum,
+  # in each dim's own units) against the TRUE correction, plus every multi-start final. This is
+  # the panel that separates "the solver picked badly" (truth sits in a deep basin it missed)
+  # from "the landscape's minimum is in the wrong place" (truth sits on a slope -- a DATA
+  # problem). Costs one grid-x-observations kNN sweep per attempt; both are capped in code.
+  # The sigma values also land in trials.csv as sigma_<dim>.
+  plot_landscape: true
   save_plots: true               # per-TRIAL error figure (trial_TTT_errors.png), RE-SAVED after
                                  # every attempt: ground-truth error vs attempt, all attempts
                                  # co-plotted (x = 0 is the injected error), plus the ICP

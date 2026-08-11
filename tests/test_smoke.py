@@ -15,8 +15,6 @@ import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ROOT)
 
 from urlab import transforms as T   # noqa: E402
 from urlab.frames import FrameGraph   # noqa: E402
@@ -24,6 +22,53 @@ from urlab.frames import FrameGraph   # noqa: E402
 
 def approx(a, b, tol=1e-9):
     return np.allclose(a, b, atol=tol)
+
+
+def test_sources_parse_and_have_no_duplicated_blocks():
+    """Every source PARSES, and no block of lines is immediately repeated.
+
+    Both failure modes have actually happened here: committing the same work independently on the
+    dev box and the robot box, then merging, makes git take BOTH copies of each changed hunk. The
+    result is silently duplicated statements (harmless-looking) and unbalanced brackets (a hard
+    syntax error) -- twice, in files that a hardware run imports. Line endings are not the cause
+    and normalising them does not prevent it; only noticing does, so this test does the noticing."""
+    import ast
+
+    src_dirs = [os.path.join(ROOT, 'urlab'), os.path.join(ROOT, 'analysis'),
+                os.path.join(ROOT, 'tests')]
+    files = []
+    for d in src_dirs:
+        for base, _, names in os.walk(d):
+            files += [os.path.join(base, n) for n in names if n.endswith('.py')]
+    assert files, 'no sources found -- the walk paths are wrong'
+
+    bad_syntax, dups = [], []
+    for f in files:
+        text = open(f, encoding='utf-8').read()
+        try:
+            ast.parse(text, f)
+        except SyntaxError as exc:
+            bad_syntax.append(f'{os.path.relpath(f, ROOT)}:{exc.lineno}: {exc.msg}')
+            continue
+        lines = text.split('\n')
+        i = 0
+        while i < len(lines):
+            hit = 0
+            # Longest-first so a big duplicated hunk is reported once, not as many small ones.
+            for n in range(40, 1, -1):
+                if i + 2 * n > len(lines):
+                    continue
+                blk = lines[i:i + n]
+                if blk == lines[i + n:i + 2 * n] and sum(1 for s in blk if s.strip()) >= 2:
+                    dups.append(f'{os.path.relpath(f, ROOT)}:{i + 1}-{i + n} repeated '
+                                f'immediately ({n} lines): {blk[0].strip()[:60]!r}')
+                    hit = 2 * n
+                    break
+            i += hit if hit else 1
+
+    assert not bad_syntax, 'sources fail to parse:\n  ' + '\n  '.join(bad_syntax)
+    assert not dups, ('duplicated line blocks -- almost certainly a merge that took both copies '
+                      'of the same change:\n  ' + '\n  '.join(dups))
 
 
 # ------------------------------------------------------------------ transforms
@@ -390,9 +435,6 @@ def test_cable_profile_applies_counts():
     # The HOLDER chain is retired: no cable may still promote the old keys.
     assert cfg.get_path('connector_in_holder') is None
     assert cfg.get_path('connector_holder_target') is None
-    # The HOLDER chain is retired: no cable may still promote the old keys.
-    assert cfg.get_path('connector_in_holder') is None
-    assert cfg.get_path('connector_holder_target') is None
 
     bnc = Config({'cable': 'bnc', '_config_dir': CONFIG_DIR})
     apply_cable_profile(bnc)
@@ -412,15 +454,6 @@ def test_cable_profile_applies_counts():
             raise AssertionError('junction_offset_m must raise, not be ignored')
         except ValueError as exc:
             assert 'junction_in_fingertip' in str(exc)
-        # The retired HOLDER keys must fail loudly too -- a stale entry would otherwise feed a
-        # target nothing reads any more.
-        with open(os.path.join(tmp, 'cables.yaml'), 'w') as fh:
-            fh.write('cables:\n  x:\n    connector_holder_target: {xyz_mm: [1, 2, 3]}\n')
-        try:
-            apply_cable_profile(Config({'cable': 'x', '_config_dir': tmp}))
-            raise AssertionError('connector_holder_target must raise, not be ignored')
-        except ValueError as exc:
-            assert 'frames.yaml' in str(exc)
         # The retired HOLDER keys must fail loudly too -- a stale entry would otherwise feed a
         # target nothing reads any more.
         with open(os.path.join(tmp, 'cables.yaml'), 'w') as fh:
@@ -1471,11 +1504,7 @@ def test_tool_frames_shared_yaml_source():
     targets = load_targets()
     with open(os.path.join(ROOT, 'configs', 'frames.yaml')) as fh:
         raw = yaml.safe_load(fh)['targets']['banana_connector_finger_holder']
-    with open(os.path.join(ROOT, 'configs', 'frames.yaml')) as fh:
-        raw = yaml.safe_load(fh)['targets']['banana_connector_finger_holder']
     xyz, rpy = matrix_to_xyzrpy(targets['banana_connector_finger_holder'])
-    assert np.allclose(xyz * 1000.0, raw['xyz_mm'])
-    assert np.allclose(np.degrees(rpy), raw['rpy_deg'])
     assert np.allclose(xyz * 1000.0, raw['xyz_mm'])
     assert np.allclose(np.degrees(rpy), raw['rpy_deg'])
 

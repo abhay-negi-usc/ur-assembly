@@ -76,6 +76,23 @@ cables:
     # (The held-connector frame + its recorded mate live in configs/frames.yaml:
     # frames: banana_connector_finger_holder + targets: banana_connector_finger_holder.)
 
+  hose: # FIXME: add actual parameters 
+    # PHYSICAL dimensions (preferred): the grasp-check count band is DERIVED from these through
+    # the calibrated gripper kinematic model + groove_depth_mm. The measured count keys below
+    # are kept as the recorded reference; when both are present the DIAMETERS win and the
+    # loader logs the derived-vs-measured comparison.
+    connector_diameter_mm: [9.55, 10.7]   # grasp SUCCESS = fingers stalled on this (the target)
+    cable_diameter_mm: 3.66               # thinner than 2*groove: stalls in the flex region
+    connector: [207, 213]   # measured reference (CONNECTOR between the fingertips = SUCCESS)
+    cable: 225              # measured reference (grabbing the CABLE instead = a MISS)
+    # Where the JUNCTION sits in the FINGERTIP frame at the grasp (fingertip target =
+    # detected junction @ inverse of this). Monitor units (mm/deg) -- xyz/rpy (m/rad) also work.
+    junction_in_fingertip:
+      xyz_mm:  [-17.0, 0.0, 5.0]
+      rpy_deg: [0.0, 0.0, 0.0]
+    # (The held-connector frame + its recorded mate live in configs/frames.yaml:
+    # frames: banana_connector_finger_holder + targets: banana_connector_finger_holder.)
+
   bnc:
     connector: [197, 206]
     cable: 221

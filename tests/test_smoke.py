@@ -1114,6 +1114,154 @@ def test_manifold_estimator_recovers_belief_error():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_grid_estimator_fuses_probes_and_flags_uncertainty():
+    """skills\\grid_estimator: the exhaustive-grid estimator must (a) recover a rigid belief error
+    without multi-start, (b) FUSE probes by adding their energies -- the algebra the probe app
+    relies on -- (c) weight rows by informativeness vs depth, and (d) report the campaign's
+    uncertainty signals: 1/curvature at the minimum and the multi-modality flag."""
+    import csv as _csv
+    import shutil
+    import tempfile
+
+    from urlab.skills.grid_estimator import GridManifoldEstimator
+    from urlab.skills.manifold import (FORCE_COLS, POSE_COLS, TORQUE_COLS, mats_from_vec6,
+                                       vec6_from_mats)
+
+    tmp = tempfile.mkdtemp()
+    try:
+        # Manifold: insertions at several pitch offsets, each with a pitch-DEPENDENT contact
+        # direction, so pitch is identifiable from the wrench (the real manifold's structure).
+        rows = []
+        for p in np.arange(-12.0, 12.01, 1.0):
+            for x in np.linspace(-20.0, -4.0, 40):
+                f = 5.0 * np.array([-0.9, 0.0, 0.0]) + np.array([0.0, -0.25 * p, 0.0])
+                rows.append([x, 0.0, 0.0, 0.0, p, 0.0] + list(f) + [0.0, 0.0, 0.0])
+        path = os.path.join(tmp, 'manifold.csv')
+        with open(path, 'w', newline='') as fh:
+            w = _csv.writer(fh)
+            w.writerow(POSE_COLS + FORCE_COLS + TORQUE_COLS)
+            w.writerows(rows)
+
+        cfg = {'manifold_csv': path, 'estimate_dims': ['pitch_deg'], 'min_observations': 5,
+               'scaling_constant_unit_force_to_mm': 1.5, 'scaling_constant_unit_torque_to_mm': 0.0,
+               'wrench_representation': 'rawcap', 'min_force_n': 1.0,
+               'grid': {'range': {'pitch_deg': 14.0}, 'step': {'pitch_deg': 0.25},
+                        'curvature_probe_deg': 3.0, 'mode_threshold': 1.1}}
+        est = GridManifoldEstimator(cfg)
+        assert len(est.grid6) == 113, len(est.grid6)
+
+        def observe(true_pitch, err_pitch):
+            """Rows the robot would log at `true_pitch` with belief error `err_pitch`."""
+            src = np.array([r for r in rows if abs(r[4] - true_pitch) < 1e-9])
+            D = mats_from_vec6([0.0, 0.0, 0.0, 0.0, err_pitch, 0.0])
+            pose = vec6_from_mats(mats_from_vec6(src[:, :6]) @ D)
+            f = src[:, 6:9] @ D[:3, :3]
+            return pose, f, np.zeros_like(f)
+
+        # (a) single probe recovers the correction: believed @ T_corr ~= true, so corr ~= -err.
+        pose, f, tau = observe(0.0, 4.0)
+        v6, w6 = est.prepare_observations(pose, f, tau)
+        T_corr, info = est.estimate(v6, w6)
+        assert T_corr is not None, info
+        assert abs(info['theta_corr']['pitch_deg'] + 4.0) <= 0.5, info['theta_corr']
+        assert info['aggregator'] == 'grid' and info['candidates'] == 113
+        assert info['modes'] >= 1 and 'pitch_deg' in info['curvature_uncertainty']
+
+        # (b) FUSION: the same belief error probed at two DIFFERENT true pitches (i.e. two
+        # commanded biases) must fuse by ADDING energies and still yield that one correction.
+        E1, n1 = est.energy(*est.prepare_observations(*observe(-5.0, 4.0)))
+        E2, n2 = est.energy(*est.prepare_observations(*observe(+5.0, 4.0)))
+        _, fused = est.solve(E1 + E2, n1 + n2)
+        assert abs(fused['theta_corr']['pitch_deg'] + 4.0) <= 0.5, fused['theta_corr']
+        assert fused['n_observations'] == n1 + n2
+
+        # (c) depth weighting: deep rows outweigh approach rows (d' 0.7 -> 2.4), and the weights
+        # are a normalized distribution either way.
+        wd = est.row_weights(v6)
+        assert abs(wd.sum() - 1.0) < 1e-9
+        deep = v6[:, 0] >= -8.0
+        if deep.any() and (~deep).any():
+            assert wd[deep].mean() > wd[~deep].mean() * 2.0, 'deep rows must dominate'
+        flat = GridManifoldEstimator(dict(cfg, grid=dict(cfg['grid'], info_weighting='none')))
+        assert np.allclose(flat.row_weights(v6), 1.0 / len(v6))
+
+        # (d) uncertainty: against a manifold whose wrench does NOT vary with pitch, every
+        # correction matches equally well (the aliasing case) -- the basin flattens, so
+        # 1/curvature must blow up relative to the identifiable manifold above.
+        alias_rows = [[r[0], 0.0, 0.0, 0.0, r[4], 0.0, -4.5, 0.0, 0.0, 0.0, 0.0, 0.0]
+                      for r in rows]
+        apath = os.path.join(tmp, 'alias.csv')
+        with open(apath, 'w', newline='') as fh:
+            w = _csv.writer(fh)
+            w.writerow(POSE_COLS + FORCE_COLS + TORQUE_COLS)
+            w.writerows(alias_rows)
+        alias = GridManifoldEstimator(dict(cfg, manifold_csv=apath))
+        src = np.array([r for r in alias_rows if abs(r[4]) < 1e-9])
+        D = mats_from_vec6([0.0, 0.0, 0.0, 0.0, 4.0, 0.0])
+        apose = vec6_from_mats(mats_from_vec6(src[:, :6]) @ D)
+        av6, aw6 = alias.prepare_observations(apose, src[:, 6:9] @ D[:3, :3],
+                                              np.zeros((len(src), 3)))
+        _, alias_info = alias.estimate(av6, aw6)
+        assert alias_info['uncertainty'] > 5.0 * info['uncertainty'], \
+            f"aliased manifold must read as far more uncertain: {info['uncertainty']:.3g} " \
+            f"vs {alias_info['uncertainty']:.3g}"
+
+        # Too few observations must SKIP, never guess.
+        none_corr, reason = est.estimate(v6[:2], w6[:2])
+        assert none_corr is None and 'observations' in reason
+
+        # A bad grid config must fail at CONSTRUCTION, before any robot motion.
+        for bad in ({'range': {'pitch_deg': 0.0}}, {'step': {'pitch_deg': 0.0}}):
+            try:
+                GridManifoldEstimator(dict(cfg, grid=dict(cfg['grid'], **bad)))
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f'grid {bad} must raise at construction')
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_probe_app_config_is_wired():
+    """configs/estimator_eval_probe.yaml must name a real held frame, keep the probe settle long
+    enough for the wrench to settle (the whole point of the app), give the probe and insertion
+    phases their own stiffness, and match the app's expected schema."""
+    import yaml
+
+    from urlab.apps.estimator_eval_probe import _fieldnames
+
+    with open(os.path.join(ROOT, 'configs', 'estimator_eval_probe.yaml')) as fh:
+        cfg = yaml.safe_load(fh)
+    with open(os.path.join(ROOT, 'configs', 'frames.yaml')) as fh:
+        frames = yaml.safe_load(fh)
+    held = cfg['held_frame']
+    assert held in frames['frames'] and held in frames['targets'], \
+        f'{held} needs BOTH a frames: and a targets: entry'
+
+    pb, ins = cfg['probe'], cfg['insertion']
+    assert pb['settle_s'] >= 1.2, \
+        'probe.settle_s must exceed the ~1.2 s this admittance needs to settle -- a short hold ' \
+        'logs transients, which is the mismatch this app exists to fix'
+    assert pb['stiffness'] != ins['stiffness'], 'probe and insertion must differ in stiffness'
+    assert len(pb['stiffness']) == 6 and len(ins['stiffness']) == 6
+    assert pb['alternate_pitch_deg'] > 0, 'probes must alternate to break aliases'
+    assert pb['attempts'] >= 2, 'fusion needs at least two probes'
+
+    g = cfg['estimation']['grid']
+    assert g['curvature_probe_deg'] >= 2.0, \
+        'curvature_probe_deg below ~2 deg measures interpolation noise (AUROC 0.66 at 1 deg)'
+    assert g['mode_threshold'] > 1.0
+    assert g['info_weighting'] in ('depth', 'none')
+    dims = cfg['estimation']['estimate_dims']
+    for d in dims:
+        assert d in g['range'] and d in g['step'], f'grid range/step missing for {d}'
+
+    cols = _fieldnames(dims, pb['attempts'])
+    for c in ['uncertainty', 'modes', 'multimodal', 'insert_success', 'err_after_pos_mm',
+              f'probe{pb["attempts"]}_settled_rows', f'corr_{dims[0]}']:
+        assert c in cols, f'{c} missing from trials.csv schema'
+
+
 def test_manifold_interpolation_reduces_latching():
     """skills\\manifold interp_neighbors: the manifold is a FINITE sample of a continuous surface,
     so exact-NN matching LATCHES onto the single closest sample -- observations lying BETWEEN

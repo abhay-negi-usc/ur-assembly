@@ -22,7 +22,7 @@ tip_frame: tool0
 
 # The CONNECTOR under test -- selects grasp params from configs/cables.yaml.
 # Change it here, or on the CLI: --set cable=bnc
-cable: banana
+cable: hose
 
 # ---- Held frame from the SHARED catalogue (REQUIRED) ----
 # Names a configs/frames.yaml frame: the held part's pose wrt tool0 comes from its `frames:`
@@ -30,7 +30,7 @@ cable: banana
 # ONE common source, selected here per connector type (or on the CLI:
 # --set held_frame=banana_connector_finger_holder). The connector is specified DIRECTLY wrt
 # tool0; the old connector_holder chain is retired.
-held_frame: banana_connector_finger_holder
+held_frame: hose_connector_finger_holder
 
 # ---- Path ----
 trajectory_csv: assembly_trajectory.csv
@@ -39,13 +39,13 @@ trajectory_angles_deg: false
 # Stand-off: the free-space pose approached ONCE before the trial loop. Measured from the START of
 # the assembly trajectory (its first row), backed off a further standoff_distance_m along
 # standoff_axis -- so it is always clear of the path, whatever the trajectory's first row is.
-standoff_distance_m: 0.010        # 10 mm beyond the trajectory start
+standoff_distance_m: 0.100        # 10 mm beyond the trajectory start
 standoff_axis: [-1.0, 0.0, 0.0]   # assembly is a direct -X -> 0 insertion
 
 # RETRACT: after each trial, back straight out along the CONNECTOR's OWN -X by this distance, from
 # wherever the insert stopped -- so a perturbed (tilted) part retreats along its own axis, not the
 # target's. Speed comes from speed.retract_* below.
-retract_distance_m: 0.050
+retract_distance_m: 0.100
 
 # COMPLIANCE (software admittance): the arm FOLLOWS the assembly trajectory (position reference) and
 # YIELDS to contact via a virtual spring-mass-damper with finite restoring stiffness, springing back
@@ -65,7 +65,7 @@ compliance:
 # Contact watchdog: a trip during insertion = the connector SEATED (stop advancing). NOT armed during
 # retract (a seated part is already over the limit; a guarded retract would block itself).
 force_guard:
-  max_force_n: 25.0
+  max_force_n: 30.0
   max_torque_nm: 8.0
 
 sampling:
@@ -92,18 +92,18 @@ sampling:
   # degenerate DOF contributes a single value), so all-zero DOFs cost nothing. The step is nudged so
   # both endpoints are hit exactly.
   # As set: z 11 values (-5..+5 mm by 1 mm) x pitch 31 values (-15..+15 deg by 1 deg) = 341 trials.
-  grid_resolution: [0.0, 0.025, 0.005, 0.0, 1.0, 0.0]
+  grid_resolution: [0.0, 0.001, 0.0005, 0.0, 0.5, 0.0]
 
   # UNCERTAINTY RANGE per DOF, as ABSOLUTE LOWER/UPPER bounds [x, y, z (m), roll, pitch, yaw (deg)]
   # in the frame selected above -- NOT half-widths, so a range need not be centred on zero.
   # Applied ONCE per trial (the trial's initial misalignment). HARD limits, never exceeded.
   uncertainty:
-    lower: [0.0, -0.000, -0.010, 0.0, -15.0, 0.0]   # -5 mm in z, -15 deg in pitch
-    upper: [0.0, +0.000, +0.010, 0.0,  15.0, 0.0]   # +5 mm in z, +15 deg in pitch
+    lower: [0.0, -0.000, -0.005, 0.0, -10.0, 0.0]   # -5 mm in z, -15 deg in pitch
+    upper: [0.0, +0.000, +0.005, 0.0,  10.0, 0.0]   # +5 mm in z, +15 deg in pitch
   # Extra per-WAYPOINT jitter, same form (usually all zero).
   noise:
-    lower: [0.0, -0.00, -0.00, 0.0, -0.0, 0.0]
-    upper: [0.0, +0.00, +0.00, 0.0, +0.0, 0.0]
+    lower: [0.0, -0.0005, -0.0050, 0.0, -5.0, 0.0]
+    upper: [0.0, +0.0005, +0.0050, 0.0, +5.0, 0.0]
 
   log_decimation: 5             # log every Nth servo cycle (125 Hz / N -> ~25 Hz rows)
   random_seed: 0                # 0 = nondeterministic; >0 seeds a dedicated RNG for replayable trials

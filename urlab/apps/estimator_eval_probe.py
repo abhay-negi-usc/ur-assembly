@@ -70,12 +70,18 @@ def _fieldnames(dims, n_probes):
         cols += [f'probe{k}_bias_pitch_deg', f'probe{k}_bias_z_mm', f'probe{k}_n_obs',
                  f'probe{k}_seated', f'probe{k}_settled_rows', f'probe{k}_max_force_n',
                  f'probe{k}_residual', f'probe{k}_p_seat']
+                 f'probe{k}_residual', f'probe{k}_p_seat']
     cols += [f'corr_{d}' for d in dims]
     cols += ['fused_residual', 'uncertainty', 'modes', 'multimodal', 'width_frac']
     cols += [f'unc_{d}' for d in dims]             # 1/curvature -- the ranking metric
     cols += [f'sigma_{d}' for d in dims]           # marginal width, mm / deg -- plottable
     cols += [f'cov_{a}{b}' for a in range(len(dims)) for b in range(a, len(dims))]
+    cols += [f'sigma_{d}' for d in dims]           # marginal width, mm / deg -- plottable
+    cols += [f'cov_{a}{b}' for a in range(len(dims)) for b in range(a, len(dims))]
     cols += [f'err_after_{s}' for s in _ERR] + ['err_after_pos_mm', 'err_after_rot_deg']
+    cols += ['converged', 'p_seat', 'gate_opened', 'insert_seated', 'insert_success',
+             'insert_success_tolwise', 'insert_depth_mm', 'seat_depth_mm',
+             'insert_check_pos_mm', 'insert_check_rot_deg'] + [f'seat_{s}' for s in _ERR]
     cols += ['converged', 'p_seat', 'gate_opened', 'insert_seated', 'insert_success',
              'insert_success_tolwise', 'insert_depth_mm', 'seat_depth_mm',
              'insert_check_pos_mm', 'insert_check_rot_deg'] + [f'seat_{s}' for s in _ERR]
@@ -182,6 +188,27 @@ def _plot_trial(path, est, fused, dims, truth_corr, hist, status=None, live_path
                         pass
                 axL.plot([e_app[1]], [e_app[0]], 'o', ms=8, mfc='#DD8452', mec='white',
                          zorder=6, label='estimate')
+                cov = (info or {}).get('cov')
+                if cov is not None and len(cov) >= 2:
+                    sub = np.array([[cov[0][0], cov[0][1]], [cov[1][0], cov[1][1]]])
+                    try:
+                        wv, Vv = np.linalg.eigh(sub)
+                        wv = np.maximum(wv, 0.0)
+                        th = np.linspace(0, 2 * np.pi, 120)
+                        pts = (Vv * np.sqrt(wv)) @ np.vstack([np.cos(th), np.sin(th)])
+                        axL.plot(e_app[1] + pts[1], e_app[0] + pts[0], color='#DD8452', lw=1.8,
+                                 zorder=5, label='1-sigma covariance')
+                        for a2 in range(2):    # eigen-axes: the stiff / sloppy directions
+                            v = Vv[:, a2] * np.sqrt(wv[a2])
+                            axL.plot([e_app[1] - v[1], e_app[1] + v[1]],
+                                     [e_app[0] - v[0], e_app[0] + v[0]], color='#DD8452',
+                                     lw=1.0, ls='--', alpha=0.85, zorder=5)
+                        axL.plot([], [], ' ', label='sloppy/stiff = '
+                                 f'{np.sqrt(wv[1] / max(wv[0], 1e-12)):.1f}x')
+                    except np.linalg.LinAlgError:
+                        pass
+                axL.plot([e_app[1]], [e_app[0]], 'o', ms=8, mfc='#DD8452', mec='white',
+                         zorder=6, label='estimate')
                 axL.axhline(0.0, ls=':', lw=0.9, color='#ffffff', alpha=0.6)
                 axL.axvline(0.0, ls=':', lw=0.9, color='#ffffff', alpha=0.6)
                 # SUCCESS BASIN outline in the same error coordinates -- the region the estimate
@@ -279,6 +306,22 @@ def _plot_trial(path, est, fused, dims, truth_corr, hist, status=None, live_path
         plt.close(fig)
     except Exception as exc:                       # noqa: BLE001 -- plotting is never fatal
         log.warning('trial plot skipped (%s)', exc)
+
+
+def _p_seat_of(basin, estimator, fused, theta_applied, temp):
+    """E_p[P(seat)] over the fused landscape's posterior, if `theta_applied` is applied.
+
+    The robot never knows its remaining error, so the decision quantity is P(seat) AVERAGED over
+    the posterior, not evaluated at the point estimate. Hypothesis "theta was the right
+    correction" leaves remaining error inverse(theta) (.) theta_applied; the basin is indexed by
+    the PHYSICAL offset, which SuccessBasin.offset_of_error derives from that."""
+    Ef = np.asarray(fused, dtype=float).ravel()
+    a6 = np.zeros(6)
+    a6[estimator.idx] = [theta_applied[d] for d in estimator.estimate_dims]
+    rem = vec6_from_mats(np.linalg.inv(mats_from_vec6(estimator.grid6))
+                         @ mats_from_vec6(a6)[None, :, :])
+    w = np.exp(-(Ef - Ef.min()) / max(temp * float(Ef.min()), 1e-12))
+    return basin.p_seat_posterior(basin.offset_of_error(rem), w)
 
 
 def _p_seat_of(basin, estimator, fused, theta_applied, temp):
@@ -600,6 +643,8 @@ def build_and_run(cfg, robot, camera, args):
             abandoned = False
             gate_open = False
             p_seat = float('nan')
+            gate_open = False
+            p_seat = float('nan')
             for k in range(1, n_probes + 1):
                 sign = 1.0 if k % 2 else -1.0
                 bias = [0.0, 0.0, sign * z_jog_mm / 1000.0, 0.0, sign * alt_pitch, 0.0] \
@@ -670,6 +715,25 @@ def build_and_run(cfg, robot, camera, args):
                                      'committing.', 100 * seat_gate)
                             gate_open = True
                             break
+                # P(SEAT) GATE on the FUSED evidence so far: stop probing the moment the belief
+                # is good enough to commit. Probing past that point costs cycle time and, worse,
+                # risks a bad probe degrading a belief that was already good enough.
+                if basin is not None:
+                    _, finfo = estimator.solve(fused, n_obs_total)
+                    try:
+                        p_seat = _p_seat_of(basin, estimator, fused, finfo['theta_corr'],
+                                            seat_temp)
+                    except Exception as exc:       # noqa: BLE001
+                        log.warning('P(seat) skipped (%s)', exc)
+                        p_seat = float('nan')
+                    row[f'probe{k}_p_seat'] = p_seat
+                    if np.isfinite(p_seat):
+                        log.info('     P(seat) after %d probe(s): %.0f%%', k, 100 * p_seat)
+                        if p_seat >= seat_gate:
+                            log.info('     >= %.0f%% -- stopping the probe phase and '
+                                     'committing.', 100 * seat_gate)
+                            gate_open = True
+                            break
             if abandoned:
                 rows.append(row)
                 writer.writerow(row)
@@ -697,7 +761,10 @@ def build_and_run(cfg, robot, camera, args):
                 row.update({f'sigma_{d}': v for d, v in info['sigma'].items()})
                 rec.update({'corr': info['theta_corr'], 'sigma': info['sigma'],
                             'cov': np.asarray(info['covariance']).tolist(),
+                            'cov': np.asarray(info['covariance']).tolist(),
                             'multimodal': info['multimodal']})
+                row.update({f'cov_{a}{b}': float(info['covariance'][a][b])
+                            for a in range(len(dims)) for b in range(a, len(dims))})
                 row.update({f'cov_{a}{b}': float(info['covariance'][a][b])
                             for a in range(len(dims)) for b in range(a, len(dims))})
                 log.info('FUSED estimate over %d probes: %s | sigma %s | residual %.3f  '
@@ -748,14 +815,33 @@ def build_and_run(cfg, robot, camera, args):
                 succ_tolwise = all(abs(v) <= t for v, t in zip(seat6, succ_tol))
                 succ = (basin.is_seated(depth) if (basin is not None and np.isfinite(depth))
                         else succ_tolwise)
+                # SUCCESS by the SAME rule that labels the basin: the true depth reached vs the
+                # manifold's deepest insertion less seat_margin_mm. Gate and verdict agree by
+                # construction. (The per-DOF pose tolerance is kept as a fallback/secondary.)
+                depth = float('nan')
+                if len(obs):
+                    oa = np.asarray(obs, dtype=float).reshape(-1, 12)
+                    rel = vec6_from_mats(mats_from_vec6(oa[:, :6])
+                                         @ np.linalg.inv(mats_from_vec6(np.asarray(erra))))
+                    depth = float(rel[:, 0].max())
+                succ_tolwise = all(abs(v) <= t for v, t in zip(seat6, succ_tol))
+                succ = (basin.is_seated(depth) if (basin is not None and np.isfinite(depth))
+                        else succ_tolwise)
                 n_succ += int(succ)
                 row.update({'insert_seated': seated, 'insert_success': succ,
                             'insert_success_tolwise': succ_tolwise,
                             'insert_depth_mm': depth, 'p_seat': p_seat,
                             'gate_opened': gate_open,
                             'seat_depth_mm': (basin.seat_depth if basin is not None else ''),
+                            'insert_success_tolwise': succ_tolwise,
+                            'insert_depth_mm': depth, 'p_seat': p_seat,
+                            'gate_opened': gate_open,
+                            'seat_depth_mm': (basin.seat_depth if basin is not None else ''),
                             'insert_check_pos_mm': lin * 1000.0,
                             'insert_check_rot_deg': float(np.degrees(ang))})
+                if basin is not None and np.isfinite(depth):
+                    log.info('   depth %+.2f mm vs seat threshold %+.2f mm -> %s',
+                             depth, basin.seat_depth, 'SEATED' if succ else 'NOT seated')
                 if basin is not None and np.isfinite(depth):
                     log.info('   depth %+.2f mm vs seat threshold %+.2f mm -> %s',
                              depth, basin.seat_depth, 'SEATED' if succ else 'NOT seated')

@@ -58,6 +58,7 @@ from ..skills import trajectory as traj
 from ..skills.manifold import (FORCE_COLS, POSE_COLS, TORQUE_COLS,
                                mats_from_vec6, scaled12, vec6_from_mats)
 from ..skills.solution_check import CheckedManifoldEstimator
+from ..skills.success_basin import SuccessBasin
 from ..transforms import inverse, matrix_to_xyzrpy, pose_error, translation_matrix
 from ._runner import run_app
 from .uncertain_sampling import _clock, _fmt_dur, _retract_ref
@@ -133,6 +134,8 @@ def _fieldnames(dims):
             + [f'inj_{s}' for s in _ERR]
             + [f'err_before_{s}' for s in _ERR] + ['err_before_pos_mm', 'err_before_rot_deg']
             + [f'corr_{d}' for d in dims] + [f'sigma_{d}' for d in dims]
+            + [f'cov_{a}{b}' for a in range(len(dims)) for b in range(a, len(dims))]
+            + ['p_seat', 'gate_opened', 'insert_depth_mm', 'seat_depth_mm', 'seated_basin']
             + ['icp_inliers', 'icp_residual', 'estimate']
             + ['trust_rankavg2', 'trust_cauchy'] + [f'trust_{s}' for s in _TRUST_SIGNALS]
             + [f'err_after_{s}' for s in _ERR] + ['err_after_pos_mm', 'err_after_rot_deg']
@@ -175,19 +178,49 @@ def _landscape(estimator, vec6, w6, max_pts=2600, row_cap=120):
 
     k = np.unravel_index(int(np.argmin(E)), E.shape)
     Emin = float(E[k])
-    sigma, argmin = {}, {}
-    for a, (d, ax) in enumerate(zip(dims, axes)):
-        argmin[d] = float(ax[k[a]])
+    n = len(dims)
+    argmin = {d: float(ax[k[a]]) for a, (d, ax) in enumerate(zip(dims, axes))}
+
+    # FULL Hessian at the minimum -> covariance. The per-axis sigma alone is misleading whenever
+    # the dims trade off (the z-pitch valley): it reports the CONDITIONAL width and hides the
+    # correlation. Cov = E_min * inv(H) gives the MARGINAL widths on its diagonal and, through
+    # its eigenvectors, the stiff/sloppy directions -- which is what the ellipse draws.
+    H = np.zeros((n, n))
+    probe = []
+    for a, ax in enumerate(axes):
         step = ax[1] - ax[0]
-        off = max(int(round(3.0 / step)), 1)       # +-3 mm / deg: validated probe distance
+        probe.append(max(int(round(3.0 / step)), 1))   # +-3 mm / deg: validated probe distance
+    for a in range(n):
         lo, hi = list(k), list(k)
-        lo[a] = max(k[a] - off, 0)
-        hi[a] = min(k[a] + off, len(ax) - 1)
-        h = 0.5 * (ax[hi[a]] - ax[lo[a]])
-        curv = ((float(E[tuple(lo)]) - 2.0 * Emin + float(E[tuple(hi)])) / (h ** 2)
-                if h > 0 else 0.0)
-        sigma[d] = float(np.sqrt(max(Emin, 0.0) / curv)) if curv > 1e-12 else float(ax[-1])
-    return axes, E, sigma, argmin
+        lo[a] = max(k[a] - probe[a], 0)
+        hi[a] = min(k[a] + probe[a], len(axes[a]) - 1)
+        h = 0.5 * (axes[a][hi[a]] - axes[a][lo[a]])
+        H[a, a] = ((float(E[tuple(lo)]) - 2.0 * Emin + float(E[tuple(hi)])) / (h ** 2)
+                   if h > 0 else 0.0)
+    for a in range(n):
+        for b in range(a + 1, n):
+            ia, ib = probe[a], probe[b]
+            def at(sa, sb):
+                q = list(k)
+                q[a] = int(np.clip(k[a] + sa * ia, 0, len(axes[a]) - 1))
+                q[b] = int(np.clip(k[b] + sb * ib, 0, len(axes[b]) - 1))
+                return float(E[tuple(q)])
+            ha = axes[a][int(np.clip(k[a] + ia, 0, len(axes[a]) - 1))] - axes[a][k[a]]
+            hb = axes[b][int(np.clip(k[b] + ib, 0, len(axes[b]) - 1))] - axes[b][k[b]]
+            if ha > 0 and hb > 0:
+                H[a, b] = H[b, a] = (at(1, 1) - at(1, -1) - at(-1, 1) + at(-1, -1)) / (
+                    4.0 * ha * hb)
+    try:
+        w_h, V_h = np.linalg.eigh(H)
+        floor = max(1e-9, 1e-6 * max(abs(w_h).max(), 1e-9))
+        cov = (V_h * (max(Emin, 1e-12) / np.maximum(w_h, floor))) @ V_h.T
+    except np.linalg.LinAlgError:
+        cov = np.eye(n) * float(axes[0][-1]) ** 2
+    sigma = {d: float(np.sqrt(max(cov[a, a], 0.0)))
+             for a, d in enumerate(dims)}
+    for a, d in enumerate(dims):                   # never claim more than the box we searched
+        sigma[d] = float(min(sigma[d], axes[a][-1]))
+    return axes, E, sigma, argmin, cov
 
 
 def _as_error(errb, theta, idx):
@@ -345,7 +378,8 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None
         # Separates "the solver picked badly" -- truth sits in a deep basin it missed -- from
         # "the landscape's minimum is in the wrong place", where the DATA is at fault.
         if land:
-            axes_l, E, sigma, argmin, est_corr, errb_l, finals, idx_l, track_l = land
+            (axes_l, E, sigma, argmin, est_corr, errb_l, finals, idx_l, track_l, cov_l,
+             pseat_l) = land
             col = ncols - 1
             axl = fig.add_subplot(gs[:, col])
             unit = [('deg' if d.endswith('_deg') else 'mm') for d in dims]
@@ -396,12 +430,29 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None
                     for i in range(len(tr)):
                         axl.annotate(str(i), (tr[i, 1], tr[i, 0]), textcoords='offset points',
                                      xytext=(4, 3), fontsize=7, color='#eaf2ff')
-                s0, s1 = sigma.get(d0, np.nan), sigma.get(d1, np.nan)
-                axl.errorbar([e_app[1]], [e_app[0]],
-                             xerr=[[s1], [s1]] if np.isfinite(s1) else None,
-                             yerr=[[s0], [s0]] if np.isfinite(s0) else None,
-                             fmt='o', ms=9, mfc='#DD8452', mec='white', ecolor='#DD8452',
-                             elinewidth=2, capsize=4, zorder=6, label='applied +/- 1 sigma')
+                # 1-sigma COVARIANCE ELLIPSE with its eigen-axes drawn: the marginal 2x2 block
+                # of the full covariance, so with 3+ estimated dims this is the correct marginal
+                # for the two shown. The axes make the stiff/sloppy split visible directly.
+                if cov_l is not None and len(cov_l) >= 2:
+                    sub = np.array([[cov_l[0, 0], cov_l[0, 1]], [cov_l[1, 0], cov_l[1, 1]]])
+                    try:
+                        wv, Vv = np.linalg.eigh(sub)
+                        wv = np.maximum(wv, 0.0)
+                        th = np.linspace(0, 2 * np.pi, 120)
+                        pts = (Vv * np.sqrt(wv)) @ np.vstack([np.cos(th), np.sin(th)])
+                        axl.plot(e_app[1] + pts[1], e_app[0] + pts[0], color='#DD8452',
+                                 lw=1.8, zorder=6, label='1-sigma covariance')
+                        for a2 in range(2):        # the eigen-axes (stiff / sloppy directions)
+                            v = Vv[:, a2] * np.sqrt(wv[a2])
+                            axl.plot([e_app[1] - v[1], e_app[1] + v[1]],
+                                     [e_app[0] - v[0], e_app[0] + v[0]], color='#DD8452',
+                                     lw=1.0, ls='--', alpha=0.85, zorder=6)
+                        ratio = (np.sqrt(wv[1] / max(wv[0], 1e-12)) if wv[0] > 0 else np.inf)
+                        axl.plot([], [], ' ', label=f'sloppy/stiff = {ratio:.1f}x')
+                    except np.linalg.LinAlgError:
+                        pass
+                axl.plot([e_app[1]], [e_app[0]], 'o', ms=8, mfc='#DD8452', mec='white',
+                         zorder=7, label='applied')
                 axl.plot([e_arg[1]], [e_arg[0]], 'x', color='#C44E52', ms=10, mew=2, zorder=7,
                          label='grid argmin')
                 axl.axhline(0.0, ls=':', lw=0.9, color='#ffffff', alpha=0.6, zorder=2)
@@ -411,7 +462,10 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None
                 axl.set_xlabel(f'{d1} ERROR remaining [{unit[1]}]   (0 = truth)')
                 axl.set_ylabel(f'{d0} ERROR remaining [{unit[0]}]   (0 = truth)')
             axl.legend(fontsize=7, loc='best')
-            axl.set_title('energy landscape in the ERROR frame (truth = origin)', fontsize=10)
+            ttl = 'energy landscape in the ERROR frame (truth = origin)'
+            if pseat_l is not None and np.isfinite(pseat_l):
+                ttl += f'   |   P(seat) = {pseat_l:.0%}'
+            axl.set_title(ttl, fontsize=10)
 
         fig.suptitle(f'trial {trial}: ground-truth belief error per attempt', y=0.995)
         if status:                                 # run progress: trials done + success rate
@@ -472,6 +526,24 @@ def build_and_run(cfg, robot, camera, args):
     # here, with the ground truth known, is exactly where those scores get VALIDATED against
     # the realized error. The correction is always applied, same as the plain estimator.
     estimator = CheckedManifoldEstimator(cfg.section('estimation'))
+
+    # ---- SUCCESS BASIN: P(seat | offset) learned from the SAME manifold, plus ONE definition
+    # of success (reach within seat_margin_mm of the manifold's deepest insertion) used both to
+    # gate the insertion and to score it afterwards. ----
+    sg = ev.get('seat_gate', {}) or {}
+    basin, seat_gate, seat_temp = None, 1.0, 0.05
+    if bool(sg.get('enabled', True)):
+        try:
+            basin = SuccessBasin(urconfig.resolve(cfg, cfg.get_path('estimation.manifold_csv')),
+                                 estimator.estimate_dims,
+                                 dict(sg, scaling_constant_deg_to_mm=estimator.s_rot))
+            seat_gate = float(sg.get('p_seat_threshold', 0.95))
+            seat_temp = float(sg.get('posterior_temp', 0.05))
+            log.info('P(seat) gate at %.0f%%: once the posterior clears it the trial commits to '
+                     'ONE insertion with NO trajectory noise.', 100 * seat_gate)
+        except Exception as exc:                   # noqa: BLE001
+            log.error('Success basin unavailable (%s) -- gating disabled.', exc)
+            basin = None
 
     # ---- GROUND TRUTH from the shared catalogue: the part is fixtured between the closed
     # fingers, so frames.yaml's tool0->frame pose IS the true in-hand pose, and its targets:
@@ -732,6 +804,7 @@ def build_and_run(cfg, robot, camera, args):
             acc = np.zeros((0, 12))
 
             abandoned = False
+            gate_open = False
             for attempt in range(1, max_attempts + 1):
                 errb, errb_pos, errb_rot = _gt_error(T_true, T_believed)
                 if tn_on:
@@ -776,7 +849,7 @@ def build_and_run(cfg, robot, camera, args):
                 vec6, w6 = estimator.prepare_observations(
                     full[:, :6], full[:, 6:9], full[:, 9:12])
                 T_corr_mm, info = estimator.estimate(vec6, w6)
-                land = None                        # (axes, E, sigma, argmin, est, truth, finals)
+                land, p_seat = None, float('nan')
                 row = {'trial': trial, 'attempt': attempt, 'n_observations': len(obs),
                        'seated': seated, 'check_pos_mm': lin * 1000.0,
                        'check_rot_deg': float(np.degrees(ang)), 'success': succ,
@@ -822,19 +895,42 @@ def build_and_run(cfg, robot, camera, args):
                         + ((estimator.s_rot * rem6[:, 3:]) ** 2).sum(axis=1)))
                     # The landscape the correction was picked from, with the TRUE correction
                     # (believed @ C = true, so C = inverse(err_before)) for reference.
-                    if save_plots and plot_land:
+                    if (save_plots and plot_land) or basin is not None:
                         try:
-                            ax_l, E_l, sig_l, amin_l = _landscape(estimator, vec6, w6)
-                            # track6 holds this trial's error path (index 0 = injected); the
-                            # panel draws it in the same error frame as the landscape.
+                            ax_l, E_l, sig_l, amin_l, cov_l = _landscape(estimator, vec6, w6)
+                            # P(SEAT) of the POSTERIOR, not of the point estimate: the robot
+                            # never knows its remaining error, so the decision quantity is
+                            # E_p[P(seat)] over the landscape's Gibbs posterior. Hypothesis
+                            # "theta was the right correction" leaves remaining error
+                            # inverse(theta) (.) theta_applied once we apply theta_applied.
+                            if basin is not None:
+                                mesh = np.meshgrid(*ax_l, indexing='ij')
+                                gth = np.stack([m.ravel() for m in mesh], axis=1)
+                                g6 = np.zeros((len(gth), 6))
+                                g6[:, estimator.idx] = gth
+                                a6 = np.zeros(6)
+                                a6[estimator.idx] = [info['theta_corr'][d]
+                                                     for d in estimator.estimate_dims]
+                                rem = vec6_from_mats(
+                                    np.linalg.inv(mats_from_vec6(g6))
+                                    @ mats_from_vec6(a6)[None, :, :])
+                                Ef = np.asarray(E_l, dtype=float).ravel()
+                                wgt = np.exp(-(Ef - Ef.min())
+                                             / max(seat_temp * float(Ef.min()), 1e-12))
+                                p_seat = basin.p_seat_posterior(
+                                    basin.offset_of_error(rem), wgt)
+                                row['p_seat'] = p_seat
                             trk = np.asarray(track6, dtype=float)[:, estimator.idx]
                             land = (ax_l, E_l, sig_l, amin_l, dict(info['theta_corr']),
                                     np.asarray(errb, dtype=float),
                                     np.asarray(info['theta_hist'], dtype=float)[:, -1, :],
-                                    list(estimator.idx), trk)
+                                    list(estimator.idx), trk, cov_l, p_seat)
                             row.update({f'sigma_{d}': v for d, v in sig_l.items()})
+                            row.update({f'cov_{a}{b}': float(cov_l[a, b])
+                                        for a in range(len(cov_l))
+                                        for b in range(a, len(cov_l))})
                         except Exception as exc:   # noqa: BLE001 -- diagnostics never fatal
-                            log.warning('landscape skipped (%s)', exc)
+                            log.warning('landscape/P(seat) skipped (%s)', exc)
                 erra, erra_pos, erra_rot = _gt_error(T_true, T_believed)
                 track6.append(erra)
                 if save_plots:                     # re-saved after EVERY attempt of this trial
@@ -848,21 +944,31 @@ def build_and_run(cfg, robot, camera, args):
                 row.update({'err_after_pos_mm': erra_pos, 'err_after_rot_deg': erra_rot})
                 row['converged'] = bool(erra_pos <= tol_pos_mm and erra_rot <= tol_rot_deg)
                 log.info('trial %d attempt %d: gt error %.2f mm / %.2f deg -> %.2f mm / %.2f deg'
-                         '%s%s', trial, attempt, errb_pos, errb_rot, erra_pos, erra_rot,
+                         '%s%s%s', trial, attempt, errb_pos, errb_rot, erra_pos, erra_rot,
+                         '' if not np.isfinite(p_seat) else f'  P(seat) {p_seat:.0%}',
                          '  (CONVERGED)' if row['converged'] else '',
                          '  (SUCCESS -- seated within tolerance)' if succ else '')
                 rows.append(row)
                 writer.writerow(row)
                 fout.flush()                       # a 50-trial run must survive an abort mid-way
                 os.fsync(fout.fileno())
+                # P(SEAT) GATE: stop probing the moment the belief is good enough to commit --
+                # the final insertion then runs with NO trajectory noise (see below).
+                if basin is not None and np.isfinite(p_seat) and p_seat >= seat_gate:
+                    log.info('P(seat) %.0f%% >= %.0f%% -- committing to the insertion.',
+                             p_seat, 100 * seat_gate)
+                    gate_open = True
+                    break
                 if succ or (row['converged'] and stop_conv):
                     break
 
-            # OPTIONAL FINAL INSERTION: from the FINAL corrected belief, the NOMINAL (un-noised)
-            # trajectory, different stiffness -- no estimation, no belief update. Its trials.csv
-            # row carries attempt='final_insertion' and is EXCLUDED from summary.csv (which
-            # aggregates estimator updates, not this seat-check).
-            if fi_on and not abandoned:
+            # FINAL INSERTION -- the commit. Runs when the P(seat) gate opened (or always, if
+            # eval.final_insertion.enabled and the attempts ran out). ALWAYS on the NOMINAL
+            # trajectory with ZERO noise: the jitter exists to gather varied contact while
+            # probing, and has no place in the attempt that is meant to seat. SUCCESS is decided
+            # by the SAME rule that labels the basin -- the true depth reached vs the manifold's
+            # deepest insertion less seat_margin_mm -- so the gate and the verdict agree.
+            if (fi_on or gate_open) and not abandoned:
                 refs = [T_base_tconn @ row @ inverse(T_believed) for row in dense]
                 q = robot.arm.ik(refs[0], seed_q)
                 if q is None or not robot.arm.move_j(q, label=f'trial {trial} final insertion'):
@@ -874,13 +980,31 @@ def build_and_run(cfg, robot, camera, args):
                         _save_observations(os.path.join(
                             out_dir, f'trial_{trial:03d}_final_insertion_observations.csv'), obs)
                     errf, errf_pos, errf_rot = _gt_error(T_true, T_believed)
+                    # depth actually reached, in the TRUE frame (the basin's own coordinate)
+                    depth = float('nan')
+                    seated_basin = None
+                    if len(obs):
+                        oa = np.asarray(obs, dtype=float).reshape(-1, 12)
+                        rel = vec6_from_mats(mats_from_vec6(oa[:, :6])
+                                             @ np.linalg.inv(mats_from_vec6(np.asarray(errf))))
+                        depth = float(rel[:, 0].max())
+                        if basin is not None:
+                            seated_basin = basin.is_seated(depth)
                     frow = {'trial': trial, 'attempt': 'final_insertion',
                             'n_observations': len(obs), 'seated': seated,
                             'check_pos_mm': lin * 1000.0,
                             'check_rot_deg': float(np.degrees(ang)),
-                            'success': all(abs(v) <= t for v, t in zip(seat6, succ_tol)),
-                            'estimate': 'none (final insertion)',
+                            'success': (seated_basin if seated_basin is not None
+                                        else all(abs(v) <= t for v, t in zip(seat6, succ_tol))),
+                            'estimate': 'none (final insertion)', 'gate_opened': gate_open,
+                            'insert_depth_mm': depth, 'seat_depth_mm':
+                                (basin.seat_depth if basin is not None else ''),
+                            'seated_basin': ('' if seated_basin is None else seated_basin),
                             'err_before_pos_mm': errf_pos, 'err_before_rot_deg': errf_rot}
+                    if basin is not None:
+                        log.info('FINAL INSERTION: depth %+.2f mm vs seat threshold %+.2f mm '
+                                 '-> %s', depth, basin.seat_depth,
+                                 'SEATED' if seated_basin else 'NOT seated')
                     frow.update({f'seat_{s}': v for s, v in zip(_ERR, seat6)})
                     frow.update({f'err_before_{s}': v for s, v in zip(_ERR, errf)})
                     writer.writerow(frow)

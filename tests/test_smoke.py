@@ -1241,6 +1241,74 @@ def test_grid_estimator_fuses_probes_and_flags_uncertainty():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_success_basin_labels_gates_and_signs():
+    """skills\\success_basin: the manifold's own trials are labelled by how deep they got, giving
+    P(seat | offset). Three things must hold or the gate is silently wrong:
+      (a) the depth rule labels trials and scores real insertions IDENTICALLY;
+      (b) the belief-error -> PHYSICAL-offset inversion (getting it backwards mirrors the basin);
+      (c) P(seat) of a POSTERIOR, which is the decision quantity -- the robot never knows its
+          remaining error, only a distribution over it."""
+    import csv as _csv
+    import shutil
+    import tempfile
+
+    from urlab.skills.manifold import FORCE_COLS, POSE_COLS, TORQUE_COLS
+    from urlab.skills.success_basin import SuccessBasin
+
+    tmp = tempfile.mkdtemp()
+    try:
+        # Trials at many offsets: those with |z| <= 3 insert to x = -4, the rest wedge at -12.
+        # Each trial is a separate run of x from -20 up, so the segmenter sees the resets.
+        rows = []
+        for z in np.arange(-8, 8.01, 0.5):
+            deep = -4.0 if abs(z) <= 3.0 else -12.0
+            for x in np.linspace(-20.0, deep, 40):
+                rows.append([x, 0.0, float(z), 0.0, 0.0, 0.0, -5.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        path = os.path.join(tmp, 'm.csv')
+        with open(path, 'w', newline='') as fh:
+            w = _csv.writer(fh)
+            w.writerow(POSE_COLS + FORCE_COLS + TORQUE_COLS)
+            w.writerows(rows)
+
+        b = SuccessBasin(path, ['z_mm'], {'depth_reference': 95.0, 'seat_margin_mm': 4.0,
+                                          'neighbors': 5})
+        assert len(b.offsets) == len(np.arange(-8, 8.01, 0.5)), len(b.offsets)
+        # (a) ONE definition: the labels and is_seated() must agree on the same numbers.
+        assert b.is_seated(b.seat_depth + 0.1) and not b.is_seated(b.seat_depth - 0.1)
+        assert b.seated[np.abs(b.offsets[:, 0]) <= 2.5].all(), 'aligned trials must count seated'
+        assert not b.seated[np.abs(b.offsets[:, 0]) >= 5.0].any(), 'wedged trials must not'
+        # P(seat) tracks the physical structure
+        p = b.p_seat(np.array([[0.0], [7.0]]))
+        assert p[0] > 0.9 > p[1], p
+
+        # (b) SIGN: belief error +z means the robot plans too far +z, so the part rides at -z.
+        off = b.offset_of_error([[0.0, 0.0, 5.0, 0.0, 0.0, 0.0]])
+        assert abs(off[0, 0] + 5.0) < 1e-6, off
+
+        # (c) POSTERIOR P(seat): a posterior concentrated on a good offset must beat a diffuse
+        # one that puts mass out in the wedge region, even with the same argmax.
+        offs = np.array([[0.0], [7.0]])
+        sharp = b.p_seat_posterior(offs, [1.0, 0.0])
+        diffuse = b.p_seat_posterior(offs, [0.5, 0.5])
+        assert sharp > diffuse, (sharp, diffuse)
+        assert abs(diffuse - 0.5 * (p[0] + p[1])) < 1e-9
+
+        # 'max' on a map with a crush-through outlier makes the gate un-openable -- the reason
+        # the default is a percentile. One deep row is enough to demonstrate it.
+        rows.append([40.0, 0.0, 0.0, 0.0, 0.0, 0.0, -5.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        path2 = os.path.join(tmp, 'm2.csv')
+        with open(path2, 'w', newline='') as fh:
+            w = _csv.writer(fh)
+            w.writerow(POSE_COLS + FORCE_COLS + TORQUE_COLS)
+            w.writerows(rows)
+        bmax = SuccessBasin(path2, ['z_mm'], {'depth_reference': 'max', 'neighbors': 5})
+        assert bmax.seated.mean() < 0.05, 'a single deep outlier must sink the seat rate'
+        bpct = SuccessBasin(path2, ['z_mm'], {'depth_reference': 95.0, 'neighbors': 5})
+        assert bpct.seated.mean() > 0.3, 'the percentile default must stay usable'
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_probe_app_config_is_wired():
     """configs/estimator_eval_probe.yaml must name a real held frame, keep the probe settle long
     enough for the wrench to settle (the whole point of the app), give the probe and insertion
@@ -1301,6 +1369,14 @@ def test_probe_app_config_is_wired():
     assert n_cand <= 4000, f'{n_cand} grid candidates will be slow per probe -- coarsen the step'
 
     assert cfg['eval'].get('live_plot', True), 'live_plot is how the run is watched'
+
+    # P(seat) gate: a 'max' depth_reference is what makes the gate un-openable on a map with
+    # crush-through outliers, so the shipped config must not use it.
+    sgc = cfg['eval']['seat_gate']
+    assert 0.0 < sgc['p_seat_threshold'] <= 1.0
+    assert sgc['depth_reference'] != 'max', \
+        "depth_reference 'max' is set by crush-through outliers -- use a percentile"
+    assert sgc['seat_margin_mm'] > 0
 
     cols = _fieldnames(dims, pb['attempts'])
     for c in ['uncertainty', 'modes', 'multimodal', 'insert_success', 'err_after_pos_mm',

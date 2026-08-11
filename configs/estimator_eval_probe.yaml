@@ -54,6 +54,25 @@ eval:
     upper: [0.0, 0.0, +0.003, 0.0, +8.0, 0.0]
   grid_resolution: [0.0, 0.0, 0.0025, 0.0, 4.0, 0.0]
 
+  # ---- P(SEAT) GATE + the single definition of SUCCESS -------------------------------------
+  # The manifold's trials are labelled by how deep they got, which makes it a dataset of
+  # (offset -> seated?) and gives P(seat | offset) by k-NN. The robot never knows its remaining
+  # error, so the gate uses E_p[P(seat)] over the fused landscape's posterior, NOT P(seat) at the
+  # point estimate. Probing STOPS as soon as it clears p_seat_threshold, then one insertion runs
+  # with NO trajectory noise. The SAME depth rule scores that insertion, so gate and verdict
+  # cannot disagree.
+  seat_gate:
+    enabled: true
+    p_seat_threshold: 0.95
+    seat_margin_mm: 4.0          # seated := reached within this of the reference depth
+    # 'max' = the literal deepest manifold row, a NUMBER = that percentile of the per-trial
+    # maxima. MEASURED on the 2026-08 hose map: 'max' puts the threshold at +24.9 mm (a
+    # crush-through outlier nothing reaches -> 0% seated, the gate never opens); p95 puts it at
+    # -5.1 mm with 61% seated, matching the force-verified rate. The startup log prints the seat
+    # rate for 'max' and 99.9/99/95/90 so this can be re-checked whenever the map changes.
+    depth_reference: 95.0
+    neighbors: 25
+    posterior_temp: 0.05
   save_plots: true               # per-trial figure (trial_TTT.png), re-saved every trial
   # LIVE figure: ONE fixed path OUTSIDE the experiment folder, atomically overwritten after every
   # trial -- keep it open in an image viewer across runs. true =

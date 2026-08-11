@@ -141,24 +141,46 @@ class GridManifoldEstimator(ManifoldEstimator):
         Eg = E.reshape(self.grid_shape)
         k = np.unravel_index(int(np.argmin(Eg)), self.grid_shape)
         Emin = float(Eg[k])
+        n = len(self.estimate_dims)
         inv_curv, sigma = {}, {}
+        H = np.zeros((n, n))
+        probe = [max(int(round(self.curvature_probe[d] / (ax[1] - ax[0]))), 1)
+                 for d, ax in zip(self.estimate_dims, self.grid_axes)]
         for a, (dim, ax) in enumerate(zip(self.estimate_dims, self.grid_axes)):
-            step = ax[1] - ax[0]
-            off = max(int(round(self.curvature_probe[dim] / step)), 1)
-            lo = list(k)
-            hi = list(k)
-            lo[a] = max(k[a] - off, 0)
-            hi[a] = min(k[a] + off, len(ax) - 1)
+            lo, hi = list(k), list(k)
+            lo[a] = max(k[a] - probe[a], 0)
+            hi[a] = min(k[a] + probe[a], len(ax) - 1)
             h = 0.5 * (ax[hi[a]] - ax[lo[a]])
             curv = ((float(Eg[tuple(lo)]) - 2.0 * Emin + float(Eg[tuple(hi)])) / (h ** 2)
                     if h > 0 else 0.0)
-            if curv > 1e-12:
-                inv_curv[dim] = float(1.0 / curv)
-                sigma[dim] = float(np.sqrt(max(Emin, 0.0) / curv))
-            else:
-                inv_curv[dim] = float('inf')
-                sigma[dim] = float(ax[-1])          # unbounded within the searched box
-        return inv_curv, sigma, (max(inv_curv.values()) if inv_curv else float('inf'))
+            H[a, a] = curv
+            inv_curv[dim] = float(1.0 / curv) if curv > 1e-12 else float('inf')
+        # OFF-DIAGONALS: without them the per-dim sigma is the CONDITIONAL width and hides the
+        # z-pitch trade-off entirely. The full covariance below reports the MARGINAL widths and,
+        # through its eigenvectors, the stiff/sloppy directions the ellipse draws.
+        for a in range(n):
+            for b in range(a + 1, n):
+                def at(sa, sb):
+                    q = list(k)
+                    q[a] = int(np.clip(k[a] + sa * probe[a], 0, self.grid_shape[a] - 1))
+                    q[b] = int(np.clip(k[b] + sb * probe[b], 0, self.grid_shape[b] - 1))
+                    return float(Eg[tuple(q)])
+                ha = (self.grid_axes[a][int(np.clip(k[a] + probe[a], 0, self.grid_shape[a] - 1))]
+                      - self.grid_axes[a][k[a]])
+                hb = (self.grid_axes[b][int(np.clip(k[b] + probe[b], 0, self.grid_shape[b] - 1))]
+                      - self.grid_axes[b][k[b]])
+                if ha > 0 and hb > 0:
+                    H[a, b] = H[b, a] = (at(1, 1) - at(1, -1) - at(-1, 1)
+                                         + at(-1, -1)) / (4.0 * ha * hb)
+        try:
+            w_h, V_h = np.linalg.eigh(H)
+            floor = max(1e-9, 1e-6 * max(abs(w_h).max(), 1e-9))
+            cov = (V_h * (max(Emin, 1e-12) / np.maximum(w_h, floor))) @ V_h.T
+        except np.linalg.LinAlgError:
+            cov = np.diag([float(ax[-1]) ** 2 for ax in self.grid_axes])
+        for a, (dim, ax) in enumerate(zip(self.estimate_dims, self.grid_axes)):
+            sigma[dim] = float(min(np.sqrt(max(cov[a, a], 0.0)), float(ax[-1])))
+        return inv_curv, sigma, cov, (max(inv_curv.values()) if inv_curv else float('inf'))
 
     def _modes(self, E):
         """Number of connected components of {E <= mode_threshold * E_min} (the mode FLAG)."""
@@ -193,7 +215,7 @@ class GridManifoldEstimator(ManifoldEstimator):
         k = int(np.argmin(E))
         theta = self.grid6[k]
         Emin = float(E[k])
-        curv, sigma, worst = self._curvature(E)
+        curv, sigma, cov, worst = self._curvature(E)
         modes = self._modes(E)
         width = float(np.mean(E <= Emin * 1.2))
         info = {
@@ -202,7 +224,8 @@ class GridManifoldEstimator(ManifoldEstimator):
             'n_observations': int(n_obs),
             'candidates': int(len(self.grid6)),
             'curvature_uncertainty': curv,       # per dim: 1/curvature (big = flat = uncertain)
-            'sigma': sigma,                      # per dim, in mm / deg -- for error bars
+            'sigma': sigma,                      # per dim MARGINAL width, mm / deg
+            'covariance': cov,                   # full n x n -- the ellipse and its eigen-axes
             'uncertainty': float(worst),
             'modes': int(modes),
             'multimodal': bool(modes > 1),

@@ -1,0 +1,172 @@
+# ===================================================================================================
+# ESTIMATOR EVALUATION -- PROBE phase + INSERTION phase (see urlab/apps/estimator_eval_probe.py).
+#
+# The 2026-08-11 hose information campaign's recommendations, made testable:
+#   * probes exist to GATHER INFORMATION -- their own stiffness, their own guard, and a LONG
+#     settle so the logged wrench is SETTLED like the manifold's (this is the fix for the 40.8 deg
+#     wrench mismatch that made every estimator score at corr ~0);
+#   * probes carry an ALTERNATING pitch bias -- diverse probes break aliases (on hard cases 3
+#     alternating probes cut the 75th-percentile error from 11.08 to 1.63 deg);
+#   * the belief is NOT updated between probes; their energies FUSE and ONE correction is applied;
+#   * the estimate is an EXHAUSTIVE grid (no multi-start, no aggregator), rows weighted by
+#     informativeness-vs-depth, uncertainty = curvature at the minimum + a multi-modality flag;
+#   * the INSERTION phase then tests the corrected belief at PRODUCTION stiffness.
+#
+# The connector is RIGIDLY FIXTURED between the CLOSED gripper fingers, so the true in-hand pose
+# IS configs/frames.yaml's held_frame entry. THE GRIPPER IS NEVER OPENED OR CLOSED.
+# ===================================================================================================
+
+robot:
+  ip: 192.168.125.2
+  dry_run: false
+  payload:
+    mass_kg: 1.3
+    cog_m: [-0.026, 0.028, 0.030]
+base_frame: base_link
+tip_frame: tool0
+
+# The hose connector fixtured in the closed fingers + its recorded mate (configs/frames.yaml).
+held_frame: hose_connector_finger_holder
+
+trajectory_csv: assembly_trajectory.csv
+trajectory_angles_deg: false
+translational_resolution_m: 0.001
+rotational_resolution_deg: 1.0
+
+standoff_distance_m: 0.025
+standoff_axis: [-1.0, 0.0, 0.0]
+retract_distance_m: 0.050
+
+# ===================================================================================================
+# EVAL -- the injected belief errors (same conventions as estimator_eval.yaml)
+# ===================================================================================================
+eval:
+  num_trials: 20                 # IGNORED when mode: grid/bounds (the count is derived)
+  mode: bounds
+  bounds_simultaneous: false     # false = one DOF at a time -- cleaner for reading the results
+  # ABSOLUTE lower/upper per DOF [x, y, z (m), roll, pitch, yaw (deg)], in the held part's OWN
+  # frame. START PITCH-ONLY: pitch is the identifiable DOF (the campaign's 1-DOF result), so a
+  # pitch-only sweep is the cleanest first test. Add z back once pitch works.
+  perturbation:
+    lower: [0.0, 0.0, 0.0, 0.0, -8.0, 0.0]
+    upper: [0.0, 0.0, 0.0, 0.0, +8.0, 0.0]
+  grid_resolution: [0.0, 0.0, 0.001, 0.0, 2.0, 0.0]
+
+  success_tolerance:             # ground-truth convergence gate (logged, not enforced)
+    pos_mm: 1.0
+    rot_deg: 1.0
+  # PHYSICAL success of the insertion phase: TRUE connector pose wrt the target, per DOF
+  # [x, y, z (mm), roll, pitch, yaw (deg)].
+  success_pose_tol: [2.0, 1.0, 5.0, 5.0, 5.0, 1.0]
+
+  random_seed: 7
+  log_decimation: 5              # observation every Nth servo cycle (125 Hz / N -> ~25 Hz)
+  save_observations: true
+
+# ===================================================================================================
+# PROBE PHASE -- insertions whose only job is to gather information
+# ===================================================================================================
+probe:
+  attempts: 3                    # 3 alternating probes was the validated setting
+
+  # THE CRITICAL KNOB. The manifold was collected by uncertain_sampling with a 5 s hold, and this
+  # admittance (damping_ratio 10, z stiffness 250 N/m) needs ~1.2 s of true rest to reach 95% of
+  # the settled contact wrench. estimator_eval's 0.5 s logged TRANSIENTS -- the measured wrench
+  # then sat 40.8 deg off the manifold (self-consistency floor 12.3 deg) and every estimator
+  # scored at corr ~0. If the run logs few 'settled_rows', raise this.
+  settle_s: 2.0
+
+  # Deliberate per-probe bias, SIGN ALTERNATING (+, -, +, ...) in the connector's own frame.
+  # Diversity of probes -- not optimality of any one probe -- is what breaks aliases.
+  alternate_pitch_deg: 5.0
+  alternate_z_mm: 0.0            # optional z jog; 0 = pitch-only probing
+
+  # Probe compliance/guard: SOFTER and more conservative than production -- a probe should feel
+  # the contact, not force the mate. Overrides compliance.stiffness / force_guard.max_force_n.
+  stiffness: [1500.0, 1500.0, 150.0, 8.0, 8.0, 8.0]
+  max_force_n: 30.0
+  retract_distance_m: 0.050
+
+# ===================================================================================================
+# INSERTION PHASE -- the real attempt from the corrected belief, at PRODUCTION stiffness
+# ===================================================================================================
+insertion:
+  stiffness: [1500.0, 1500.0, 250.0, 10.0, 10.0, 10.0]
+  settle_s: 0.5
+  max_force_n: 50.0
+
+# ===================================================================================================
+# ESTIMATION -- exhaustive grid over the contact manifold
+# ===================================================================================================
+estimation:
+  manifold_csv: ./configs/data/hose_manifold.csv
+  wrench_representation: rawcap
+  scaling_constant_deg_to_mm: 0.2
+  scaling_constant_unit_force_to_mm: 1.5
+  scaling_constant_unit_torque_to_mm: 0.0
+  min_force_n: 3.0
+  min_observations: 10
+
+  # START WITH PITCH ALONE -- the identifiable DOF. Add z_mm back once pitch tracks truth.
+  estimate_dims: [pitch_deg]
+
+  interp_neighbors: 16
+  interp_softness: 1.0
+  recency_half_life_frac: 0.0    # probes are independent measurements; no recency decay
+  random_seed: 0
+
+  grid:
+    # Half-width of the exhaustive search box per estimated dim, and its resolution.
+    range:
+      pitch_deg: 14.0
+      z_mm: 8.0
+    step:
+      pitch_deg: 0.25
+      z_mm: 0.25
+    # Weight rows by informativeness vs insertion depth (d' 0.7 in the approach -> 2.4 at the
+    # socket mouth). 'none' = uniform.
+    info_weighting: depth
+    # Uncertainty = 1/curvature at the minimum, from two extra evaluations at theta* +- this.
+    # 3.0 deg validated (AUROC 0.89-0.91); 1.0 deg does NOT work (measures interpolation noise).
+    curvature_probe_deg: 3.0
+    # Sublevel factor for the multi-modality FLAG: >1 component => 44% failure rate vs 6%.
+    mode_threshold: 1.1
+
+# ===================================================================================================
+# COMPLIANCE -- the BASE admittance; probe/insertion override `stiffness` and `settle_s`.
+# ===================================================================================================
+compliance:
+  enabled: true
+  tare_before: true
+  mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
+  stiffness:     [1500.0, 1500.0, 250.0, 10.0, 10.0, 10.0]
+  damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+  selected_axes: [1, 1, 1, 1, 1, 1]
+  reference_rate_hz: 125.0
+  warmup_s: 0.1
+  settle_s: 0.5
+  lookahead_time_s: 0.1
+  servo_gain: 300.0
+  max_delta_m: 0.05
+  max_delta_rad: 0.5
+
+force_guard:
+  enabled: true
+  max_force_n: 50.0
+  max_torque_nm: 8.0
+
+speed:
+  max_joint_velocity_deg_s: 30.0
+  joint_acceleration_rad_s2: 1.0
+  max_cartesian_velocity_m_s: 0.25
+  # NOTE the manifold was collected at 20 mm/s. Matching it removes one more process difference;
+  # 5 mm/s is the production insert speed. Try 20.0 here if the wrench match stays poor.
+  max_cartesian_translation_mm_s: 5.0
+  max_cartesian_rotation_deg_s: 30.0
+  retract_translation_mm_s: 50.0
+  retract_rotation_deg_s: 50.0
+
+move_timeout_s: 120.0
+settle_s: 0.2
+confirm_each_step: false
+debug: false

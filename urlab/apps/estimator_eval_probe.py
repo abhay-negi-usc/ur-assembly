@@ -106,47 +106,72 @@ def _plot_trial(path, est, fused, dims, truth_corr, hist, status=None, live_path
         sig = (info or {}).get('sigma', {})
         est_corr = (info or {}).get('corr', {})
 
-        # ---- LEFT: the fused energy landscape --------------------------------------------
-        if fused is not None and len(dims) == 1:
-            ax0 = est.grid_axes[0]
-            axL.plot(ax0, fused, color='#4C72B0', lw=1.6)
-            e = est_corr.get(dims[0])
-            s = sig.get(dims[0])
-            if e is not None:
-                axL.axvline(e, color='#DD8452', lw=2.0, label=f'estimate {e:+.2f}')
+        # ---- LEFT: the fused energy landscape, in the ERROR FRAME (truth = origin) --------
+        # Every candidate correction is drawn at the REMAINING ERROR it would leave
+        # (err_before (.) theta), so the axes mean the same thing on every trial, truth is always
+        # the origin, and earlier trials' outcomes can be overlaid in the same coordinates.
+        errb_l = (info or {}).get('errb')
+        idx_l = list(est.idx)
+        unit = [('deg' if d.endswith('_deg') else 'mm') for d in dims]
+
+        def as_err(theta):
+            th = np.atleast_2d(np.asarray(theta, dtype=float))
+            th6 = np.zeros((len(th), 6))
+            th6[:, idx_l] = th
+            rem = vec6_from_mats(mats_from_vec6(np.asarray(errb_l, dtype=float))
+                                 @ mats_from_vec6(th6))
+            return rem[:, idx_l]
+
+        if fused is not None and errb_l is not None and est_corr:
+            mesh = np.meshgrid(*est.grid_axes, indexing='ij')
+            gth = np.stack([m.ravel() for m in mesh], axis=1)
+            gerr = as_err(gth)
+            e_app = as_err([est_corr[d] for d in dims])[0]
+            past = np.array([[h['err_dims'][d] for d in dims] for h in hist[:-1]
+                             if h.get('err_dims')], dtype=float)
+            if len(dims) == 1:
+                o = np.argsort(gerr[:, 0])
+                axL.plot(gerr[o, 0], np.asarray(fused).ravel()[o], color='#4C72B0', lw=1.6)
+                axL.axvline(0.0, color='#55A868', ls='--', lw=2.0, label='truth')
+                axL.axvline(e_app[0], color='#DD8452', lw=2.0,
+                            label=f'estimate ({e_app[0]:+.2f} left)')
+                s = sig.get(dims[0])
                 if s is not None and np.isfinite(s):
-                    axL.axvspan(e - s, e + s, color='#DD8452', alpha=0.18,
-                                label=f'+/- sigma ({s:.2f})')
-            t = truth_corr.get(dims[0])
-            if t is not None:
-                axL.axvline(t, color='#55A868', ls='--', lw=2.0, label=f'truth {t:+.2f}')
-            axL.set_xlabel(f'{dims[0]} correction')
-            axL.set_ylabel('fused energy [mm-eq]')
-            axL.legend(fontsize=8)
-        elif fused is not None and len(dims) >= 2:
-            a0, a1 = est.grid_axes[0], est.grid_axes[1]
-            Eg = np.asarray(fused).reshape(est.grid_shape)
-            if Eg.ndim > 2:                       # collapse any extra dims at their best slice
-                Eg = Eg.reshape(len(a0), len(a1), -1).min(axis=2)
-            im = axL.pcolormesh(a1, a0, Eg, shading='auto', cmap='viridis')
-            fig.colorbar(im, ax=axL, label='fused energy [mm-eq]')
-            e0, e1 = est_corr.get(dims[0]), est_corr.get(dims[1])
-            if e0 is not None and e1 is not None:
+                    axL.axvspan(e_app[0] - s, e_app[0] + s, color='#DD8452', alpha=0.18,
+                                label=f'+/- 1 sigma ({s:.2f})')
+                if len(past):
+                    y = float(np.min(fused)) + 0.03 * float(np.ptp(fused))
+                    axL.plot(past[:, 0], np.full(len(past), y), '.', color='#7fb3ff', ms=6,
+                             alpha=0.8, label='earlier trials')
+                axL.set_xlabel(f'{dims[0]} ERROR remaining [{unit[0]}]   (0 = truth)')
+                axL.set_ylabel('fused energy [mm-eq]')
+            else:
+                sh = mesh[0].shape
+                Eg = np.asarray(fused).reshape(est.grid_shape)
+                if Eg.ndim > 2:                   # collapse extra dims at their best slice
+                    Eg = Eg.reshape(sh[0], sh[1], -1).min(axis=2)
+                im = axL.pcolormesh(gerr[:, 1].reshape(sh), gerr[:, 0].reshape(sh), Eg,
+                                    shading='auto', cmap='viridis')
+                fig.colorbar(im, ax=axL, label='fused energy [mm-eq]')
+                if len(past):
+                    axL.scatter(past[:, 1], past[:, 0], s=16, color='#7fb3ff', alpha=0.75,
+                                zorder=3, label='earlier trials')
                 s0, s1 = sig.get(dims[0], np.nan), sig.get(dims[1], np.nan)
-                axL.errorbar([e1], [e0],
+                axL.errorbar([e_app[1]], [e_app[0]],
                              xerr=[[s1], [s1]] if np.isfinite(s1) else None,
                              yerr=[[s0], [s0]] if np.isfinite(s0) else None,
                              fmt='o', ms=9, mfc='#DD8452', mec='white', ecolor='#DD8452',
-                             elinewidth=2, capsize=4, label='estimate +/- sigma')
-            t0, t1 = truth_corr.get(dims[0]), truth_corr.get(dims[1])
-            if t0 is not None and t1 is not None:
-                axL.plot([t1], [t0], '*', ms=18, mfc='#55A868', mec='white', label='truth')
-            axL.set_xlabel(f'{dims[1]} correction')
-            axL.set_ylabel(f'{dims[0]} correction')
-            axL.legend(fontsize=8, loc='upper right')
+                             elinewidth=2, capsize=4, zorder=5, label='estimate +/- 1 sigma')
+                axL.axhline(0.0, ls=':', lw=0.9, color='#ffffff', alpha=0.6)
+                axL.axvline(0.0, ls=':', lw=0.9, color='#ffffff', alpha=0.6)
+                axL.plot([0.0], [0.0], '*', ms=18, mfc='#55A868', mec='white', zorder=6,
+                         label='truth (origin)')
+                axL.set_xlabel(f'{dims[1]} ERROR remaining [{unit[1]}]   (0 = truth)')
+                axL.set_ylabel(f'{dims[0]} ERROR remaining [{unit[0]}]   (0 = truth)')
+            axL.legend(fontsize=7, loc='best')
         else:
             axL.text(0.5, 0.5, 'no fused energy', ha='center', va='center')
-        axL.set_title('fused probe energy (the landscape the estimate came from)', fontsize=10)
+        axL.set_title('fused probe energy, ERROR frame (truth = origin)', fontsize=10)
 
         # ---- RIGHT TOP: estimated vs true correction, with sigma bars ---------------------
         d0 = dims[0]
@@ -547,7 +572,8 @@ def build_and_run(cfg, robot, camera, args):
             # The TRUE correction: believed @ C = true, so C = inverse(err_before).
             truth6 = vec6_from_mats(inverse(mats_from_vec6(np.asarray(errb, dtype=float))))
             truth_corr = {d: float(truth6[j]) for d, j in zip(dims, estimator.idx)}
-            rec = {'truth': truth_corr, 'err_before': errb_pos, 'err_after': errb_pos}
+            rec = {'truth': truth_corr, 'err_before': errb_pos, 'err_after': errb_pos,
+                   'errb': np.asarray(errb, dtype=float)}
             if fused is None:
                 log.error('trial %d: no usable probe observations -- belief unchanged.', trial)
             else:
@@ -575,6 +601,10 @@ def build_and_run(cfg, robot, camera, args):
             row.update({'err_after_pos_mm': erra_pos, 'err_after_rot_deg': erra_rot})
             row['converged'] = bool(erra_pos <= tol_pos_mm and erra_rot <= tol_rot_deg)
             rec['err_after'] = erra_pos
+            # where this trial LANDED in the shared error frame (0 = truth), so later trials can
+            # be overlaid on the landscape panel in the same coordinates
+            rec['err_dims'] = {d: float(np.asarray(erra, dtype=float)[j])
+                               for d, j in zip(dims, estimator.idx)}
             hist.append(rec)
             log.info('gt error %.2f mm / %.2f deg -> %.2f mm / %.2f deg%s',
                      errb_pos, errb_rot, erra_pos, erra_rot,

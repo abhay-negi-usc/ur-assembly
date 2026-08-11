@@ -190,6 +190,20 @@ def _landscape(estimator, vec6, w6, max_pts=2600, row_cap=120):
     return axes, E, sigma, argmin
 
 
+def _as_error(errb, theta, idx):
+    """Corrections -> the REMAINING ERROR they would leave, in the estimated dims.
+
+    Applying correction T to belief B gives B @ T, so the error left against the truth is
+    err_before (.) theta -- exact, not a subtraction. Plotting in this frame makes every attempt
+    and every trial share ONE set of axes with TRUTH AT THE ORIGIN, instead of a correction frame
+    that shifts every time the belief updates."""
+    th = np.atleast_2d(np.asarray(theta, dtype=float))
+    th6 = np.zeros((len(th), 6))
+    th6[:, idx] = th
+    rem = vec6_from_mats(mats_from_vec6(np.asarray(errb, dtype=float)) @ mats_from_vec6(th6))
+    return rem[:, idx]
+
+
 def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None,
                        res_all=None, l2_all=None, status=None, land=None):
     """ONE figure per trial, RE-SAVED after every attempt: the GROUND-TRUTH error, all attempts
@@ -325,64 +339,79 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None
             if pi == 0:
                 axp.legend(fontsize=7, loc='best')
 
-        # LANDSCAPE: the energy over every candidate correction, with the APPLIED estimate and
-        # its +/- sigma bars against the TRUE correction. This is the panel that separates "the
-        # solver picked badly" from "the landscape's minimum is in the wrong place" -- if truth
-        # sits in a deep basin the solver missed it, if truth is on a slope the DATA is at fault.
+        # LANDSCAPE, in the ERROR FRAME: every candidate correction is drawn at the REMAINING
+        # ERROR it would leave, so TRUTH IS THE ORIGIN and the axes mean the same thing on every
+        # attempt and every trial (the correction frame shifts each time the belief updates).
+        # Separates "the solver picked badly" -- truth sits in a deep basin it missed -- from
+        # "the landscape's minimum is in the wrong place", where the DATA is at fault.
         if land:
-            axes_l, E, sigma, argmin, est_corr, truth_corr, finals = land
+            axes_l, E, sigma, argmin, est_corr, errb_l, finals, idx_l, track_l = land
             col = ncols - 1
             axl = fig.add_subplot(gs[:, col])
+            unit = [('deg' if d.endswith('_deg') else 'mm') for d in dims]
+            mesh = np.meshgrid(*axes_l, indexing='ij')
+            gth = np.stack([m.ravel() for m in mesh], axis=1)
+            gerr = _as_error(errb_l, gth, idx_l)     # grid, as remaining error
+            e_app = _as_error(errb_l, [est_corr[d] for d in dims], idx_l)[0]
+            e_arg = _as_error(errb_l, [argmin[d] for d in dims], idx_l)[0]
+            e_fin = (_as_error(errb_l, finals, idx_l)
+                     if finals is not None and len(finals) else None)
+            tr = np.asarray(track_l, dtype=float) if track_l is not None else None
             if len(dims) == 1:
                 d0 = dims[0]
-                axl.plot(axes_l[0], E, color='#4C72B0', lw=1.6, zorder=2)
-                if finals is not None and len(finals):
-                    axl.plot(finals[:, 0], np.full(len(finals), float(np.min(E))), '|',
-                             color='#999999', ms=8, alpha=0.5, zorder=1, label='ICP finals')
-                e = est_corr.get(d0)
-                if e is not None:
-                    axl.axvline(e, color='#DD8452', lw=2.0, zorder=3,
-                                label=f'applied {e:+.2f}')
-                    s = sigma.get(d0)
-                    if s is not None and np.isfinite(s):
-                        axl.axvspan(e - s, e + s, color='#DD8452', alpha=0.18, zorder=0,
-                                    label=f'+/- sigma ({s:.2f})')
-                t = truth_corr.get(d0)
-                if t is not None:
-                    axl.axvline(t, color='#55A868', ls='--', lw=2.0, zorder=4,
-                                label=f'truth {t:+.2f}')
-                axl.set_xlabel(f'{d0} correction '
-                               f'[{"deg" if d0.endswith("_deg") else "mm"}]')
+                o = np.argsort(gerr[:, 0])
+                axl.plot(gerr[o, 0], E.ravel()[o], color='#4C72B0', lw=1.6, zorder=2)
+                if e_fin is not None:
+                    axl.plot(e_fin[:, 0], np.full(len(e_fin), float(np.min(E))), '|',
+                             color='#ff7f0e', ms=9, alpha=0.8, zorder=3, label='ICP finals')
+                axl.axvline(0.0, color='#55A868', ls='--', lw=2.0, zorder=5, label='truth')
+                axl.axvline(e_app[0], color='#DD8452', lw=2.0, zorder=4,
+                            label=f'applied ({e_app[0]:+.2f} left)')
+                s = sigma.get(d0)
+                if s is not None and np.isfinite(s):
+                    axl.axvspan(e_app[0] - s, e_app[0] + s, color='#DD8452', alpha=0.18,
+                                zorder=0, label=f'+/- 1 sigma ({s:.2f})')
+                axl.plot([e_arg[0]], [float(np.min(E))], 'x', color='#C44E52', ms=9, mew=2,
+                         zorder=6, label='grid argmin')
+                if tr is not None and len(tr):
+                    y = float(np.min(E)) + 0.03 * float(np.ptp(E))
+                    axl.plot(tr[:, 0], np.full(len(tr), y), '.-', color='#4C72B0', lw=1.0,
+                             ms=6, alpha=0.7, zorder=4, label='estimate trajectory')
+                axl.set_xlabel(f'{d0} ERROR remaining [{unit[0]}]   (0 = truth)')
                 axl.set_ylabel('ICP energy [mm-eq]')
             else:
                 d0, d1 = dims[0], dims[1]
-                Eg = E if E.ndim == 2 else E.reshape(len(axes_l[0]), len(axes_l[1]), -1).min(2)
-                im = axl.pcolormesh(axes_l[1], axes_l[0], Eg, shading='auto', cmap='viridis')
+                sh = mesh[0].shape
+                Eg = E if E.ndim == 2 else E.reshape(sh[0], sh[1], -1).min(2)
+                im = axl.pcolormesh(gerr[:, 1].reshape(sh), gerr[:, 0].reshape(sh), Eg,
+                                    shading='auto', cmap='viridis')
                 fig.colorbar(im, ax=axl, label='ICP energy [mm-eq]')
-                if finals is not None and len(finals) and finals.shape[1] >= 2:
-                    axl.scatter(finals[:, 1], finals[:, 0], s=14, facecolors='none',
+                if e_fin is not None and e_fin.shape[1] >= 2:
+                    axl.scatter(e_fin[:, 1], e_fin[:, 0], s=14, facecolors='none',
                                 edgecolors='#ff7f0e', linewidths=0.7, alpha=0.75, zorder=3,
                                 label='ICP finals')
-                e0, e1 = est_corr.get(d0), est_corr.get(d1)
-                if e0 is not None and e1 is not None:
-                    s0 = sigma.get(d0, np.nan)
-                    s1 = sigma.get(d1, np.nan)
-                    axl.errorbar([e1], [e0],
-                                 xerr=[[s1], [s1]] if np.isfinite(s1) else None,
-                                 yerr=[[s0], [s0]] if np.isfinite(s0) else None,
-                                 fmt='o', ms=9, mfc='#DD8452', mec='white', ecolor='#DD8452',
-                                 elinewidth=2, capsize=4, zorder=4, label='applied +/- sigma')
-                if argmin:
-                    axl.plot([argmin[d1]], [argmin[d0]], 'x', color='#C44E52', ms=9, mew=2,
-                             zorder=5, label='grid argmin')
-                t0, t1 = truth_corr.get(d0), truth_corr.get(d1)
-                if t0 is not None and t1 is not None:
-                    axl.plot([t1], [t0], '*', ms=18, mfc='#55A868', mec='white', zorder=6,
-                             label='truth')
-                axl.set_xlabel(f'{d1} correction [{"deg" if d1.endswith("_deg") else "mm"}]')
-                axl.set_ylabel(f'{d0} correction [{"deg" if d0.endswith("_deg") else "mm"}]')
+                if tr is not None and len(tr) > 1:
+                    axl.plot(tr[:, 1], tr[:, 0], '-', color='#7fb3ff', lw=1.4, zorder=4)
+                    axl.scatter(tr[:-1, 1], tr[:-1, 0], s=22, color='#7fb3ff', zorder=5)
+                    for i in range(len(tr)):
+                        axl.annotate(str(i), (tr[i, 1], tr[i, 0]), textcoords='offset points',
+                                     xytext=(4, 3), fontsize=7, color='#eaf2ff')
+                s0, s1 = sigma.get(d0, np.nan), sigma.get(d1, np.nan)
+                axl.errorbar([e_app[1]], [e_app[0]],
+                             xerr=[[s1], [s1]] if np.isfinite(s1) else None,
+                             yerr=[[s0], [s0]] if np.isfinite(s0) else None,
+                             fmt='o', ms=9, mfc='#DD8452', mec='white', ecolor='#DD8452',
+                             elinewidth=2, capsize=4, zorder=6, label='applied +/- 1 sigma')
+                axl.plot([e_arg[1]], [e_arg[0]], 'x', color='#C44E52', ms=10, mew=2, zorder=7,
+                         label='grid argmin')
+                axl.axhline(0.0, ls=':', lw=0.9, color='#ffffff', alpha=0.6, zorder=2)
+                axl.axvline(0.0, ls=':', lw=0.9, color='#ffffff', alpha=0.6, zorder=2)
+                axl.plot([0.0], [0.0], '*', ms=18, mfc='#55A868', mec='white', zorder=8,
+                         label='truth (origin)')
+                axl.set_xlabel(f'{d1} ERROR remaining [{unit[1]}]   (0 = truth)')
+                axl.set_ylabel(f'{d0} ERROR remaining [{unit[0]}]   (0 = truth)')
             axl.legend(fontsize=7, loc='best')
-            axl.set_title('energy landscape: estimate vs truth', fontsize=10)
+            axl.set_title('energy landscape in the ERROR frame (truth = origin)', fontsize=10)
 
         fig.suptitle(f'trial {trial}: ground-truth belief error per attempt', y=0.995)
         if status:                                 # run progress: trials done + success rate
@@ -796,12 +825,13 @@ def build_and_run(cfg, robot, camera, args):
                     if save_plots and plot_land:
                         try:
                             ax_l, E_l, sig_l, amin_l = _landscape(estimator, vec6, w6)
-                            t6 = vec6_from_mats(
-                                inverse(mats_from_vec6(np.asarray(errb, dtype=float))))
+                            # track6 holds this trial's error path (index 0 = injected); the
+                            # panel draws it in the same error frame as the landscape.
+                            trk = np.asarray(track6, dtype=float)[:, estimator.idx]
                             land = (ax_l, E_l, sig_l, amin_l, dict(info['theta_corr']),
-                                    {d: float(t6[j]) for d, j in zip(estimator.estimate_dims,
-                                                                     estimator.idx)},
-                                    np.asarray(info['theta_hist'], dtype=float)[:, -1, :])
+                                    np.asarray(errb, dtype=float),
+                                    np.asarray(info['theta_hist'], dtype=float)[:, -1, :],
+                                    list(estimator.idx), trk)
                             row.update({f'sigma_{d}': v for d, v in sig_l.items()})
                         except Exception as exc:   # noqa: BLE001 -- diagnostics never fatal
                             log.warning('landscape skipped (%s)', exc)

@@ -60,8 +60,8 @@ eval:
   # [x, y, z (m), roll, pitch, yaw (deg)], applied in the HELD part's OWN frame -- the same
   # right-multiplied frame the estimator corrects in. As set: x +/-5 mm, z +/-5 mm, pitch +/-5 deg.
   perturbation:
-    lower: [-0.000, 0.0, -0.005, 0.0, -5.0, 0.0]
-    upper: [ 0.000, 0.0, +0.005, 0.0, +5.0, 0.0]
+    lower: [-0.000, 0.0, -0.001, 0.0, -5.0, 0.0]
+    upper: [ 0.000, 0.0, +0.001, 0.0, +5.0, 0.0]
   # Grid step per DOF (grid mode only), same order/units as the bounds.
   grid_resolution: [0.001, 0.0, 0.001, 0.0, 1.0, 0.0]
 
@@ -148,7 +148,7 @@ estimation:
   # wrench_representation unit, s_force 3.0, s_torque 1.0.
   manifold_csv: ./configs/data/hose_manifold.csv
   wrench_representation: rawcap
-  scaling_constant_deg_to_mm: 0.2
+  scaling_constant_deg_to_mm: 1.0
   scaling_constant_unit_force_to_mm: 1.5
   scaling_constant_unit_torque_to_mm: 0.0
   min_force_n: 3.0
@@ -159,7 +159,7 @@ estimation:
   init_guess_range:
     x_mm: 0.0
     y_mm: 0.0
-    z_mm: 10.0
+    z_mm: 3.0
     roll_deg: 0.0
     pitch_deg: 10.0
     yaw_deg: 0.0

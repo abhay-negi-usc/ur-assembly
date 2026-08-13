@@ -1263,41 +1263,148 @@ def test_mixture_separates_ambiguity_from_precision():
     assert d['n_modes'] == 2 and 'sigma_within' in d and len(d['modes']) == 2
 
 
-def test_probe_app_targets_rival_modes_and_flags_thin_support():
-    """apps\\estimator_eval_probe + skills: the two actions a multi-modal posterior calls for.
+def test_mode_pose_config_is_wired():
+    """configs/mode_pose_estimator_eval.yaml: the two stages must keep their intended
+    asymmetry (mode = wrench-HEAVY + pose down-weighted, pose = wrench-light), share one grid
+    (only estimation_shared may define it), and hold a settle long enough for the wrench the
+    mode stage lives on."""
+    import yaml
 
-    (1) MODE-DIRECTED bias. More of the same probe cannot shrink a BETWEEN-mode spread, so the
-        app commands a rival mode instead: bias = inverse(that mode's correction), the exact path
-        the robot would drive if the mode were true. Getting the inverse backwards would probe
-        the mirror image of the hypothesis, which is why it is asserted here rather than eyeballed.
-    (2) SUPPORT. Observations taken far off the manifold must read as thin support -- that is the
-        drift-out-of-distribution failure, and the residual alone cannot see it.
-    (3) MODE RANKING (seat_gate.mode_ranking: p_seat). Committing the deepest minimum is wrong
-        whenever a rival mode does more for P(seat) -- the 2026-08-12 validation put the truth
-        in a NON-dominant mode in 54% of fused probe cases -- so _rank_modes must pick the
-        P(seat)-argmax among {argmin} + mode centres, and must reduce to the argmin under
-        'energy' ranking or a unimodal mixture."""
+    with open(os.path.join(ROOT, 'configs', 'mode_pose_estimator_eval.yaml')) as fh:
+        cfg = yaml.safe_load(fh)
+    sh, em, ep = (cfg['estimation_shared'], cfg['estimation_mode'], cfg['estimation_pose'])
+    assert 'grid' in sh and 'estimate_dims' in sh
+    for stage in (em, ep):
+        assert 'grid' not in stage and 'estimate_dims' not in stage, \
+            'stages must share estimation_shared\'s grid'
+    assert float(em['scaling_constant_unit_force_to_mm']) \
+        > float(ep['scaling_constant_unit_force_to_mm']), \
+        'the MODE stage must weight the wrench harder than the POSE stage'
+    dw = em.get('dim_weights') or {}
+    assert dw and max(float(v) for v in dw.values()) < 1.0, \
+        'the mode stage must down-weight the (aliased) pose channels'
+    assert float(cfg['compliance']['settle_s']) >= 1.2, \
+        'stage 1 lives on the wrench -- it must be SETTLED (>= ~1.2 s)'
+    assert 0 < float(cfg['pose_stage']['alpha']) <= 0.8
+    with open(os.path.join(ROOT, 'configs', 'frames.yaml')) as fh:
+        frames = yaml.safe_load(fh)
+    held = cfg['held_frame']
+    assert held in frames['frames'] and held in frames['targets']
+
+
+def test_two_stage_mode_then_pose_escapes_wrong_global_minimum():
+    """apps\\mode_pose_estimator_eval.two_stage: the pathology it exists for, synthesized.
+
+    A DENSE decoy region of the map makes the pose-light energy's GLOBAL minimum land in the
+    wrong mode (soft-kNN energy is lower where sampling is denser -- what should be a local
+    minimum becomes global). The wrench signature still separates the modes. The MODE GATE
+    was removed (2026-08-13: restricting stage 2 measurably hurt on real data), so what the
+    two-stage must deliver here is the DIAGNOSTIC that catches the pathology: the pose-only
+    argmin fooled, the wrench-heavy stage-1 partition putting the truth in its TOP-mass mode,
+    and the mode centre disagreeing loudly with the fooled pose argmin -- the discrepancy an
+    operator (or a later gate, once the classifier earns it) acts on."""
     import csv as _csv
     import shutil
     import tempfile
 
-    from urlab.apps.estimator_eval_probe import _mode_bias, _rank_modes
+    from urlab.apps.mode_pose_estimator_eval import (merged_estimation, truth_mode_rank,
+                                                     two_stage)
     from urlab.skills.grid_estimator import GridManifoldEstimator
     from urlab.skills.manifold import (FORCE_COLS, POSE_COLS, TORQUE_COLS, mats_from_vec6,
                                        vec6_from_mats)
-    from urlab.skills.mixture import Component, Mixture
 
-    dims, idx = ['z_mm', 'pitch_deg'], [2, 4]
-    # (1) the bias must be the INVERSE of the mode's correction, and clamped per dim.
-    bias = _mode_bias([2.0, -6.0], dims, idx, [5.0, 10.0])
-    want = vec6_from_mats(T.inverse(mats_from_vec6([0.0, 0.0, 2.0, 0.0, -6.0, 0.0])))
-    assert np.allclose(bias[3:], want[3:], atol=1e-9), (bias, want)
-    assert np.allclose([b * 1000.0 for b in bias[:3]], want[:3], atol=1e-6), bias
-    assert abs(bias[4] - 6.0) < 1e-6, 'commanding a -6 deg correction must bias +6 deg'
-    clamped = _mode_bias([99.0, 99.0], dims, idx, [5.0, 10.0])
-    assert abs(clamped[2] * 1000.0) <= 5.0 + 1e-6 and abs(clamped[4]) <= 10.0 + 1e-6, clamped
+    tmp = tempfile.mkdtemp()
+    rng = np.random.default_rng(4)
+    try:
+        # map: pitch offsets -12..12, wrench fy encodes the offset (mode-identifying). The
+        # DECOY is a SAMPLING-DENSITY asymmetry -- the user's observed mechanism: the
+        # [-8, -4] band is sampled 7.5x denser in x than the truth's side, so its kNN
+        # residuals are genuinely SMALLER and the pose metric's global minimum lands there
+        # ('incorrect parameters better explain the observations'). The wrench refuses it.
+        rows = []
+        for p in np.arange(-12.0, 12.01, 1.0):
+            n_x = 90 if -8.0 <= p <= -4.0 else (12 if p >= 0.0 else 30)
+            for x in np.linspace(-20.0, -4.0, n_x):
+                f = [-4.5 + rng.normal(0, 0.02), -0.25 * p + rng.normal(0, 0.02),
+                     rng.normal(0, 0.02)]
+                rows.append([x + rng.normal(0, 0.05), 0.0, 0.0, 0.0,
+                             p + rng.normal(0, 0.05), 0.0] + f + [0.0, 0.0, 0.0])
+        path = os.path.join(tmp, 'manifold.csv')
+        with open(path, 'w', newline='') as fh:
+            w = _csv.writer(fh)
+            w.writerow(POSE_COLS + FORCE_COLS + TORQUE_COLS)
+            w.writerows(rows)
 
-    # (2) support: a manifold covering pitch in [-12, 12] only. Observations that sit ON it must
+        base = dict(manifold_csv=path, estimate_dims=['pitch_deg'], min_observations=5,
+                    wrench_representation='rawcap', min_force_n=1.0, interp_neighbors=8,
+                    scaling_constant_deg_to_mm=1.0,
+                    grid={'range': {'pitch_deg': 14.0}, 'step': {'pitch_deg': 0.5},
+                          'curvature_probe_deg': 3.0})
+        est_mode = GridManifoldEstimator({**base, 'scaling_constant_unit_force_to_mm': 4.0,
+                                          'dim_weights': {'pitch_deg': 0.3}})
+        est_pose = GridManifoldEstimator({**base, 'scaling_constant_unit_force_to_mm': 0.1})
+
+        # observations: physical offset +4 (wrench fy = -1.0) over the FULL depth range --
+        # the real insertion went deeper than the map's coverage of its own mode. Belief
+        # error -4 deg: the believed pitch column reads ~0, the CORRECT correction is +4.
+        xs = np.linspace(-20.0, -4.0, 40)
+        src = np.stack([xs + rng.normal(0, 0.05, 40), np.zeros(40), np.zeros(40),
+                        np.zeros(40), 4.0 + rng.normal(0, 0.05, 40), np.zeros(40),
+                        -4.5 + rng.normal(0, 0.02, 40), -1.0 + rng.normal(0, 0.02, 40),
+                        rng.normal(0, 0.02, 40), np.zeros(40), np.zeros(40),
+                        np.zeros(40)], axis=1)
+        D = mats_from_vec6([0.0, 0.0, 0.0, 0.0, -4.0, 0.0])
+        bel = vec6_from_mats(mats_from_vec6(src[:, :6]) @ D)
+        obs = np.hstack([bel, src[:, 6:9] @ D[:3, :3], np.zeros((len(src), 3))])
+        e6 = np.array([0.0, 0.0, 0.0, 0.0, -4.0, 0.0])   # err_before
+
+        # the single pose-metric argmin must be SEDUCED by the dense decoy band...
+        vp, wp = est_pose.prepare_observations(obs[:, :6], obs[:, 6:9], obs[:, 9:12])
+        E_p, _, _ = est_pose.energy(vp, wp)
+        th_single = float(est_pose.grid6[int(np.argmin(E_p))][4])
+        assert abs(th_single - 4.0) > 3.0, \
+            f'the decoy must fool the pose-only argmin (got {th_single:+.1f}, wanted wrong)'
+        # ... while the wrench-heavy stage-1 DIAGNOSTIC catches it: truth in the TOP mode,
+        # and the mode centre pointing at +4 while the fooled pose argmin sits elsewhere.
+        th6, info = two_stage(est_mode, est_pose, obs)
+        assert th6 is not None, info
+        assert truth_mode_rank(info['mixture'], est_mode, e6) == 1, \
+            'the wrench-heavy stage must put the truth in its TOP mode'
+        assert abs(info['mode_centre']['pitch_deg'] - 4.0) <= 2.5, \
+            f"the mode centre must point near +4 (got {info['mode_centre']})"
+        assert abs(info['pose_argmin_global']['pitch_deg']
+                   - info['mode_centre']['pitch_deg']) > 3.0, \
+            'the diagnostic must expose the pose-vs-mode disagreement'
+
+        # config plumbing: per-stage grid/estimate_dims overrides must be rejected
+        class FakeCfg(dict):
+            def section(self, k):
+                return self.get(k, {})
+        try:
+            merged_estimation(FakeCfg(estimation_shared=dict(base),
+                                      estimation_mode={'grid': {}}, estimation_pose={}))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('per-stage grid override must raise')
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_grid_estimator_support_flags_thin_evidence():
+    """skills/grid_estimator SUPPORT: observations taken far off the manifold must read as
+    thin support -- the drift-out-of-distribution failure the residual alone cannot see. On-map
+    observations must calibrate to ratio ~1, off-map wrenches must at least double it and widen
+    the reported sigma when the (opt-in) inflation multiplier is on."""
+    import csv as _csv
+    import shutil
+    import tempfile
+
+    from urlab.skills.grid_estimator import GridManifoldEstimator
+    from urlab.skills.manifold import (FORCE_COLS, POSE_COLS, TORQUE_COLS, mats_from_vec6,
+                                       vec6_from_mats)
+
+    # support: a manifold covering pitch in [-12, 12] only. Observations that sit ON it must
     # report support ~1; observations driven far outside it must report a materially larger
     # ratio even though the RESIDUAL cannot tell the difference on its own.
     tmp = tempfile.mkdtemp()
@@ -1345,43 +1452,6 @@ def test_probe_app_targets_rival_modes_and_flags_thin_support():
         assert info_out['support_inflation'] > 1.0
         assert set(info_in) >= {'mixture', 'ambiguity', 'between_frac', 'separation',
                                 'sigma_within', 'cov_mixture'}
-
-        # (3) MODE RANKING. The case re-ranking exists for: an ASYMMETRIC basin (seats for
-        # remaining pitch error in [-2, +12] -- generous one way, unforgiving the other).
-        # Committing the shallower +4 mode is then safe under BOTH hypotheses (remaining error
-        # 0 or +10, both inside), while the deeper -6 argmin fails if the rival was true
-        # (remaining error -10). Depth says -6; the decision quantity says +4.
-        class FakeBasin:
-            def offset_of_error(self, err6):
-                return np.atleast_2d(np.asarray(err6, dtype=float))[:, [4]]
-
-            def p_seat_posterior(self, offsets, weights):
-                w = np.asarray(weights, dtype=float)
-                o = np.asarray(offsets, dtype=float)[:, 0]
-                p = ((o >= -2.0) & (o <= 12.0)).astype(float)
-                return float((p * (w / w.sum())).sum())
-
-        # energy: deepest at -6 deg (the decoy), a shallower rival at +4 (the truth)
-        ax_p = est.grid_axes[0]
-        E_rank = np.minimum(0.05 * (ax_p + 6.0) ** 2 + 1.0, 0.05 * (ax_p - 4.0) ** 2 + 1.02)
-        k0 = int(np.argmin(E_rank))
-        info_rank = {
-            'theta_corr': {'pitch_deg': float(ax_p[k0])}, 'energy': E_rank,
-            'mixture': Mixture([Component(0.6, np.array([-6.0]), np.eye(1) * 0.25),
-                                Component(0.4, np.array([+4.0]), np.eye(1) * 0.25)],
-                               ['pitch_deg'])}
-        fb = FakeBasin()
-        th_e, ps_e, m_e = _rank_modes(fb, est, info_rank, 0.05, 'energy')
-        assert m_e == -1 and th_e == info_rank['theta_corr'], 'energy ranking must keep argmin'
-        th_p, ps_p, m_p = _rank_modes(fb, est, info_rank, 0.05, 'p_seat')
-        assert m_p == 1 and abs(th_p['pitch_deg'] - 4.0) < 1e-9, \
-            f'p_seat ranking must pick the rival mode the basin prefers: {th_p}, mode {m_p}'
-        assert ps_p > ps_e, (ps_p, ps_e)
-        # ... and reduce to the argmin when the mixture is unimodal
-        uni = dict(info_rank, mixture=Mixture([Component(1.0, np.array([-6.0]),
-                                                         np.eye(1) * 0.25)], ['pitch_deg']))
-        _, _, m_u = _rank_modes(fb, est, uni, 0.05, 'p_seat')
-        assert m_u == -1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1685,100 +1755,6 @@ def test_estimator_eval_collection_config():
     abt = cfg['eval'].get('abort_bounds') or {}
     assert 0 < float(abt.get('pos_mm', 10.0)) <= 20.0, abt
     assert 0 < float(abt.get('rot_deg', 15.0)) <= 15.0, abt
-
-
-def test_probe_app_config_is_wired():
-    """configs/estimator_eval_probe.yaml must name a real held frame, keep the probe settle long
-    enough for the wrench to settle (the whole point of the app), give the probe and insertion
-    phases their own stiffness, and match the app's expected schema."""
-    import yaml
-
-    from urlab.apps.estimator_eval_probe import _fieldnames
-
-    with open(os.path.join(ROOT, 'configs', 'estimator_eval_probe.yaml')) as fh:
-        cfg = yaml.safe_load(fh)
-    with open(os.path.join(ROOT, 'configs', 'frames.yaml')) as fh:
-        frames = yaml.safe_load(fh)
-    held = cfg['held_frame']
-    assert held in frames['frames'] and held in frames['targets'], \
-        f'{held} needs BOTH a frames: and a targets: entry'
-
-    pb, ins = cfg['probe'], cfg['insertion']
-    assert pb['settle_s'] >= 1.2, \
-        'probe.settle_s must exceed the ~1.2 s this admittance needs to settle -- a short hold ' \
-        'logs transients, which is the mismatch this app exists to fix'
-    assert pb['stiffness'] != ins['stiffness'], 'probe and insertion must differ in stiffness'
-    assert len(pb['stiffness']) == 6 and len(ins['stiffness']) == 6
-    assert pb['alternate_pitch_deg'] > 0, 'probes must alternate to break aliases'
-    assert pb['attempts'] >= 2, 'fusion needs at least two probes'
-
-    # Per-waypoint trajectory noise is PROCESS-CRITICAL: the manifold was collected with fresh
-    # per-waypoint jitter, which is what walks a misaligned cylindrical peg off the hole rim and
-    # into the bore. A clean probe path lands face-on-face and stops ~15 mm short (measured
-    # early-landing 68% clean vs 6% for the map), so the probes never reach the contact the map
-    # describes and no estimate can work.
-    tn = pb.get('trajectory_noise') or {}
-    assert tn.get('enabled'), 'probe.trajectory_noise must be enabled to clear the hole rim'
-    assert len(tn['std']) == 6
-    assert tn['std'][2] > 0 or tn['std'][4] > 0, \
-        'the jitter must act in z and/or pitch -- the DOFs that walk the peg off the rim'
-
-    g = cfg['estimation']['grid']
-    assert g['curvature_probe_deg'] >= 2.0, \
-        'curvature_probe_deg below ~2 deg measures interpolation noise (AUROC 0.66 at 1 deg)'
-    assert g['mode_threshold'] > 1.0
-    assert g['info_weighting'] in ('depth', 'none')
-
-    # STOP-SIGNATURE FUSION: the probe app must carry the same estimator option, with the
-    # SAME tuning, as estimator_eval -- one estimator, two collection processes. alpha must
-    # sit in the ACCUMULATED-regime range (this app fuses multiple probes): full application
-    # (alpha ~1) measurably hurts there (|z'| 3.0 vs 1.1 on the m=3 benchmark).
-    sf = cfg['estimation'].get('stop_fusion') or {}
-    assert sf.get('enabled') is not None, 'estimation.stop_fusion block must exist'
-    if sf.get('enabled'):
-        assert 0.0 < float(sf.get('alpha', 1.0)) <= 0.8, sf
-        assert float(sf.get('weight', 0.0)) > 0.0, sf
-        import yaml as _yaml
-        with open(os.path.join(os.path.dirname(__file__), '..', 'configs',
-                               'estimator_eval.yaml')) as fh:
-            ev = _yaml.safe_load(fh)['estimation'].get('stop_fusion') or {}
-        if ev.get('enabled'):
-            assert (float(sf['weight']), float(sf['alpha'])) \
-                == (float(ev['weight']), float(ev['alpha'])), \
-                'probe and eval stop_fusion tuning must match (one estimator, two apps)'
-    dims = cfg['estimation']['estimate_dims']
-    for d in dims:
-        assert d in g['range'] and d in g['step'], f'grid range/step missing for {d}'
-        assert g.get('curvature_probe', {}).get(d, g['curvature_probe_deg']) >= 2 * g['step'][d]
-
-    # Both z and pitch: the perturbation must actually inject the dims being estimated, and the
-    # probe pattern must jog z too -- a pitch-only probe moves ALONG the z-pitch valley, the one
-    # direction that cannot disambiguate it.
-    pert = cfg['eval']['perturbation']
-    if 'z_mm' in dims and 'pitch_deg' in dims:
-        assert pert['lower'][2] < 0 < pert['upper'][2], 'z must be injected when it is estimated'
-        assert pert['lower'][4] < 0 < pert['upper'][4], 'pitch must be injected'
-        assert pb['alternate_z_mm'] > 0, 'probe z jog is required when estimating z'
-    n_cand = 1
-    for d in dims:
-        n_cand *= int(round(2 * g['range'][d] / g['step'][d])) + 1
-    assert n_cand <= 4000, f'{n_cand} grid candidates will be slow per probe -- coarsen the step'
-
-    assert cfg['eval'].get('live_plot', True), 'live_plot is how the run is watched'
-
-    # P(seat) gate: a 'max' depth_reference is what makes the gate un-openable on a map with
-    # crush-through outliers, so the shipped config must not use it.
-    sgc = cfg['eval']['seat_gate']
-    assert 0.0 < sgc['p_seat_threshold'] <= 1.0
-    assert sgc['depth_reference'] != 'max', \
-        "depth_reference 'max' is set by crush-through outliers -- use a percentile"
-    assert sgc['seat_margin_mm'] > 0
-
-    cols = _fieldnames(dims, pb['attempts'])
-    for c in ['uncertainty', 'modes', 'multimodal', 'insert_success', 'err_after_pos_mm',
-              f'probe{pb["attempts"]}_settled_rows'] + [f'corr_{d}' for d in dims] \
-             + [f'sigma_{d}' for d in dims]:
-        assert c in cols, f'{c} missing from trials.csv schema'
 
 
 def test_manifold_interpolation_reduces_latching():

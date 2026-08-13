@@ -716,9 +716,9 @@ def build_and_run(cfg, robot, camera, args):
     basin, seat_gate, seat_temp = None, 1.0, 0.05
     # MODE RANKING at commitment: 'energy' = apply the aggregator's estimate untouched (the
     # original); 'p_seat' = candidates are that estimate PLUS each final-mixture mode centre,
-    # and the E_p[P(seat)]-argmax over the landscape posterior is committed instead. Same
-    # rationale and CSV columns as estimator_eval_probe (truth sat in a NON-dominant mode in
-    # 54% / 70% of the 2026-08-12 validation cases).
+    # and the E_p[P(seat)]-argmax over the landscape posterior is committed instead
+    # (motivation: the truth sat in a NON-dominant mode in 54% / 70% of the 2026-08-12
+    # validation cases -- depth misranks rivals; P(seat) is what the gate acts on anyway).
     # STOP-SIGNATURE FUSION (estimation.stop_fusion) -- the current best estimator: fuse the
     # dense-landscape NN energy with SuccessBasin.stop_energy and partially apply the argmin.
     # Measured on the v3 replay: single attempt 2.55 vs 3.05 mm |z'| (win 62%); with

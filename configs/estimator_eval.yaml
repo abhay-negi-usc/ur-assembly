@@ -46,7 +46,7 @@ retract_distance_m: 0.100
 # ===================================================================================================
 eval:
   num_trials: 50                 # IGNORED when mode: grid (the grid derives the count)
-  max_attempts: 5                # assemble -> estimate updates per trial
+  max_attempts: 1                # assemble -> estimate updates per trial
 
   # HOW the injected errors are chosen: 'random' draws uniformly inside the bounds for
   # num_trials; 'grid' sweeps every combination at grid_resolution (count derived, like
@@ -88,7 +88,7 @@ eval:
   # stops probing and commits to ONE insertion with NO trajectory noise. The SAME depth rule
   # then decides whether that insertion actually seated, so gate and verdict cannot disagree.
   seat_gate:
-    enabled: true
+    enabled: false
     # Commit once the posterior says the belief will seat this often. CEILING WARNING: P(seat)
     # is bounded by how repeatably the PROCESS seats, not just by the estimate. On the 2026-08
     # hose map, trials at near-identical offsets agree on seated/not only 67% of the time (a
@@ -160,7 +160,12 @@ eval:
     mode: attempts               # attempts | offset_sweep | peck
     # offset_sweep: commanded offsets [x, y, z (m), roll, pitch, yaw (deg)] in the held part's
     # own frame. null = the default pitch sweep -4..+4 deg in 2 deg steps, other dims zero.
-    sweep_offsets: null
+    sweep_offsets: 
+      - [0, 0, 0, 0, -4, 0]
+      - [0, 0, 0, 0, -2, 0]
+      - [0, 0, 0, 0, 0, 0]
+      - [0, 0, 0, 0, +2, 0]
+      - [0, 0, 0, 0, +4, 0]
     peck_retract_mm: 10.0         # back-off after each force stop
     peck_timeout_s: 60.0         # time budget for one peck attempt
 
@@ -177,7 +182,7 @@ eval:
   # contact instead of the same nominal path every time. Uses its OWN random stream, so
   # toggling it does not change the injected-error draws (noised/nominal runs stay pairable).
   trajectory_noise:
-    enabled: true
+    enabled: false
     # PER-DIMENSION per-waypoint std [x, y, z (m), roll, pitch, yaw (deg)], applied after
     # smoothing; a zero entry leaves that DOF unperturbed. (Legacy scalar keys translation_m /
     # rotation_deg still work when 'std' is absent.)
@@ -209,7 +214,7 @@ estimation:
   # setup with: manifold_csv ./configs/data/banana_manifold_20260807_clean.csv,
   # wrench_representation unit, s_force 3.0, s_torque 1.0.
   manifold_csv: ./configs/data/hose_manifold.csv
-  wrench_representation: rawcap
+  wrench_representation: unit
   # rawcap SATURATION: the wrench feature is unit(f) x min(|f| / rawcap_force_ref_n,
   # rawcap_cap) -- magnitude in units of the reference, CAPPED at rawcap_cap. Saturation
   # therefore sits at ref x cap: 10 N x 3.0 = 30 N force, 1 Nm x 3.0 = 3 Nm torque. Above
@@ -232,19 +237,19 @@ estimation:
     roll_deg: 1.0
     pitch_deg: 1.0
     yaw_deg: 1.0
-  scaling_constant_unit_force_to_mm: 1.5
+  scaling_constant_unit_force_to_mm: 1.0
   scaling_constant_unit_torque_to_mm: 0.0
   min_force_n: 3.0
   min_observations: 20
-  estimate_dims: [pitch_deg]
+  estimate_dims: [z_mm, pitch_deg]
   icp_iterations: 20
   num_initial_guesses: 1000
   init_guess_range:
     x_mm: 0.0
     y_mm: 0.0
-    z_mm: 0.0
+    z_mm: 10.0
     roll_deg: 0.0
-    pitch_deg: 10.0
+    pitch_deg: 15.0
     yaw_deg: 0.0
   step_gain: 1.0
   ransac_iters: 100
@@ -339,7 +344,7 @@ force_guard:
   # original). Raw F/T spikes over the limit for a few samples on every hard contact
   # transient; 0.5 s distinguishes "clipped the rim for 30 ms" from "genuinely jammed".
   # Travel cost while waiting: ~2.5 mm at the 5 mm/s insertion speed.
-  persistence_s: 0.5
+  persistence_s: 1.0
 
 speed:
   # Free-space moves (the approach to each attempt's start and the between-trial stand-off).

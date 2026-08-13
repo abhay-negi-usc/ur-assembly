@@ -1,0 +1,166 @@
+# ===================================================================================================
+# TWO-STAGE estimator evaluation: MODE first (wrench-heavy, DIAGNOSTIC), POSE second
+# (wrench-light + stop signature, unrestricted). See urlab/apps/mode_pose_estimator_eval.py.
+#
+# Why: on the hose data the single-metric energy is multimodal with the GLOBAL minimum in an
+# incorrect mode -- a similar-but-wrong contact mode explains the observations better than the
+# truth (aliasing), and committing to it diverges the belief. The wrench signature separates
+# contact modes; pose channels are the aliased ones. So stage 1 classifies the mode with a
+# wrench-heavy metric (optionally fused with the stop signature -- the channel aliasing cannot
+# touch), stage 2 refines the pose inside that mode with a wrench-light metric.
+#
+# TUNING WORKFLOW: trials.csv grades the stages separately -- `truth_in_mode`/`truth_mode_rank`
+# score stage 1 as a CLASSIFIER (tune estimation_mode until high), err_after_* scores stage 2.
+# The connector is RIGIDLY FIXTURED between the CLOSED fingers; the gripper is never constructed.
+# ===================================================================================================
+
+robot:
+  ip: 192.168.125.2
+  dry_run: false
+  payload:
+    mass_kg: 1.3
+    cog_m: [-0.026, 0.028, 0.030]
+base_frame: base_link
+tip_frame: tool0
+
+held_frame: hose_connector_finger_holder
+
+trajectory_csv: assembly_trajectory.csv
+trajectory_angles_deg: false
+translational_resolution_m: 0.001
+rotational_resolution_deg: 1.0
+standoff_distance_m: 0.030
+standoff_axis: [-1.0, 0.0, 0.0]
+retract_distance_m: 0.100
+
+# ===================================================================================================
+# EVAL -- trials, collection (offset sweep by default: diversity feeds stage 1), safety
+# ===================================================================================================
+eval:
+  num_trials: 10
+  max_attempts: 2                # sweep -> two-stage estimate -> repeat; then final insertion
+  mode: random                   # 'random' inside the bounds | 'grid' at grid_resolution
+  perturbation:
+    lower: [0.0, 0.0, -0.001, 0.0, -5.0, 0.0]
+    upper: [0.0, 0.0, +0.001, 0.0, +5.0, 0.0]
+  grid_resolution: [0.0, 0.0, 0.001, 0.0, 2.5, 0.0]
+
+  # COLLECTION: one attempt = every offset below (belief fixed across passes -- their evidence
+  # fuses exactly; each pass also contributes its own stop depth to stage 1's fusion).
+  # null = the default pitch sweep -4..+4 deg in 2 deg steps.
+  sweep_offsets: null
+  trajectory_noise:              # per-waypoint jitter, matched to the map's collection process
+    enabled: true
+    std: [0.0, 0.0005, 0.005, 0.0, 5.0, 0.0]
+    smooth_window: 1
+
+  # DIVERGENCE BOUNDS: terminate the trial when the post-update belief error exceeds these.
+  abort_bounds:
+    pos_mm: 10.0
+    rot_deg: 15.0
+  success_tolerance:
+    pos_mm: 1.0
+    rot_deg: 1.0
+  success_pose_tol: [2.0, 1.0, 5.0, 5.0, 5.0, 1.0]
+  accumulate_observations: true
+  random_seed: 7
+  log_decimation: 5
+  save_observations: true
+
+# ===================================================================================================
+# THE TWO METRICS -- shared geometry, per-stage weighting
+# ===================================================================================================
+# Everything both stages must AGREE on: the map, the grid (identical candidate cells!), the
+# estimated dims, and the mm <-> deg conversion. Per-stage blocks override the METRIC only.
+estimation_shared:
+  manifold_csv: ./configs/data/hose_manifold.csv
+  wrench_representation: rawcap
+  rawcap_force_ref_n: 10.0
+  rawcap_torque_ref_nm: 1.0
+  rawcap_cap: 3.0
+  scaling_constant_deg_to_mm: 0.5
+  min_force_n: 3.0
+  min_observations: 10
+  estimate_dims: [z_mm, pitch_deg]
+  interp_neighbors: 16
+  interp_softness: 1.0
+  random_seed: 0
+  grid:
+    range: {z_mm: 8.0, pitch_deg: 14.0}
+    step: {z_mm: 0.5, pitch_deg: 0.5}
+    curvature_probe: {z_mm: 3.0, pitch_deg: 3.0}
+    info_weighting: depth
+
+# STAGE 1 -- MODE (classification): wrench-HEAVY, pose channels down-weighted. TUNED on the
+# 2026-08-13 AM data (analysis/mode_pose/tune_stages): truth-in-top-mode 84% with a GENUINE
+# 2-mode partition, vs 19% for the single metric. DEGENERACY TRAP measured: pushing harder
+# (s_force >= 5 with dim_weights 0.1) scores 88-91% but only by collapsing the partition to
+# ONE grid-wide mode -- trivially 'right', useless as a classifier. Judge any retune by
+# truth_in_mode AND n_modes together.
+estimation_mode:
+  scaling_constant_unit_force_to_mm: 3.0
+  scaling_constant_unit_torque_to_mm: 1.0
+  dim_weights:
+    x_mm: 0.1
+    y_mm: 0.1
+    z_mm: 0.1
+    roll_deg: 0.1
+    pitch_deg: 0.1
+    yaw_deg: 0.1
+
+# STAGE 2 -- POSE (refinement). The 'wrench-light' hypothesis was REJECTED by the tuning
+# sweep: s_force 1.5 beats 0.5 and 0.0 on win rate across every stop_weight x alpha cell
+# (84% vs 59-75%) -- the standard force weighting stays.
+estimation_pose:
+  scaling_constant_unit_force_to_mm: 1.5
+  scaling_constant_unit_torque_to_mm: 0.0
+
+# Stage-1 partition. VERIFIED: the stop signature must NOT fuse into the partition energy
+# (its smooth basin fragments the watershed: truth-in-top-mode 78% -> 0%); it belongs in
+# stage 2. Keep stop_fusion false here.
+mode_stage:
+  # temp 0.12: monotone gain on the tuned metric (0.03 -> 78%, 0.05 -> 81%, 0.12 -> 84%
+  # truth-in-mode) while the partition stays honestly 2-mode; min_weight had no effect.
+  posterior_temp: 0.12
+  mode_min_weight: 0.02
+  stop_fusion: false
+  basin:                         # SuccessBasin settings for the stop-depth model (stage 2)
+    depth_reference: 95.0
+    seat_margin_mm: 4.0
+    neighbors: 25
+
+# Stage-2 refinement: the FUSED energy (pose metric + stop signature) -- the measured-best
+# point estimator (1.96 mm / win 84% on the 2026-08-13 AM data), UNRESTRICTED. There is no
+# mode gate (removed 2026-08-13: restricting the argmin to the chosen mode measurably hurt,
+# 7.4 vs 2.0 mm, while the classifier trails the refiner). The mode columns in trials.csv
+# (truth_in_mode / truth_mode_rank) grade the stage-1 classifier for tuning.
+pose_stage:
+  stop_fusion: true
+  stop_weight: 2.0               # the 84%-win plateau; w 4.0 buys median at sub-60% win
+  alpha: 0.6                     # tuned: |z'| 1.67 vs 1.96 at 0.75, same 84% win -- and
+                                 # consistent with the accumulated-regime optimum measured
+                                 # earlier (multiple fused passes -> shrink harder)
+
+compliance:
+  enabled: true
+  tare_before: true
+  mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
+  stiffness:     [1500.0, 250.0, 250.0, 10.0, 10.0, 10.0]
+  damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+  settle_s: 2.0                  # SETTLED wrench -- stage 1 lives on the wrench channel
+
+force_guard:
+  enabled: true
+  max_force_n: 30.0
+  max_torque_nm: 8.0
+  persistence_s: 0.5
+
+speed:
+  max_joint_velocity_deg_s: 30.0
+  max_joint_acceleration_deg_s2: 30.0
+  max_cartesian_translation_mm_s: 5.0
+  max_cartesian_rotation_deg_s: 30.0
+  retract_translation_mm_s: 50.0
+  retract_rotation_deg_s: 50.0
+
+data_dir: data

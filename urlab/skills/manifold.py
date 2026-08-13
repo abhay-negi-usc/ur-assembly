@@ -24,7 +24,16 @@ them back onto the manifold estimates the error. This module does that alignment
   * OPTIONAL residual-softmax aggregation (aggregator: softmax): instead of the consensus vote,
     average ALL finals weighted exp(-(r - r_min)/(softmax_temp x r_min)) -- the 2026-08 offline
     ablation's winner: the residual VALUE carries more information than cluster mass, and a bad
-    cluster can then never outvote a few well-aligned starts.
+    cluster can then never outvote a few well-aligned starts;
+  * a MIXTURE over the finals (skills/mixture.py), because raising the guess count helps ACCURACY
+    (the true basin gets found) while wrecking the usual uncertainty number: the std of the finals
+    then measures the DISTANCE BETWEEN RIVAL MODES, not the width of any one of them, so a run
+    that found the right answer AND a decoy looks less certain than one whose starts all fell into
+    a single wrong basin. The mixture reports WITHIN (one hypothesis' precision) and BETWEEN (mass
+    on rivals) separately; only the second calls for a discriminating probe rather than more data;
+  * OPTIONAL SEEDED starts (`seeds=`): allocate part of the guess budget around named hypotheses
+    -- the two modes of the previous solve -- so a probe meant to tell them apart actually
+    re-examines both instead of re-rolling the dice.
 
 This is the SAME algorithm as analysis/manifold_icp_validation.py (which validates it offline
 against known offsets); this copy is numpy/scipy-only so the robot apps can run it without the
@@ -42,6 +51,7 @@ from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
 
 from .. import log as urlog
+from .mixture import Component, Mixture, from_particles
 
 log = urlog.get('manifold')
 
@@ -165,6 +175,15 @@ class ManifoldEstimator:
         self.interp_neighbors = max(1, int(kn)) if kn else 1
         self.interp_softness = float(c.get('interp_softness', 1.0))
         self.min_observations = int(c.get('min_observations', 20))
+        # MIXTURE over the finals. `mode_bandwidth` is the mm-equivalent distance below which two
+        # finals count as the SAME mode -- it defaults to ransac_tol because that is already this
+        # config's answer to "how far apart is a different solution". `mode_min_weight` folds
+        # negligible clusters into their neighbours so `ambiguity` stays a probability.
+        self.mode_bandwidth = float(c.get('mode_bandwidth', self.ransac_tol))
+        self.mode_min_weight = float(c.get('mode_min_weight', 0.02))
+        # Fraction of the guess budget spent around caller-supplied `seeds`, and how tightly.
+        self.seed_frac = float(c.get('seed_frac', 0.5))
+        self.seed_spread = float(c.get('seed_spread', 0.25))
         seed = int(c.get('random_seed', 0))
         self.rng = np.random.default_rng(seed if seed > 0 else None)
 
@@ -176,11 +195,27 @@ class ManifoldEstimator:
         log.info('Contact manifold: %d points from %s', len(self.M12), path)
         self.interp_neighbors = min(self.interp_neighbors, len(self.M12))
         self.interp_tau = None
+        # SUPPORT REFERENCE: how far the k-th neighbour sits for a TYPICAL manifold point. This
+        # is the in-distribution scale. A candidate correction whose k-th neighbour is much
+        # further away than this is being scored against EXTRAPOLATED evidence -- the residual
+        # can still look small (the interpolation happily reaches out to whatever is nearest),
+        # which is exactly how a solution latches onto the edge of the map and then drifts
+        # further out of distribution with every update.
+        # support_k is at least 2: the 1st neighbour of a MANIFOLD point is itself, so a k=1
+        # reference would be identically zero and the ratio meaningless. Whatever k is used here
+        # must also be the k the queries use, or the ratio compares two different quantities and
+        # lands nowhere near 1 for in-distribution data.
+        self.support_k = max(self.interp_neighbors, 2)
+        d_ref = self.tree.query(self.M12, k=self.support_k, workers=-1)[0]
+        self.support_ref = float(max(np.median(d_ref[:, -1]), 1e-9))
         if self.interp_neighbors > 1:
-            spacing = float(np.median(self.tree.query(self.M12, k=2, workers=-1)[0][:, 1]))
+            spacing = float(np.median(d_ref[:, 1]))
             self.interp_tau = max(spacing * self.interp_softness, 1e-9)
             log.info('Interpolated matching: k=%d, tau=%.3f mm-eq (median manifold spacing %.3f)',
                      self.interp_neighbors, self.interp_tau, spacing)
+        log.info('Support reference: median %d-th NN distance %.3f mm-eq -- a correction whose '
+                 'k-th neighbour sits much further than this is extrapolating.',
+                 self.support_k, self.support_ref)
 
     # ------------------------------------------------------------------ data
     def _load_manifold(self, path):
@@ -231,13 +266,57 @@ class ManifoldEstimator:
         return vec6, self._wrench6(f_raw, tau_raw)
 
     # ------------------------------------------------------------------ solver
-    def estimate(self, vec6, w6):
+    def _start_guesses(self, G, seeds=None):
+        """The G initial corrections: guess 0 identity, the rest uniform in init_guess_range --
+        except that when `seeds` are given, `seed_frac` of the budget is drawn TIGHTLY around
+        them instead. That is what makes a disambiguating probe re-examine both live hypotheses
+        rather than re-rolling the dice and possibly missing the weaker one entirely."""
+        g6 = np.zeros((G, 6))
+        rng_d = np.array([float(self.init_range.get(d, 5.0)) for d in self.estimate_dims])
+        n_seed = 0
+        seeds = [np.asarray(s, dtype=float).ravel() for s in (seeds or [])]
+        seeds = [s for s in seeds if s.size == len(self.idx) and np.all(np.isfinite(s))]
+        if seeds and G > 2:
+            n_seed = min(int(round(self.seed_frac * (G - 1))), G - 2)
+            per = max(n_seed // len(seeds), 0)
+            n_seed = per * len(seeds)
+            for m, s in enumerate(seeds):
+                sl = slice(1 + m * per, 1 + (m + 1) * per)
+                g6[sl, self.idx] = s + self.rng.normal(
+                    0.0, np.maximum(self.seed_spread * rng_d, 1e-6), (per, len(self.idx)))
+        for a, (d, j) in enumerate(zip(self.estimate_dims, self.idx)):
+            r = rng_d[a]
+            g6[1 + n_seed:, j] = self.rng.uniform(-r, r, G - 1 - n_seed)
+        if seeds:
+            # fancy indexing yields a COPY, so clip-and-assign (np.clip out= would be a no-op)
+            g6[:, self.idx] = np.clip(g6[:, self.idx], -rng_d, rng_d)
+        return g6, n_seed
+
+    def _mixture(self, finals, r_fin, scale_idx):
+        """Mixture over the multi-start finals, in PHYSICAL units.
+
+        Fitted in the mm-equivalent space the solver works in (so one bandwidth covers mm and
+        deg alike), then rescaled -- the caller wants mm and deg. Particles are weighted by the
+        residual softmax whatever the aggregator is: the mixture describes the POSTERIOR, which
+        is a separate question from which single number the aggregator hands back."""
+        r_min = float(r_fin.min())
+        w = np.exp(-(r_fin - r_min) / max(self.softmax_temp * r_min, 1e-12))
+        mix = from_particles(finals, w, bandwidth=max(self.mode_bandwidth, 1e-6),
+                             min_weight=self.mode_min_weight)
+        inv = 1.0 / np.asarray(scale_idx, dtype=float)
+        comps = [Component(c.weight, c.mean * inv, c.cov * np.outer(inv, inv), c.idx, c.w_in)
+                 for c in mix.components]
+        return Mixture(comps, self.estimate_dims)
+
+    def estimate(self, vec6, w6, seeds=None):
         """The belief correction from one set of observations (believed poses + their wrench).
 
         `vec6` (N,6): BELIEVED connector-wrt-target poses [mm, deg]. `w6` (N,6): the scaled unit
-        wrench rows (from prepare_observations). Returns (T_corr, info) -- believed @ T_corr ~= true
-        -- or (None, reason) when there is not enough data. info carries theta_corr (the correction
-        in physical units on estimate_dims), inlier count, and the final residual."""
+        wrench rows (from prepare_observations). `seeds`: optional hypotheses (each a vector over
+        estimate_dims, in mm/deg) to concentrate part of the guess budget around. Returns
+        (T_corr, info) -- believed @ T_corr ~= true -- or (None, reason) when there is not enough
+        data. info carries theta_corr (the correction in physical units on estimate_dims), inlier
+        count, the final residual, and the mixture over the finals."""
         if len(vec6) < self.min_observations:
             return None, f'only {len(vec6)} observations (< min_observations {self.min_observations})'
 
@@ -254,10 +333,7 @@ class ManifoldEstimator:
         Y = mats_from_vec6(vec6)
         G, K, idx = self.guesses, self.iterations, self.idx
 
-        g6 = np.zeros((G, 6))
-        for d, j in zip(self.estimate_dims, idx):
-            r = float(self.init_range.get(d, 5.0))
-            g6[1:, j] = self.rng.uniform(-r, r, G - 1)        # guess 0 stays identity
+        g6, n_seeded = self._start_guesses(G, seeds)          # guess 0 stays identity
         T_corr = mats_from_vec6(g6)
 
         free = np.zeros(6, dtype=bool)
@@ -325,12 +401,28 @@ class ManifoldEstimator:
 
         theta = np.zeros(6)
         theta[idx] = est / scale[idx]                         # physical mm / deg, free dims only
+        # The MIXTURE over the finals -- see the module note on why a single std is misleading
+        # here. WITHIN is the ICP's own repeatability, BETWEEN is the rival-mode ambiguity.
+        try:
+            mix = self._mixture(finals, r_fin, scale[idx])
+            mix_info = {
+                'mixture': mix, 'n_mixture_modes': mix.n_modes, 'ambiguity': mix.ambiguity,
+                'between_frac': mix.between_frac, 'separation': mix.separation,
+                'sigma': {d: float(s) for d, s in zip(self.estimate_dims, mix.sigma())},
+                'sigma_within': {d: float(s)
+                                 for d, s in zip(self.estimate_dims, mix.sigma(True))},
+                'cov_mixture': mix.cov,
+            }
+        except Exception as exc:                              # noqa: BLE001 -- never fatal
+            log.debug('mixture fit skipped (%s)', exc)
+            mix_info = {'mixture': None, 'n_mixture_modes': 1, 'ambiguity': 0.0,
+                        'between_frac': 0.0, 'separation': 0.0}
         info = {
             'theta_corr': {d: float(theta[j]) for d, j in zip(self.estimate_dims, idx)},
             'inliers': int(best.sum()), 'guesses': G, 'aggregator': self.aggregator,
-            'final_residual': final_residual,
+            'final_residual': final_residual, 'seeded_guesses': int(n_seeded),
             'n_observations': len(vec6), 'recency_half_life_frac': self.recency_half_life_frac,
-            'interp_neighbors': self.interp_neighbors,
+            'interp_neighbors': self.interp_neighbors, **mix_info,
             # Per-iteration histories (all guesses) for convergence plots: correction params in
             # physical mm/deg on estimate_dims, the mean NN residual, and the RANSAC inlier mask.
             'theta_hist': theta_hist, 'res_hist': res_hist, 'inlier_mask': best,

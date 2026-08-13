@@ -117,6 +117,21 @@ probe:
   alternate_pitch_deg: 5.0
   alternate_z_mm: 2.0            # 0 = pitch-only probing
 
+  # MODE-DIRECTED probing. The fixed +/- schedule gathers more of the same KIND of evidence, and
+  # a BETWEEN-mode spread does not shrink with more of the same evidence -- only a discriminating
+  # action shrinks it. So once the fused landscape holds genuine rivals, the next probe COMMANDS
+  # one of them: bias = inverse(that mode's correction), which is exactly the path the robot
+  # would drive if that mode were true. If it is, the probe inserts deep and logs the
+  # high-information rows near the socket mouth; if it is not, it stops shallow. The belief is
+  # never updated during the probe phase, so betting on the wrong mode costs one probe, not the
+  # estimate. Modes are taken in turn, heaviest first.
+  mode_directed: true
+  mode_min_separation: 2.0       # top-2 gap in units of the WITHIN-mode width; under ~2 the
+                                 # "modes" are one blurred basin and the schedule handles it
+  mode_min_ambiguity: 0.15       # ... and the runner-up must hold at least this much mass
+  mode_bias_limit: [5.0, 10.0]   # clamp on the commanded bias [mm, deg] -- a mode parked at the
+                                 # edge of the grid must not command a large excursion
+
   # PER-WAYPOINT TRAJECTORY NOISE -- PROCESS-CRITICAL, matched to how the manifold was collected.
   # uncertain_sampling draws a fresh offset on EVERY waypoint (y +-0.5 mm, z +-5 mm, pitch +-5
   # deg, UNSMOOTHED), and that jitter is what walks a misaligned cylindrical peg off the hole's
@@ -150,6 +165,15 @@ insertion:
 estimation:
   manifold_csv: ./configs/data/hose_manifold.csv
   wrench_representation: rawcap
+  # rawcap SATURATION: the wrench feature is unit(f) x min(|f| / rawcap_force_ref_n,
+  # rawcap_cap) -- magnitude in units of the reference, CAPPED at rawcap_cap. Saturation
+  # therefore sits at ref x cap: 10 N x 3.0 = 30 N force, 1 Nm x 3.0 = 3 Nm torque. Above
+  # that, harder pressing adds nothing to the feature (by design -- extreme forces are the
+  # least reproducible part of the signal). These are the code defaults, spelled out so the
+  # threshold is visible and tunable here rather than buried in skills/manifold.py.
+  rawcap_force_ref_n: 10.0
+  rawcap_torque_ref_nm: 1.0
+  rawcap_cap: 3.0
   scaling_constant_deg_to_mm: 0.2
   scaling_constant_unit_force_to_mm: 1.5
   scaling_constant_unit_torque_to_mm: 0.0
@@ -188,6 +212,28 @@ estimation:
       pitch_deg: 3.0
     # Sublevel factor for the multi-modality FLAG: >1 component => 44% failure rate vs 6%.
     mode_threshold: 1.1
+
+    # ---- MIXTURE uncertainty (skills/mixture.py) --------------------------------------------
+    # A single sigma over a multi-modal landscape reports the DISTANCE BETWEEN RIVALS, not the
+    # width of any one of them -- so the landscape is decomposed into its steepest-descent
+    # basins and the spread is split into WITHIN (one hypothesis' precision; more probing
+    # shrinks it) and BETWEEN (mass on rivals; only a DISCRIMINATING probe shrinks it, which is
+    # what probe.mode_directed does). trials.csv logs both, plus ambiguity/separation.
+    posterior_temp: 0.05         # Gibbs temperature, RELATIVE to the minimum energy
+    mode_min_weight: 0.02        # basins under this posterior mass fold into their neighbours
+
+    # ---- SUPPORT-aware uncertainty ----------------------------------------------------------
+    # The residual says how WELL the observations fit the map; it says nothing about whether the
+    # map HAS anything there. Off the edge of the manifold the soft-kNN target is extrapolated
+    # from far-away points, the residual still looks fine, and the solver happily parks there --
+    # then the next observations are collected even further out of distribution. support_ratio =
+    # (distance to the k-th manifold neighbour at the chosen correction) / (the map's own median
+    # k-th-neighbour distance): 1 = as well surrounded as a typical map point, 2 = the nearest
+    # evidence is twice as far as normal.
+    support_inflation: 1.0       # sigma *= max(1, support_ratio)^this. 0 = report it only.
+    # OPTIONAL and OFF by default: this one MOVES the answer rather than just flagging it, by
+    # adding <this> mm-eq of energy per mm-eq of missing support. Raise only with evidence.
+    support_penalty: 0.0
 
 # ===================================================================================================
 # COMPLIANCE -- the BASE admittance; probe/insertion override `stiffness` and `settle_s`.

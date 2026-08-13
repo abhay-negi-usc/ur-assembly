@@ -189,8 +189,8 @@ class CheckedManifoldEstimator(ManifoldEstimator):
         return rank_score, cauchy_score
 
     # -------------------------------------------------------------- estimate
-    def estimate(self, vec6, w6):
-        T_corr, info = super().estimate(vec6, w6)
+    def estimate(self, vec6, w6, seeds=None):
+        T_corr, info = super().estimate(vec6, w6, seeds=seeds)
         if T_corr is None or not self.check_enabled:
             return T_corr, info
         try:

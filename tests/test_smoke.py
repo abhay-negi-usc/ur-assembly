@@ -1132,6 +1132,22 @@ def test_manifold_estimator_recovers_belief_error():
         assert tc['z_mm'] < -2.5 and tc['pitch_deg'] > 5.5, \
             f'recency weighting must pull the estimate toward the NEWEST in-hand pose: {tc}'
 
+        # SEEDED starts: seed_frac of the budget must be drawn TIGHTLY around the given
+        # hypotheses (so a rival mode is genuinely re-examined next attempt, not left to the
+        # luck of uniform restarts), guess 0 must stay identity, and every start must stay
+        # inside init_guess_range even when a seed sits at the box edge.
+        est.init_range = {'z_mm': 5.0, 'pitch_deg': 8.0}
+        g6s, n_seeded = est._start_guesses(40, seeds=[[-2.0, 6.0], [5.0, -8.0]])
+        # seed_frac 0.5 of the 39 non-identity guesses, split evenly -> 19//2 = 9 per seed... but
+        # rounded: round(0.5 * 39) = 20, per-seed 10. Guess 0 stays identity regardless.
+        assert n_seeded == 20 and np.all(g6s[0] == 0.0), n_seeded
+        near_a = np.linalg.norm(g6s[1:11][:, [2, 4]] - [-2.0, 6.0], axis=1)
+        assert np.median(near_a) < 3.0, 'first seed block must cluster on the first hypothesis'
+        assert np.all(np.abs(g6s[:, 2]) <= 5.0 + 1e-9) and np.all(np.abs(g6s[:, 4]) <= 8.0 + 1e-9)
+        _, info_s = est.estimate(vec6, w6, seeds=[[-2.5, 6.0]])
+        assert info_s['seeded_guesses'] > 0
+        assert 'mixture' in info_s and info_s['n_mixture_modes'] >= 1
+
         # residual_gate: None disables it (like manifold_icp_validation) -- INCLUDING the STRING
         # 'None', because yaml parses a bare `None` as a string (only null/~ are yaml null) and
         # float('None') used to blow up MID-RUN, after the robot had already moved.
@@ -1143,6 +1159,155 @@ def test_manifold_estimator_recovers_belief_error():
             assert gated.residual_gate is None, f'{gate!r} must DISABLE the gate'
             corr, info2 = gated.estimate(vec6, w6)
             assert corr is not None, f'gate {gate!r}: estimate must run gateless, not crash'
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_mixture_separates_ambiguity_from_precision():
+    """skills\\mixture: a multi-modal posterior must not be summarised by one mean and one std.
+
+    The failure it exists to prevent: more multi-start guesses IMPROVE accuracy (the true basin
+    gets found) but blow up the reported sigma, because the spread of the finals then measures
+    the DISTANCE BETWEEN RIVAL MODES rather than the width of any one of them. So a run that
+    found the right answer AND a decoy reads as less certain than one whose starts all fell into
+    a single wrong basin -- backwards, and the number a gate would act on.
+
+    What must hold:
+      (a) the law of total variance -- total = within + between, exactly;
+      (b) two separated clusters read as AMBIGUITY (between_frac high, separation large) while
+          one diffuse cluster of the SAME total spread reads as IMPRECISION (between_frac ~ 0);
+      (c) the component weights are the posterior mass, so `ambiguity` is a probability;
+      (d) the grid constructor PARTITIONS the landscape (watershed), so nothing is dropped and
+          a double well is found as two modes with the deeper one carrying more mass;
+      (e) `split` points from the runner-up to the leader -- the direction a discriminating
+          probe must move along."""
+    from urlab.skills.mixture import descent_labels, from_energy, from_particles
+
+    rng = np.random.default_rng(3)
+
+    # (b/c) two well-separated clusters, 70/30 by mass.
+    a = rng.normal([0.0, 0.0], 0.2, (140, 2))
+    b = rng.normal([6.0, 0.0], 0.2, (60, 2))
+    mix = from_particles(np.vstack([a, b]), bandwidth=1.0, dims=['z_mm', 'pitch_deg'])
+    assert mix.n_modes == 2, mix
+    assert abs(mix.dominant.weight - 0.7) < 0.05, mix.dominant.weight
+    assert abs(mix.ambiguity - 0.3) < 0.05, mix.ambiguity
+    assert mix.between_frac > 0.9, mix.between_frac
+    assert mix.separation > 5.0, mix.separation
+    assert abs(np.linalg.norm(mix.split) - 1.0) < 1e-6, mix.split
+    # the leader sits at 0 and the runner-up at +6, so the split points in -z
+    assert mix.split[0] < -0.99, mix.split
+
+    # (a) law of total variance, exactly.
+    assert np.allclose(mix.cov, mix.within + mix.between)
+    # ... and the WITHIN width is the cluster width (0.2), not the 6-unit gap.
+    assert mix.sigma(within_only=True)[0] < 0.5 < mix.sigma()[0]
+
+    # (b) one DIFFUSE cluster with a comparable total spread must read as IMPRECISION instead:
+    # same sigma, but nothing to disambiguate, so a probe should gather more of the same.
+    diffuse = from_particles(rng.normal([0.0, 0.0], [2.6, 0.2], (200, 2)), bandwidth=1.0)
+    assert diffuse.n_modes == 1 and diffuse.ambiguity == 0.0, diffuse
+    assert diffuse.between_frac < 1e-9
+    assert diffuse.sigma()[0] > 1.5, diffuse.sigma()
+
+    # (d) grid constructor: a double well, the left one deeper. Watershed labels must PARTITION
+    # the grid (every cell assigned exactly once) and the deeper well must carry more mass.
+    # The 5% depth gap is deliberate -- that is the scale rival residual minima actually differ
+    # by, and at posterior_temp 0.05 a much deeper rival is correctly weighted out of existence.
+    ax = np.linspace(-10.0, 10.0, 201)
+    E = np.minimum((ax + 5.0) ** 2 * 0.05 + 1.0, (ax - 5.0) ** 2 * 0.05 + 1.05)
+    labels, roots = descent_labels(E, (201,))
+    assert labels.shape == (201,) and len(roots) == 2 and set(np.unique(labels)) == {0, 1}
+    gm = from_energy(ax[:, None], E, (201,), temp=0.05, dims=['pitch_deg'])
+    assert gm.n_modes == 2, gm
+    assert abs(gm.dominant.mean[0] + 5.0) < 0.5, gm.dominant.mean
+    assert gm.dominant.weight > 0.5 and abs(sum(c.weight for c in gm.components) - 1.0) < 1e-9
+    assert gm.separation > 2.0, gm.separation
+
+    # a SINGLE well must stay unimodal -- a mode count that inflates on smooth landscapes would
+    # make the ambiguity flag useless.
+    single = from_energy(ax[:, None], (ax ** 2) * 0.05 + 1.0, (201,), temp=0.05)
+    assert single.n_modes == 1 and single.between_frac < 1e-9, single
+
+    # `as_dict` is what reaches the CSV/log: it must carry both widths, not just the total.
+    d = gm.as_dict()
+    assert d['n_modes'] == 2 and 'sigma_within' in d and len(d['modes']) == 2
+
+
+def test_probe_app_targets_rival_modes_and_flags_thin_support():
+    """apps\\estimator_eval_probe + skills: the two actions a multi-modal posterior calls for.
+
+    (1) MODE-DIRECTED bias. More of the same probe cannot shrink a BETWEEN-mode spread, so the
+        app commands a rival mode instead: bias = inverse(that mode's correction), the exact path
+        the robot would drive if the mode were true. Getting the inverse backwards would probe
+        the mirror image of the hypothesis, which is why it is asserted here rather than eyeballed.
+    (2) SUPPORT. Observations taken far off the manifold must read as thin support -- that is the
+        drift-out-of-distribution failure, and the residual alone cannot see it."""
+    import csv as _csv
+    import shutil
+    import tempfile
+
+    from urlab.apps.estimator_eval_probe import _mode_bias
+    from urlab.skills.grid_estimator import GridManifoldEstimator
+    from urlab.skills.manifold import (FORCE_COLS, POSE_COLS, TORQUE_COLS, mats_from_vec6,
+                                       vec6_from_mats)
+
+    dims, idx = ['z_mm', 'pitch_deg'], [2, 4]
+    # (1) the bias must be the INVERSE of the mode's correction, and clamped per dim.
+    bias = _mode_bias([2.0, -6.0], dims, idx, [5.0, 10.0])
+    want = vec6_from_mats(T.inverse(mats_from_vec6([0.0, 0.0, 2.0, 0.0, -6.0, 0.0])))
+    assert np.allclose(bias[3:], want[3:], atol=1e-9), (bias, want)
+    assert np.allclose([b * 1000.0 for b in bias[:3]], want[:3], atol=1e-6), bias
+    assert abs(bias[4] - 6.0) < 1e-6, 'commanding a -6 deg correction must bias +6 deg'
+    clamped = _mode_bias([99.0, 99.0], dims, idx, [5.0, 10.0])
+    assert abs(clamped[2] * 1000.0) <= 5.0 + 1e-6 and abs(clamped[4]) <= 10.0 + 1e-6, clamped
+
+    # (2) support: a manifold covering pitch in [-12, 12] only. Observations that sit ON it must
+    # report support ~1; observations driven far outside it must report a materially larger
+    # ratio even though the RESIDUAL cannot tell the difference on its own.
+    tmp = tempfile.mkdtemp()
+    try:
+        rows = []
+        for p in np.arange(-12.0, 12.01, 1.0):
+            for x in np.linspace(-20.0, -4.0, 40):
+                f = 5.0 * np.array([-0.9, 0.0, 0.0]) + np.array([0.0, -0.25 * p, 0.0])
+                rows.append([x, 0.0, 0.0, 0.0, p, 0.0] + list(f) + [0.0, 0.0, 0.0])
+        path = os.path.join(tmp, 'manifold.csv')
+        with open(path, 'w', newline='') as fh:
+            w = _csv.writer(fh)
+            w.writerow(POSE_COLS + FORCE_COLS + TORQUE_COLS)
+            w.writerows(rows)
+        est = GridManifoldEstimator({
+            'manifold_csv': path, 'estimate_dims': ['pitch_deg'], 'min_observations': 5,
+            'scaling_constant_unit_force_to_mm': 1.5, 'scaling_constant_unit_torque_to_mm': 0.0,
+            'wrench_representation': 'rawcap', 'min_force_n': 1.0, 'interp_neighbors': 8,
+            'grid': {'range': {'pitch_deg': 6.0}, 'step': {'pitch_deg': 0.5},
+                     'curvature_probe_deg': 3.0}})
+        assert est.support_ref > 0
+
+        def obs_at(true_pitch, err_pitch):
+            src = np.array([r for r in rows if abs(r[4] - true_pitch) < 1e-9])
+            D = mats_from_vec6([0.0, 0.0, 0.0, 0.0, err_pitch, 0.0])
+            return (vec6_from_mats(mats_from_vec6(src[:, :6]) @ D), src[:, 6:9] @ D[:3, :3],
+                    np.zeros((len(src), 3)))
+
+        _, info_in = est.estimate(*est.prepare_observations(*obs_at(0.0, 2.0)))
+        # CALIBRATION: observations that lie ON the map must score ~1, not "somewhat far". The
+        # ratio is only interpretable -- and only usable as a sigma multiplier -- if 1 really
+        # does mean "as well surrounded as a typical manifold point".
+        assert 0.7 < info_in['support_ratio'] < 1.3, info_in['support_ratio']
+        # OFF the map: a wrench direction AND magnitude the manifold never contains at any pitch.
+        pose, f, tau = obs_at(0.0, 2.0)
+        f_off = np.tile([0.0, 0.0, 30.0], (len(f), 1))
+        _, info_out = est.estimate(*est.prepare_observations(pose, f_off, tau))
+        assert info_out['support_ratio'] > 2.0 * info_in['support_ratio'], \
+            f"off-manifold observations must read as thin support: {info_in['support_ratio']:.2f}" \
+            f" -> {info_out['support_ratio']:.2f}"
+        # ... and thin support must WIDEN the reported sigma, which is the whole point: the gate
+        # sees a number that already knows the answer came from the edge of the map.
+        assert info_out['support_inflation'] > 1.0
+        assert set(info_in) >= {'mixture', 'ambiguity', 'between_frac', 'separation',
+                                'sigma_within', 'cov_mixture'}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1205,11 +1370,15 @@ def test_grid_estimator_fuses_probes_and_flags_uncertainty():
 
         # (b) FUSION: the same belief error probed at two DIFFERENT true pitches (i.e. two
         # commanded biases) must fuse by ADDING energies and still yield that one correction.
-        E1, n1 = est.energy(*est.prepare_observations(*observe(-5.0, 4.0)))
-        E2, n2 = est.energy(*est.prepare_observations(*observe(+5.0, 4.0)))
-        _, fused = est.solve(E1 + E2, n1 + n2)
+        E1, n1, S1 = est.energy(*est.prepare_observations(*observe(-5.0, 4.0)))
+        E2, n2, S2 = est.energy(*est.prepare_observations(*observe(+5.0, 4.0)))
+        _, fused = est.solve(E1 + E2, n1 + n2, 0.5 * (S1 + S2))
         assert abs(fused['theta_corr']['pitch_deg'] + 4.0) <= 0.5, fused['theta_corr']
         assert fused['n_observations'] == n1 + n2
+        # SUPPORT travels with the energy and is a RATIO against the map's own k-th-neighbour
+        # distance -- for observations that lie ON the manifold it must be about 1, not 5.
+        assert S1 is not None and S1.shape == E1.shape
+        assert 0.2 < fused['support_ratio'] < 2.5, fused['support_ratio']
 
         # (c) depth weighting: deep rows outweigh approach rows (d' 0.7 -> 2.4), and the weights
         # are a normalized distribution either way.

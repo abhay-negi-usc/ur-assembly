@@ -57,6 +57,7 @@ from ..robot import AdmittanceController, ForceGuard
 from ..skills import trajectory as traj
 from ..skills.manifold import (FORCE_COLS, POSE_COLS, TORQUE_COLS,
                                mats_from_vec6, scaled12, vec6_from_mats)
+from ..skills.mixture import from_energy
 from ..skills.solution_check import CheckedManifoldEstimator
 from ..skills.success_basin import SuccessBasin
 from ..transforms import inverse, matrix_to_xyzrpy, pose_error, translation_matrix
@@ -134,7 +135,14 @@ def _fieldnames(dims):
             + [f'inj_{s}' for s in _ERR]
             + [f'err_before_{s}' for s in _ERR] + ['err_before_pos_mm', 'err_before_rot_deg']
             + [f'corr_{d}' for d in dims] + [f'sigma_{d}' for d in dims]
+            + [f'sigma_within_{d}' for d in dims]
             + [f'cov_{a}{b}' for a in range(len(dims)) for b in range(a, len(dims))]
+            # MIXTURE + SUPPORT. `_land` columns come from the dense landscape, the bare ones
+            # from the ICP finals themselves -- they answer the same question from the two
+            # different things the solver produces, and disagreement between them is a finding.
+            + ['n_mixture_modes', 'ambiguity', 'between_frac', 'separation', 'seeded_guesses']
+            + ['n_modes_land', 'ambiguity_land', 'between_frac_land', 'separation_land',
+               'support_ratio']
             + ['p_seat', 'gate_opened', 'insert_depth_mm', 'seat_depth_mm', 'seated_basin']
             + ['icp_inliers', 'icp_residual', 'estimate']
             + ['trust_rankavg2', 'trust_cauchy'] + [f'trust_{s}' for s in _TRUST_SIGNALS]
@@ -148,9 +156,12 @@ def _landscape(estimator, vec6, w6, max_pts=2600, row_cap=120):
     The multi-start solver never builds this -- it only samples it from random starts -- so the
     landscape is what shows whether the applied correction sits in the true basin, whether the
     basin is flat (uncertain) and whether a rival mode is deeper. Returns
-    (axes, E, sigma, argmin) with E shaped like the mesh, sigma per dim in that dim's own units
-    (sqrt(E_min / curvature), the 2026-08 campaign's uncertainty winner) and argmin the grid's
-    best correction. Cost is bounded by subsampling the grid and the observation rows."""
+    (axes, E, sigma, argmin, cov, mix, support) with E shaped like the mesh, sigma per dim in
+    that dim's own units (sqrt(E_min / curvature), the 2026-08 campaign's uncertainty winner),
+    argmin the grid's best correction, `mix` the MIXTURE over the landscape's modes (skills/
+    mixture.py -- the honest uncertainty when rivals exist) and `support` the k-th-neighbour
+    distance at the argmin over the manifold's own median, so a correction picked from the EDGE
+    of the map is visible as such. Cost is bounded by subsampling grid and rows."""
     dims = estimator.estimate_dims
     halves = [max(float(estimator.init_range.get(d, 8.0)), 6.0 if d.endswith('_mm') else 10.0)
               for d in dims]
@@ -164,17 +175,29 @@ def _landscape(estimator, vec6, w6, max_pts=2600, row_cap=120):
     if len(v6) > row_cap:                          # bound the cost; the shape is unaffected
         sel = np.linspace(0, len(v6) - 1, row_cap).astype(int)
         v6, w = v6[sel], w[sel]
-    C = np.einsum('nij,kjl->knil', mats_from_vec6(v6), mats_from_vec6(G))
-    pts = scaled12(vec6_from_mats(C), w, estimator.s_rot).reshape(-1, 12)
-    dist, nn = estimator.tree.query(pts, k=estimator.interp_neighbors, workers=-1)
-    if estimator.interp_neighbors > 1:
-        bw = np.exp(-(dist - dist[:, :1]) / estimator.interp_tau)
-        bw /= bw.sum(axis=1, keepdims=True)
-        tgt = np.einsum('mk,mkd->md', bw, estimator.M12[nn])
-        d1 = np.linalg.norm(tgt - pts, axis=1)
-    else:
-        d1 = dist if dist.ndim == 1 else dist[:, 0]
-    E = d1.reshape(len(G), len(v6)).mean(axis=1).reshape(mesh[0].shape)
+    # CHUNKED over candidates: the neighbour gather is (candidates x rows, k, 12) float64, which
+    # at k=64 runs to gigabytes in ONE allocation -- a diagnostic must not be able to
+    # MemoryError a hardware run.
+    Ym = mats_from_vec6(v6)
+    Ef, Sup = np.empty(len(G)), np.empty(len(G))
+    sk = getattr(estimator, 'support_k', max(estimator.interp_neighbors, 2))
+    per = max(int(256e6 // max(len(v6) * sk * 12 * 8, 1)), 1)
+    for lo in range(0, len(G), per):
+        hi = min(lo + per, len(G))
+        C = np.einsum('nij,kjl->knil', Ym, mats_from_vec6(G[lo:hi]))
+        pts = scaled12(vec6_from_mats(C), w, estimator.s_rot).reshape(-1, 12)
+        dist, nn = estimator.tree.query(pts, k=sk, workers=-1)
+        dist = dist[:, None] if dist.ndim == 1 else dist
+        if estimator.interp_neighbors > 1:
+            bw = np.exp(-(dist - dist[:, :1]) / estimator.interp_tau)
+            bw /= bw.sum(axis=1, keepdims=True)
+            tgt = np.einsum('mk,mkd->md', bw, estimator.M12[nn])
+            d1 = np.linalg.norm(tgt - pts, axis=1)
+        else:
+            d1 = dist[:, 0]
+        Ef[lo:hi] = d1.reshape(hi - lo, len(v6)).mean(axis=1)
+        Sup[lo:hi] = dist[:, -1].reshape(hi - lo, len(v6)).mean(axis=1)
+    E = Ef.reshape(mesh[0].shape)
 
     k = np.unravel_index(int(np.argmin(E)), E.shape)
     Emin = float(E[k])
@@ -220,7 +243,20 @@ def _landscape(estimator, vec6, w6, max_pts=2600, row_cap=120):
              for a, d in enumerate(dims)}
     for a, d in enumerate(dims):                   # never claim more than the box we searched
         sigma[d] = float(min(sigma[d], axes[a][-1]))
-    return axes, E, sigma, argmin, cov
+    # The MIXTURE over the landscape's modes, and the SUPPORT at the correction we picked. The
+    # curvature sigma above is the width of ONE basin; when rivals exist that is not the whole
+    # uncertainty, and when the argmin sits off the edge of the map it is not even the right
+    # basin. Both are cheap here -- the energy is already computed.
+    gth = np.stack([m.ravel() for m in mesh], axis=1)
+    mix = from_energy(gth, E.ravel(), E.shape, temp=0.05, dims=list(dims))
+    support = float(Sup[int(np.argmin(E))] / max(getattr(estimator, 'support_ref', 1.0), 1e-9))
+    # ADD the between-mode spread to the curvature covariance rather than replacing it: the
+    # curvature width is the calibrated one, and the mixture's contribution is the ambiguity the
+    # curvature cannot see. Unimodal landscapes are therefore unchanged.
+    cov = cov + mix.between
+    for a, d in enumerate(dims):
+        sigma[d] = float(min(np.sqrt(max(cov[a, a], 0.0)), axes[a][-1]))
+    return axes, E, sigma, argmin, cov, mix, support
 
 
 def _basin_contour(ax, basin, dims, ja, jb, xlim, ylim, levels, rest=None, n=56):
@@ -451,7 +487,13 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None
         # "the landscape's minimum is in the wrong place", where the DATA is at fault.
         if land:
             (axes_l, E, sigma, argmin, est_corr, errb_l, finals, idx_l, track_l, cov_l,
-             pseat_l) = land
+             pseat_l, mix_l) = land
+            # The MIXTURE's mode centres, in the same error frame. Drawing them is the whole
+            # point of the mixture: a big sigma with the modes far apart is AMBIGUITY (probe
+            # differently), a big sigma with one mode is IMPRECISION (probe more).
+            e_modes = (_as_error(errb_l, [c.mean for c in mix_l.components], idx_l)
+                       if mix_l is not None else None)
+            w_modes = [c.weight for c in mix_l.components] if mix_l is not None else []
             col = ncols - 1
             axl = fig.add_subplot(gs[:, col])
             unit = [('deg' if d.endswith('_deg') else 'mm') for d in dims]
@@ -479,6 +521,12 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None
                                 zorder=0, label=f'+/- 1 sigma ({s:.2f})')
                 axl.plot([e_arg[0]], [float(np.min(E))], 'x', color='#C44E52', ms=9, mew=2,
                          zorder=6, label='grid argmin')
+                if e_modes is not None and len(e_modes) > 1:
+                    for m, (em, wm) in enumerate(zip(e_modes, w_modes)):
+                        axl.axvline(em[0], color='#9467bd', lw=1.0 + 2.0 * wm, alpha=0.75,
+                                    zorder=3, label='mixture modes' if m == 0 else None)
+                        axl.annotate(f'{wm:.0%}', (em[0], float(np.max(E))), fontsize=7,
+                                     color='#9467bd', ha='center', va='top')
                 if tr is not None and len(tr):
                     y = float(np.min(E)) + 0.03 * float(np.ptp(E))
                     axl.plot(tr[:, 0], np.full(len(tr), y), '.-', color='#4C72B0', lw=1.0,
@@ -521,6 +569,26 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None
                                      lw=1.0, ls='--', alpha=0.85, zorder=6)
                     except np.linalg.LinAlgError:
                         pass
+                # RIVAL MODES: each one's centre, sized by its posterior mass, with a thin
+                # within-mode ellipse. Two well-separated modes mean the spread is a genuine
+                # either/or -- averaging them lands between two answers, both wrong.
+                if e_modes is not None and len(e_modes) > 1 and e_modes.shape[1] >= 2:
+                    for m, (em, wm) in enumerate(zip(e_modes, w_modes)):
+                        axl.plot([em[1]], [em[0]], 'D', ms=4 + 8 * wm, mfc='none',
+                                 mec='#e377c2', mew=1.6, zorder=7,
+                                 label='mixture modes' if m == 0 else None)
+                        axl.annotate(f'{wm:.0%}', (em[1], em[0]), textcoords='offset points',
+                                     xytext=(6, -9), fontsize=7, color='#e377c2')
+                        cm = mix_l.components[m].cov
+                        try:
+                            wv, Vv = np.linalg.eigh(cm[:2, :2])
+                            th = np.linspace(0, 2 * np.pi, 90)
+                            pp = (Vv * np.sqrt(np.maximum(wv, 0.0))) @ np.vstack(
+                                [np.cos(th), np.sin(th)])
+                            axl.plot(em[1] + pp[1], em[0] + pp[0], color='#e377c2', lw=0.9,
+                                     alpha=0.7, zorder=6)
+                        except np.linalg.LinAlgError:
+                            pass
                 axl.plot([e_app[1]], [e_app[0]], 'o', ms=8, mfc='#DD8452', mec='white',
                          zorder=7, label='applied')
                 axl.plot([e_arg[1]], [e_arg[0]], 'x', color='#C44E52', ms=10, mew=2, zorder=7,
@@ -541,6 +609,10 @@ def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None
             ttl = 'energy landscape in the ERROR frame (truth = origin)'
             if pseat_l is not None and np.isfinite(pseat_l):
                 ttl += f'   |   P(seat) = {pseat_l:.0%}'
+            if mix_l is not None and mix_l.n_modes > 1:
+                ttl += (f'\n{mix_l.n_modes} modes: {mix_l.ambiguity:.0%} of the mass off the '
+                        f'leader, separation {mix_l.separation:.1f}, '
+                        f'{mix_l.between_frac:.0%} of the spread is ambiguity')
             axl.set_title(ttl, fontsize=10)
 
         fig.suptitle(f'trial {trial}: ground-truth belief error per attempt', y=0.995)
@@ -888,6 +960,7 @@ def build_and_run(cfg, robot, camera, args):
             # acc = this trial's accumulated observations, always in the CURRENT belief.
             track6, trackr, trackg, trackl2, trackp = [inj], [], [], [], []
             acc = np.zeros((0, 12))
+            seeds = None                           # rival modes carried between attempts
 
             abandoned = False
             gate_open = False
@@ -934,7 +1007,13 @@ def build_and_run(cfg, robot, camera, args):
                              len(full), len(acc))
                 vec6, w6 = estimator.prepare_observations(
                     full[:, :6], full[:, 6:9], full[:, 9:12])
-                T_corr_mm, info = estimator.estimate(vec6, w6)
+                # SEED the multi-start on the previous attempt's rival modes. Random restarts
+                # rediscover the DOMINANT basin easily and the runner-up only by luck, so an
+                # attempt meant to tell two hypotheses apart can silently re-examine just one of
+                # them. Seeds are corrections relative to the belief that produced them, so they
+                # are carried through each belief update below rather than reused verbatim.
+                T_corr_mm, info = estimator.estimate(vec6, w6, seeds=seeds)
+                seeds = None
                 land, p_seat, icp_paths = None, float('nan'), None
                 row = {'trial': trial, 'attempt': attempt, 'n_observations': len(obs),
                        'seated': seated, 'check_pos_mm': lin * 1000.0,
@@ -959,7 +1038,36 @@ def build_and_run(cfg, robot, camera, args):
                     row['estimate'] = 'ok'
                     row.update({f'corr_{k}': v for k, v in info['theta_corr'].items()})
                     row.update({'icp_inliers': info['inliers'],
-                                'icp_residual': info['final_residual']})
+                                'icp_residual': info['final_residual'],
+                                'n_mixture_modes': info.get('n_mixture_modes'),
+                                'ambiguity': info.get('ambiguity'),
+                                'between_frac': info.get('between_frac'),
+                                'separation': info.get('separation'),
+                                'seeded_guesses': info.get('seeded_guesses', 0)})
+                    mix_icp = info.get('mixture')
+                    if mix_icp is not None:
+                        row.update({f'sigma_within_{d}': float(s) for d, s in
+                                    zip(estimator.estimate_dims, mix_icp.sigma(True))})
+                        if mix_icp.n_modes > 1:
+                            log.info('   %d rival modes over the finals: %s | %.0f%% of the mass '
+                                     'off the leader, separation %.1f, %.0f%% of the spread is '
+                                     'AMBIGUITY not measurement width.', mix_icp.n_modes,
+                                     ' vs '.join('(' + ', '.join(f'{v:+.1f}' for v in c.mean)
+                                                 + f') w={c.weight:.2f}'
+                                                 for c in mix_icp.components[:3]),
+                                     100 * mix_icp.ambiguity, mix_icp.separation,
+                                     100 * mix_icp.between_frac)
+                        # Carry the modes into the NEXT attempt, re-expressed in the belief we
+                        # are about to adopt: mode M satisfied believed @ M ~= true, and the new
+                        # belief is believed @ C, so the same hypothesis is now inverse(C) @ M.
+                        try:
+                            m6 = np.zeros((mix_icp.n_modes, 6))
+                            m6[:, estimator.idx] = np.array([c.mean for c in mix_icp.components])
+                            nxt = vec6_from_mats(np.linalg.inv(T_corr_mm)
+                                                 @ mats_from_vec6(m6))[:, estimator.idx]
+                            seeds = [row_ for row_ in nxt]
+                        except Exception as exc:   # noqa: BLE001 -- seeding is an optimisation
+                            log.debug('mode seeding skipped (%s)', exc)
                     # TRUST readout (observational): both scores + the raw signals, so the
                     # run's ground truth can score the uncertainty estimates themselves.
                     chk = info.get('check')
@@ -987,7 +1095,8 @@ def build_and_run(cfg, robot, camera, args):
                     # (believed @ C = true, so C = inverse(err_before)) for reference.
                     if (save_plots and plot_land) or basin is not None:
                         try:
-                            ax_l, E_l, sig_l, amin_l, cov_l = _landscape(estimator, vec6, w6)
+                            (ax_l, E_l, sig_l, amin_l, cov_l,
+                             mix_l, sup_l) = _landscape(estimator, vec6, w6)
                             # P(SEAT) of the POSTERIOR, not of the point estimate: the robot
                             # never knows its remaining error, so the decision quantity is
                             # E_p[P(seat)] over the landscape's Gibbs posterior. Hypothesis
@@ -1011,14 +1120,31 @@ def build_and_run(cfg, robot, camera, args):
                                     basin.offset_of_error(rem), wgt)
                                 row['p_seat'] = p_seat
                             trk = np.asarray(track6, dtype=float)[:, estimator.idx]
-                            land = (ax_l, E_l, sig_l, amin_l, dict(info['theta_corr']),
+                            # SUPPORT-INFLATED sigma: off the edge of the map the curvature width
+                            # is measuring the shape of an extrapolation, so widen it in
+                            # proportion to how much further the nearest evidence sits.
+                            infl = float(max(sup_l, 1.0))
+                            sig_rep = {d: float(min(v * infl, ax_l[a][-1]))
+                                       for a, (d, v) in enumerate(sig_l.items())}
+                            land = (ax_l, E_l, sig_rep, amin_l, dict(info['theta_corr']),
                                     np.asarray(errb, dtype=float),
                                     np.asarray(info['theta_hist'], dtype=float)[:, -1, :],
-                                    list(estimator.idx), trk, cov_l, p_seat)
-                            row.update({f'sigma_{d}': v for d, v in sig_l.items()})
-                            row.update({f'cov_{a}{b}': float(cov_l[a, b])
+                                    list(estimator.idx), trk, cov_l * infl ** 2, p_seat, mix_l)
+                            row.update({f'sigma_{d}': v for d, v in sig_rep.items()})
+                            row.update({f'cov_{a}{b}': float(cov_l[a, b] * infl ** 2)
                                         for a in range(len(cov_l))
                                         for b in range(a, len(cov_l))})
+                            row.update({'n_modes_land': mix_l.n_modes,
+                                        'ambiguity_land': mix_l.ambiguity,
+                                        'between_frac_land': mix_l.between_frac,
+                                        'separation_land': mix_l.separation,
+                                        'support_ratio': sup_l})
+                            if sup_l > 1.5:
+                                log.warning('   SUPPORT x%.2f: the nearest map evidence at this '
+                                            'correction is %.0f%% further away than for a '
+                                            'typical manifold point -- this correction came from '
+                                            'the EDGE of the map, sigma inflated to match.',
+                                            sup_l, 100 * (sup_l - 1.0))
                         except Exception as exc:   # noqa: BLE001 -- diagnostics never fatal
                             log.warning('landscape/P(seat) skipped (%s)', exc)
                 erra, erra_pos, erra_rot = _gt_error(T_true, T_believed)

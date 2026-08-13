@@ -1277,6 +1277,14 @@ def test_mode_pose_config_is_wired():
     for stage in (em, ep):
         assert 'grid' not in stage and 'estimate_dims' not in stage, \
             'stages must share estimation_shared\'s grid'
+    # per-dim search bounds (estimator_eval-style init_guess_range, or grid.range) must give
+    # every ESTIMATED dim a positive half-width, and stay wide enough to contain any injected
+    # error plus a couple of imperfect updates
+    igr = sh.get('init_guess_range') or {}
+    grng = (sh.get('grid') or {}).get('range') or {}
+    for d in sh['estimate_dims']:
+        half = float(grng.get(d, igr.get(d, 8.0)))
+        assert half > 0, f'estimated dim {d} needs a positive search half-width'
     assert float(em['scaling_constant_unit_force_to_mm']) \
         > float(ep['scaling_constant_unit_force_to_mm']), \
         'the MODE stage must weight the wrench harder than the POSE stage'

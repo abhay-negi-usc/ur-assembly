@@ -42,17 +42,22 @@ eval:
   # 'random' draws inside the bounds; 'grid' sweeps every combination at grid_resolution;
   # 'bounds' tests the +/- extremes -- one DOF at a time, or every corner of the box with
   # bounds_simultaneous: true. Same semantics as estimator_eval.
-  mode: random
-  bounds_simultaneous: false
+  mode: bounds
+  bounds_simultaneous: true
   perturbation:
-    lower: [0.0, 0.0, -0.001, 0.0, -5.0, 0.0]
-    upper: [0.0, 0.0, +0.001, 0.0, +5.0, 0.0]
+    lower: [0.0, 0.0, -0.000, 0.0, -5.0, 0.0]
+    upper: [0.0, 0.0, +0.000, 0.0, +5.0, 0.0]
   grid_resolution: [0.0, 0.0, 0.001, 0.0, 2.5, 0.0]
 
   # COLLECTION: one attempt = every offset below (belief fixed across passes -- their evidence
   # fuses exactly; each pass also contributes its own stop depth to stage 1's fusion).
   # null = the default pitch sweep -4..+4 deg in 2 deg steps.
-  sweep_offsets: null
+  sweep_offsets: 
+    - [0, 0, -0.002, 0, 0, 0]
+    - [0, 0, -0.001, 0, 0, 0]
+    - [0, 0, +0.000, 0, 0, 0]
+    - [0, 0, +0.001, 0, 0, 0]
+    - [0, 0, +0.002, 0, 0, 0]
   trajectory_noise:              # per-waypoint jitter, matched to the map's collection process
     enabled: true
     std: [0.0, 0.0005, 0.005, 0.0, 5.0, 0.0]
@@ -61,7 +66,7 @@ eval:
   # DIVERGENCE BOUNDS: terminate the trial when the post-update belief error exceeds these.
   abort_bounds:
     pos_mm: 10.0
-    rot_deg: 15.0
+    rot_deg: 12.0
   success_tolerance:
     pos_mm: 1.0
     rot_deg: 1.0
@@ -95,8 +100,18 @@ estimation_shared:
   interp_neighbors: 16
   interp_softness: 1.0
   random_seed: 0
+  # PER-DIMENSION search half-widths, same block name and shape as estimator_eval's -- for
+  # the exhaustive grid these ARE the candidate bounds (there are no random initial guesses
+  # to seed). Entries for non-estimated dims are ignored. grid.range, if present, would
+  # override these per dim; keep ONE source of truth and leave it out.
+  init_guess_range:
+    x_mm: 0.0
+    y_mm: 0.0
+    z_mm: 0.0
+    roll_deg: 0.0
+    pitch_deg: 10.0
+    yaw_deg: 0.0
   grid:
-    range: {z_mm: 8.0, pitch_deg: 14.0}
     step: {z_mm: 0.5, pitch_deg: 0.5}
     curvature_probe: {z_mm: 3.0, pitch_deg: 3.0}
     info_weighting: depth

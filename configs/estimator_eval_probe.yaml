@@ -200,6 +200,20 @@ estimation:
   recency_half_life_frac: 0.0    # probes are independent measurements; no recency decay
   random_seed: 0
 
+  # ---- STOP-SIGNATURE FUSION -- same option and tuning as estimator_eval.yaml ---------------
+  # Every probe's observed stop depth adds a SuccessBasin.stop_energy curve to the fused grid
+  # energy; the combined decision energy drives the P(seat) gate, the mode ranking, and the
+  # committed correction, which alpha then partially applies. Probes make the stop channel
+  # STRONGER than in estimator_eval: several stops at different biases triangulate the offset.
+  # Measured on the 2026-08-12/13 v3 replays: single attempt |z'| 2.55 vs 3.05 no-correction;
+  # 3-5 fused trajectories ~1.1 mm at alpha 0.6 (the accumulated-regime optimum -- this app
+  # fuses multiple probes, so it uses 0.6 like estimator_eval with accumulation, not the
+  # single-shot 0.75). false = original behaviour.
+  stop_fusion:
+    enabled: true
+    weight: 2.0
+    alpha: 0.6
+
   grid:
     # Half-width of the exhaustive search box per estimated dim, and its resolution. COST: the
     # candidate count is the PRODUCT over dims and every candidate is scored against every

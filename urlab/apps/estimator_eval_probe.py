@@ -96,6 +96,7 @@ def _fieldnames(dims, n_probes):
     cols += [f'cov_{a}{b}' for a in range(len(dims)) for b in range(a, len(dims))]
     cols += [f'err_after_{s}' for s in _ERR] + ['err_after_pos_mm', 'err_after_rot_deg']
     cols += ['ranked_mode', 'p_seat_argmin']       # seat_gate.mode_ranking diagnostics
+    cols += ['stop_fused']                         # estimation.stop_fusion diagnostics
     cols += ['converged', 'p_seat', 'gate_opened', 'insert_seated', 'insert_success',
              'insert_success_tolwise', 'insert_depth_mm', 'seat_depth_mm',
              'insert_check_pos_mm', 'insert_check_rot_deg'] + [f'seat_{s}' for s in _ERR]
@@ -440,6 +441,18 @@ def build_and_run(cfg, robot, camera, args):
     # Validated motivation: the truth sat in a NON-dominant mode in 54% of fused probe cases,
     # so depth alone misranks rivals -- but P(seat) is what the gate acts on anyway, so gate
     # and commitment stay one definition.
+    # STOP-SIGNATURE FUSION (estimation.stop_fusion) -- same option and tuning as
+    # estimator_eval. Every probe's observed stop depth adds a SuccessBasin.stop_energy curve
+    # over the grid; the fused NN energies and the fused stop energies combine (median-
+    # normalised, rescaled back to mm-eq) into ONE decision energy that drives the gate, the
+    # mode ranking, and the committed correction; alpha partially applies the result. Probes
+    # make the stop channel STRONGER than in estimator_eval: several stops at different biases
+    # triangulate the offset. Measured (v3 replay): single attempt |z'| 2.55 vs 3.05 baseline;
+    # accumulated 3-5 trajectories ~1.1 mm at alpha 0.6.
+    sf = cfg.get_path('estimation.stop_fusion', {}) or {}
+    stop_fuse_on = bool(sf.get('enabled', False))
+    stop_fuse_w = float(sf.get('weight', 2.0))
+    stop_fuse_alpha = float(sf.get('alpha', 0.6))
     mode_rank = str(sg.get('mode_ranking', 'energy')).strip().lower()
     if mode_rank not in ('energy', 'p_seat'):
         log.error("seat_gate.mode_ranking %r must be 'energy' or 'p_seat'.", mode_rank)
@@ -713,6 +726,7 @@ def build_and_run(cfg, robot, camera, args):
             # ---------------- PROBE PHASE (belief held FIXED throughout) ----------------
             fused = None
             sup_sum = None
+            fused_stop = None                      # accumulated stop-signature energies
             n_probes_used = 0
             n_obs_total = 0
             abandoned = False
@@ -720,6 +734,15 @@ def build_and_run(cfg, robot, camera, args):
             p_seat = float('nan')
             mix = None                             # the fused mixture after the previous probe
             mode_turn = 0
+
+            def decision_energy():
+                """What the gate/ranking/commitment act on: NN fusion + stop fusion. The stop
+                term is rescaled into the NN energy's mm-eq units so estimator.solve's sigma
+                and mixture stay meaningful."""
+                if not (stop_fuse_on and basin is not None and fused_stop is not None):
+                    return fused
+                s = float(np.median(fused)) / max(float(np.median(fused_stop)), 1e-9)
+                return fused + stop_fuse_w * s * fused_stop
             for k in range(1, n_probes + 1):
                 sign = 1.0 if k % 2 else -1.0
                 # MODE-DIRECTED bias, but only when the rivals are real: a `separation` under ~2
@@ -783,6 +806,16 @@ def build_and_run(cfg, robot, camera, args):
                 # SUPPORT accumulates as a MEAN, not a sum: it is a property of the map (how much
                 # evidence exists near a candidate), not evidence that piles up with more probes.
                 sup_sum = S if sup_sum is None else sup_sum + S
+                # STOP SIGNATURE: this probe's raw stop depth is one more independent
+                # measurement of the offset; its energy ADDS across probes exactly like the
+                # NN energies (several stops at different biases triangulate the offset).
+                if stop_fuse_on and basin is not None:
+                    try:
+                        e_st = basin.stop_energy(float(obs_arr[:, 0].max()),
+                                                 estimator.grid6[:, estimator.idx])
+                        fused_stop = e_st if fused_stop is None else fused_stop + e_st
+                    except Exception as exc:       # noqa: BLE001 -- fusion is best-effort
+                        log.warning('  stop energy skipped (%s)', exc)
                 _, pinfo = estimator.solve(E, n, S)
                 row[f'probe{k}_residual'] = pinfo['final_residual']
                 log.info('  probe %d (bias pitch %+.1f deg, z %+.1f mm%s): %d obs (%d settled), '
@@ -791,10 +824,12 @@ def build_and_run(cfg, robot, camera, args):
                          float(bias[2]) * 1000.0 if bias else 0.0,
                          ' -- MODE-DIRECTED' if directed is not None else '', n, settled,
                          fmax, {d: round(v, 2) for d, v in pinfo['theta_corr'].items()})
-                # Re-solve the FUSED evidence: this drives BOTH the P(seat) gate below and the
-                # next probe's action, since the mixture is what says whether more of the same
-                # probe can help or a discriminating one is needed.
-                _, finfo = estimator.solve(fused, n_obs_total, sup_sum / n_probes_used)
+                # Re-solve the FUSED evidence (stop-fused when enabled): this drives BOTH the
+                # P(seat) gate below and the next probe's action, since the mixture is what
+                # says whether more of the same probe can help or a discriminating one is
+                # needed.
+                _, finfo = estimator.solve(decision_energy(), n_obs_total,
+                                           sup_sum / n_probes_used)
                 mix = finfo.get('mixture')
                 row[f'probe{k}_modes'] = finfo['n_mixture_modes']
                 row[f'probe{k}_ambiguity'] = finfo['ambiguity']
@@ -845,7 +880,11 @@ def build_and_run(cfg, robot, camera, args):
             if fused is None:
                 log.error('trial %d: no usable probe observations -- belief unchanged.', trial)
             else:
-                T_corr_mm, info = estimator.solve(fused, n_obs_total,
+                # COMMIT from the decision energy -- the same (stop-fused when enabled)
+                # energy the gate acted on, so gate and commitment cannot disagree.
+                row['stop_fused'] = bool(stop_fuse_on and basin is not None
+                                         and fused_stop is not None)
+                T_corr_mm, info = estimator.solve(decision_energy(), n_obs_total,
                                                   sup_sum / max(n_probes_used, 1))
                 # MODE RANKING at commitment (seat_gate.mode_ranking: p_seat): the argmin is
                 # only the default candidate -- a rival mode that does MORE for P(seat) wins.
@@ -870,6 +909,17 @@ def build_and_run(cfg, robot, camera, args):
                         p_seat = ps_r
                     except Exception as exc:       # noqa: BLE001
                         log.warning('mode ranking skipped (%s)', exc)
+                # PARTIAL APPLICATION (stop_fusion.alpha): scale the final correction --
+                # whatever won above -- to hedge the noise floor. With multiple fused probes
+                # this app is in the ACCUMULATED regime, where alpha 0.6 was the measured
+                # best (|z'| 1.06 vs 1.84 mm at alpha 0.75 on the m=3 benchmark).
+                if row.get('stop_fused') and abs(stop_fuse_alpha - 1.0) > 1e-9:
+                    th_a = np.zeros(6)
+                    th_a[estimator.idx] = [stop_fuse_alpha * info['theta_corr'][d]
+                                           for d in dims]
+                    T_corr_mm = mats_from_vec6(th_a)
+                    info['theta_corr'] = {d: float(th_a[j])
+                                          for d, j in zip(dims, estimator.idx)}
                 T_believed = T_believed @ _corr_to_m(T_corr_mm)
                 row.update({f'corr_{d}': v for d, v in info['theta_corr'].items()})
                 row.update({'fused_residual': info['final_residual'],

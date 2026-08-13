@@ -1556,6 +1556,29 @@ def test_success_basin_labels_gates_and_signs():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_estimator_eval_collection_config():
+    """configs/estimator_eval.yaml eval.collection must match the app's schema: a known mode,
+    positive peck parameters, and -- when sweep_offsets is explicit -- 6-vectors. The app
+    validates pre-motion; this catches a broken config before it reaches the robot box."""
+    import yaml
+    with open(os.path.join(os.path.dirname(__file__), '..', 'configs',
+                           'estimator_eval.yaml')) as fh:
+        cfg = yaml.safe_load(fh)
+    col = cfg['eval'].get('collection') or {}
+    assert str(col.get('mode', 'attempts')) in ('attempts', 'offset_sweep', 'peck'), col
+    assert float(col.get('peck_retract_mm', 5.0)) > 0
+    assert float(col.get('peck_timeout_s', 30.0)) > 0
+    so = col.get('sweep_offsets')
+    if so is not None:
+        assert so and all(len(o) == 6 for o in so), \
+            'sweep_offsets must be 6-vectors [x, y, z (m), roll, pitch, yaw (deg)]'
+    # the zero-noise commit after the last attempt must not be silently disabled
+    fi = cfg['eval'].get('final_insertion') or {}
+    assert fi.get('enabled', True), \
+        'eval.final_insertion must stay enabled: every collection mode ends with one ' \
+        'zero-noise insertion from the final belief'
+
+
 def test_probe_app_config_is_wired():
     """configs/estimator_eval_probe.yaml must name a real held frame, keep the probe settle long
     enough for the wrench to settle (the whole point of the app), give the probe and insertion
@@ -1597,6 +1620,24 @@ def test_probe_app_config_is_wired():
         'curvature_probe_deg below ~2 deg measures interpolation noise (AUROC 0.66 at 1 deg)'
     assert g['mode_threshold'] > 1.0
     assert g['info_weighting'] in ('depth', 'none')
+
+    # STOP-SIGNATURE FUSION: the probe app must carry the same estimator option, with the
+    # SAME tuning, as estimator_eval -- one estimator, two collection processes. alpha must
+    # sit in the ACCUMULATED-regime range (this app fuses multiple probes): full application
+    # (alpha ~1) measurably hurts there (|z'| 3.0 vs 1.1 on the m=3 benchmark).
+    sf = cfg['estimation'].get('stop_fusion') or {}
+    assert sf.get('enabled') is not None, 'estimation.stop_fusion block must exist'
+    if sf.get('enabled'):
+        assert 0.0 < float(sf.get('alpha', 1.0)) <= 0.8, sf
+        assert float(sf.get('weight', 0.0)) > 0.0, sf
+        import yaml as _yaml
+        with open(os.path.join(os.path.dirname(__file__), '..', 'configs',
+                               'estimator_eval.yaml')) as fh:
+            ev = _yaml.safe_load(fh)['estimation'].get('stop_fusion') or {}
+        if ev.get('enabled'):
+            assert (float(sf['weight']), float(sf['alpha'])) \
+                == (float(ev['weight']), float(ev['alpha'])), \
+                'probe and eval stop_fusion tuning must match (one estimator, two apps)'
     dims = cfg['estimation']['estimate_dims']
     for d in dims:
         assert d in g['range'] and d in g['step'], f'grid range/step missing for {d}'

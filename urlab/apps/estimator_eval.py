@@ -23,9 +23,17 @@ exactly. Each trial then INJECTS a known belief error and lets the estimator try
             success    the TRUE connector pose wrt the TARGET at the end of the hold within
                        eval.success_pose_tol per DOF -> the trial TERMINATES; the live figure
                        shows the running trial count + success rate
-        final      OPTIONAL (eval.final_insertion): ONE more guarded insertion from the FINAL
-                   corrected belief under a DIFFERENT stiffness -- seats-or-not, no estimation
+        final      (eval.final_insertion, default ON): ONE more guarded insertion from the
+                   FINAL corrected belief, ZERO trajectory noise, optionally a different
+                   stiffness -- seats-or-not, no estimation. Every collection mode ends here.
         disassemble: back at the stand-off (free space) before the next trial
+
+Collection modes (eval.collection.mode): 'attempts' = the loop above; 'offset_sweep' = each
+attempt commands a LIST of deliberate offsets (default pitch -4..+4 deg step 2), pools all
+their observations, then estimates ONCE -- trajectory diversity by design, with each pass
+feeding its own stop depth to the stop-signature fusion; 'peck' = a force stop only backs the
+part off a few mm before advancing again (end of trajectory or a time budget ends the attempt),
+so one attempt logs a SEQUENCE of contact events, each a stop signature.
 
 Options: eval.trajectory_noise adds smoothed per-waypoint noise (redrawn per attempt, its own
 random stream); eval.live_plot mirrors the current trial's figure to ONE fixed path outside the
@@ -876,6 +884,45 @@ def build_and_run(cfg, robot, camera, args):
     # older attempts naturally (they sit earlier in the concatenated sequence).
     accumulate = bool(ev.get('accumulate_observations', True))
 
+    # ---- OBSERVATION COLLECTION MODE (eval.collection) --------------------------------------
+    # 'attempts'      the original loop: one noised insertion per attempt.
+    # 'offset_sweep'  each attempt COMMANDS a list of deliberate pose offsets (default pitch
+    #                 -4..+4 deg in 2 deg steps, other dims zero) and pools all their
+    #                 observations BEFORE estimating once -- the probe-diversity result
+    #                 (1 -> 3+ trajectories: truth-in-top-2 basin 15% -> 51%) as a collection
+    #                 mode. The belief is NOT updated between sweep passes, so their evidence
+    #                 fuses exactly (each pass measures the same correction inverse(E)).
+    # 'peck'          on a force stop the connector does NOT fully retract: it backs off a few
+    #                 mm, advances again, and keeps going until the end of the trajectory or a
+    #                 time budget -- one attempt logs a whole sequence of contact events, each
+    #                 with its own stop depth for the stop-signature fusion.
+    col = ev.get('collection', {}) or {}
+    col_mode = str(col.get('mode', 'attempts')).strip().lower()
+    if col_mode not in ('attempts', 'offset_sweep', 'peck'):
+        log.error("eval.collection.mode %r must be 'attempts', 'offset_sweep' or 'peck'.",
+                  col_mode)
+        return False                               # bad values fail HERE, pre-motion
+    sweep_offsets = col.get('sweep_offsets')
+    if sweep_offsets is None:
+        sweep_offsets = [[0.0, 0.0, 0.0, 0.0, float(p), 0.0]
+                         for p in np.arange(-4.0, 4.01, 2.0)]
+    sweep_offsets = [[float(v) for v in o] for o in sweep_offsets]
+    if col_mode == 'offset_sweep':
+        if any(len(o) != 6 for o in sweep_offsets) or not sweep_offsets:
+            log.error('eval.collection.sweep_offsets must be a non-empty list of 6-vectors '
+                      '[x, y, z (m), roll, pitch, yaw (deg)].')
+            return False
+        log.info('Collection mode OFFSET SWEEP: %d commanded offsets per attempt, pitch %s deg.',
+                 len(sweep_offsets), [round(o[4], 1) for o in sweep_offsets])
+    peck_mm = float(col.get('peck_retract_mm', 5.0))
+    peck_timeout_s = float(col.get('peck_timeout_s', 30.0))
+    if col_mode == 'peck':
+        if peck_mm <= 0 or peck_timeout_s <= 0:
+            log.error('eval.collection.peck_retract_mm and peck_timeout_s must be > 0.')
+            return False
+        log.info('Collection mode PECK: %.1f mm back-off on force stop, %.0f s budget per '
+                 'attempt.', peck_mm, peck_timeout_s)
+
     # COMPLIANCE + guard + speeds: same shape as uncertain_sampling; the config mirrors the pick
     # app's assembly values so the estimator sees production-like observations.
     adm = AdmittanceController(robot.arm, cfg.section('compliance'))
@@ -883,8 +930,11 @@ def build_and_run(cfg, robot, camera, args):
     # OPTIONAL FINAL INSERTION: one extra guarded assemble per trial from the FINAL corrected
     # belief under a DIFFERENT stiffness (same compliance section otherwise) -- does the
     # corrected belief actually seat? Built here so a bad stiffness list fails pre-motion.
+    # Default ON (2026-08-13): EVERY collection mode ends its trial with one zero-noise
+    # insertion from the final corrected belief -- the jitter/sweep/peck exist to gather
+    # observations, and have no place in the attempt that is meant to seat.
     fi = ev.get('final_insertion', {}) or {}
-    fi_on = bool(fi.get('enabled', False))
+    fi_on = bool(fi.get('enabled', True))
     adm_final = None
     if fi_on:
         comp_final = dict(cfg.section('compliance'))
@@ -910,11 +960,20 @@ def build_and_run(cfg, robot, camera, args):
         t_ang = (np.degrees(ang_rad) / w) if w > 0 else 0.0
         return max(t_lin, t_ang, min_seg_s)
 
-    def run_insertion(adm_ctl, refs, T_bel):
+    def run_insertion(adm_ctl, refs, T_bel, peck=False):
         """One admittance-followed insertion along refs, collecting observations (same law and
         logging as cable_pick_estimate_assemble), the seated kinematic check, then the compliant
         UN-guarded retract along the believed part's own -X (a seated part is already over the
-        guard limit; a guarded retract would block itself). Returns (obs, seated, lin, ang)."""
+        guard limit; a guarded retract would block itself).
+
+        peck=True (eval.collection.mode: peck): a force stop does NOT end the advance -- back
+        off peck_retract_mm along the believed -X, reset the guard, and continue along the
+        trajectory; the loop ends at the last waypoint or when peck_timeout_s runs out. One
+        call then logs a SEQUENCE of contact events, each recorded in `stops`.
+
+        Returns (obs, seated, lin, ang, seat6, stops) with `stops` the believed stop depth(s)
+        in mm -- one per contact event (peck), one for the single stop (normal), or the deepest
+        point reached when the trajectory completed without a force stop."""
         obs, cnt = [], [0]
 
         def log_cb():
@@ -925,16 +984,40 @@ def build_and_run(cfg, robot, camera, args):
         adm_ctl.reset()
         adm_ctl.warmup(refs[0], tare_fn=tare)
         guard.reset()
-        last_ref, seated = refs[0], False
-        for i in range(1, len(refs)):
-            res = adm_ctl.ramp(refs[i - 1], refs[i], seg_time(refs[i - 1], refs[i]),
-                               guard, on_step=log_cb)
+        last_ref, seated, stops = refs[0], False, []
+        t0 = time.time()
+        prev, i = refs[0], 1
+        while i < len(refs):
+            res = adm_ctl.ramp(prev, refs[i], seg_time(prev, refs[i]), guard, on_step=log_cb)
             last_ref = refs[i]
             if res == 'seated':
                 seated = True
-                log.info('Contact limit at waypoint %d/%d -- stopped advancing.',
-                         i, len(refs) - 1)
-                break
+                if obs:
+                    stops.append(float(obs[-1][0]))
+                if not peck:
+                    log.info('Contact limit at waypoint %d/%d -- stopped advancing.',
+                             i, len(refs) - 1)
+                    break
+                if time.time() - t0 > peck_timeout_s:
+                    log.info('PECK: time budget (%.0f s) spent after %d contact(s) -- holding '
+                             'here.', peck_timeout_s, len(stops))
+                    break
+                # back off a little, UN-guarded (we are at the guard limit by construction),
+                # then continue with the NEXT waypoint -- 'continue on the trajectory'
+                T_out = _retract_ref(refs[i], T_bel, peck_mm / 1000.0)
+                adm_ctl.ramp(refs[i], T_out, seg_time(refs[i], T_out, rv_mm_s, rw_deg_s),
+                             guard=None, on_step=log_cb)
+                guard.reset()
+                prev = T_out
+                i += 1
+                continue
+            prev = refs[i]
+            i += 1
+        if not stops and obs:                      # ran to the end: deepest point IS the stop
+            stops = [float(np.max(np.asarray(obs, dtype=float).reshape(-1, 12)[:, 0]))]
+        if peck:
+            log.info('PECK: %d contact event(s), stop depths %s mm.', len(stops),
+                     [round(s, 1) for s in stops])
         adm_ctl.hold(last_ref, settle_s, guard, on_step=log_cb)
 
         # Kinematic check numbers (BELIEVED pose), for the record only.
@@ -947,7 +1030,7 @@ def build_and_run(cfg, robot, camera, args):
         T_out = _retract_ref(last_ref, T_bel, retract_m)
         adm_ctl.ramp(last_ref, T_out, seg_time(last_ref, T_out, rv_mm_s, rw_deg_s), guard=None)
         adm_ctl.stop()
-        return obs, seated, lin, ang, seat6
+        return obs, seated, lin, ang, seat6, stops
 
     out_dir = os.path.join(cfg.get('data_dir', 'data'), 'experiments',
                            f'estimator_eval_{datetime.now():%Y%m%d_%H%M%S}')
@@ -1008,27 +1091,55 @@ def build_and_run(cfg, robot, camera, args):
             gate_open = False
             for attempt in range(1, max_attempts + 1):
                 errb, errb_pos, errb_rot = _gt_error(T_true, T_believed)
-                if tn_on:
-                    bias = ([0.0, 0.0, 0.0, 0.0,
-                             tn_alt * (1.0 if attempt % 2 else -1.0), 0.0]
-                            if tn_alt else None)
-                    rows_t = traj.noised(dense, noise_rng, tn_std, tn_w, tn_dt,
-                                         (1.0 - tn_da) ** (attempt - 1), bias)
-                else:
-                    rows_t = dense
-                refs = [T_base_tconn @ row @ inverse(T_believed) for row in rows_t]
+                # COLLECTION PASSES for this attempt: the sweep commands one insertion per
+                # deliberate offset (belief FIXED across passes, so their evidence fuses
+                # exactly); the other modes make a single pass. The pass bias rides on top of
+                # the usual per-waypoint noise when that is enabled.
+                passes = ([list(o) for o in sweep_offsets] if col_mode == 'offset_sweep'
+                          else [None])
+                obs, attempt_stops = [], []
+                seated, lin, ang, seat6 = False, 0.0, 0.0, [0.0] * 6
+                for pi, poff in enumerate(passes):
+                    if poff is not None:
+                        bias = poff
+                    elif tn_on and tn_alt:
+                        bias = [0.0, 0.0, 0.0, 0.0,
+                                tn_alt * (1.0 if attempt % 2 else -1.0), 0.0]
+                    else:
+                        bias = None
+                    if tn_on or bias is not None:
+                        rows_t = traj.noised(dense, noise_rng,
+                                             tn_std if tn_on else [0.0] * 6, tn_w, tn_dt,
+                                             (1.0 - tn_da) ** (attempt - 1), bias)
+                    else:
+                        rows_t = dense
+                    refs = [T_base_tconn @ row @ inverse(T_believed) for row in rows_t]
 
-                # To the attempt's start -- stiff, free space (the retract/stand-off cleared it).
-                q = robot.arm.ik(refs[0], seed_q)
-                if q is None or not robot.arm.move_j(
-                        q, label=f'trial {trial} attempt {attempt} start'):
-                    log.warning('IK/approach failed; abandoning the rest of trial %d.', trial)
-                    abandoned = True
+                    # To the pass start -- stiff, free space (retract/stand-off cleared it).
+                    label = (f'trial {trial} attempt {attempt}'
+                             + (f' sweep {pi + 1}/{len(passes)}' if poff is not None else '')
+                             + ' start')
+                    q = robot.arm.ik(refs[0], seed_q)
+                    if q is None or not robot.arm.move_j(q, label=label):
+                        log.warning('IK/approach failed; abandoning the rest of trial %d.',
+                                    trial)
+                        abandoned = True
+                        break
+                    seed_q = q
+
+                    # ASSEMBLE under admittance (same law as the pick app), check, retract.
+                    obs_i, seated, lin, ang, seat6, stops_i = run_insertion(
+                        adm, refs, T_believed, peck=(col_mode == 'peck'))
+                    obs.extend(obs_i)
+                    attempt_stops.extend(stops_i)
+                    if poff is not None:
+                        log.info('  sweep %d/%d (pitch %+.1f deg, z %+.1f mm): %d obs, '
+                                 'stop %s mm.', pi + 1, len(passes), poff[4], poff[2] * 1000.0,
+                                 len(obs_i), [round(s, 1) for s in stops_i])
+                if abandoned:
                     break
-                seed_q = q
-
-                # ASSEMBLE under admittance (same law as the pick app), check, retract.
-                obs, seated, lin, ang, seat6 = run_insertion(adm, refs, T_believed)
+                # success is judged on the LAST pass's seat pose (for the sweep that is the
+                # final commanded offset -- the record of whether probing itself ever seated)
                 succ = all(abs(v) <= t for v, t in zip(seat6, succ_tol))
                 if succ and not trial_succ:
                     trial_succ = True
@@ -1094,11 +1205,15 @@ def build_and_run(cfg, robot, camera, args):
                     row['stop_fused'] = False
                     if stop_fuse_on and basin is not None and land_pack is not None:
                         try:
-                            x_stop = float(obs_arr[:, 0].max())
+                            # EVERY contact event contributes its own stop signature: sweep
+                            # passes and peck contacts each measured the same correction at a
+                            # different bias/depth, so their energies ADD (they triangulate).
+                            stops_f = list(attempt_stops) or [float(obs_arr[:, 0].max())]
+                            x_stop = max(stops_f)
                             row['x_stop_mm'] = x_stop
                             mesh_f = np.meshgrid(*land_pack[0], indexing='ij')
                             gth_f = np.stack([m.ravel() for m in mesh_f], axis=1)
-                            e_stop = basin.stop_energy(x_stop, gth_f)
+                            e_stop = sum(basin.stop_energy(xs, gth_f) for xs in stops_f)
                             e_l = E_dec.ravel()
                             sc_f = float(np.median(e_l)) / max(float(np.median(e_stop)), 1e-9)
                             E_dec = (e_l + stop_fuse_w * sc_f * e_stop).reshape(E_dec.shape)
@@ -1312,7 +1427,8 @@ def build_and_run(cfg, robot, camera, args):
                     log.warning('IK/approach failed for the final insertion of trial %d.', trial)
                 else:
                     seed_q = q
-                    obs, seated, lin, ang, seat6 = run_insertion(adm_final, refs, T_believed)
+                    obs, seated, lin, ang, seat6, _ = run_insertion(adm_final, refs,
+                                                                    T_believed)
                     if save_obs:
                         _save_observations(os.path.join(
                             out_dir, f'trial_{trial:03d}_final_insertion_observations.csv'), obs)

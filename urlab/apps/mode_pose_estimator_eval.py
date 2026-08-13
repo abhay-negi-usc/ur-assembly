@@ -348,17 +348,37 @@ def build_and_run(cfg, robot, camera, args):
     dense = traj.resample(mats, float(cfg.get('translational_resolution_m', 0.001)),
                           float(cfg.get('rotational_resolution_deg', 1.0)))
 
-    # injected errors: 'random' inside the bounds, or 'grid' at grid_resolution
+    # injected errors -- SAME semantics as estimator_eval: 'random' draws uniformly inside
+    # the bounds for num_trials; 'grid' sweeps every combination at grid_resolution (count
+    # derived); 'bounds' tests the +/- extremes (count derived) -- one DOF at a time by
+    # default, or every corner of the box with eval.bounds_simultaneous.
     seed = int(ev.get('random_seed', 0))
     rng = np.random.default_rng(seed if seed > 0 else None)
     pert = ev.get('perturbation', {}) or {}
     lo, hi = pert.get('lower', [0.0] * 6), pert.get('upper', [0.0] * 6)
     mode_sel = str(ev.get('mode', 'random')).lower()
-    fixed = None
-    if mode_sel == 'grid':
-        fixed = traj.grid_deltas(lo, hi, ev.get('grid_resolution', [0.0] * 6))
+    if mode_sel not in ('random', 'grid', 'bounds'):
+        log.error("eval.mode %r must be 'random', 'grid' or 'bounds'.", mode_sel)
+        return False                               # bad values fail HERE, pre-motion
+    try:
+        if mode_sel == 'grid':
+            fixed = traj.grid_deltas(lo, hi, ev.get('grid_resolution', [0.0] * 6))
+        elif mode_sel == 'bounds':
+            fixed = traj.bounds_deltas(
+                lo, hi, simultaneous=bool(ev.get('bounds_simultaneous', False)))
+        else:
+            fixed = None
+    except ValueError as exc:
+        log.error('%s', exc)
+        return False
+    if fixed is not None and not fixed:
+        log.error("eval.mode %r produced 0 trials -- every perturbation bound is zero.",
+                  mode_sel)
+        return False
     num_trials = len(fixed) if fixed is not None else int(ev.get('num_trials', 10))
     max_attempts = int(ev.get('max_attempts', 2))
+    log.info('%d trials x max %d attempts (%s perturbations, lower=%s upper=%s).',
+             num_trials, max_attempts, mode_sel.upper(), list(lo), list(hi))
 
     sweep = ev.get('sweep_offsets')
     if sweep is None:

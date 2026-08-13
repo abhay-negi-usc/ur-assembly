@@ -206,16 +206,48 @@ class ManifoldEstimator:
         # must also be the k the queries use, or the ratio compares two different quantities and
         # lands nowhere near 1 for in-distribution data.
         self.support_k = max(self.interp_neighbors, 2)
-        d_ref = self.tree.query(self.M12, k=self.support_k, workers=-1)[0]
-        self.support_ref = float(max(np.median(d_ref[:, -1]), 1e-9))
+        d_all = self.tree.query(self.M12, k=self.support_k, workers=-1)[0]
+        d_ref = d_all[:, -1]                        # k-th neighbour distance per map point
+        self.support_ref = float(max(np.median(d_ref), 1e-9))
+        # ... and the reference is DEPTH-CONDITIONAL, not one global median. Measured on the
+        # 2026-08 hose data: the map is DENSE in the shallow approach region and SPARSE at
+        # depth, so against a global reference a good deep insertion read as "thin support"
+        # (ratio ~2) while a bad rim-stuck trial matching useless approach rows read as ~1 --
+        # the metric ranked failures BACKWARDS (AUROC 0.39). Normalising each query row by the
+        # median k-th-NN distance of manifold points AT ITS OWN DEPTH removes exactly that
+        # confound: the ratio then measures off-distribution-ness, not insertion depth.
+        xs = self.M12[:, 0]
+        edges = np.quantile(xs, np.linspace(0.0, 1.0, 13))       # 12 equal-mass depth bins
+        centres, meds = [], []
+        for i in range(len(edges) - 1):
+            m = (xs >= edges[i]) & (xs <= edges[i + 1] if i == len(edges) - 2
+                                    else xs < edges[i + 1])
+            if m.sum() >= 10:
+                centres.append(float(np.median(xs[m])))
+                meds.append(float(max(np.median(d_ref[m]), 1e-9)))
+        if len(centres) >= 2:
+            self._sup_x = np.asarray(centres)
+            self._sup_med = np.asarray(meds)
+        else:                                       # degenerate map -- fall back to global
+            self._sup_x = np.array([float(xs.min()), float(xs.max())])
+            self._sup_med = np.array([self.support_ref, self.support_ref])
         if self.interp_neighbors > 1:
-            spacing = float(np.median(d_ref[:, 1]))
+            spacing = float(np.median(d_all[:, 1]))
             self.interp_tau = max(spacing * self.interp_softness, 1e-9)
             log.info('Interpolated matching: k=%d, tau=%.3f mm-eq (median manifold spacing %.3f)',
                      self.interp_neighbors, self.interp_tau, spacing)
-        log.info('Support reference: median %d-th NN distance %.3f mm-eq -- a correction whose '
-                 'k-th neighbour sits much further than this is extrapolating.',
-                 self.support_k, self.support_ref)
+        log.info('Support reference: median %d-th NN distance %.3f mm-eq global, depth-'
+                 'conditional %.3f..%.3f across x %.1f..%.1f mm -- a query row whose k-th '
+                 'neighbour sits much further than ITS DEPTH\'s reference is extrapolating.',
+                 self.support_k, self.support_ref, float(self._sup_med.min()),
+                 float(self._sup_med.max()), float(self._sup_x.min()),
+                 float(self._sup_x.max()))
+
+    def support_ref_at(self, x_mm):
+        """The in-distribution k-th-NN distance at insertion depth x (mm) -- the DENOMINATOR of
+        the support ratio. Depth-conditional because map density varies strongly with depth."""
+        return np.interp(np.asarray(x_mm, dtype=float), self._sup_x, self._sup_med,
+                         left=self._sup_med[0], right=self._sup_med[-1])
 
     # ------------------------------------------------------------------ data
     def _load_manifold(self, path):

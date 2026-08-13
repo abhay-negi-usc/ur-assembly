@@ -143,6 +143,7 @@ def _fieldnames(dims):
             + ['n_mixture_modes', 'ambiguity', 'between_frac', 'separation', 'seeded_guesses']
             + ['n_modes_land', 'ambiguity_land', 'between_frac_land', 'separation_land',
                'support_ratio']
+            + ['ranked_mode', 'p_seat_unranked']   # seat_gate.mode_ranking diagnostics
             + ['p_seat', 'gate_opened', 'insert_depth_mm', 'seat_depth_mm', 'seated_basin']
             + ['icp_inliers', 'icp_residual', 'estimate']
             + ['trust_rankavg2', 'trust_cauchy'] + [f'trust_{s}' for s in _TRUST_SIGNALS]
@@ -196,7 +197,10 @@ def _landscape(estimator, vec6, w6, max_pts=2600, row_cap=120):
         else:
             d1 = dist[:, 0]
         Ef[lo:hi] = d1.reshape(hi - lo, len(v6)).mean(axis=1)
-        Sup[lo:hi] = dist[:, -1].reshape(hi - lo, len(v6)).mean(axis=1)
+        # support as a DEPTH-NORMALISED ratio per row (a global reference confounds support
+        # with insertion depth -- the map is dense shallow, sparse deep; see support_ref_at)
+        sup_row = dist[:, -1] / estimator.support_ref_at(pts[:, 0])
+        Sup[lo:hi] = sup_row.reshape(hi - lo, len(v6)).mean(axis=1)
     E = Ef.reshape(mesh[0].shape)
 
     k = np.unravel_index(int(np.argmin(E)), E.shape)
@@ -249,7 +253,7 @@ def _landscape(estimator, vec6, w6, max_pts=2600, row_cap=120):
     # basin. Both are cheap here -- the energy is already computed.
     gth = np.stack([m.ravel() for m in mesh], axis=1)
     mix = from_energy(gth, E.ravel(), E.shape, temp=0.05, dims=list(dims))
-    support = float(Sup[int(np.argmin(E))] / max(getattr(estimator, 'support_ref', 1.0), 1e-9))
+    support = float(Sup[int(np.argmin(E))])       # already a depth-normalised ratio
     # ADD the between-mode spread to the curvature covariance rather than replacing it: the
     # curvature width is the calibrated one, and the mixture's contribution is the ambiguity the
     # curvature cannot see. Unimodal landscapes are therefore unchanged.
@@ -300,6 +304,26 @@ def _as_error(errb, theta, idx):
     th6[:, idx] = th
     rem = vec6_from_mats(mats_from_vec6(np.asarray(errb, dtype=float)) @ mats_from_vec6(th6))
     return rem[:, idx]
+
+
+def _p_seat_land(basin, axes, E, idx, theta_vals, temp):
+    """E_p[P(seat)] over the dense landscape's Gibbs posterior if `theta_vals` is applied.
+
+    The robot never knows its remaining error, so the decision quantity is P(seat) AVERAGED
+    over the posterior, not evaluated at the point estimate. Hypothesis 'g was the right
+    correction' leaves remaining error inverse(g) (.) theta once theta is applied; the basin is
+    indexed by the PHYSICAL offset of that remaining error (SuccessBasin.offset_of_error).
+    Temperature is RELATIVE to the minimum energy, like everywhere else in this stack."""
+    mesh = np.meshgrid(*axes, indexing='ij')
+    gth = np.stack([m.ravel() for m in mesh], axis=1)
+    g6 = np.zeros((len(gth), 6))
+    g6[:, idx] = gth
+    a6 = np.zeros(6)
+    a6[idx] = np.asarray(theta_vals, dtype=float)
+    rem = vec6_from_mats(np.linalg.inv(mats_from_vec6(g6)) @ mats_from_vec6(a6)[None, :, :])
+    Ef = np.asarray(E, dtype=float).ravel()
+    w = np.exp(-(Ef - Ef.min()) / max(temp * float(Ef.min()), 1e-12))
+    return basin.p_seat_posterior(basin.offset_of_error(rem), w)
 
 
 def _plot_trial_errors(path, trial, dims, err6, residuals, s_rot, live_path=None,
@@ -680,6 +704,15 @@ def build_and_run(cfg, robot, camera, args):
     # gate the insertion and to score it afterwards. ----
     sg = ev.get('seat_gate', {}) or {}
     basin, seat_gate, seat_temp = None, 1.0, 0.05
+    # MODE RANKING at commitment: 'energy' = apply the aggregator's estimate untouched (the
+    # original); 'p_seat' = candidates are that estimate PLUS each final-mixture mode centre,
+    # and the E_p[P(seat)]-argmax over the landscape posterior is committed instead. Same
+    # rationale and CSV columns as estimator_eval_probe (truth sat in a NON-dominant mode in
+    # 54% / 70% of the 2026-08-12 validation cases).
+    mode_rank = str(sg.get('mode_ranking', 'energy')).strip().lower()
+    if mode_rank not in ('energy', 'p_seat'):
+        log.error("seat_gate.mode_ranking %r must be 'energy' or 'p_seat'.", mode_rank)
+        return False                               # bad values fail HERE, pre-motion
     if bool(sg.get('enabled', True)):
         try:
             basin = SuccessBasin(urconfig.resolve(cfg, cfg.get_path('estimation.manifold_csv')),
@@ -1031,6 +1064,51 @@ def build_and_run(cfg, robot, camera, args):
                     if accumulate:
                         acc = full                 # belief unchanged -- rows stay valid as-is
                 else:
+                    # The LANDSCAPE moves ahead of the belief update: mode ranking picks the
+                    # committed correction from it, and the diagnostics below reuse the pack
+                    # (it depends only on the PRE-update observations, so nothing changes).
+                    land_pack = None
+                    if (save_plots and plot_land) or basin is not None:
+                        try:
+                            land_pack = _landscape(estimator, vec6, w6)
+                        except Exception as exc:   # noqa: BLE001 -- diagnostics never fatal
+                            log.warning('landscape skipped (%s)', exc)
+                    # MODE RANKING at commitment (seat_gate.mode_ranking: p_seat): the
+                    # aggregator's estimate is only the default candidate -- a rival mode of
+                    # the multi-start finals that does MORE for P(seat) wins. NOTE icp_residual
+                    # and icp_inliers below keep describing the aggregator's own solution.
+                    row['ranked_mode'] = -1
+                    if (basin is not None and mode_rank == 'p_seat' and land_pack is not None
+                            and info.get('mixture') is not None
+                            and info['mixture'].n_modes > 1):
+                        try:
+                            ax_r, E_r = land_pack[0], land_pack[1]
+                            base = [info['theta_corr'][d] for d in estimator.estimate_dims]
+                            ps_b = _p_seat_land(basin, ax_r, E_r, estimator.idx, base,
+                                                seat_temp)
+                            row['p_seat_unranked'] = ps_b
+                            best = (None, ps_b, -1)
+                            for m, comp in enumerate(info['mixture'].components):
+                                ps_m = _p_seat_land(basin, ax_r, E_r, estimator.idx,
+                                                    list(comp.mean), seat_temp)
+                                if ps_m > best[1] + 1e-12:
+                                    best = (list(comp.mean), ps_m, m)
+                            if best[2] >= 0:
+                                log.info('MODE RANKING: committing mode %d %s over the '
+                                         'aggregator %s (P(seat) %.0f%% vs %.0f%%).', best[2],
+                                         [round(float(v), 2) for v in best[0]],
+                                         {d: round(v, 2)
+                                          for d, v in info['theta_corr'].items()},
+                                         100 * best[1], 100 * ps_b)
+                                c6r = np.zeros(6)
+                                c6r[estimator.idx] = best[0]
+                                T_corr_mm = mats_from_vec6(c6r)
+                                info['theta_corr'] = {
+                                    d: float(v) for d, v in
+                                    zip(estimator.estimate_dims, best[0])}
+                                row['ranked_mode'] = best[2]
+                        except Exception as exc:   # noqa: BLE001 -- ranking is best-effort
+                            log.warning('mode ranking skipped (%s)', exc)
                     T_believed = T_believed @ _corr_to_m(T_corr_mm)   # believed @ corr ~= true
                     if accumulate:
                         # keep every stored row expressed in the belief JUST updated
@@ -1093,45 +1171,31 @@ def build_and_run(cfg, robot, camera, args):
                         + ((estimator.s_rot * rem6[:, 3:]) ** 2).sum(axis=1)))
                     # The landscape the correction was picked from, with the TRUE correction
                     # (believed @ C = true, so C = inverse(err_before)) for reference.
-                    if (save_plots and plot_land) or basin is not None:
+                    # (Computed ONCE above, before the belief update, for the mode ranking.)
+                    if land_pack is not None:
                         try:
-                            (ax_l, E_l, sig_l, amin_l, cov_l,
-                             mix_l, sup_l) = _landscape(estimator, vec6, w6)
-                            # P(SEAT) of the POSTERIOR, not of the point estimate: the robot
-                            # never knows its remaining error, so the decision quantity is
-                            # E_p[P(seat)] over the landscape's Gibbs posterior. Hypothesis
-                            # "theta was the right correction" leaves remaining error
-                            # inverse(theta) (.) theta_applied once we apply theta_applied.
+                            (ax_l, E_l, sig_l, amin_l, cov_l, mix_l, sup_l) = land_pack
+                            # P(SEAT) of the POSTERIOR, not of the point estimate -- evaluated
+                            # at the correction ACTUALLY committed (theta_corr reflects the
+                            # mode ranking when it fired).
                             if basin is not None:
-                                mesh = np.meshgrid(*ax_l, indexing='ij')
-                                gth = np.stack([m.ravel() for m in mesh], axis=1)
-                                g6 = np.zeros((len(gth), 6))
-                                g6[:, estimator.idx] = gth
-                                a6 = np.zeros(6)
-                                a6[estimator.idx] = [info['theta_corr'][d]
-                                                     for d in estimator.estimate_dims]
-                                rem = vec6_from_mats(
-                                    np.linalg.inv(mats_from_vec6(g6))
-                                    @ mats_from_vec6(a6)[None, :, :])
-                                Ef = np.asarray(E_l, dtype=float).ravel()
-                                wgt = np.exp(-(Ef - Ef.min())
-                                             / max(seat_temp * float(Ef.min()), 1e-12))
-                                p_seat = basin.p_seat_posterior(
-                                    basin.offset_of_error(rem), wgt)
+                                p_seat = _p_seat_land(
+                                    basin, ax_l, E_l, estimator.idx,
+                                    [info['theta_corr'][d]
+                                     for d in estimator.estimate_dims], seat_temp)
                                 row['p_seat'] = p_seat
                             trk = np.asarray(track6, dtype=float)[:, estimator.idx]
-                            # SUPPORT-INFLATED sigma: off the edge of the map the curvature width
-                            # is measuring the shape of an extrapolation, so widen it in
-                            # proportion to how much further the nearest evidence sits.
-                            infl = float(max(sup_l, 1.0))
-                            sig_rep = {d: float(min(v * infl, ax_l[a][-1]))
-                                       for a, (d, v) in enumerate(sig_l.items())}
-                            land = (ax_l, E_l, sig_rep, amin_l, dict(info['theta_corr']),
+                            # SUPPORT is logged, NOT multiplied into sigma: the 2026-08-12
+                            # validation found the ratio predicts failure on the old-process
+                            # eval runs but is INVERTED on the probe runs (deep seated probes
+                            # read as thin support), so a multiplier would widen sigma on the
+                            # best cases exactly when the process is right.
+                            land = (ax_l, E_l, sig_l, amin_l, dict(info['theta_corr']),
                                     np.asarray(errb, dtype=float),
                                     np.asarray(info['theta_hist'], dtype=float)[:, -1, :],
-                                    list(estimator.idx), trk, cov_l * infl ** 2, p_seat, mix_l)
-                            row.update({f'sigma_{d}': v for d, v in sig_rep.items()})
-                            row.update({f'cov_{a}{b}': float(cov_l[a, b] * infl ** 2)
+                                    list(estimator.idx), trk, cov_l, p_seat, mix_l)
+                            row.update({f'sigma_{d}': v for d, v in sig_l.items()})
+                            row.update({f'cov_{a}{b}': float(cov_l[a, b])
                                         for a in range(len(cov_l))
                                         for b in range(a, len(cov_l))})
                             row.update({'n_modes_land': mix_l.n_modes,
@@ -1140,11 +1204,10 @@ def build_and_run(cfg, robot, camera, args):
                                         'separation_land': mix_l.separation,
                                         'support_ratio': sup_l})
                             if sup_l > 1.5:
-                                log.warning('   SUPPORT x%.2f: the nearest map evidence at this '
-                                            'correction is %.0f%% further away than for a '
-                                            'typical manifold point -- this correction came from '
-                                            'the EDGE of the map, sigma inflated to match.',
-                                            sup_l, 100 * (sup_l - 1.0))
+                                log.info('   support x%.2f: map evidence at this correction is '
+                                         '%.0f%% further than typical at this depth (logged '
+                                         'for analysis; does not inflate sigma -- see the '
+                                         'support note).', sup_l, 100 * (sup_l - 1.0))
                         except Exception as exc:   # noqa: BLE001 -- diagnostics never fatal
                             log.warning('landscape/P(seat) skipped (%s)', exc)
                 erra, erra_pos, erra_rot = _gt_error(T_true, T_believed)

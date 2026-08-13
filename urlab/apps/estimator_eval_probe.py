@@ -95,6 +95,7 @@ def _fieldnames(dims, n_probes):
     cols += [f'sigma_within_{d}' for d in dims]    # the same, WITHIN the dominant mode only
     cols += [f'cov_{a}{b}' for a in range(len(dims)) for b in range(a, len(dims))]
     cols += [f'err_after_{s}' for s in _ERR] + ['err_after_pos_mm', 'err_after_rot_deg']
+    cols += ['ranked_mode', 'p_seat_argmin']       # seat_gate.mode_ranking diagnostics
     cols += ['converged', 'p_seat', 'gate_opened', 'insert_seated', 'insert_success',
              'insert_success_tolwise', 'insert_depth_mm', 'seat_depth_mm',
              'insert_check_pos_mm', 'insert_check_rot_deg'] + [f'seat_{s}' for s in _ERR]
@@ -343,6 +344,36 @@ def _mode_bias(mode_mean, dims, idx, limits):
     return [b6[0] / 1000.0, b6[1] / 1000.0, b6[2] / 1000.0, b6[3], b6[4], b6[5]]
 
 
+def _rank_modes(basin, estimator, info, temp, ranking):
+    """The correction to COMMIT, its E_p[P(seat)], and which mixture mode supplied it.
+
+    ranking 'energy' (the original behaviour): commit the landscape argmin, P(seat) evaluated
+    there. ranking 'p_seat': candidates = the argmin PLUS each mixture mode's centre, and the
+    one whose application maximises E_p[P(seat)] over the fused posterior wins. Rationale
+    (2026-08-12 validation, 24 probe / 188 eval cases): when rival basins differ by a few
+    percent in energy the DEPTH ordering is noise -- the truth sat in a NON-dominant mode in
+    54% / 70% of cases -- but the modes differ a lot in what committing to them does to
+    P(seat), and P(seat) is the quantity the gate acts on anyway. Returns
+    (theta_corr_dict, p_seat, mode_index) with mode_index -1 when the argmin was kept."""
+    theta0 = info['theta_corr']
+    ps0 = _p_seat_of(basin, estimator, info['energy'], theta0, temp)
+    best = (theta0, ps0, -1)
+    if ranking != 'p_seat':
+        return best
+    mix = info.get('mixture')
+    if mix is None or mix.n_modes < 2:
+        return best
+    for m, comp in enumerate(mix.components):
+        th = {d: float(v) for d, v in zip(estimator.estimate_dims, comp.mean)}
+        try:
+            ps = _p_seat_of(basin, estimator, info['energy'], th, temp)
+        except Exception:                          # noqa: BLE001 -- ranking is best-effort
+            continue
+        if ps > best[1] + 1e-12:
+            best = (th, ps, m)
+    return best
+
+
 def _p_seat_of(basin, estimator, fused, theta_applied, temp):
     """E_p[P(seat)] over the fused landscape's posterior, if `theta_applied` is applied.
 
@@ -404,6 +435,15 @@ def build_and_run(cfg, robot, camera, args):
     # both to decide when to stop probing and to score the insertion afterwards.
     sg = ev.get('seat_gate', {}) or {}
     basin, seat_gate, seat_temp = None, 1.0, 0.05
+    # MODE RANKING at commitment: 'energy' = the landscape argmin (the original); 'p_seat' =
+    # among {argmin} + the mixture's mode centres, commit whichever maximises E_p[P(seat)].
+    # Validated motivation: the truth sat in a NON-dominant mode in 54% of fused probe cases,
+    # so depth alone misranks rivals -- but P(seat) is what the gate acts on anyway, so gate
+    # and commitment stay one definition.
+    mode_rank = str(sg.get('mode_ranking', 'energy')).strip().lower()
+    if mode_rank not in ('energy', 'p_seat'):
+        log.error("seat_gate.mode_ranking %r must be 'energy' or 'p_seat'.", mode_rank)
+        return False                               # bad values fail HERE, pre-motion
     if bool(sg.get('enabled', True)):
         try:
             basin = SuccessBasin(urconfig.resolve(cfg, cfg.get_path('estimation.manifold_csv')),
@@ -411,7 +451,8 @@ def build_and_run(cfg, robot, camera, args):
             seat_gate = float(sg.get('p_seat_threshold', 0.95))
             seat_temp = float(sg.get('posterior_temp', 0.05))
             log.info('P(seat) gate at %.0f%%: probing STOPS as soon as the posterior clears it, '
-                     'then one insertion runs with NO trajectory noise.', 100 * seat_gate)
+                     'then one insertion runs with NO trajectory noise. Mode ranking: %s.',
+                     100 * seat_gate, mode_rank)
             if seat_gate > basin.p_seat_zero:
                 log.warning('The gate (%.0f%%) is above P(seat) at ZERO offset (%.0f%%) -- even '
                             'a PERFECT estimate would not clear it, so every trial will run all '
@@ -770,8 +811,13 @@ def build_and_run(cfg, robot, camera, args):
                 # risks a bad probe degrading a belief that was already good enough.
                 if basin is not None:
                     try:
-                        p_seat = _p_seat_of(basin, estimator, finfo['energy'],
-                                            finfo['theta_corr'], seat_temp)
+                        # same ranking as commitment, so the gate never opens on a correction
+                        # that would not actually be applied
+                        _, p_seat, picked = _rank_modes(basin, estimator, finfo, seat_temp,
+                                                        mode_rank)
+                        if picked >= 0:
+                            log.info('     mode ranking: rival mode %d beats the argmin on '
+                                     'P(seat).', picked)
                     except Exception as exc:       # noqa: BLE001
                         log.warning('P(seat) skipped (%s)', exc)
                         p_seat = float('nan')
@@ -801,6 +847,29 @@ def build_and_run(cfg, robot, camera, args):
             else:
                 T_corr_mm, info = estimator.solve(fused, n_obs_total,
                                                   sup_sum / max(n_probes_used, 1))
+                # MODE RANKING at commitment (seat_gate.mode_ranking: p_seat): the argmin is
+                # only the default candidate -- a rival mode that does MORE for P(seat) wins.
+                row['ranked_mode'] = -1
+                if basin is not None:
+                    try:
+                        th_r, ps_r, picked = _rank_modes(basin, estimator, info, seat_temp,
+                                                         mode_rank)
+                        row['p_seat_argmin'] = _p_seat_of(basin, estimator, info['energy'],
+                                                          info['theta_corr'], seat_temp)
+                        if picked >= 0:
+                            log.info('MODE RANKING: committing mode %d %s over the argmin %s '
+                                     '(P(seat) %.0f%% vs %.0f%%).', picked,
+                                     {d: round(v, 2) for d, v in th_r.items()},
+                                     {d: round(v, 2) for d, v in info['theta_corr'].items()},
+                                     100 * ps_r, 100 * row['p_seat_argmin'])
+                            c6r = np.zeros(6)
+                            c6r[estimator.idx] = [th_r[d] for d in dims]
+                            T_corr_mm = mats_from_vec6(c6r)
+                            info['theta_corr'] = th_r
+                            row['ranked_mode'] = picked
+                        p_seat = ps_r
+                    except Exception as exc:       # noqa: BLE001
+                        log.warning('mode ranking skipped (%s)', exc)
                 T_believed = T_believed @ _corr_to_m(T_corr_mm)
                 row.update({f'corr_{d}': v for d, v in info['theta_corr'].items()})
                 row.update({'fused_residual': info['final_residual'],
@@ -835,11 +904,14 @@ def build_and_run(cfg, robot, camera, args):
                              info['n_mixture_modes'], 100 * info['ambiguity'],
                              info['separation'], 100 * info['between_frac'])
                 if info['support_ratio'] > 1.5:
-                    log.warning('   SUPPORT x%.2f: the nearest map evidence at this correction '
-                                'is %.0f%% further than for a typical manifold point -- the '
-                                'solution is near the EDGE of the map and sigma is inflated to '
-                                'match.', info['support_ratio'],
-                                100 * (info['support_ratio'] - 1.0))
+                    log.info('   support x%.2f (sigma inflation x%.2f): the nearest map '
+                             'evidence at this correction is %.0f%% further than for a typical '
+                             'manifold row at the same depth. Logged for analysis -- the '
+                             '2026-08-12 validation found this signal INVERTED on probe runs '
+                             '(deep seated probes read as thin support), so it inflates '
+                             'nothing unless grid.support_inflation is raised.',
+                             info['support_ratio'], info['support_inflation'],
+                             100 * (info['support_ratio'] - 1.0))
                 log.info('   truth would be %s',
                          {d: round(v, 3) for d, v in truth_corr.items()})
             erra, erra_pos, erra_rot = _gt_error(T_true, T_believed)

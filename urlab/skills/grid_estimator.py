@@ -115,7 +115,14 @@ class GridManifoldEstimator(ManifoldEstimator):
         self.mode_threshold = float(g.get('mode_threshold', 1.1))
         self.posterior_temp = float(g.get('posterior_temp', 0.05))
         self.mode_min_weight = float(g.get('mode_min_weight', 0.02))
-        self.support_inflation = float(g.get('support_inflation', 1.0))
+        # DEFAULT 0.0 = REPORT-ONLY. The 2026-08-12 validation came back split: on the old-
+        # process eval runs thin support predicts failure (AUROC 0.56, ratio >= 2 -> 72% fail),
+        # but on the probe-app runs it is INVERTED (AUROC 0.38, ratio >= 2 -> 12% fail) even
+        # after depth-normalising the reference -- there, high ratio marks the deep, seated,
+        # HIGH-information probes. A multiplier that widens sigma on the best cases is worse
+        # than no multiplier, so the ratio is logged for analysis and inflates nothing unless
+        # this is explicitly raised.
+        self.support_inflation = float(g.get('support_inflation', 0.0))
         self.support_penalty = float(g.get('support_penalty', 0.0))
         # PEAK-MEMORY BOUND for the energy sweep. The neighbour gather is
         # (candidates x rows, k, 12) float64 -- with 1881 candidates, 300 rows and k=64 that is
@@ -143,9 +150,11 @@ class GridManifoldEstimator(ManifoldEstimator):
     def energy(self, vec6, w6):
         """Mean (info-weighted) soft-kNN residual at every grid candidate.
 
-        Returns (E, n_rows, S). S is the companion SUPPORT curve: the same weighted mean, but of
-        the distance to the k-th manifold neighbour rather than to the interpolated target. E
-        says how well the observations fit the map; S says how much map was there to fit."""
+        Returns (E, n_rows, S). S is the companion SUPPORT curve: the weighted mean of the
+        per-row support RATIO -- the k-th-neighbour distance over the map's own reference AT
+        THAT ROW'S DEPTH (support_ref_at). E says how well the observations fit the map; S says
+        how much map was there to fit, already normalised so 1 = typical, 2 = twice as far from
+        evidence as an in-distribution row at the same depth."""
         vec6 = np.asarray(vec6, dtype=float)
         if len(vec6) < max(self.min_observations, 1):
             return None, len(vec6), None
@@ -171,7 +180,10 @@ class GridManifoldEstimator(ManifoldEstimator):
             else:
                 d1 = dist[:, 0]
             E[lo:hi] = d1.reshape(hi - lo, n_r) @ rw
-            S[lo:hi] = dist[:, -1].reshape(hi - lo, n_r) @ rw
+            # per-row RATIO against the reference at that row's depth (pts[:, 0] is x in mm) --
+            # a global reference confounds support with depth (see support_ref_at).
+            sup_row = dist[:, -1] / self.support_ref_at(pts[:, 0])
+            S[lo:hi] = sup_row.reshape(hi - lo, n_r) @ rw
         return E, n_r, S
 
     # ------------------------------------------------------------------ uncertainty
@@ -265,9 +277,11 @@ class GridManifoldEstimator(ManifoldEstimator):
         sup = None if support is None else np.asarray(support, dtype=float).ravel()
         if sup is not None and self.support_penalty > 0:
             # Penalise candidates whose nearest evidence is further away than the map's own
-            # spacing. This does not merely flag the edge of the manifold, it stops the argmin
-            # sliding out there -- so it is OFF by default and must be opted into.
-            E = E + self.support_penalty * np.maximum(sup - self.support_ref, 0.0)
+            # spacing at that depth (sup is a RATIO; support_ref converts the excess back to
+            # mm-eq so the penalty knob stays in energy units). This does not merely flag the
+            # edge of the manifold, it stops the argmin sliding out there -- so it is OFF by
+            # default and must be opted into.
+            E = E + self.support_penalty * self.support_ref * np.maximum(sup - 1.0, 0.0)
         k = int(np.argmin(E))
         theta = self.grid6[k]
         Emin = float(E[k])
@@ -277,10 +291,8 @@ class GridManifoldEstimator(ManifoldEstimator):
         mix = from_energy(self.grid6[:, self.idx], E, self.grid_shape, temp=self.posterior_temp,
                           min_weight=self.mode_min_weight, dims=self.estimate_dims)
 
-        # SUPPORT at the chosen correction, relative to the map's own k-th-neighbour distance.
-        ratio = 1.0
-        if sup is not None:
-            ratio = float(sup[k] / self.support_ref)
+        # SUPPORT at the chosen correction -- already a depth-normalised ratio from energy().
+        ratio = 1.0 if sup is None else float(sup[k])
         infl = float(max(ratio, 1.0) ** self.support_inflation)
 
         # THE HEADLINE COVARIANCE = the curvature width PLUS the between-mode spread, inflated

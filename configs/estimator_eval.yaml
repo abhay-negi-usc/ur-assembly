@@ -97,6 +97,16 @@ eval:
     # ceilings; keep this below the ZERO-offset one, or relax seat_margin_mm to raise it
     # (margin 6.0 -> 84% at zero offset, margin 10.0 -> 96%).
     p_seat_threshold: 0.80
+    # MODE RANKING at commitment. 'energy' = apply the multi-start aggregator's estimate
+    # untouched (the original behaviour). 'p_seat' = candidates are that estimate PLUS every
+    # mode centre of the mixture over the ICP finals, and the one whose application maximises
+    # E_p[P(seat)] over the dense-landscape posterior is committed instead. Motivation
+    # (2026-08-12 validation): the truth sat in a NON-dominant mode in 70% of these eval
+    # attempts -- depth/consensus misranks rivals, but P(seat) is the quantity the gate acts
+    # on anyway. trials.csv logs ranked_mode (-1 = aggregator kept) and p_seat_unranked next
+    # to p_seat, so the re-ranking's win-rate is measurable offline. icp_residual/icp_inliers
+    # keep describing the aggregator's own solution either way.
+    mode_ranking: p_seat
     seat_margin_mm: 4.0          # seated := reached within this of the reference depth
     # WHICH depth counts as fully inserted: 'max' is the literal deepest manifold row, a NUMBER
     # is that percentile of the per-trial maxima. MEASURED on the 2026-08 hose map: 'max' sets
@@ -189,13 +199,13 @@ estimation:
   scaling_constant_unit_torque_to_mm: 0.0
   min_force_n: 0.0
   min_observations: 20
-  estimate_dims: [z_mm, pitch_deg]
+  estimate_dims: [pitch_deg]
   icp_iterations: 20
   num_initial_guesses: 1000
   init_guess_range:
     x_mm: 0.0
     y_mm: 0.0
-    z_mm: 3.0
+    z_mm: 0.0
     roll_deg: 0.0
     pitch_deg: 10.0
     yaw_deg: 0.0

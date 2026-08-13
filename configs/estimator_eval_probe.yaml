@@ -70,6 +70,17 @@ eval:
     # best-offset and zero-offset ceilings; keep this under the zero-offset one, or raise
     # seat_margin_mm (6.0 -> 84% at zero offset, 10.0 -> 96%).
     p_seat_threshold: 0.80
+    # MODE RANKING at commitment. 'energy' = commit the fused landscape's argmin (the
+    # original behaviour). 'p_seat' = candidates are the argmin PLUS every mixture mode's
+    # centre, and the one whose application maximises E_p[P(seat)] over the posterior is
+    # committed. Motivation (2026-08-12 validation on real runs): when rival basins differ by
+    # a few percent in energy the depth ordering is noise -- the truth sat in a NON-dominant
+    # mode in 54% of fused probe cases -- but the candidates differ a lot in what committing
+    # to them does to P(seat), which is the quantity this gate acts on anyway. The gate and
+    # the commitment use the SAME ranking, so the gate can never open on a correction that
+    # would not actually be applied. trials.csv logs ranked_mode (-1 = argmin kept) and
+    # p_seat_argmin next to p_seat, so the offline win-rate of the re-ranking is measurable.
+    mode_ranking: p_seat
     seat_margin_mm: 4.0          # seated := reached within this of the reference depth
     # 'max' = the literal deepest manifold row, a NUMBER = that percentile of the per-trial
     # maxima. MEASURED on the 2026-08 hose map: 'max' puts the threshold at +24.9 mm (a
@@ -224,15 +235,18 @@ estimation:
 
     # ---- SUPPORT-aware uncertainty ----------------------------------------------------------
     # The residual says how WELL the observations fit the map; it says nothing about whether the
-    # map HAS anything there. Off the edge of the manifold the soft-kNN target is extrapolated
-    # from far-away points, the residual still looks fine, and the solver happily parks there --
-    # then the next observations are collected even further out of distribution. support_ratio =
-    # (distance to the k-th manifold neighbour at the chosen correction) / (the map's own median
-    # k-th-neighbour distance): 1 = as well surrounded as a typical map point, 2 = the nearest
-    # evidence is twice as far as normal.
-    support_inflation: 1.0       # sigma *= max(1, support_ratio)^this. 0 = report it only.
+    # map HAS anything there. support_ratio = (distance to the k-th manifold neighbour at the
+    # chosen correction) / (the map's k-th-neighbour distance AT THE SAME DEPTH): 1 = as well
+    # surrounded as a typical map row, 2 = the nearest evidence is twice as far as normal.
+    # REPORT-ONLY BY DEFAULT. 2026-08-12 validation on real runs came back SPLIT: on the
+    # old-process eval attempts thin support predicts failure (AUROC 0.56, ratio >= 2 -> 72%
+    # fail), but on THIS app's probe runs the signal is INVERTED (AUROC 0.38, ratio >= 2 ->
+    # 12% fail, 0.72 mm-eq median error) even with the depth-conditional reference -- there,
+    # high ratio marks the deep, seated, information-rich probes. A multiplier would widen
+    # sigma on the best cases, so the ratio lands in trials.csv and inflates nothing.
+    support_inflation: 0.0       # sigma *= max(1, support_ratio)^this. 0 = report only.
     # OPTIONAL and OFF by default: this one MOVES the answer rather than just flagging it, by
-    # adding <this> mm-eq of energy per mm-eq of missing support. Raise only with evidence.
+    # adding <this> mm-eq of energy per unit of missing support ratio. Raise only with evidence.
     support_penalty: 0.0
 
 # ===================================================================================================

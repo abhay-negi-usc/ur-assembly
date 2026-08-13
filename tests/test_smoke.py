@@ -1242,15 +1242,21 @@ def test_probe_app_targets_rival_modes_and_flags_thin_support():
         the robot would drive if the mode were true. Getting the inverse backwards would probe
         the mirror image of the hypothesis, which is why it is asserted here rather than eyeballed.
     (2) SUPPORT. Observations taken far off the manifold must read as thin support -- that is the
-        drift-out-of-distribution failure, and the residual alone cannot see it."""
+        drift-out-of-distribution failure, and the residual alone cannot see it.
+    (3) MODE RANKING (seat_gate.mode_ranking: p_seat). Committing the deepest minimum is wrong
+        whenever a rival mode does more for P(seat) -- the 2026-08-12 validation put the truth
+        in a NON-dominant mode in 54% of fused probe cases -- so _rank_modes must pick the
+        P(seat)-argmax among {argmin} + mode centres, and must reduce to the argmin under
+        'energy' ranking or a unimodal mixture."""
     import csv as _csv
     import shutil
     import tempfile
 
-    from urlab.apps.estimator_eval_probe import _mode_bias
+    from urlab.apps.estimator_eval_probe import _mode_bias, _rank_modes
     from urlab.skills.grid_estimator import GridManifoldEstimator
     from urlab.skills.manifold import (FORCE_COLS, POSE_COLS, TORQUE_COLS, mats_from_vec6,
                                        vec6_from_mats)
+    from urlab.skills.mixture import Component, Mixture
 
     dims, idx = ['z_mm', 'pitch_deg'], [2, 4]
     # (1) the bias must be the INVERSE of the mode's correction, and clamped per dim.
@@ -1281,8 +1287,10 @@ def test_probe_app_targets_rival_modes_and_flags_thin_support():
             'manifold_csv': path, 'estimate_dims': ['pitch_deg'], 'min_observations': 5,
             'scaling_constant_unit_force_to_mm': 1.5, 'scaling_constant_unit_torque_to_mm': 0.0,
             'wrench_representation': 'rawcap', 'min_force_n': 1.0, 'interp_neighbors': 8,
+            # support_inflation is 0 (report-only) by default after the 2026-08-12 validation;
+            # the MECHANISM is what this test checks, so it turns the multiplier on.
             'grid': {'range': {'pitch_deg': 6.0}, 'step': {'pitch_deg': 0.5},
-                     'curvature_probe_deg': 3.0}})
+                     'curvature_probe_deg': 3.0, 'support_inflation': 1.0}})
         assert est.support_ref > 0
 
         def obs_at(true_pitch, err_pitch):
@@ -1308,6 +1316,43 @@ def test_probe_app_targets_rival_modes_and_flags_thin_support():
         assert info_out['support_inflation'] > 1.0
         assert set(info_in) >= {'mixture', 'ambiguity', 'between_frac', 'separation',
                                 'sigma_within', 'cov_mixture'}
+
+        # (3) MODE RANKING. The case re-ranking exists for: an ASYMMETRIC basin (seats for
+        # remaining pitch error in [-2, +12] -- generous one way, unforgiving the other).
+        # Committing the shallower +4 mode is then safe under BOTH hypotheses (remaining error
+        # 0 or +10, both inside), while the deeper -6 argmin fails if the rival was true
+        # (remaining error -10). Depth says -6; the decision quantity says +4.
+        class FakeBasin:
+            def offset_of_error(self, err6):
+                return np.atleast_2d(np.asarray(err6, dtype=float))[:, [4]]
+
+            def p_seat_posterior(self, offsets, weights):
+                w = np.asarray(weights, dtype=float)
+                o = np.asarray(offsets, dtype=float)[:, 0]
+                p = ((o >= -2.0) & (o <= 12.0)).astype(float)
+                return float((p * (w / w.sum())).sum())
+
+        # energy: deepest at -6 deg (the decoy), a shallower rival at +4 (the truth)
+        ax_p = est.grid_axes[0]
+        E_rank = np.minimum(0.05 * (ax_p + 6.0) ** 2 + 1.0, 0.05 * (ax_p - 4.0) ** 2 + 1.02)
+        k0 = int(np.argmin(E_rank))
+        info_rank = {
+            'theta_corr': {'pitch_deg': float(ax_p[k0])}, 'energy': E_rank,
+            'mixture': Mixture([Component(0.6, np.array([-6.0]), np.eye(1) * 0.25),
+                                Component(0.4, np.array([+4.0]), np.eye(1) * 0.25)],
+                               ['pitch_deg'])}
+        fb = FakeBasin()
+        th_e, ps_e, m_e = _rank_modes(fb, est, info_rank, 0.05, 'energy')
+        assert m_e == -1 and th_e == info_rank['theta_corr'], 'energy ranking must keep argmin'
+        th_p, ps_p, m_p = _rank_modes(fb, est, info_rank, 0.05, 'p_seat')
+        assert m_p == 1 and abs(th_p['pitch_deg'] - 4.0) < 1e-9, \
+            f'p_seat ranking must pick the rival mode the basin prefers: {th_p}, mode {m_p}'
+        assert ps_p > ps_e, (ps_p, ps_e)
+        # ... and reduce to the argmin when the mixture is unimodal
+        uni = dict(info_rank, mixture=Mixture([Component(1.0, np.array([-6.0]),
+                                                         np.eye(1) * 0.25)], ['pitch_deg']))
+        _, _, m_u = _rank_modes(fb, est, uni, 0.05, 'p_seat')
+        assert m_u == -1
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

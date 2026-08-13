@@ -15,15 +15,28 @@ The 2026-08 hose campaign's recommendations, made testable on hardware. Per tria
         * a deliberate per-probe BIAS, alternating +/- probe.alternate_pitch_deg (plus an
           optional z jog): probes at different biases break aliases. On hard cases 3 alternating
           probes cut the 75th-percentile error from 11.08 to 1.63 deg.
+        * MODE-DIRECTED probing (probe.mode_directed) once the fused evidence goes multi-modal:
+          instead of the fixed +/- schedule, the next probe COMMANDS ONE OF THE RIVAL MODES --
+          bias = inverse(that mode's correction), which is exactly the path the robot would drive
+          if that mode were true. If it is, the probe inserts deep and logs the high-information
+          rows near the socket mouth; if it is not, it stops shallow. Either way the two
+          hypotheses stop predicting the same thing, which is the only way a BETWEEN-mode spread
+          ever shrinks -- more probes of the same kind cannot do it. Modes are taken in turn.
         * the BELIEF IS NOT UPDATED between probes. With belief error E and bias B the logged
           rows are the biased path and the correction that realigns them is inverse(E)
           REGARDLESS of B -- so every probe measures the same correction and their energies
-          simply ADD (skills/grid_estimator.py fuses them).
+          simply ADD (skills/grid_estimator.py fuses them). This is what makes a mode-directed
+          bias safe: commanding a WRONG mode costs a probe, never the belief.
 
     ESTIMATE -- exhaustive grid over the fused energy (no multi-start, no aggregator choice),
-        rows weighted by informativeness-vs-depth; uncertainty = curvature at the minimum
-        (2 extra evaluations, AUROC 0.89-0.91) + a multi-modality FLAG (multi-modal solutions
-        fail 44% of the time vs 6%). ONE correction is applied.
+        rows weighted by informativeness-vs-depth. Uncertainty is a MIXTURE over the landscape's
+        modes, not one Gaussian: WITHIN-mode width (how sharply the data pins one hypothesis,
+        which more probing shrinks) is reported separately from BETWEEN-mode spread (how much
+        posterior mass sits on rivals, which only a discriminating probe shrinks), and both are
+        inflated by the SUPPORT ratio -- how far the k-th manifold neighbour is at the chosen
+        correction, relative to the map's own spacing, so a solution that drifted off the edge of
+        the map reports the low confidence it deserves instead of a flattering residual. ONE
+        correction is applied.
 
     INSERTION PHASE -- one guarded insertion from the corrected belief along the NOMINAL path
         with the PRODUCTION stiffness (insertion.stiffness) and settle: does the corrected
@@ -69,11 +82,17 @@ def _fieldnames(dims, n_probes):
     for k in range(1, n_probes + 1):
         cols += [f'probe{k}_bias_pitch_deg', f'probe{k}_bias_z_mm', f'probe{k}_n_obs',
                  f'probe{k}_seated', f'probe{k}_settled_rows', f'probe{k}_max_force_n',
-                 f'probe{k}_residual', f'probe{k}_p_seat']
+                 f'probe{k}_residual', f'probe{k}_p_seat', f'probe{k}_mode_directed',
+                 f'probe{k}_modes', f'probe{k}_ambiguity', f'probe{k}_separation']
     cols += [f'corr_{d}' for d in dims]
     cols += ['fused_residual', 'uncertainty', 'modes', 'multimodal', 'width_frac']
+    # MIXTURE + SUPPORT diagnostics: n_mixture_modes/ambiguity/between_frac/separation say how
+    # much of the spread is rival hypotheses rather than measurement width, and support_ratio
+    # says whether the answer came from a well-populated part of the map or its edge.
+    cols += ['n_mixture_modes', 'ambiguity', 'between_frac', 'separation', 'support_ratio']
     cols += [f'unc_{d}' for d in dims]             # 1/curvature -- the ranking metric
     cols += [f'sigma_{d}' for d in dims]           # marginal width, mm / deg -- plottable
+    cols += [f'sigma_within_{d}' for d in dims]    # the same, WITHIN the dominant mode only
     cols += [f'cov_{a}{b}' for a in range(len(dims)) for b in range(a, len(dims))]
     cols += [f'err_after_{s}' for s in _ERR] + ['err_after_pos_mm', 'err_after_rot_deg']
     cols += ['converged', 'p_seat', 'gate_opened', 'insert_seated', 'insert_success',
@@ -136,6 +155,13 @@ def _plot_trial(path, est, fused, dims, truth_corr, hist, status=None, live_path
             e_app = as_err([est_corr[d] for d in dims])[0]
             past = np.array([[h['err_dims'][d] for d in dims] for h in hist[:-1]
                              if h.get('err_dims')], dtype=float)
+            # The mixture's RIVAL MODES in the same error frame: a wide sigma with the modes far
+            # apart is ambiguity (probe differently -- the mode-directed bias), a wide sigma with
+            # one mode is imprecision (probe more of the same).
+            mix = (info or {}).get('mixture')
+            e_modes = (as_err([c.mean for c in mix.components])
+                       if mix is not None and mix.n_modes > 1 else None)
+            w_modes = [c.weight for c in mix.components] if e_modes is not None else []
             if len(dims) == 1:
                 o = np.argsort(gerr[:, 0])
                 axL.plot(gerr[o, 0], np.asarray(fused).ravel()[o], color='#4C72B0', lw=1.6)
@@ -150,6 +176,12 @@ def _plot_trial(path, est, fused, dims, truth_corr, hist, status=None, live_path
                     y = float(np.min(fused)) + 0.03 * float(np.ptp(fused))
                     axL.plot(past[:, 0], np.full(len(past), y), '.', color='#7fb3ff', ms=6,
                              alpha=0.8, label='earlier trials')
+                if e_modes is not None:
+                    for m, (em, wm) in enumerate(zip(e_modes, w_modes)):
+                        axL.axvline(em[0], color='#e377c2', lw=1.0 + 2.0 * wm, alpha=0.8,
+                                    label='rival modes' if m == 0 else None)
+                        axL.annotate(f'{wm:.0%}', (em[0], float(np.max(fused))), fontsize=7,
+                                     color='#e377c2', ha='center', va='top')
                 axL.set_xlabel(f'{dims[0]} ERROR remaining [{unit[0]}]   (0 = truth)')
                 axL.set_ylabel('fused energy [mm-eq]')
             else:
@@ -180,6 +212,12 @@ def _plot_trial(path, est, fused, dims, truth_corr, hist, status=None, live_path
                                      lw=1.0, ls='--', alpha=0.85, zorder=5)
                     except np.linalg.LinAlgError:
                         pass
+                if e_modes is not None and e_modes.shape[1] >= 2:
+                    for m, (em, wm) in enumerate(zip(e_modes, w_modes)):
+                        axL.plot([em[1]], [em[0]], 'D', ms=4 + 8 * wm, mfc='none', mec='#e377c2',
+                                 mew=1.6, zorder=6, label='rival modes' if m == 0 else None)
+                        axL.annotate(f'{wm:.0%}', (em[1], em[0]), textcoords='offset points',
+                                     xytext=(6, -9), fontsize=7, color='#e377c2')
                 axL.plot([e_app[1]], [e_app[0]], 'o', ms=8, mfc='#DD8452', mec='white',
                          zorder=6, label='estimate')
                 axL.axhline(0.0, ls=':', lw=0.9, color='#ffffff', alpha=0.6)
@@ -198,7 +236,13 @@ def _plot_trial(path, est, fused, dims, truth_corr, hist, status=None, live_path
             axL.legend(fontsize=7, loc='best')
         else:
             axL.text(0.5, 0.5, 'no fused energy', ha='center', va='center')
-        axL.set_title('fused probe energy, ERROR frame (truth = origin)', fontsize=10)
+        ttlL = 'fused probe energy, ERROR frame (truth = origin)'
+        mixt = (info or {}).get('mixture')
+        if mixt is not None and mixt.n_modes > 1:
+            ttlL += (f'\n{mixt.n_modes} modes: {mixt.ambiguity:.0%} of the mass off the leader, '
+                     f'separation {mixt.separation:.1f}, {mixt.between_frac:.0%} of the spread '
+                     'is ambiguity')
+        axL.set_title(ttlL, fontsize=10)
 
         # ---- RIGHT TOP: estimated vs true correction, with sigma bars ---------------------
         d0 = dims[0]
@@ -279,6 +323,24 @@ def _plot_trial(path, est, fused, dims, truth_corr, hist, status=None, live_path
         plt.close(fig)
     except Exception as exc:                       # noqa: BLE001 -- plotting is never fatal
         log.warning('trial plot skipped (%s)', exc)
+
+
+def _mode_bias(mode_mean, dims, idx, limits):
+    """The probe bias that DRIVES the path as though `mode_mean` were the right correction.
+
+    Applying correction C to the belief turns the reference into T @ r @ inv(T_bel @ C) =
+    T @ r @ inv(C) @ inv(T_bel); the bias mechanism produces T @ (r @ B) @ inv(T_bel). So
+    B = inverse(C) commands exactly the path that hypothesis predicts, WITHOUT touching the
+    belief -- betting on a mode costs a probe, never the estimate. Clamped per dim so a mode
+    parked at the edge of the grid cannot command a large excursion. Returns the 6-vector the
+    trajectory noiser wants: [x, y, z in METRES, roll, pitch, yaw in deg]."""
+    lim_mm, lim_deg = float(limits[0]), float(limits[1])
+    c6 = np.zeros(6)
+    for d, j, v in zip(dims, idx, np.asarray(mode_mean, dtype=float).ravel()):
+        c6[j] = float(np.clip(v, -(lim_deg if d.endswith('_deg') else lim_mm),
+                              lim_deg if d.endswith('_deg') else lim_mm))
+    b6 = vec6_from_mats(inverse(mats_from_vec6(c6)))
+    return [b6[0] / 1000.0, b6[1] / 1000.0, b6[2] / 1000.0, b6[3], b6[4], b6[5]]
 
 
 def _p_seat_of(basin, estimator, fused, theta_applied, temp):
@@ -432,6 +494,14 @@ def build_and_run(cfg, robot, camera, args):
     n_probes = max(1, int(pb.get('attempts', 3)))
     alt_pitch = float(pb.get('alternate_pitch_deg', 5.0))
     z_jog_mm = float(pb.get('alternate_z_mm', 0.0))
+    # MODE-DIRECTED probing: once the fused evidence holds two well-separated hypotheses, the
+    # fixed +/- schedule is the wrong action -- it gathers more of the same evidence, and a
+    # BETWEEN-mode spread does not shrink with more of the same evidence. Commanding one rival
+    # mode's own correction as the bias makes the two predict different outcomes.
+    mode_directed = bool(pb.get('mode_directed', True))
+    mode_min_sep = float(pb.get('mode_min_separation', 2.0))
+    mode_min_amb = float(pb.get('mode_min_ambiguity', 0.15))
+    mode_lim = [float(v) for v in (pb.get('mode_bias_limit') or [5.0, 10.0])]
     probe_settle_s = float(pb.get('settle_s', 2.0))
     if probe_settle_s < 1.0:
         log.warning('probe.settle_s = %.2f s is SHORT: this arm needs ~1.2 s of rest to reach '
@@ -489,6 +559,11 @@ def build_and_run(cfg, robot, camera, args):
              comp_probe.get('stiffness'), probe_settle_s,
              float(guard_probe.max_force_n) if hasattr(guard_probe, 'max_force_n')
              else float('nan'), alt_pitch, z_jog_mm)
+    if mode_directed:
+        log.info('   MODE-DIRECTED probing ON: once the fused evidence shows rival modes '
+                 '(separation >= %.1f and >= %.0f%% of the mass off the leader), the next probe '
+                 'COMMANDS one of them, limited to %s [mm, deg].',
+                 mode_min_sep, 100 * mode_min_amb, mode_lim)
     log.info('INSERT phase: stiffness %s, settle %.2f s.', comp_ins.get('stiffness'),
              ins_settle_s)
 
@@ -596,14 +671,30 @@ def build_and_run(cfg, robot, camera, args):
 
             # ---------------- PROBE PHASE (belief held FIXED throughout) ----------------
             fused = None
+            sup_sum = None
+            n_probes_used = 0
             n_obs_total = 0
             abandoned = False
             gate_open = False
             p_seat = float('nan')
+            mix = None                             # the fused mixture after the previous probe
+            mode_turn = 0
             for k in range(1, n_probes + 1):
                 sign = 1.0 if k % 2 else -1.0
-                bias = [0.0, 0.0, sign * z_jog_mm / 1000.0, 0.0, sign * alt_pitch, 0.0] \
-                    if (alt_pitch or z_jog_mm) else None
+                # MODE-DIRECTED bias, but only when the rivals are real: a `separation` under ~2
+                # means one blurred basin the fixed schedule handles fine, and a tiny `ambiguity`
+                # means the runner-up holds no mass worth spending a probe on.
+                directed = None
+                if (mode_directed and mix is not None and mix.n_modes > 1
+                        and mix.separation >= mode_min_sep and mix.ambiguity >= mode_min_amb):
+                    directed = mix.components[mode_turn % mix.n_modes]
+                    mode_turn += 1
+                if directed is not None:
+                    bias = _mode_bias(directed.mean, dims, estimator.idx, mode_lim)
+                elif alt_pitch or z_jog_mm:
+                    bias = [0.0, 0.0, sign * z_jog_mm / 1000.0, 0.0, sign * alt_pitch, 0.0]
+                else:
+                    bias = None
                 # The deliberate bias AND the per-waypoint jitter, redrawn for every probe (the
                 # jitter is what gets the peg past the rim -- see the note where it is read).
                 if tn_on or bias:
@@ -625,8 +716,9 @@ def build_and_run(cfg, robot, camera, args):
                 if save_obs:
                     _save_observations(os.path.join(
                         out_dir, f'trial_{trial:03d}_probe_{k:02d}_observations.csv'), obs)
-                row[f'probe{k}_bias_pitch_deg'] = sign * alt_pitch
-                row[f'probe{k}_bias_z_mm'] = sign * z_jog_mm
+                row[f'probe{k}_bias_pitch_deg'] = float(bias[4]) if bias else 0.0
+                row[f'probe{k}_bias_z_mm'] = float(bias[2]) * 1000.0 if bias else 0.0
+                row[f'probe{k}_mode_directed'] = directed is not None
                 row[f'probe{k}_n_obs'] = len(obs)
                 row[f'probe{k}_seated'] = seated
                 row[f'probe{k}_settled_rows'] = settled
@@ -640,25 +732,46 @@ def build_and_run(cfg, robot, camera, args):
                     continue
                 vec6, w6 = estimator.prepare_observations(
                     obs_arr[:, :6], obs_arr[:, 6:9], obs_arr[:, 9:12])
-                E, n = estimator.energy(vec6, w6)
+                E, n, S = estimator.energy(vec6, w6)
                 if E is None:
                     log.warning('  probe %d: %d rows after filtering, skipped.', k, n)
                     continue
                 n_obs_total += n
+                n_probes_used += 1
                 fused = E if fused is None else fused + E
-                _, pinfo = estimator.solve(E, n)
+                # SUPPORT accumulates as a MEAN, not a sum: it is a property of the map (how much
+                # evidence exists near a candidate), not evidence that piles up with more probes.
+                sup_sum = S if sup_sum is None else sup_sum + S
+                _, pinfo = estimator.solve(E, n, S)
                 row[f'probe{k}_residual'] = pinfo['final_residual']
-                log.info('  probe %d (bias pitch %+.1f deg): %d obs (%d settled), '
-                         'max |f| %.1f N, this-probe corr %s', k, sign * alt_pitch, n, settled,
+                log.info('  probe %d (bias pitch %+.1f deg, z %+.1f mm%s): %d obs (%d settled), '
+                         'max |f| %.1f N, this-probe corr %s', k,
+                         float(bias[4]) if bias else 0.0,
+                         float(bias[2]) * 1000.0 if bias else 0.0,
+                         ' -- MODE-DIRECTED' if directed is not None else '', n, settled,
                          fmax, {d: round(v, 2) for d, v in pinfo['theta_corr'].items()})
+                # Re-solve the FUSED evidence: this drives BOTH the P(seat) gate below and the
+                # next probe's action, since the mixture is what says whether more of the same
+                # probe can help or a discriminating one is needed.
+                _, finfo = estimator.solve(fused, n_obs_total, sup_sum / n_probes_used)
+                mix = finfo.get('mixture')
+                row[f'probe{k}_modes'] = finfo['n_mixture_modes']
+                row[f'probe{k}_ambiguity'] = finfo['ambiguity']
+                row[f'probe{k}_separation'] = finfo['separation']
+                if finfo['n_mixture_modes'] > 1:
+                    log.info('     fused evidence holds %d modes: %s | ambiguity %.0f%%, '
+                             'separation %.1f, support x%.2f', finfo['n_mixture_modes'],
+                             ' vs '.join('(' + ', '.join(f'{v:+.1f}' for v in c.mean)
+                                         + f') w={c.weight:.2f}' for c in mix.components[:3]),
+                             100 * finfo['ambiguity'], finfo['separation'],
+                             finfo['support_ratio'])
                 # P(SEAT) GATE on the FUSED evidence so far: stop probing the moment the belief
                 # is good enough to commit. Probing past that point costs cycle time and, worse,
                 # risks a bad probe degrading a belief that was already good enough.
                 if basin is not None:
-                    _, finfo = estimator.solve(fused, n_obs_total)
                     try:
-                        p_seat = _p_seat_of(basin, estimator, fused, finfo['theta_corr'],
-                                            seat_temp)
+                        p_seat = _p_seat_of(basin, estimator, finfo['energy'],
+                                            finfo['theta_corr'], seat_temp)
                     except Exception as exc:       # noqa: BLE001
                         log.warning('P(seat) skipped (%s)', exc)
                         p_seat = float('nan')
@@ -686,26 +799,47 @@ def build_and_run(cfg, robot, camera, args):
             if fused is None:
                 log.error('trial %d: no usable probe observations -- belief unchanged.', trial)
             else:
-                T_corr_mm, info = estimator.solve(fused, n_obs_total)
+                T_corr_mm, info = estimator.solve(fused, n_obs_total,
+                                                  sup_sum / max(n_probes_used, 1))
                 T_believed = T_believed @ _corr_to_m(T_corr_mm)
                 row.update({f'corr_{d}': v for d, v in info['theta_corr'].items()})
                 row.update({'fused_residual': info['final_residual'],
                             'uncertainty': info['uncertainty'], 'modes': info['modes'],
                             'multimodal': info['multimodal'],
-                            'width_frac': info['width_frac']})
+                            'width_frac': info['width_frac'],
+                            'n_mixture_modes': info['n_mixture_modes'],
+                            'ambiguity': info['ambiguity'],
+                            'between_frac': info['between_frac'],
+                            'separation': info['separation'],
+                            'support_ratio': info['support_ratio']})
                 row.update({f'unc_{d}': v for d, v in info['curvature_uncertainty'].items()})
                 row.update({f'sigma_{d}': v for d, v in info['sigma'].items()})
+                row.update({f'sigma_within_{d}': v for d, v in info['sigma_within'].items()})
                 rec.update({'corr': info['theta_corr'], 'sigma': info['sigma'],
-                            'cov': np.asarray(info['covariance']).tolist(),
-                            'multimodal': info['multimodal']})
-                row.update({f'cov_{a}{b}': float(info['covariance'][a][b])
+                            'cov': np.asarray(info['cov_mixture']).tolist(),
+                            'multimodal': info['multimodal'],
+                            'mixture': info.get('mixture')})
+                row.update({f'cov_{a}{b}': float(info['cov_mixture'][a][b])
                             for a in range(len(dims)) for b in range(a, len(dims))})
-                log.info('FUSED estimate over %d probes: %s | sigma %s | residual %.3f  '
-                         'modes %d%s', n_probes,
+                log.info('FUSED estimate over %d probes: %s | sigma %s (within %s) | '
+                         'residual %.3f  modes %d%s', n_probes_used,
                          {d: round(v, 3) for d, v in info['theta_corr'].items()},
                          {d: round(v, 2) for d, v in info['sigma'].items()},
+                         {d: round(v, 2) for d, v in info['sigma_within'].items()},
                          info['final_residual'], info['modes'],
                          '  *** MULTI-MODAL: treat as suspect ***' if info['multimodal'] else '')
+                if info['n_mixture_modes'] > 1:
+                    log.info('   %d modes, %.0f%% of the mass off the leader, separation %.1f, '
+                             '%.0f%% of the spread is AMBIGUITY (not measurement width) -- more '
+                             'of the same probe cannot shrink that part.',
+                             info['n_mixture_modes'], 100 * info['ambiguity'],
+                             info['separation'], 100 * info['between_frac'])
+                if info['support_ratio'] > 1.5:
+                    log.warning('   SUPPORT x%.2f: the nearest map evidence at this correction '
+                                'is %.0f%% further than for a typical manifold point -- the '
+                                'solution is near the EDGE of the map and sigma is inflated to '
+                                'match.', info['support_ratio'],
+                                100 * (info['support_ratio'] - 1.0))
                 log.info('   truth would be %s',
                          {d: round(v, 3) for d, v in truth_corr.items()})
             erra, erra_pos, erra_rot = _gt_error(T_true, T_believed)

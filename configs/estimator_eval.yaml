@@ -143,7 +143,7 @@ eval:
     # PER-DIMENSION per-waypoint std [x, y, z (m), roll, pitch, yaw (deg)], applied after
     # smoothing; a zero entry leaves that DOF unperturbed. (Legacy scalar keys translation_m /
     # rotation_deg still work when 'std' is absent.)
-    std: [0.000, 0.000, 0.010, 0.0, 3.0, 0.0]
+    std: [0.000, 0.000, 0.005, 0.0, 5.0, 0.0]
     smooth_window: 10            # moving-average window (waypoints) -- keeps the reference smooth
     noise_decay_attempt: 0.1     # fraction to shrink the WHOLE perturbation by each attempt:
                                  # attempt k is scaled (1 - f)^(k-1)
@@ -175,14 +175,23 @@ estimation:
   # wrench_representation unit, s_force 3.0, s_torque 1.0.
   manifold_csv: ./configs/data/hose_manifold.csv
   wrench_representation: rawcap
+  # rawcap SATURATION: the wrench feature is unit(f) x min(|f| / rawcap_force_ref_n,
+  # rawcap_cap) -- magnitude in units of the reference, CAPPED at rawcap_cap. Saturation
+  # therefore sits at ref x cap: 10 N x 3.0 = 30 N force, 1 Nm x 3.0 = 3 Nm torque. Above
+  # that, harder pressing adds nothing to the feature (by design -- extreme forces are the
+  # least reproducible part of the signal). These are the code defaults, spelled out so the
+  # threshold is visible and tunable here rather than buried in skills/manifold.py.
+  rawcap_force_ref_n: 10.0
+  rawcap_torque_ref_nm: 1.0
+  rawcap_cap: 3.0
   scaling_constant_deg_to_mm: 1.0
   scaling_constant_unit_force_to_mm: 1.5
   scaling_constant_unit_torque_to_mm: 0.0
-  min_force_n: 3.0
+  min_force_n: 0.0
   min_observations: 20
   estimate_dims: [z_mm, pitch_deg]
   icp_iterations: 20
-  num_initial_guesses: 500
+  num_initial_guesses: 1000
   init_guess_range:
     x_mm: 0.0
     y_mm: 0.0
@@ -205,6 +214,23 @@ estimation:
   interp_neighbors: 16
   interp_softness: 1.0
   random_seed: 0
+
+  # ---- MIXTURE over the multi-start finals (skills/mixture.py) ------------------------------
+  # Raising num_initial_guesses helps ACCURACY -- the true basin actually gets found -- but it
+  # wrecks the usual uncertainty number: the std of the finals then measures the DISTANCE
+  # BETWEEN RIVAL MODES, so a run that found the right answer AND a decoy looks less certain
+  # than one whose starts all fell into a single wrong basin. The finals are therefore clustered
+  # (weighted mean-shift, no k to choose) and the spread split into WITHIN (the ICP's own
+  # repeatability) and BETWEEN (rival-mode ambiguity). trials.csv logs n_mixture_modes,
+  # ambiguity, between_frac and separation next to the ground-truth error, which is how these
+  # get validated. Purely observational -- the aggregator still picks the applied correction.
+  mode_bandwidth: 1.0            # mm-eq below which two finals are the SAME mode (~ransac_tol)
+  mode_min_weight: 0.02          # clusters under this posterior mass fold into their neighbours
+  # MODE SEEDING: random restarts rediscover the dominant basin easily and the runner-up only by
+  # luck, so the NEXT attempt gets this share of its guesses drawn tightly around the previous
+  # attempt's modes (re-expressed in the updated belief). 0 disables.
+  seed_frac: 0.5
+  seed_spread: 0.25              # draw std, as a fraction of init_guess_range per dim
 
   # ---- SOLUTION CHECK (urlab/skills/solution_check.py) -- OBSERVATIONAL trust scoring. ----
   # Same block as cable_pick_estimate_assemble_check: after every estimate, candidate
@@ -229,7 +255,7 @@ compliance:
   enabled: true
   tare_before: true
   mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
-  stiffness:     [1500.0, 1500.0, 250.0, 10.0, 10.0, 10.0]
+  stiffness:     [1500.0, 250.0, 250.0, 10.0, 10.0, 10.0]
   damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0
@@ -242,7 +268,7 @@ compliance:
 
 force_guard:
   enabled: true
-  max_force_n: 50.0
+  max_force_n: 30.0
   max_torque_nm: 8.0
 
 speed:

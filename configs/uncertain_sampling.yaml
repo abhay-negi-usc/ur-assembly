@@ -45,7 +45,7 @@ standoff_axis: [-1.0, 0.0, 0.0]   # assembly is a direct -X -> 0 insertion
 # RETRACT: after each trial, back straight out along the CONNECTOR's OWN -X by this distance, from
 # wherever the insert stopped -- so a perturbed (tilted) part retreats along its own axis, not the
 # target's. Speed comes from speed.retract_* below.
-retract_distance_m: 0.100
+retract_distance_m: 0.050
 
 # COMPLIANCE (software admittance): the arm FOLLOWS the assembly trajectory (position reference) and
 # YIELDS to contact via a virtual spring-mass-damper with finite restoring stiffness, springing back
@@ -54,7 +54,7 @@ retract_distance_m: 0.100
 # so changing the path length or the resample resolution does not change the speed.
 compliance:
   mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]              # virtual inertia [kg / kg*m^2]
-  stiffness:     [1500.0, 1500.0, 250.0, 10.0, 10.0, 10.0]     # restoring spring [N/m, Nm/rad] (10 N -> 20 mm)
+  stiffness:     [1500.0, 250.0, 250.0, 10.0, 10.0, 10.0]     # restoring spring [N/m, Nm/rad] (10 N -> 20 mm)
   damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]        # 1 = critically damped; 10 = heavily OVERdamped
   selected_axes: [1, 1, 1, 1, 1, 1]                          # which TOOL0 axes yield to contact
   reference_rate_hz: 125.0
@@ -122,7 +122,7 @@ speed:
   # CARTESIAN limits for the COMPLIANT reference. Each ramp segment gets the time its own geometry
   # needs, so neither limit is exceeded. Set any to 0 to disable that limit.
   # INSERT -- the contact phase.
-  max_cartesian_translation_mm_s: 20.0
+  max_cartesian_translation_mm_s: 50.0
   max_cartesian_rotation_deg_s: 50.0
   # RETRACT -- free-space escape back along a path just proven clear, so it need NOT crawl at the
   # insertion speed. Still compliant, so it yields if it does catch. Omit to reuse the insert limits.

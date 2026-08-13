@@ -334,6 +334,15 @@ estimation:
   # the wiggle-only map). Fall back to the classic setup with: wrench_representation: unit,
   # s_force 3.0, s_torque 1.0.
   wrench_representation: rawcap
+  # rawcap SATURATION: the wrench feature is unit(f) x min(|f| / rawcap_force_ref_n,
+  # rawcap_cap) -- magnitude in units of the reference, CAPPED at rawcap_cap. Saturation
+  # therefore sits at ref x cap: 10 N x 3.0 = 30 N force, 1 Nm x 3.0 = 3 Nm torque. Above
+  # that, harder pressing adds nothing to the feature (by design -- extreme forces are the
+  # least reproducible part of the signal). These are the code defaults, spelled out so the
+  # threshold is visible and tunable here rather than buried in skills/manifold.py.
+  rawcap_force_ref_n: 10.0
+  rawcap_torque_ref_nm: 1.0
+  rawcap_cap: 3.0
 
   # Optional override of the initial in-hand estimate (fingertip -> connector, m / rad).
   # Default (absent): the grasp geometry, <cable>.junction_in_fingertip from cables.yaml.

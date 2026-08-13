@@ -67,6 +67,11 @@ compliance:
 force_guard:
   max_force_n: 30.0
   max_torque_nm: 8.0
+  # The limit must hold CONTINUOUSLY this long before tripping (0 = instant). 10 ms rides out
+  # single-sample F/T spikes at the 125 Hz servo rate (~1-2 samples) without materially moving
+  # the stop point (~0.03 mm at 3.5 mm/s) -- so the map's stop depths stay comparable to runs
+  # collected with the instant guard.
+  persistence_s: 0.010
 
 sampling:
   num_trials: 1_000             # IGNORED when mode: grid (the grid derives the count)

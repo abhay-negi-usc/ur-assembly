@@ -1,0 +1,48 @@
+# ===================================================================================================
+# CALIBRATION CHECK -- repeated slow probes of the recorded target (urlab/apps/calibration_check.py).
+#
+# Answers, in ~two minutes: is the recorded mate still where the physical socket is, and how
+# repeatable is contact? Contact x should sit near the physical face-to-face offset with sub-mm
+# std and NO trend across cycles; a drift means the fixture, the grasp or the frame is moving.
+# The 2026-08 hose campaign lost a full estimator-eval session to exactly such a shift.
+#
+# The connector is RIGIDLY FIXTURED between the CLOSED gripper fingers; the gripper is never
+# constructed. NO estimation, NO belief updates -- pure geometry + force.
+# ===================================================================================================
+
+robot:
+  ip: 192.168.125.2
+  dry_run: false
+  payload:                       # same values as estimator_eval -- true EXTERNAL force readout
+    mass_kg: 1.3
+    cog_m: [-0.026, 0.028, 0.030]
+base_frame: base_link
+tip_frame: tool0
+
+# The held connector + its recorded mate (configs/frames.yaml: frames: AND targets: entries).
+held_frame: hose_connector_finger_holder
+
+cycles: 10                       # how many probe -> contact -> retract repetitions
+standoff_distance_m: 0.030       # backed off along the connector's own -X (free space)
+overshoot_m: 0.005               # command slightly PAST the recorded mate so contact is certain
+resolution_m: 0.001              # straight-line waypoint spacing
+
+speed:
+  approach_translation_mm_s: 2.0 # SLOW on purpose: gentle first contact, crisp trip point
+  retract_translation_mm_s: 20.0
+  max_joint_velocity_deg_s: 30.0 # free-space joint moves between cycles
+
+compliance:
+  enabled: true
+  tare_before: true
+  mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
+  stiffness:     [1500.0, 1500.0, 250.0, 10.0, 10.0, 10.0]
+  damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+  settle_s: 1.0                  # hold at the stop before reading the contact pose
+
+force_guard:
+  enabled: true
+  max_force_n: 15.0              # a probe should FEEL the face, not press it
+  max_torque_nm: 4.0
+  persistence_s: 0.0             # instant: the trip point IS the measurement here -- a
+                                 # debounce would smear the contact pose by the extra travel

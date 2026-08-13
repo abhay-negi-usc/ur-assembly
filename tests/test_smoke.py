@@ -1556,6 +1556,34 @@ def test_success_basin_labels_gates_and_signs():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_calibration_check_line_and_config():
+    """apps/calibration_check: the probe line must run from -standoff to +overshoot along the
+    connector's +X, monotone, at the requested resolution; and the shipped config must keep the
+    guard INSTANT (persistence smears the contact pose by the extra travel) and the approach
+    slow -- the trip point IS the measurement."""
+    import yaml
+
+    from urlab.apps.calibration_check import line_rows
+
+    rows = line_rows(0.030, 0.005, 0.001)
+    xs = [r[0, 3] for r in rows]
+    assert abs(xs[0] + 0.030) < 1e-9 and abs(xs[-1] - 0.005) < 1e-9
+    assert all(b > a for a, b in zip(xs, xs[1:])), 'the advance must be monotone in x'
+    assert all(abs(r[1, 3]) < 1e-12 and abs(r[2, 3]) < 1e-12 for r in rows), \
+        'a calibration probe moves along x ONLY'
+    assert len(rows) >= 2 and len(line_rows(0.002, 0.0, 0.01)) >= 2
+
+    with open(os.path.join(os.path.dirname(__file__), '..', 'configs',
+                           'calibration_check.yaml')) as fh:
+        cfg = yaml.safe_load(fh)
+    assert cfg['cycles'] >= 1 and cfg['standoff_distance_m'] > 0
+    assert float(cfg['force_guard'].get('persistence_s', 0.0)) == 0.0, \
+        'calibration probes need an INSTANT guard -- persistence smears the contact pose'
+    assert float(cfg['speed']['approach_translation_mm_s']) <= 5.0, \
+        'the approach must stay slow: the trip point is the measurement'
+    assert float(cfg['force_guard']['max_force_n']) <= 20.0
+
+
 def test_force_guard_persistence_debounces_transients():
     """robot/guard: with persistence_s set, the guard must IGNORE a spike shorter than the
     window, TRIP on a sustained press, and RESET its clock when the wrench drops under the

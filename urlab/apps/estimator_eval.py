@@ -144,6 +144,7 @@ def _fieldnames(dims):
             + ['n_modes_land', 'ambiguity_land', 'between_frac_land', 'separation_land',
                'support_ratio']
             + ['ranked_mode', 'p_seat_unranked']   # seat_gate.mode_ranking diagnostics
+            + ['stop_fused', 'x_stop_mm']          # estimation.stop_fusion diagnostics
             + ['p_seat', 'gate_opened', 'insert_depth_mm', 'seat_depth_mm', 'seated_basin']
             + ['icp_inliers', 'icp_residual', 'estimate']
             + ['trust_rankavg2', 'trust_cauchy'] + [f'trust_{s}' for s in _TRUST_SIGNALS]
@@ -709,6 +710,14 @@ def build_and_run(cfg, robot, camera, args):
     # and the E_p[P(seat)]-argmax over the landscape posterior is committed instead. Same
     # rationale and CSV columns as estimator_eval_probe (truth sat in a NON-dominant mode in
     # 54% / 70% of the 2026-08-12 validation cases).
+    # STOP-SIGNATURE FUSION (estimation.stop_fusion) -- the current best estimator: fuse the
+    # dense-landscape NN energy with SuccessBasin.stop_energy and partially apply the argmin.
+    # Measured on the v3 replay: single attempt 2.55 vs 3.05 mm |z'| (win 62%); with
+    # accumulate_observations, 2 fused attempts reach 1.63 mm (win 67%).
+    sf = cfg.get_path('estimation.stop_fusion', {}) or {}
+    stop_fuse_on = bool(sf.get('enabled', False))
+    stop_fuse_w = float(sf.get('weight', 2.0))
+    stop_fuse_alpha = float(sf.get('alpha', 0.75))
     mode_rank = str(sg.get('mode_ranking', 'energy')).strip().lower()
     if mode_rank not in ('energy', 'p_seat'):
         log.error("seat_gate.mode_ranking %r must be 'energy' or 'p_seat'.", mode_rank)
@@ -1073,6 +1082,42 @@ def build_and_run(cfg, robot, camera, args):
                             land_pack = _landscape(estimator, vec6, w6)
                         except Exception as exc:   # noqa: BLE001 -- diagnostics never fatal
                             log.warning('landscape skipped (%s)', exc)
+                    # STOP-SIGNATURE FUSION (estimation.stop_fusion) -- the measured-best
+                    # estimator on the 2026-08-12/13 v3 replays: single attempt |z'| 2.55 vs
+                    # 3.05 no-correction (win 62%), and with accumulate_observations at 2
+                    # attempts 1.63 mm (win 67%). The committed correction becomes the argmin
+                    # of E_landscape + weight * E_stop (median-normalised, rescaled to mm-eq);
+                    # alpha partially applies it to hedge the noise floor. E_dec carries the
+                    # fused energy into mode ranking and P(seat), so one posterior drives all
+                    # three decisions.
+                    E_dec = None if land_pack is None else np.asarray(land_pack[1], dtype=float)
+                    row['stop_fused'] = False
+                    if stop_fuse_on and basin is not None and land_pack is not None:
+                        try:
+                            x_stop = float(obs_arr[:, 0].max())
+                            row['x_stop_mm'] = x_stop
+                            mesh_f = np.meshgrid(*land_pack[0], indexing='ij')
+                            gth_f = np.stack([m.ravel() for m in mesh_f], axis=1)
+                            e_stop = basin.stop_energy(x_stop, gth_f)
+                            e_l = E_dec.ravel()
+                            sc_f = float(np.median(e_l)) / max(float(np.median(e_stop)), 1e-9)
+                            E_dec = (e_l + stop_fuse_w * sc_f * e_stop).reshape(E_dec.shape)
+                            th_f = gth_f[int(np.argmin(E_dec))]
+                            log.info('STOP FUSION: x_stop %+.1f mm -> correction %s (was %s).',
+                                     x_stop,
+                                     {d: round(float(v), 2) for d, v in
+                                      zip(estimator.estimate_dims, th_f)},
+                                     {d: round(v, 2)
+                                      for d, v in info['theta_corr'].items()})
+                            c6f = np.zeros(6)
+                            c6f[estimator.idx] = th_f
+                            T_corr_mm = mats_from_vec6(c6f)
+                            info['theta_corr'] = {d: float(v) for d, v in
+                                                  zip(estimator.estimate_dims, th_f)}
+                            row['stop_fused'] = True
+                        except Exception as exc:   # noqa: BLE001 -- fusion is best-effort
+                            log.warning('stop fusion skipped (%s)', exc)
+                            E_dec = np.asarray(land_pack[1], dtype=float)
                     # MODE RANKING at commitment (seat_gate.mode_ranking: p_seat): the
                     # aggregator's estimate is only the default candidate -- a rival mode of
                     # the multi-start finals that does MORE for P(seat) wins. NOTE icp_residual
@@ -1082,7 +1127,7 @@ def build_and_run(cfg, robot, camera, args):
                             and info.get('mixture') is not None
                             and info['mixture'].n_modes > 1):
                         try:
-                            ax_r, E_r = land_pack[0], land_pack[1]
+                            ax_r, E_r = land_pack[0], E_dec   # fused decision energy when on
                             base = [info['theta_corr'][d] for d in estimator.estimate_dims]
                             ps_b = _p_seat_land(basin, ax_r, E_r, estimator.idx, base,
                                                 seat_temp)
@@ -1109,6 +1154,16 @@ def build_and_run(cfg, robot, camera, args):
                                 row['ranked_mode'] = best[2]
                         except Exception as exc:   # noqa: BLE001 -- ranking is best-effort
                             log.warning('mode ranking skipped (%s)', exc)
+                    # PARTIAL APPLICATION (stop_fusion.alpha): scale the final correction --
+                    # whatever won above -- to hedge the estimator's noise floor (alpha 0.75
+                    # beat full application: |z'| 2.55 vs 2.85 on the v3 replay).
+                    if row.get('stop_fused') and abs(stop_fuse_alpha - 1.0) > 1e-9:
+                        th_a = np.zeros(6)
+                        th_a[estimator.idx] = [stop_fuse_alpha * info['theta_corr'][d]
+                                               for d in estimator.estimate_dims]
+                        T_corr_mm = mats_from_vec6(th_a)
+                        info['theta_corr'] = {d: float(th_a[j]) for d, j in
+                                              zip(estimator.estimate_dims, estimator.idx)}
                     T_believed = T_believed @ _corr_to_m(T_corr_mm)   # believed @ corr ~= true
                     if accumulate:
                         # keep every stored row expressed in the belief JUST updated
@@ -1180,7 +1235,8 @@ def build_and_run(cfg, robot, camera, args):
                             # mode ranking when it fired).
                             if basin is not None:
                                 p_seat = _p_seat_land(
-                                    basin, ax_l, E_l, estimator.idx,
+                                    basin, ax_l, E_dec if E_dec is not None else E_l,
+                                    estimator.idx,
                                     [info['theta_corr'][d]
                                      for d in estimator.estimate_dims], seat_temp)
                                 row['p_seat'] = p_seat

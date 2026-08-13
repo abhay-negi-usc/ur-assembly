@@ -64,5 +64,5 @@ targets:
 
   # hose_connector_finger_holder at the mate (read off the monitor).
   hose_connector_finger_holder:
-    xyz_mm:  [-27.10, +945.86, -140.33]
-    rpy_deg: [-86.40, +0.19, +91.61]
+    xyz_mm:  [-50.90, +956.05, -139.80]
+    rpy_deg: [-86.41, +0.76, +93.08]

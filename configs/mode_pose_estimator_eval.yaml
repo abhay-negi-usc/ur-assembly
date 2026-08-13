@@ -37,9 +37,13 @@ retract_distance_m: 0.100
 # EVAL -- trials, collection (offset sweep by default: diversity feeds stage 1), safety
 # ===================================================================================================
 eval:
-  num_trials: 10
+  num_trials: 10                 # IGNORED when mode: grid/bounds (the count is derived)
   max_attempts: 2                # sweep -> two-stage estimate -> repeat; then final insertion
-  mode: random                   # 'random' inside the bounds | 'grid' at grid_resolution
+  # 'random' draws inside the bounds; 'grid' sweeps every combination at grid_resolution;
+  # 'bounds' tests the +/- extremes -- one DOF at a time, or every corner of the box with
+  # bounds_simultaneous: true. Same semantics as estimator_eval.
+  mode: random
+  bounds_simultaneous: false
   perturbation:
     lower: [0.0, 0.0, -0.001, 0.0, -5.0, 0.0]
     upper: [0.0, 0.0, +0.001, 0.0, +5.0, 0.0]
@@ -61,7 +65,13 @@ eval:
   success_tolerance:
     pos_mm: 1.0
     rot_deg: 1.0
+  stop_when_converged: true      # skip remaining attempts once the GT error is inside tol
   success_pose_tol: [2.0, 1.0, 5.0, 5.0, 5.0, 1.0]
+  # FINAL zero-noise insertion from the final belief (default ON for every trial); an
+  # optional stiffness list runs it under its own admittance, like estimator_eval's.
+  final_insertion:
+    enabled: true
+    stiffness: null
   accumulate_observations: true
   random_seed: 7
   log_decimation: 5

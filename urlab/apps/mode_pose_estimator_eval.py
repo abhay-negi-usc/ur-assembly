@@ -389,7 +389,13 @@ def build_and_run(cfg, robot, camera, args):
         return False
     tn = ev.get('trajectory_noise', {}) or {}
     tn_on = bool(tn.get('enabled', True))
-    tn_std = [float(v) for v in (tn.get('std') or [0.0, 0.0005, 0.005, 0.0, 5.0, 0.0])]
+    tn_std = tn.get('std')
+    if tn_std is None:                             # legacy scalar keys broadcast, like
+        tn_std = [float(tn.get('translation_m', 0.0005))] * 3             + [float(tn.get('rotation_deg', 0.5))] * 3    # estimator_eval's convention
+    tn_std = [float(v) for v in tn_std]
+    if len(tn_std) != 6:
+        log.error('eval.trajectory_noise.std must have 6 entries [x,y,z (m), r,p,y (deg)].')
+        return False
     tn_w = max(1, int(tn.get('smooth_window', 1)))
     # SAME semantics as estimator_eval's eval.trajectory_noise: shrink the whole perturbation
     # by noise_decay_attempt each attempt ((1-f)^(k-1)) and shed it linearly along the path by
@@ -404,7 +410,11 @@ def build_and_run(cfg, robot, camera, args):
     abort_rot = float(ab.get('rot_deg', 15.0))
     tol = ev.get('success_tolerance', {}) or {}
     tol_pos, tol_rot = float(tol.get('pos_mm', 1.0)), float(tol.get('rot_deg', 1.0))
+    stop_conv = bool(ev.get('stop_when_converged', True))
     succ_tol = [float(v) for v in ev.get('success_pose_tol', [2, 1, 5, 5, 5, 1])]
+    if len(succ_tol) != 6:
+        log.error('eval.success_pose_tol must have 6 entries [x,y,z (mm), r,p,y (deg)].')
+        return False
     decim = max(1, int(ev.get('log_decimation', 5)))
     save_obs = bool(ev.get('save_observations', True))
     accumulate = bool(ev.get('accumulate_observations', True))
@@ -419,6 +429,16 @@ def build_and_run(cfg, robot, camera, args):
 
     adm = AdmittanceController(robot.arm, cfg.section('compliance'))
     guard = ForceGuard(robot.arm, cfg.section('force_guard'))
+    # FINAL INSERTION (eval.final_insertion, default ON): every trial ends with one zero-noise
+    # insertion from the final belief; an optional dedicated stiffness overrides compliance's.
+    fi = ev.get('final_insertion', {}) or {}
+    fi_on = bool(fi.get('enabled', True))
+    adm_final = adm
+    if fi_on and fi.get('stiffness') is not None:
+        comp_final = dict(cfg.section('compliance'))
+        comp_final['stiffness'] = [float(v) for v in fi['stiffness']]
+        adm_final = AdmittanceController(robot.arm, comp_final)
+        log.info('Final insertion stiffness: %s.', comp_final['stiffness'])
     tare = (lambda: robot.arm.zero_ft(settle=False)) \
         if bool(cfg.get_path('compliance.tare_before', True)) else None
     settle_s = float(cfg.get_path('compliance.settle_s', 0.5))
@@ -436,7 +456,8 @@ def build_and_run(cfg, robot, camera, args):
         return max((lin_m * 1000.0 / v) if v > 0 else 0.0,
                    (np.degrees(ang_rad) / w) if w > 0 else 0.0, min_seg_s)
 
-    def run_insertion(refs, T_bel):
+    def run_insertion(refs, T_bel, adm_ctl=None):
+        adm_ctl = adm if adm_ctl is None else adm_ctl
         obs, cnt = [], [0]
 
         def log_cb():
@@ -444,30 +465,43 @@ def build_and_run(cfg, robot, camera, args):
             if cnt[0] % decim == 0:
                 obs.append(_observe(robot, T_bel, T_base_tconn))
 
-        adm.reset()
-        adm.warmup(refs[0], tare_fn=tare)
+        adm_ctl.reset()
+        adm_ctl.warmup(refs[0], tare_fn=tare)
         guard.reset()
         last_ref, seated = refs[0], False
         for i in range(1, len(refs)):
-            if adm.ramp(refs[i - 1], refs[i], seg_time(refs[i - 1], refs[i]), guard,
-                        on_step=log_cb) == 'seated':
+            if adm_ctl.ramp(refs[i - 1], refs[i], seg_time(refs[i - 1], refs[i]), guard,
+                            on_step=log_cb) == 'seated':
                 seated = True
                 last_ref = refs[i]
                 break
             last_ref = refs[i]
-        adm.hold(last_ref, settle_s, guard, on_step=log_cb)
+        adm_ctl.hold(last_ref, settle_s, guard, on_step=log_cb)
         lin, ang = pose_error(robot.tool0() @ T_bel, T_base_tconn)
         xyz, rpy = matrix_to_xyzrpy(inverse(T_base_tconn) @ robot.tool0() @ T_true)
         seat6 = list(xyz * 1000.0) + list(np.degrees(rpy))
         T_out = _retract_ref(last_ref, T_bel, retract_m)
-        adm.ramp(last_ref, T_out, seg_time(last_ref, T_out, rv, rw), guard=None)
-        adm.stop()
+        adm_ctl.ramp(last_ref, T_out, seg_time(last_ref, T_out, rv, rw), guard=None)
+        adm_ctl.stop()
         return obs, seated, lin, ang, seat6
 
     out_dir = os.path.join(cfg.get('data_dir', 'data'), 'experiments',
                            f'mode_pose_eval_{datetime.now():%Y%m%d_%H%M%S}')
     os.makedirs(out_dir, exist_ok=True)
     log.info('Experiment folder: %s', out_dir)
+    try:
+        import json
+        with open(os.path.join(out_dir, 'eval_config.json'), 'w') as fh:
+            json.dump({'held_frame': held_name, 'eval': ev,
+                       'estimation_shared': cfg.section('estimation_shared'),
+                       'estimation_mode': cfg.section('estimation_mode'),
+                       'estimation_pose': cfg.section('estimation_pose'),
+                       'mode_stage': cfg.section('mode_stage'),
+                       'pose_stage': cfg.section('pose_stage'),
+                       'compliance': cfg.section('compliance'),
+                       'force_guard': cfg.section('force_guard')}, fh, indent=2, default=str)
+    except Exception as exc:                       # noqa: BLE001
+        log.warning('eval_config.json skipped (%s)', exc)
     fout = open(os.path.join(out_dir, 'trials.csv'), 'w', newline='')
     writer = _csv.DictWriter(fout, fieldnames=_fieldnames(dims), restval='')
     writer.writeheader()
@@ -597,16 +631,17 @@ def build_and_run(cfg, robot, camera, args):
                 log.info('trial %d attempt %d: %.2f mm / %.2f deg -> %.2f mm / %.2f deg%s',
                          trial, attempt, errb_pos, errb_rot, erra_pos, erra_rot,
                          '  (DIVERGED -- trial terminated)' if diverged else '')
-                if diverged or row['converged']:
+                if diverged or (row['converged'] and stop_conv):
                     break
 
             # FINAL zero-noise insertion from the final belief (all collection modes end here)
-            if not abandoned and not diverged:
+            if fi_on and not abandoned and not diverged:
                 refs = [T_base_tconn @ r @ inverse(T_believed) for r in dense]
                 q = robot.arm.ik(refs[0], seed_q)
                 if q is not None and robot.arm.move_j(q, label=f'trial {trial} final'):
                     seed_q = q
-                    obs, seated, lin, ang, seat6 = run_insertion(refs, T_believed)
+                    obs, seated, lin, ang, seat6 = run_insertion(refs, T_believed,
+                                                                 adm_ctl=adm_final)
                     errf = _gt_error(T_true, T_believed)[0]
                     depth = ''
                     if obs:

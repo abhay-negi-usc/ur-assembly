@@ -164,6 +164,14 @@ eval:
     peck_retract_mm: 5.0         # back-off after each force stop
     peck_timeout_s: 30.0         # time budget for one peck attempt
 
+  # ---- DIVERGENCE BOUNDS: terminate the TRIAL (no further attempts, no final insertion) the
+  # moment the post-update belief error exceeds these. A diverged belief drives every later
+  # pass into contact the map has never seen and, at ~15 deg, toward the gripper/fixture
+  # collision regime. Eval-only safety net (uses the known ground truth). <= 0 disables.
+  abort_bounds:
+    pos_mm: 10.0
+    rot_deg: 15.0
+
   # OPTIONAL trajectory noising: smoothed zero-mean Gaussian offsets applied to EVERY waypoint
   # in the connector's OWN frame, REDRAWN per attempt -- exercises the estimator with varied
   # contact instead of the same nominal path every time. Uses its OWN random stream, so
@@ -318,6 +326,11 @@ force_guard:
   enabled: true
   max_force_n: 30.0
   max_torque_nm: 8.0
+  # The limit must hold CONTINUOUSLY this long before the guard trips (0 = instant, the
+  # original). Raw F/T spikes over the limit for a few samples on every hard contact
+  # transient; 0.5 s distinguishes "clipped the rim for 30 ms" from "genuinely jammed".
+  # Travel cost while waiting: ~2.5 mm at the 5 mm/s insertion speed.
+  persistence_s: 0.5
 
 speed:
   # Free-space moves (the approach to each attempt's start and the between-trial stand-off).

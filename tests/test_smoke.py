@@ -1556,6 +1556,52 @@ def test_success_basin_labels_gates_and_signs():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_force_guard_persistence_debounces_transients():
+    """robot/guard: with persistence_s set, the guard must IGNORE a spike shorter than the
+    window, TRIP on a sustained press, and RESET its clock when the wrench drops under the
+    limit between two shorter presses (two 0.3 s presses != one 0.6 s press)."""
+    import time as _time
+
+    from urlab.robot.guard import ForceGuard
+
+    class FakeArm:
+        def __init__(self):
+            self.w = np.zeros(6)
+
+        def wrench(self):
+            return self.w
+
+    arm = FakeArm()
+    g = ForceGuard(arm, {'max_force_n': 10.0, 'persistence_s': 0.15})
+    over = np.array([20.0, 0, 0, 0, 0, 0])
+
+    # a short spike must NOT trip
+    arm.w = over
+    assert not g(), 'first over-limit sample must start the clock, not trip'
+    arm.w = np.zeros(6)
+    assert not g()
+    # ... and the clock must have RESET: a new press starts from zero
+    arm.w = over
+    assert not g()
+    _time.sleep(0.08)
+    arm.w = np.zeros(6)
+    assert not g()
+    arm.w = over
+    assert not g(), 'two sub-window presses must not add up across a gap'
+    # a sustained press MUST trip, and report the duration
+    _time.sleep(0.17)
+    assert g(), 'the limit held past persistence_s -- the guard must trip'
+    assert g.tripped_by and 'force' in g.tripped_by
+    # reset clears the clock too
+    g.reset()
+    arm.w = over
+    assert not g()
+    # persistence 0 keeps the ORIGINAL instant behaviour
+    g0 = ForceGuard(arm, {'max_force_n': 10.0})
+    arm.w = over
+    assert g0(), 'persistence_s absent/0 must trip on the first sample, as before'
+
+
 def test_estimator_eval_collection_config():
     """configs/estimator_eval.yaml eval.collection must match the app's schema: a known mode,
     positive peck parameters, and -- when sweep_offsets is explicit -- 6-vectors. The app
@@ -1577,6 +1623,11 @@ def test_estimator_eval_collection_config():
     assert fi.get('enabled', True), \
         'eval.final_insertion must stay enabled: every collection mode ends with one ' \
         'zero-noise insertion from the final belief'
+    # divergence bounds: present and sane (a diverged belief must terminate the trial well
+    # before the >15 deg gripper/fixture collision regime)
+    abt = cfg['eval'].get('abort_bounds') or {}
+    assert 0 < float(abt.get('pos_mm', 10.0)) <= 20.0, abt
+    assert 0 < float(abt.get('rot_deg', 15.0)) <= 15.0, abt
 
 
 def test_probe_app_config_is_wired():

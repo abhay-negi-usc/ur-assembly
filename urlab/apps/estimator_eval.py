@@ -157,7 +157,7 @@ def _fieldnames(dims):
             + ['icp_inliers', 'icp_residual', 'estimate']
             + ['trust_rankavg2', 'trust_cauchy'] + [f'trust_{s}' for s in _TRUST_SIGNALS]
             + [f'err_after_{s}' for s in _ERR] + ['err_after_pos_mm', 'err_after_rot_deg']
-            + ['converged'])
+            + ['converged', 'diverged'])
 
 
 def _landscape(estimator, vec6, w6, max_pts=2600, row_cap=120):
@@ -923,6 +923,19 @@ def build_and_run(cfg, robot, camera, args):
         log.info('Collection mode PECK: %.1f mm back-off on force stop, %.0f s budget per '
                  'attempt.', peck_mm, peck_timeout_s)
 
+    # ---- DIVERGENCE BOUNDS (eval.abort_bounds): terminate the TRIAL when the belief error
+    # left after an update exceeds them. A diverged belief drives every later pass into contact
+    # the map has never seen (the drift-out-of-distribution spiral) and, at 15 deg, toward the
+    # gripper/fixture collision regime -- there is nothing left to learn from that trial.
+    # EVAL-ONLY safety net: it reads the ground-truth error, which production apps do not have.
+    # <= 0 disables a bound.
+    ab = ev.get('abort_bounds', {}) or {}
+    abort_pos_mm = float(ab.get('pos_mm', 10.0))
+    abort_rot_deg = float(ab.get('rot_deg', 15.0))
+    if abort_pos_mm > 0 or abort_rot_deg > 0:
+        log.info('Divergence bounds: trial aborts if the post-update belief error exceeds '
+                 '%.1f mm or %.1f deg.', abort_pos_mm, abort_rot_deg)
+
     # COMPLIANCE + guard + speeds: same shape as uncertain_sampling; the config mirrors the pick
     # app's assembly values so the estimator sees production-like observations.
     adm = AdmittanceController(robot.arm, cfg.section('compliance'))
@@ -1089,6 +1102,7 @@ def build_and_run(cfg, robot, camera, args):
 
             abandoned = False
             gate_open = False
+            diverged = False                       # set when abort_bounds terminate the trial
             for attempt in range(1, max_attempts + 1):
                 errb, errb_pos, errb_rot = _gt_error(T_true, T_believed)
                 # COLLECTION PASSES for this attempt: the sweep commands one insertion per
@@ -1395,6 +1409,12 @@ def build_and_run(cfg, robot, camera, args):
                 row.update({f'err_after_{s}': v for s, v in zip(_ERR, erra)})
                 row.update({'err_after_pos_mm': erra_pos, 'err_after_rot_deg': erra_rot})
                 row['converged'] = bool(erra_pos <= tol_pos_mm and erra_rot <= tol_rot_deg)
+                # DIVERGENCE BOUNDS: a post-update belief error beyond eval.abort_bounds ends
+                # the TRIAL -- no further attempts, no final insertion (a diverged belief has
+                # nothing left to teach and heads for the collision regime).
+                diverged = bool((abort_pos_mm > 0 and erra_pos > abort_pos_mm)
+                                or (abort_rot_deg > 0 and erra_rot > abort_rot_deg))
+                row['diverged'] = diverged
                 log.info('trial %d attempt %d: gt error %.2f mm / %.2f deg -> %.2f mm / %.2f deg'
                          '%s%s%s', trial, attempt, errb_pos, errb_rot, erra_pos, erra_rot,
                          '' if not np.isfinite(p_seat) else f'  P(seat) {p_seat:.0%}',
@@ -1404,6 +1424,11 @@ def build_and_run(cfg, robot, camera, args):
                 writer.writerow(row)
                 fout.flush()                       # a 50-trial run must survive an abort mid-way
                 os.fsync(fout.fileno())
+                if diverged:
+                    log.error('TRIAL %d TERMINATED: belief error %.2f mm / %.2f deg exceeds '
+                              'the divergence bounds (%.1f mm / %.1f deg).', trial,
+                              erra_pos, erra_rot, abort_pos_mm, abort_rot_deg)
+                    break
                 # P(SEAT) GATE: stop probing the moment the belief is good enough to commit --
                 # the final insertion then runs with NO trajectory noise (see below).
                 if basin is not None and np.isfinite(p_seat) and p_seat >= seat_gate:
@@ -1420,7 +1445,7 @@ def build_and_run(cfg, robot, camera, args):
             # probing, and has no place in the attempt that is meant to seat. SUCCESS is decided
             # by the SAME rule that labels the basin -- the true depth reached vs the manifold's
             # deepest insertion less seat_margin_mm -- so the gate and the verdict agree.
-            if (fi_on or gate_open) and not abandoned:
+            if (fi_on or gate_open) and not abandoned and not diverged:
                 refs = [T_base_tconn @ row @ inverse(T_believed) for row in dense]
                 q = robot.arm.ik(refs[0], seed_q)
                 if q is None or not robot.arm.move_j(q, label=f'trial {trial} final insertion'):

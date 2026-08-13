@@ -285,6 +285,9 @@ force_guard:
   enabled: true
   max_force_n: 50.0
   max_torque_nm: 8.0
+  # Limit must hold this long continuously before tripping (0 = instant). Filters the F/T
+  # spikes of hard contact transients; see estimator_eval.yaml for the rationale.
+  persistence_s: 0.5
 
 speed:
   max_joint_velocity_deg_s: 30.0

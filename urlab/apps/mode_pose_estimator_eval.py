@@ -371,6 +371,12 @@ def build_and_run(cfg, robot, camera, args):
     tn_on = bool(tn.get('enabled', True))
     tn_std = [float(v) for v in (tn.get('std') or [0.0, 0.0005, 0.005, 0.0, 5.0, 0.0])]
     tn_w = max(1, int(tn.get('smooth_window', 1)))
+    # SAME semantics as estimator_eval's eval.trajectory_noise: shrink the whole perturbation
+    # by noise_decay_attempt each attempt ((1-f)^(k-1)) and shed it linearly along the path by
+    # noise_decay_traj. Defaults 0 = the map-matching process (full unsmoothed jitter to the
+    # stop, like uncertain_sampling) -- set them if you want estimator_eval-like motion.
+    tn_da = float(tn.get('noise_decay_attempt', 0.0))
+    tn_dt = float(tn.get('noise_decay_traj', 0.0))
     noise_rng = np.random.default_rng(seed + 1 if seed > 0 else None)
 
     ab = ev.get('abort_bounds', {}) or {}
@@ -474,7 +480,7 @@ def build_and_run(cfg, robot, camera, args):
                 seated, seat6 = False, [0.0] * 6
                 for pi, poff in enumerate(sweep):
                     rows_t = traj.noised(dense, noise_rng, tn_std if tn_on else [0.0] * 6,
-                                         tn_w, 0.0, 1.0, poff)
+                                         tn_w, tn_dt, (1.0 - tn_da) ** (attempt - 1), poff)
                     refs = [T_base_tconn @ r @ inverse(T_believed) for r in rows_t]
                     q = robot.arm.ik(refs[0], seed_q)
                     if q is None or not robot.arm.move_j(

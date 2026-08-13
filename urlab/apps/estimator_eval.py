@@ -195,7 +195,8 @@ def _landscape(estimator, vec6, w6, max_pts=2600, row_cap=120):
     for lo in range(0, len(G), per):
         hi = min(lo + per, len(G))
         C = np.einsum('nij,kjl->knil', Ym, mats_from_vec6(G[lo:hi]))
-        pts = scaled12(vec6_from_mats(C), w, estimator.s_rot).reshape(-1, 12)
+        pts = scaled12(vec6_from_mats(C), w, estimator.s_rot,
+                       getattr(estimator, 'dim_w', None)).reshape(-1, 12)
         dist, nn = estimator.tree.query(pts, k=sk, workers=-1)
         dist = dist[:, None] if dist.ndim == 1 else dist
         if estimator.interp_neighbors > 1:
@@ -863,13 +864,14 @@ def build_and_run(cfg, robot, camera, args):
         log.error('eval.trajectory_noise.std must have 6 entries [x,y,z (m), r,p,y (deg)].')
         return False
     tn_w = max(1, int(tn.get('smooth_window', 25)))
-    # DECAYS + alternation: shrink the whole perturbation by noise_decay_attempt each attempt
-    # ((1-f)^(k-1)), shed it linearly along the path by noise_decay_traj (1 -> 1-f at the last
-    # waypoint), and optionally add a deterministic initial pitch offset whose SIGN alternates
-    # per attempt (probe the valley from both sides).
+    # DECAYS: shrink the whole perturbation by noise_decay_attempt each attempt
+    # ((1-f)^(k-1)) and shed it linearly along the path by noise_decay_traj (1 -> 1-f at the
+    # last waypoint). Deliberate offsets live in eval.collection (offset_sweep), not here.
     tn_da = float(tn.get('noise_decay_attempt', 0.0))
     tn_dt = float(tn.get('noise_decay_traj', 0.0))
-    tn_alt = float(tn.get('alternate_pitch_deg', 0.0))
+    if tn.get('alternate_pitch_deg'):
+        log.warning('eval.trajectory_noise.alternate_pitch_deg was REMOVED (2026-08-13) -- '
+                    'use eval.collection.mode: offset_sweep for deliberate offsets. Ignored.')
     noise_rng = np.random.default_rng(seed + 1 if seed > 0 else None)
     if tn_on:
         log.info('Trajectory noise ON: std [%.2f, %.2f, %.2f] mm / [%.2f, %.2f, %.2f] deg '
@@ -1114,13 +1116,7 @@ def build_and_run(cfg, robot, camera, args):
                 obs, attempt_stops = [], []
                 seated, lin, ang, seat6 = False, 0.0, 0.0, [0.0] * 6
                 for pi, poff in enumerate(passes):
-                    if poff is not None:
-                        bias = poff
-                    elif tn_on and tn_alt:
-                        bias = [0.0, 0.0, 0.0, 0.0,
-                                tn_alt * (1.0 if attempt % 2 else -1.0), 0.0]
-                    else:
-                        bias = None
+                    bias = poff                    # sweep offset, or None for a plain pass
                     if tn_on or bias is not None:
                         rows_t = traj.noised(dense, noise_rng,
                                              tn_std if tn_on else [0.0] * 6, tn_w, tn_dt,

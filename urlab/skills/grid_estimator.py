@@ -167,7 +167,7 @@ class GridManifoldEstimator(ManifoldEstimator):
         for lo in range(0, n_c, per):               # chunked: see max_query_bytes
             hi = min(lo + per, n_c)
             C = np.einsum('nij,kjl->knil', Y, self._gridm[lo:hi])
-            pts = scaled12(vec6_from_mats(C), w6, self.s_rot).reshape(-1, 12)
+            pts = scaled12(vec6_from_mats(C), w6, self.s_rot, self.dim_w).reshape(-1, 12)
             # query support_k (>= 2), so the last column is the SAME k the support reference was
             # measured at -- d1 still comes from the first interp_neighbors columns.
             dist, nn = self.tree.query(pts, k=self.support_k, workers=-1)

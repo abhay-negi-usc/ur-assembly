@@ -135,7 +135,7 @@ class CheckedManifoldEstimator(ManifoldEstimator):
         g6[0, self.idx] = [info['theta_corr'][d] for d in self.estimate_dims]
         Y = mats_from_vec6(vec6)
         C = np.einsum('nij,kjl->knil', Y, mats_from_vec6(g6))
-        pts = scaled12(vec6_from_mats(C), w6, self.s_rot).reshape(-1, 12)
+        pts = scaled12(vec6_from_mats(C), w6, self.s_rot, self.dim_w).reshape(-1, 12)
         kq = self.interp_neighbors
         dist, nn = self.tree.query(pts, k=kq, workers=-1)
         if kq > 1:

@@ -267,7 +267,6 @@ assembly:
     smooth_window: 25            # moving-average window (waypoints) -- keeps the reference smooth
     noise_decay_attempt: 0.0     # shrink the WHOLE perturbation (1 - f)^(attempt-1)
     noise_decay_traj: 0.0        # shed linearly along the path: full -> x(1 - f) at the last row
-    alternate_pitch_deg: 0.0     # initial pitch offset, sign ALTERNATING per attempt (+, -, ...)
 
   # LIVE run figure (like estimator_eval's): the cumulative belief corrections, per-attempt
   # residuals (all guesses + aggregated) and the correction phase plot, atomically overwritten

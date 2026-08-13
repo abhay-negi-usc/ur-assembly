@@ -186,6 +186,18 @@ estimation:
   rawcap_torque_ref_nm: 1.0
   rawcap_cap: 3.0
   scaling_constant_deg_to_mm: 0.2
+  # PER-DIMENSION pose weights, ON TOP of the unit scaling above: the scaling constant stays
+  # the mm <-> deg CONVERSION, dim_weights say how much each dimension MATTERS relative to the
+  # others in the match (partial dicts fill with 1.0; delete the block for the uniform metric).
+  # 0 is allowed only on dimensions NOT being estimated. Example: y is fixtured (down-weight),
+  # z is the decisive channel (up-weight).
+  dim_weights:
+    x_mm: 1.0
+    y_mm: 1.0
+    z_mm: 1.0
+    roll_deg: 1.0
+    pitch_deg: 1.0
+    yaw_deg: 1.0
   scaling_constant_unit_force_to_mm: 1.5
   scaling_constant_unit_torque_to_mm: 0.0
   min_force_n: 3.0

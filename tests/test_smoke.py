@@ -1148,6 +1148,35 @@ def test_manifold_estimator_recovers_belief_error():
         assert info_s['seeded_guesses'] > 0
         assert 'mixture' in info_s and info_s['n_mixture_modes'] >= 1
 
+        # PER-DIMENSION WEIGHTS (estimation.dim_weights): applied ON TOP of the unit scaling
+        # (s_rot stays the mm <-> deg conversion). (a) the metric must actually scale -- the
+        # manifold's z column doubles under z_mm: 2; (b) recovery must survive a reweighting
+        # (it changes the METRIC, not the answer); (c) bad configs fail at construction.
+        wcfg = {'manifold_csv': path, 'estimate_dims': ['z_mm', 'pitch_deg'],
+                'icp_iterations': 10, 'num_initial_guesses': 30, 'random_seed': 5,
+                'dim_weights': {'z_mm': 2.0, 'pitch_deg': 0.5}}
+        west = ManifoldEstimator(wcfg)
+        assert np.allclose(west.M12[:, 2], 2.0 * est.M12[:, 2])
+        assert np.allclose(west.M12[:, 4], 0.5 * est.M12[:, 4])
+        assert np.allclose(west.M12[:, 0], est.M12[:, 0]), 'unweighted dims must not move'
+        wv6, ww6 = west.prepare_observations(obs6, f_raw, tau_raw)
+        T_corr_w, info_w = west.estimate(wv6, ww6)
+        assert T_corr_w is not None, info_w
+        undone_w = vec6_from_mats(D @ T_corr_w)
+        assert np.all(np.abs(undone_w) < 0.3), f'reweighted recovery: {np.round(undone_w, 3)}'
+        for bad in ({'dim_weights': {'bogus_dim': 1.0}},
+                    {'dim_weights': {'z_mm': -1.0}},
+                    {'dim_weights': {'z_mm': 0.0}}):   # zero on an ESTIMATED dim
+            try:
+                ManifoldEstimator({**wcfg, **bad})
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f'{bad} must raise at construction')
+        # ... but zero on a NON-estimated dim is legitimate (make the channel invisible)
+        ok0 = ManifoldEstimator({**wcfg, 'dim_weights': {'y_mm': 0.0}})
+        assert ok0.dim_w[1] == 0.0
+
         # residual_gate: None disables it (like manifold_icp_validation) -- INCLUDING the STRING
         # 'None', because yaml parses a bare `None` as a string (only null/~ are yaml null) and
         # float('None') used to blow up MID-RUN, after the robot had already moved.

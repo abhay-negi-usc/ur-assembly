@@ -309,8 +309,7 @@ def build_and_run(cfg, robot, camera, args):
     # smoothed per-waypoint Gaussian offsets in the connector's OWN frame, redrawn per attempt,
     # per-DOF std [x,y,z (m), r,p,y (deg)]; noise_decay_attempt shrinks the whole perturbation
     # by (1-f)^(attempt-1); noise_decay_traj sheds it linearly along the path (converge onto
-    # the nominal reference near the seat); alternate_pitch_deg adds an initial pitch offset
-    # whose SIGN alternates per attempt (probe the z-pitch valley from both sides).
+    # the nominal reference near the seat).
     tn = a.get('trajectory_noise', {}) or {}
     tn_on = bool(tn.get('enabled', False))
     tn_std = tn.get('std')
@@ -324,11 +323,12 @@ def build_and_run(cfg, robot, camera, args):
     tn_w = max(1, int(tn.get('smooth_window', 25)))
     tn_da = float(tn.get('noise_decay_attempt', 0.0))
     tn_dt = float(tn.get('noise_decay_traj', 0.0))
-    tn_alt = float(tn.get('alternate_pitch_deg', 0.0))
+    if tn.get('alternate_pitch_deg'):
+        log.warning('trajectory_noise.alternate_pitch_deg was REMOVED (2026-08-13). Ignored.')
     noise_rng = np.random.default_rng()
     if tn_on:
-        log.info('Trajectory noise ON: std %s, smooth %d, decay/attempt %.2f, decay/traj %.2f,'
-                 ' alternate pitch %.2f deg.', tn_std, tn_w, tn_da, tn_dt, tn_alt)
+        log.info('Trajectory noise ON: std %s, smooth %d, decay/attempt %.2f, decay/traj %.2f.',
+                 tn_std, tn_w, tn_da, tn_dt)
 
     # LIVE run figure (like estimator_eval's): ONE fixed path outside the experiment folder,
     # atomically overwritten after every estimate. true = data/experiments/cable_pick_live.png;
@@ -457,10 +457,8 @@ def build_and_run(cfg, robot, camera, args):
             log.info('--- attempt %d/%d --- in-hand estimate xyz=%s mm rpy=%s deg', it, max_attempts,
                      np.round(e_xyz * 1000, 2).tolist(), np.round(np.degrees(e_rpy), 2).tolist())
             if tn_on:
-                bias = ([0.0, 0.0, 0.0, 0.0, tn_alt * (1.0 if it % 2 else -1.0), 0.0]
-                        if tn_alt else None)
                 rows_t = traj.noised(dense, noise_rng, tn_std, tn_w, tn_dt,
-                                     (1.0 - tn_da) ** (it - 1), bias)
+                                     (1.0 - tn_da) ** (it - 1))
             else:
                 rows_t = dense
             refs = [tool0_ref(row, T_tool0_conn) for row in rows_t]

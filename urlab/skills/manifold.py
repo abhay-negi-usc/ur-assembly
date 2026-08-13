@@ -92,11 +92,19 @@ def vec6_from_mats(T):
     return np.concatenate([T[..., :3, 3], eul], axis=-1)
 
 
-def scaled12(vec6, w6, s_rot):
-    """The common 12-D point: [t (mm) | rot (deg x s_rot) | scaled unit f | scaled unit tau]."""
+def scaled12(vec6, w6, s_rot, dim_w=None):
+    """The common 12-D point: [t (mm) | rot (deg x s_rot) | scaled unit f | scaled unit tau].
+
+    `dim_w` (optional, 6 per-dimension multipliers in DIMS order) weights the POSE channels ON
+    TOP of the unit scaling: s_rot stays the mm <-> deg conversion, dim_w says how much each
+    dimension MATTERS relative to the others (e.g. weight y down when it is fixtured, weight z
+    up when it is the decisive channel). None = all ones = the original metric."""
     v = np.asarray(vec6, dtype=float)
     w = np.broadcast_to(np.asarray(w6, dtype=float), v.shape[:-1] + (6,))
-    return np.concatenate([v[..., :3], v[..., 3:] * s_rot, w], axis=-1)
+    p = np.concatenate([v[..., :3], v[..., 3:] * s_rot], axis=-1)
+    if dim_w is not None:
+        p = p * np.asarray(dim_w, dtype=float)
+    return np.concatenate([p, w], axis=-1)
 
 
 class ManifoldEstimator:
@@ -109,6 +117,18 @@ class ManifoldEstimator:
         self.s_rot = float(c.get('scaling_constant_deg_to_mm', 1.0))
         self.s_force = float(c.get('scaling_constant_unit_force_to_mm', 0.1))
         self.s_torque = float(c.get('scaling_constant_unit_torque_to_mm', 0.1))
+        # PER-DIMENSION pose weights, ON TOP of the unit scaling: s_rot stays the mm <-> deg
+        # CONVERSION; dim_weights say how much each dimension MATTERS relative to the others
+        # (partial dicts fill with 1.0; absent = the original uniform metric). Zero is allowed
+        # only on dimensions that are NOT being estimated -- a zero weight makes the channel
+        # invisible to the match, and the ICP update divides by it on the estimated dims.
+        dw = dict(c.get('dim_weights', {}) or {})
+        bad = [k for k in dw if k not in DIMS]
+        if bad:
+            raise ValueError(f'estimation.dim_weights keys {bad} not in {DIMS}')
+        self.dim_w = np.array([float(dw.get(d, 1.0)) for d in DIMS])
+        if np.any(self.dim_w < 0):
+            raise ValueError('estimation.dim_weights must be >= 0')
         # WRENCH REPRESENTATION (2026-08 offline wrench-lab winner): 'unit' = direction
         # only (the original); 'rawcap' = direction x saturated magnitude -- f/10 N capped
         # at 30 N, tau/1 Nm capped at 3 Nm -- so a 30 N wedge press carries a 3x larger
@@ -131,6 +151,13 @@ class ManifoldEstimator:
         if bad:
             raise ValueError(f'estimation.estimate_dims {bad} not in {DIMS}')
         self.idx = [DIMS.index(d) for d in self.estimate_dims]
+        zero_est = [d for d, j in zip(self.estimate_dims, self.idx) if self.dim_w[j] <= 0]
+        if zero_est:
+            raise ValueError(f'estimation.dim_weights is 0 on ESTIMATED dim(s) {zero_est} -- '
+                             'the match cannot see, and the update cannot move, that dimension')
+        # the EFFECTIVE per-dim scale (unit conversion x importance): physical <-> metric space
+        self.pose_scale6 = self.dim_w * np.array([1.0, 1.0, 1.0,
+                                                  self.s_rot, self.s_rot, self.s_rot])
         self.iterations = int(c.get('icp_iterations', 10))
         self.guesses = int(c.get('num_initial_guesses', 100))
         self.init_range = dict(c.get('init_guess_range', {}) or {})
@@ -274,7 +301,7 @@ class ManifoldEstimator:
             v6, f, tau = v6[keep], f[keep], tau[keep]
         if len(v6) < 10:
             raise ValueError(f'{path}: only {len(v6)} usable manifold rows')
-        return scaled12(v6, self._wrench6(f, tau), self.s_rot)
+        return scaled12(v6, self._wrench6(f, tau), self.s_rot, self.dim_w)
 
     def _wrench6(self, f, tau):
         """The 6 wrench feature columns under the configured representation, scales applied."""
@@ -376,7 +403,7 @@ class ManifoldEstimator:
         kq = self.interp_neighbors
         for k in range(K):
             C = np.einsum('nij,gjk->gnik', Y, T_corr)
-            pts = scaled12(vec6_from_mats(C), w6, self.s_rot)
+            pts = scaled12(vec6_from_mats(C), w6, self.s_rot, self.dim_w)
             dist, nn = self.tree.query(pts.reshape(-1, 12), k=kq, workers=-1)
             if kq > 1:
                 # soft correspondence: blend the close-enough neighbours so the target
@@ -390,16 +417,16 @@ class ManifoldEstimator:
             tgt, dist = tgt.reshape(G, -1, 12), dist.reshape(G, -1)
             res_hist[:, k] = np.average(dist, axis=1, weights=wts)          # recency-weighted
             delta12 = np.average(tgt - pts, axis=1, weights=wts)
-            delta6 = np.zeros((G, 6))
-            delta6[:, :3] = delta12[:, :3]
-            delta6[:, 3:] = delta12[:, 3:6] / max(self.s_rot, 1e-12)
+            # metric -> physical: divide by the EFFECTIVE per-dim scale (unit conversion x
+            # dim weight); non-estimated dims are zeroed below, so their scale never divides
+            delta6 = delta12[:, :6] / np.maximum(self.pose_scale6, 1e-12)
             delta6[:, ~free] = 0.0
             T_corr = T_corr @ mats_from_vec6(delta6 * self.step_gain)
             theta_hist[:, k + 1] = vec6_from_mats(T_corr)[:, idx]
 
         # Aggregate the G final corrections into ONE estimate (distances in mm-equivalent space).
         corr6 = vec6_from_mats(T_corr)                        # (G, 6) physical
-        scale = np.array([self.s_rot if d.endswith('_deg') else 1.0 for d in DIMS])
+        scale = self.pose_scale6
         finals = corr6[:, idx] * scale[idx]
         r_fin = res_hist[:, -1]
         if self.aggregator == 'softmax':

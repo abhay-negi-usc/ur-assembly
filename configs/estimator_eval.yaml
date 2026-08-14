@@ -23,7 +23,7 @@ tip_frame: tool0
 # ---- GROUND TRUTH from the SHARED catalogue (configs/frames.yaml) ----
 # frames: entry  = the true tool0 -> connector pose of the fixtured part;
 # targets: entry = the recorded base_link mate. Both REQUIRED -- this app cannot run without them.
-held_frame: hose_connector_finger_holder
+held_frame: bnc_connector_finger_holder
 
 # ---- Path (same trajectory the pick app assembles with) ----
 trajectory_csv: assembly_trajectory.csv
@@ -39,7 +39,7 @@ standoff_axis: [-1.0, 0.0, 0.0]
 
 # After each attempt: back straight out along the BELIEVED connector's own -X by this distance.
 # Must exceed the insertion depth so the part is fully clear before the next free-space move.
-retract_distance_m: 0.100
+retract_distance_m: 0.030
 
 # ===================================================================================================
 # EVAL -- the trial loop and the injected belief errors
@@ -60,8 +60,8 @@ eval:
   # [x, y, z (m), roll, pitch, yaw (deg)], applied in the HELD part's OWN frame -- the same
   # right-multiplied frame the estimator corrects in. As set: x +/-5 mm, z +/-5 mm, pitch +/-5 deg.
   perturbation:
-    lower: [-0.000, 0.0, -0.001, 0.0, -5.0, 0.0]
-    upper: [ 0.000, 0.0, +0.001, 0.0, +5.0, 0.0]
+    lower: [-0.000, 0.0, -0.000, 0.0, -5.0, 0.0]
+    upper: [ 0.000, 0.0, +0.000, 0.0, +5.0, 0.0]
   # Grid step per DOF (grid mode only), same order/units as the bounds.
   grid_resolution: [0.001, 0.0, 0.001, 0.0, 1.0, 0.0]
 
@@ -161,11 +161,14 @@ eval:
     # offset_sweep: commanded offsets [x, y, z (m), roll, pitch, yaw (deg)] in the held part's
     # own frame. null = the default pitch sweep -4..+4 deg in 2 deg steps, other dims zero.
     sweep_offsets: 
-      - [0, 0, 0, 0, -4, 0]
-      - [0, 0, 0, 0, -2, 0]
-      - [0, 0, 0, 0, 0, 0]
-      - [0, 0, 0, 0, +2, 0]
-      - [0, 0, 0, 0, +4, 0]
+      - [0, -0.003, -0.003, 0, -3.0, 0]
+      - [0, +0.003, -0.003, 0, -3.0, 0]
+      - [0, -0.003, +0.003, 0, -3.0, 0]
+      - [0, +0.003, +0.003, 0, -3.0, 0]
+      - [0, -0.003, -0.003, 0, +3.0, 0]
+      - [0, +0.003, -0.003, 0, +3.0, 0]
+      - [0, -0.003, +0.003, 0, +3.0, 0]
+      - [0, +0.003, +0.003, 0, +3.0, 0]
     peck_retract_mm: 10.0         # back-off after each force stop
     peck_timeout_s: 60.0         # time budget for one peck attempt
 
@@ -182,11 +185,11 @@ eval:
   # contact instead of the same nominal path every time. Uses its OWN random stream, so
   # toggling it does not change the injected-error draws (noised/nominal runs stay pairable).
   trajectory_noise:
-    enabled: true
+    enabled: false
     # PER-DIMENSION per-waypoint std [x, y, z (m), roll, pitch, yaw (deg)], applied after
     # smoothing; a zero entry leaves that DOF unperturbed. (Legacy scalar keys translation_m /
     # rotation_deg still work when 'std' is absent.)
-    std: [0.000, 0.000, 0.001, 0.0, 1.0, 0.0]
+    std: [0.000, 0.005, 0.005, 0.0, 5.0, 0.0]
     smooth_window: 10            # moving-average window (waypoints) -- keeps the reference smooth
     noise_decay_attempt: 0.1     # fraction to shrink the WHOLE perturbation by each attempt:
                                  # attempt k is scaled (1 - f)^(k-1)
@@ -209,11 +212,20 @@ eval:
 # in trials.csv as trust_* columns).
 # ===================================================================================================
 estimation:
+  # WHICH NUMBER GETS COMMITTED.
+  #   aggregator  the multi-start solver's vote (see `aggregator:` below) -- production.
+  #   argmin      the single deepest cell of the dense energy landscape; the ICP finals are
+  #               ignored entirely. Costs nothing extra (the landscape is built anyway for the
+  #               plots / P(seat)) and is the hardware version of analysis/landscape_sweep,
+  #               where the argmin measured |z'| 3.3-9.6 mm at ~50% win against ~2.0 mm / 84%
+  #               for the aggregator. Use it to see landscape quality end-to-end, not to run
+  #               production. The `commit` column in trials.csv records what was used.
+  commit: aggregator
   # The AUGMENTED manifold (clean map + 30k truth-corrected production-process rows) and the
   # rawcap wrench representation -- the 2026-08-09 offline winners. Fall back to the classic
   # setup with: manifold_csv ./configs/data/banana_manifold_20260807_clean.csv,
   # wrench_representation unit, s_force 3.0, s_torque 1.0.
-  manifold_csv: ./configs/data/hose_manifold.csv
+  manifold_csv: ./configs/data/bnc_manifold.csv
   wrench_representation: unit
   # rawcap SATURATION: the wrench feature is unit(f) x min(|f| / rawcap_force_ref_n,
   # rawcap_cap) -- magnitude in units of the reference, CAPPED at rawcap_cap. Saturation
@@ -241,15 +253,15 @@ estimation:
   scaling_constant_unit_torque_to_mm: 0.0
   min_force_n: 3.0
   min_observations: 20
-  estimate_dims: [z_mm, pitch_deg]
+  estimate_dims: [pitch_deg]
   icp_iterations: 20
   num_initial_guesses: 1000
   init_guess_range:
     x_mm: 0.0
     y_mm: 0.0
-    z_mm: 10.0
+    z_mm: 0.0
     roll_deg: 0.0
-    pitch_deg: 15.0
+    pitch_deg: 10.0
     yaw_deg: 0.0
   step_gain: 1.0
   ransac_iters: 100
@@ -306,7 +318,7 @@ compliance:
   enabled: true
   tare_before: true
   mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
-  stiffness:     [1500.0, 1500.0, 250.0, 10.0, 10.0, 10.0]
+  stiffness:     [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
   damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0

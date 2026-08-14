@@ -20,23 +20,13 @@ base_frame: base_link
 tip_frame: tool0
 
 # The held connector + its recorded mate (configs/frames.yaml: frames: AND targets: entries).
-held_frame: hose_connector_finger_holder
+held_frame: bnc_connector_finger_holder
 
 cycles: 10                       # how many probe -> contact -> retract repetitions
-<<<<<<< HEAD
-retract: false                    # true   = compliant retract to the standoff after each contact
-                                 # false  = leave the arm AT the contact; run ends after ONE
-                                 #          probe (irreversible mates: a human must unlock first)
-                                 # prompt = wait at the contact until the operator presses the
-                                 #          unlock button and hits ENTER in the terminal, THEN
-                                 #          retract -- multi-cycle checks of irreversible mates
-standoff_distance_m: 0.050       # backed off along the connector's own -X (free space)
-=======
 retract: true                    # false = leave the arm AT the contact and end after ONE probe.
                                  # For irreversible mates (a fully assembled hose): the robot
                                  # cannot back out until a human presses the unlock button.
 standoff_distance_m: 0.030       # backed off along the connector's own -X (free space)
->>>>>>> 454e0ff2d19d0257f6da4df7e506be47eadf815a
 overshoot_m: 0.005               # command slightly PAST the recorded mate so contact is certain
 resolution_m: 0.001              # straight-line waypoint spacing
 

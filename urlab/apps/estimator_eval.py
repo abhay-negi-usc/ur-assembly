@@ -152,6 +152,7 @@ def _fieldnames(dims):
             + ['n_modes_land', 'ambiguity_land', 'between_frac_land', 'separation_land',
                'support_ratio']
             + ['ranked_mode', 'p_seat_unranked']   # seat_gate.mode_ranking diagnostics
+            + ['commit']                           # estimation.commit actually used this attempt
             + ['p_seat', 'gate_opened', 'insert_depth_mm', 'seat_depth_mm', 'seated_basin']
             + ['icp_inliers', 'icp_residual', 'estimate']
             + ['trust_rankavg2', 'trust_cauchy'] + [f'trust_{s}' for s in _TRUST_SIGNALS]
@@ -708,6 +709,22 @@ def build_and_run(cfg, robot, camera, args):
     # the realized error. The correction is always applied, same as the plain estimator.
     estimator = CheckedManifoldEstimator(cfg.section('estimation'))
 
+    # WHICH NUMBER GETS COMMITTED (estimation.commit):
+    #   'aggregator'  the multi-start solver's vote (ransac / softmax) -- the production path;
+    #   'argmin'      the single deepest cell of the dense energy landscape, ignoring the ICP
+    #                 finals entirely. The landscape is built anyway for the plots and P(seat),
+    #                 so this costs nothing extra -- it is the hardware version of the offline
+    #                 argmin study (analysis/landscape_sweep), where it measured 3.3-9.6 mm
+    #                 |z'| at ~50% win vs ~2.0 mm / 84% for the aggregator.
+    commit = str(cfg.get_path('estimation.commit', 'aggregator')).strip().lower()
+    if commit not in ('aggregator', 'argmin'):
+        log.error("estimation.commit %r must be 'aggregator' or 'argmin'.", commit)
+        return False                               # bad values fail HERE, pre-motion
+    if commit == 'argmin':
+        log.warning('estimation.commit: ARGMIN -- committing the landscape minimum, NOT the '
+                    'aggregator. Measured well below the aggregator offline; this is a '
+                    'diagnostic mode.')
+
     # ---- SUCCESS BASIN: P(seat | offset) learned from the SAME manifold, plus ONE definition
     # of success (reach within seat_margin_mm of the manifold's deepest insertion) used both to
     # gate the insertion and to score it afterwards. ----
@@ -1191,11 +1208,35 @@ def build_and_run(cfg, robot, camera, args):
                     # committed correction from it, and the diagnostics below reuse the pack
                     # (it depends only on the PRE-update observations, so nothing changes).
                     land_pack = None
-                    if (save_plots and plot_land) or basin is not None:
+                    if (save_plots and plot_land) or basin is not None or commit == 'argmin':
                         try:
                             land_pack = _landscape(estimator, vec6, w6)
                         except Exception as exc:   # noqa: BLE001 -- diagnostics never fatal
                             log.warning('landscape skipped (%s)', exc)
+                    # ARGMIN COMMITMENT (estimation.commit: argmin): throw away the multi-start
+                    # aggregator's vote and commit the single deepest cell of the dense
+                    # landscape. No consensus, no mixture, no shrink -- the estimator IS the
+                    # argmin. Measured offline on the 2026-08-13 AM data (analysis/
+                    # landscape_sweep): |z'| 3.3-9.6 mm at ~50% win depending on the metric, vs
+                    # ~2.0 mm / 84% for the aggregator, so this is a DIAGNOSTIC option -- it
+                    # makes the landscape's own quality visible end-to-end on hardware.
+                    row['commit'] = commit
+                    if commit == 'argmin':
+                        if land_pack is None:
+                            log.warning('commit: argmin needs the landscape and it failed -- '
+                                        'falling back to the aggregator on this attempt.')
+                            row['commit'] = 'aggregator (landscape failed)'
+                        else:
+                            th_a = land_pack[3]        # {dim: value} at the landscape minimum
+                            log.info('COMMIT ARGMIN: %s (aggregator said %s).',
+                                     {d: round(float(v), 2) for d, v in th_a.items()},
+                                     {d: round(float(v), 2)
+                                      for d, v in info['theta_corr'].items()})
+                            c6a = np.zeros(6)
+                            c6a[estimator.idx] = [th_a[d] for d in estimator.estimate_dims]
+                            T_corr_mm = mats_from_vec6(c6a)
+                            info['theta_corr'] = {d: float(th_a[d])
+                                                  for d in estimator.estimate_dims}
                     # MODE RANKING at commitment (seat_gate.mode_ranking: p_seat): the
                     # aggregator's estimate is only the default candidate -- a rival mode of
                     # the multi-start finals that does MORE for P(seat) wins. NOTE icp_residual

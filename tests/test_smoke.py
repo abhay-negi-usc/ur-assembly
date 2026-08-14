@@ -1763,6 +1763,17 @@ def test_estimator_eval_collection_config():
     abt = cfg['eval'].get('abort_bounds') or {}
     assert 0 < float(abt.get('pos_mm', 10.0)) <= 20.0, abt
     assert 0 < float(abt.get('rot_deg', 15.0)) <= 15.0, abt
+    # estimation.commit selects WHICH number is applied: the aggregator's vote or the raw
+    # landscape argmin. Only those two exist, and the app rejects anything else pre-motion.
+    commit = str(cfg['estimation'].get('commit', 'aggregator')).strip().lower()
+    assert commit in ('aggregator', 'argmin'), commit
+    src = open(os.path.join(os.path.dirname(__file__), '..', 'urlab', 'apps',
+                            'estimator_eval.py')).read()
+    assert "'aggregator', 'argmin'" in src, \
+        'estimator_eval must validate estimation.commit pre-motion'
+    assert "commit == 'argmin'" in src and 'land_pack[3]' in src, \
+        'commit: argmin must commit the dense landscape argmin, not the ICP finals'
+    assert "+ ['commit']" in src, 'trials.csv must record which commit path ran'
 
 
 def test_manifold_interpolation_reduces_latching():

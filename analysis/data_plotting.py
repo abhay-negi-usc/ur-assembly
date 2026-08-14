@@ -75,7 +75,7 @@ from mpl_toolkits.mplot3d import Axes3D     # noqa: E402,F401  (registers the 3d
 # =====================================================================================
 CONFIG = {
     # ---- input / output ----------------------------------------------------------------
-    'csv_path': r'configs/data/hose_manifold.csv',
+    'csv_path': r'configs/data/bnc_manifold.csv',
     'output_root': 'analysis',       # a timestamped subdirectory is created under this
     'description': None,             # optional str -> written to description.txt
 

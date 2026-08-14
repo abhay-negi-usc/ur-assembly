@@ -49,6 +49,11 @@ frames:
     xyz_mm:  [0.0, -78.0, 159.0]
     rpy_deg: [180.0, 0.0, +90.0]
 
+  # The hose connector fixtured between the closed fingers (tool0 -> connector).
+  bnc_connector_finger_holder:
+    xyz_mm:  [0.0, -45.7, 159.0]
+    rpy_deg: [180.0, 0.0, +90.0]
+
 # ============================================================================
 # TARGETS -- recorded BASE_LINK poses of the frames above (base_link <- frame), e.g. the assembly
 # mate. MEASURE: hand-guide to a good mate, read the `base_link <- <frame>` line off
@@ -66,3 +71,8 @@ targets:
   hose_connector_finger_holder:
     xyz_mm:  [-49.99, 947.55, -139.50]
     rpy_deg: [-86.91, +1.45, +94.20]
+
+  # bnc_connector_finger_holder at the mate (read off the monitor).
+  bnc_connector_finger_holder:
+    xyz_mm:  [+112.68, +1012.00, -139.26]
+    rpy_deg: [-56.18, -0.24, +93.96]

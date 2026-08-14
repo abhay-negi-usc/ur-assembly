@@ -157,7 +157,7 @@ eval:
   # Whatever the mode, the trial ends with ONE zero-noise insertion from the final belief
   # (eval.final_insertion, default ON since 2026-08-13).
   collection:
-    mode: attempts               # attempts | offset_sweep | peck
+    mode: offset_sweep               # attempts | offset_sweep | peck
     # offset_sweep: commanded offsets [x, y, z (m), roll, pitch, yaw (deg)] in the held part's
     # own frame. null = the default pitch sweep -4..+4 deg in 2 deg steps, other dims zero.
     sweep_offsets: 
@@ -182,11 +182,11 @@ eval:
   # contact instead of the same nominal path every time. Uses its OWN random stream, so
   # toggling it does not change the injected-error draws (noised/nominal runs stay pairable).
   trajectory_noise:
-    enabled: false
+    enabled: true
     # PER-DIMENSION per-waypoint std [x, y, z (m), roll, pitch, yaw (deg)], applied after
     # smoothing; a zero entry leaves that DOF unperturbed. (Legacy scalar keys translation_m /
     # rotation_deg still work when 'std' is absent.)
-    std: [0.000, 0.000, 0.005, 0.0, 5.0, 0.0]
+    std: [0.000, 0.000, 0.001, 0.0, 1.0, 0.0]
     smooth_window: 10            # moving-average window (waypoints) -- keeps the reference smooth
     noise_decay_attempt: 0.1     # fraction to shrink the WHOLE perturbation by each attempt:
                                  # attempt k is scaled (1 - f)^(k-1)
@@ -306,7 +306,7 @@ compliance:
   enabled: true
   tare_before: true
   mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
-  stiffness:     [1500.0, 250.0, 250.0, 10.0, 10.0, 10.0]
+  stiffness:     [1500.0, 1500.0, 250.0, 10.0, 10.0, 10.0]
   damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0

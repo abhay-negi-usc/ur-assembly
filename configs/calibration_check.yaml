@@ -23,7 +23,13 @@ tip_frame: tool0
 held_frame: hose_connector_finger_holder
 
 cycles: 10                       # how many probe -> contact -> retract repetitions
-standoff_distance_m: 0.030       # backed off along the connector's own -X (free space)
+retract: false                    # true   = compliant retract to the standoff after each contact
+                                 # false  = leave the arm AT the contact; run ends after ONE
+                                 #          probe (irreversible mates: a human must unlock first)
+                                 # prompt = wait at the contact until the operator presses the
+                                 #          unlock button and hits ENTER in the terminal, THEN
+                                 #          retract -- multi-cycle checks of irreversible mates
+standoff_distance_m: 0.050       # backed off along the connector's own -X (free space)
 overshoot_m: 0.005               # command slightly PAST the recorded mate so contact is certain
 resolution_m: 0.001              # straight-line waypoint spacing
 

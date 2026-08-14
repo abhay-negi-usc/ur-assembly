@@ -13,7 +13,12 @@ Per cycle:
     contact    the force guard trips (force_guard.max_force_n, with the usual optional
                persistence_s debounce); hold settle_s, then record the CONTACT POSE = the held
                connector wrt the recorded target (mm / deg) and the settled wrench
-    retract    compliant, un-guarded, straight back out to the standoff
+    retract    compliant, un-guarded, straight back out to the standoff. For mates the robot
+               cannot back out of on its own (a fully assembled hose needs a human on the unlock
+               button) there are two alternatives: retract: false leaves the arm AT the contact
+               and ends the run after that single probe; retract: prompt waits at the contact
+               for the operator to press the unlock button and confirm with ENTER in the
+               terminal, THEN retracts -- so multi-cycle checks still work.
 
 After `cycles` repetitions: per-axis mean / std / min / max of the contact pose, and the DRIFT
 (linear slope of contact x vs cycle). Contact x should sit near the physical face-to-face
@@ -69,9 +74,19 @@ def build_and_run(cfg, robot, camera, args):
     v_mm_s = float(cfg.get_path('speed.approach_translation_mm_s', 2.0))
     rv_mm_s = float(cfg.get_path('speed.retract_translation_mm_s', 20.0))
     settle_s = float(cfg.get_path('compliance.settle_s', 1.0))
+    retract = cfg.get('retract', True)
+    retract = (retract.strip().lower() if isinstance(retract, str)
+               else ('auto' if retract else 'never'))
+    if retract not in ('auto', 'never', 'prompt'):
+        log.error("retract must be true, false or 'prompt' (got %r).", cfg.get('retract'))
+        return False
     if cycles < 1 or standoff_m <= 0 or overshoot_m < 0:
         log.error('cycles must be >= 1, standoff_distance_m > 0, overshoot_m >= 0.')
         return False
+    if retract == 'never' and cycles > 1:
+        log.warning('retract: false leaves the arm AT the contact, so only ONE probe can run '
+                    '(%d cycles requested). Capping to 1.', cycles)
+        cycles = 1
 
     adm = AdmittanceController(robot.arm, cfg.section('compliance'))
     guard = ForceGuard(robot.arm, cfg.section('force_guard'))
@@ -82,9 +97,9 @@ def build_and_run(cfg, robot, camera, args):
     rows_line = line_rows(standoff_m, overshoot_m, res_m)
     refs = [T_base_tconn @ r @ inverse(T_held) for r in rows_line]
     log.info('Calibration check: %d cycles, %.0f mm standoff -> %.1f mm past the recorded '
-             'target at %.1f mm/s, guard %.0f N (persistence %.2f s).', cycles,
+             'target at %.1f mm/s, guard %.0f N (persistence %.2f s), retract %s.', cycles,
              standoff_m * 1000.0, overshoot_m * 1000.0, v_mm_s, guard.max_force,
-             guard.persistence_s)
+             guard.persistence_s, retract)
 
     def seg_time(A, B, v):
         lin_m, ang_rad = pose_error(A, B)
@@ -151,9 +166,26 @@ def build_and_run(cfg, robot, camera, args):
                      pose6[2], pose6[3], pose6[4], pose6[5], fmag,
                      '  [REACHED END -- no contact before the overshoot!]' if reached_end
                      else '')
-            # compliant straight retract to the standoff reference
-            adm.ramp(last_ref, refs[0], seg_time(last_ref, refs[0], rv_mm_s), guard=None)
-            adm.stop()
+            if retract == 'never':
+                adm.stop()
+                log.warning('retract: false -- the arm is LEFT AT THE CONTACT. Press the '
+                            'unlock/release button before commanding any robot motion.')
+            else:
+                if retract == 'prompt':
+                    adm.stop()         # hold position while the human is at the connector
+                    try:
+                        input(f'   cycle {cyc}/{cycles}: press the unlock/release button, '
+                              'then hit ENTER to retract... ')
+                    except EOFError:
+                        log.warning("retract: prompt needs an interactive terminal and stdin "
+                                    "is closed. Leaving the arm AT the contact; press the "
+                                    "unlock/release button before commanding any motion.")
+                        break
+                    adm.reset()
+                    adm.warmup(last_ref)   # NO tare: the sensor is loaded at the contact
+                # compliant straight retract to the standoff reference
+                adm.ramp(last_ref, refs[0], seg_time(last_ref, refs[0], rv_mm_s), guard=None)
+                adm.stop()
     finally:
         fout.close()
 

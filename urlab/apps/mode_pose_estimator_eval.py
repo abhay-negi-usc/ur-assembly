@@ -16,8 +16,8 @@ So the metric is SPLIT:
         watershed, skills/mixture), and pick the top-mass mode. This stage is tuned for
         CLASSIFICATION -- it does not need to be accurate, only to put the truth's cell in
         the chosen SET.
-    STAGE 2 -- POSE  (estimation_pose: wrench-LIGHT metric, stop-signature fused): a second
-        energy over the SAME grid, UNRESTRICTED argmin, scaled by alpha. The mode partition
+    STAGE 2 -- POSE  (estimation_pose: its own metric): a second energy over the SAME grid,
+        UNRESTRICTED argmin, scaled by alpha. The mode partition
         is a pure DIAGNOSTIC -- gating stage 2 on it was measured to hurt (|z'| 7.4 vs 2.0
         mm) while the classifier (78% truth-in-mode) trails the fused refiner's implicit
         mode accuracy (~84%); the mode columns exist to tune the classifier toward the
@@ -47,7 +47,6 @@ from ..skills import trajectory as traj
 from ..skills.grid_estimator import GridManifoldEstimator
 from ..skills.manifold import mats_from_vec6, vec6_from_mats
 from ..skills.mixture import from_energy
-from ..skills.success_basin import SuccessBasin
 from ..transforms import inverse, matrix_to_xyzrpy, pose_error, translation_matrix
 from ._runner import run_app
 from .estimator_eval import (_ERR, _corr_to_m, _gt_error, _observe, _rebase_rows,
@@ -76,22 +75,14 @@ def merged_estimation(cfg):
     return out
 
 
-def two_stage(est_mode, est_pose, rows12, e_stop=None, stop_weight=2.0,
-              temp=0.05, min_weight=0.02, alpha=1.0, stop_in_mode=False):
+def two_stage(est_mode, est_pose, rows12, temp=0.05, min_weight=0.02, alpha=1.0):
     """The two-stage estimate, PURE (no robot): rows12 = pooled observation rows.
 
-    Returns (theta6, info) or (None, reason). Verified against the 2026-08-13 AM data:
-
-      * the stage-1 PARTITION must stay UNFUSED (stop_in_mode=False): adding the smooth
-        stop-signature basin fragments the watershed and destroys the mode classifier
-        (truth-in-top-mode 78% -> 0% when fused);
-      * the stop signature belongs in STAGE 2 instead -- `e_stop` fuses into the refinement
-        energy (median-normalised), which is the measured-best point estimator;
-      * there is NO GATE (removed 2026-08-13): restricting stage 2 to the chosen mode was
-        measured to HURT (|z'| 7.4 vs 2.0 mm) because the classifier (78% truth-in-mode) is
-        below the fused refiner's own implicit mode accuracy (~84%). Stage 1's partition is
-        a pure DIAGNOSTIC: the mode outputs grade the classifier, the refinement runs
-        unrestricted."""
+    Returns (theta6, info) or (None, reason). Stage 1 partitions the wrench-heavy energy
+    into modes (a pure DIAGNOSTIC: there is no gate -- restricting stage 2 to the chosen
+    mode was measured to hurt while the classifier trails the refiner's implicit mode
+    accuracy). Stage 2 commits alpha x the unrestricted argmin of the pose-metric energy.
+    (Stop-signature fusion was REMOVED 2026-08-13 at the user's direction.)"""
     vm, wm = est_mode.prepare_observations(rows12[:, :6], rows12[:, 6:9], rows12[:, 9:12])
     vp, wp = est_pose.prepare_observations(rows12[:, :6], rows12[:, 6:9], rows12[:, 9:12])
     E_m, n_m, _ = est_mode.energy(vm, wm)
@@ -100,12 +91,6 @@ def two_stage(est_mode, est_pose, rows12, e_stop=None, stop_weight=2.0,
         return None, f'too few observations (mode {n_m}, pose {n_p})'
     E_dec = E_m / max(float(np.median(E_m)), 1e-12)
     E_p = np.asarray(E_p, dtype=float) / max(float(np.median(E_p)), 1e-12)
-    if e_stop is not None:
-        e_n = stop_weight * np.asarray(e_stop, dtype=float) \
-            / max(float(np.median(e_stop)), 1e-12)
-        E_p = E_p + e_n                            # refinement: stop fusion belongs HERE
-        if stop_in_mode:
-            E_dec = E_dec + e_n                    # partition fusion: measured HARMFUL
     mix = from_energy(est_mode.grid6[:, est_mode.idx], E_dec, est_mode.grid_shape,
                       temp=temp, min_weight=min_weight, dims=est_mode.estimate_dims)
     chosen = mix.components[0]
@@ -223,7 +208,7 @@ def _plot_live(path, live_path, est_mode, est_pose, info, errb, dims, hist, stat
         axM.legend(fontsize=7, loc='best')
 
         # ---- MIDDLE: fused pose landscape + committed correction ----
-        landscape(axP, info['E_pose'], 'stage 2 POSE (wrench-light + stop, committed)')
+        landscape(axP, info['E_pose'], 'stage 2 POSE (committed)')
         a6 = np.zeros(6)
         a6[idx] = [info['theta_corr'][d] for d in dims]
         ae = vec6_from_mats(mats_from_vec6(np.asarray(errb, dtype=float))
@@ -281,7 +266,7 @@ def _fieldnames(dims):
                'truth_in_mode', 'truth_mode_rank']
             + [f'mode_centre_{d}' for d in dims]
             + [f'corr_{d}' for d in dims] + [f'pose_argmin_global_{d}' for d in dims]
-            + ['stop_fused', 'x_stop_mm']
+            + ['x_stop_mm']            # deepest stop, diagnostic only
             + [f'err_after_{s}' for s in _ERR] + ['err_after_pos_mm', 'err_after_rot_deg']
             + ['converged', 'diverged', 'estimate']
             + ['insert_depth_mm', 'insert_seated', 'insert_success']
@@ -311,27 +296,13 @@ def build_and_run(cfg, robot, camera, args):
     ps = cfg.section('pose_stage')
     temp = float(ms.get('posterior_temp', 0.05))
     min_w = float(ms.get('mode_min_weight', 0.02))
-    # VERIFIED 2026-08-13 (analysis/mode_pose): the stop signature fuses into STAGE 2 (the
-    # refinement -- the measured-best point estimator), and must NOT enter the stage-1
-    # partition (it fragments the watershed: truth-in-top-mode 78% -> 0%). There is NO mode
-    # gate (removed): restricting stage 2 to the chosen mode measurably hurt (|z'| 7.4 vs
-    # 2.0) -- the mode outputs are DIAGNOSTICS for tuning the classifier.
-    stop_in_mode = bool(ms.get('stop_fusion', False))
-    stop_w = float(ps.get('stop_weight', 2.0))
     alpha = float(ps.get('alpha', 0.75))
-    if ps.get('mode_gate'):
-        log.warning('pose_stage.mode_gate was REMOVED (2026-08-13) -- the mode partition is '
-                    'diagnostic only. Ignored.')
-    basin = None
-    if bool(ps.get('stop_fusion', True)) or stop_in_mode:
-        try:
-            basin = SuccessBasin(urconfig.resolve(cfg, cfg_m['manifold_csv']), dims,
-                                 dict(ms.get('basin', {}) or {},
-                                      scaling_constant_deg_to_mm=est_mode.s_rot))
-        except Exception as exc:                   # noqa: BLE001
-            log.error('Stop model unavailable (%s) -- stages run unfused.', exc)
-    log.info('Two-stage wiring: stop->stage2 %s (w %.1f), stop->partition %s, '
-             'alpha %.2f.', basin is not None, stop_w, stop_in_mode, alpha)
+    for where, sec, stale in (('pose_stage', ps, 'mode_gate'),
+                              ('pose_stage', ps, 'stop_fusion'),
+                              ('mode_stage', ms, 'stop_fusion')):
+        if sec.get(stale):
+            log.warning('%s.%s was REMOVED (2026-08-13). Ignored.', where, stale)
+    log.info('Two-stage wiring: alpha %.2f, temp %.2f, min_weight %.2f.', alpha, temp, min_w)
 
     held_name = cfg.get('held_frame')
     frames = tool_frames.load_frames(cfg)
@@ -558,17 +529,10 @@ def build_and_run(cfg, robot, camera, args):
                         out_dir, f'trial_{trial:03d}_attempt_{attempt:02d}_'
                                  'observations.csv'), obs)
                 full = np.vstack([acc, obs_arr]) if accumulate else obs_arr
-                e_stop = None
-                if basin is not None and xstops:
-                    e_stop = sum(basin.stop_energy(xs, est_mode.grid6[:, est_mode.idx])
-                                 for xs in xstops)
-                theta6, info = two_stage(est_mode, est_pose, full, e_stop, stop_w,
-                                         temp, min_w, alpha,
-                                         stop_in_mode=stop_in_mode)
+                theta6, info = two_stage(est_mode, est_pose, full, temp, min_w, alpha)
                 row = {'trial': trial, 'attempt': attempt,
                        'n_passes': len(sweep), 'err_before_pos_mm': errb_pos,
                        'err_before_rot_deg': errb_rot,
-                       'stop_fused': e_stop is not None,
                        'x_stop_mm': max(xstops) if xstops else ''}
                 row.update({f'inj_{s}': v for s, v in zip(_ERR, inj)})
                 row.update({f'err_before_{s}': v for s, v in zip(_ERR, errb)})

@@ -167,24 +167,3 @@ class SuccessBasin:
     def is_seated(self, max_x):
         """The SAME depth rule the labels use, applied to a real insertion."""
         return bool(float(max_x) >= self.seat_depth)
-
-    def stop_energy(self, x_stop, offsets):
-        """STOP-SIGNATURE energy over candidate offsets: how surprising the observed stop depth
-        is if the part were riding at each offset.
-
-        The part rigid-rides its offset, so believed-frame poses are nearly offset-invariant
-        and the NN pose/wrench energy aliases -- but HOW DEEP the insertion got is a direct
-        physical consequence of the offset. Fusing this with the NN energy is the measured
-        best single-attempt estimator on the 2026-08-12 v3 replay (|z'| 2.55 vs 3.05 baseline,
-        win 62%), and on 2-attempt accumulated observations the best overall (1.63 mm, 67%).
-        Per candidate offset, the k nearest manifold trials predict a stop-depth distribution
-        (median + MAD-std, floored at 1.5 mm of process noise); the energy is the squared
-        z-score of the observed stop under it. NOTE: x_stop is the BELIEVED max x, so this
-        assumes the x component of the belief error is ~0 (true while only z/pitch are
-        estimated)."""
-        q = self._scale(offsets)
-        _, nn = self._tree.query(q, k=min(self.k, len(self.offsets)), workers=-1)
-        r = self.reach[nn]
-        med = np.median(r, axis=1)
-        sd = np.maximum(1.4826 * np.median(np.abs(r - med[:, None]), axis=1), 1.5)
-        return ((float(x_stop) - med) / sd) ** 2

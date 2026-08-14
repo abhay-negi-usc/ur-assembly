@@ -96,7 +96,7 @@ estimation_shared:
   scaling_constant_deg_to_mm: 0.5
   min_force_n: 3.0
   min_observations: 10
-  estimate_dims: [z_mm, pitch_deg]
+  estimate_dims: [pitch_deg]
   interp_neighbors: 16
   interp_softness: 1.0
   random_seed: 0
@@ -140,31 +140,18 @@ estimation_pose:
   scaling_constant_unit_force_to_mm: 1.5
   scaling_constant_unit_torque_to_mm: 0.0
 
-# Stage-1 partition. VERIFIED: the stop signature must NOT fuse into the partition energy
-# (its smooth basin fragments the watershed: truth-in-top-mode 78% -> 0%); it belongs in
-# stage 2. Keep stop_fusion false here.
+# Stage-1 partition. (Stop fusion was REMOVED from all estimators, 2026-08-13.)
 mode_stage:
   # temp 0.12: monotone gain on the tuned metric (0.03 -> 78%, 0.05 -> 81%, 0.12 -> 84%
   # truth-in-mode) while the partition stays honestly 2-mode; min_weight had no effect.
   posterior_temp: 0.12
   mode_min_weight: 0.02
-  stop_fusion: false
-  basin:                         # SuccessBasin settings for the stop-depth model (stage 2)
-    depth_reference: 95.0
-    seat_margin_mm: 4.0
-    neighbors: 25
 
-# Stage-2 refinement: the FUSED energy (pose metric + stop signature) -- the measured-best
-# point estimator (1.96 mm / win 84% on the 2026-08-13 AM data), UNRESTRICTED. There is no
-# mode gate (removed 2026-08-13: restricting the argmin to the chosen mode measurably hurt,
-# 7.4 vs 2.0 mm, while the classifier trails the refiner). The mode columns in trials.csv
+# Stage-2 refinement: the pose-metric energy, UNRESTRICTED argmin, scaled by alpha. There is
+# no mode gate and no stop fusion (both removed 2026-08-13). The mode columns in trials.csv
 # (truth_in_mode / truth_mode_rank) grade the stage-1 classifier for tuning.
 pose_stage:
-  stop_fusion: true
-  stop_weight: 2.0               # the 84%-win plateau; w 4.0 buys median at sub-60% win
-  alpha: 0.6                     # tuned: |z'| 1.67 vs 1.96 at 0.75, same 84% win -- and
-                                 # consistent with the accumulated-regime optimum measured
-                                 # earlier (multiple fused passes -> shrink harder)
+  alpha: 0.6
 
 compliance:
   enabled: true

@@ -266,25 +266,6 @@ estimation:
   interp_neighbors: 16
   interp_softness: 1.0
   random_seed: 0
-
-  # ---- STOP-SIGNATURE FUSION -- the CURRENT BEST estimator, as an option ---------------------
-  # The believed-frame NN energy aliases on this task (the part rigid-rides its offset), while
-  # the stop DEPTH is a direct physical consequence of the offset. The committed correction
-  # becomes the argmin of E_landscape + weight x E_stop (median-normalised), scaled by alpha.
-  # Measured on the 2026-08-12/13 v3 replays: single attempt |z'| 2.55 vs 3.05 no-correction
-  # (win 62%); combined with accumulate_observations, 2 fused attempts reach 1.63 mm (win 67%).
-  # Works with any estimate_dims (the basin/stop model is built on the same dims). Requires
-  # seat_gate.enabled (the SuccessBasin supplies the stop model). false = original behaviour.
-  stop_fusion:
-    enabled: false
-    weight: 2.0                  # stop energy vs NN energy (results robust across 1.0-4.0)
-    # PARTIAL APPLICATION. 2026-08-13 sweep on the m=3/5 ACCUMULATED benchmark (the objective):
-    # alpha 0.6 beats 0.75 monotonically across every weight (|z'| 1.06 vs 1.84 mm at m=3,
-    # win 67%) -- with accumulation, shrink harder. Caveat: tuned on n=45/20 replayed trials;
-    # the DIRECTION (monotone in alpha, robust in weight) is trustworthy, the third decimal is
-    # not. For single-attempt runs (accumulate_observations: false), 0.75 was the measured best.
-    alpha: 0.6
-
   # ---- MIXTURE over the multi-start finals (skills/mixture.py) ------------------------------
   # Raising num_initial_guesses helps ACCURACY -- the true basin actually gets found -- but it
   # wrecks the usual uncertainty number: the std of the finals then measures the DISTANCE

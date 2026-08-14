@@ -23,6 +23,9 @@ tip_frame: tool0
 held_frame: hose_connector_finger_holder
 
 cycles: 10                       # how many probe -> contact -> retract repetitions
+retract: true                    # false = leave the arm AT the contact and end after ONE probe.
+                                 # For irreversible mates (a fully assembled hose): the robot
+                                 # cannot back out until a human presses the unlock button.
 standoff_distance_m: 0.030       # backed off along the connector's own -X (free space)
 overshoot_m: 0.005               # command slightly PAST the recorded mate so contact is certain
 resolution_m: 0.001              # straight-line waypoint spacing

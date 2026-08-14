@@ -13,7 +13,10 @@ Per cycle:
     contact    the force guard trips (force_guard.max_force_n, with the usual optional
                persistence_s debounce); hold settle_s, then record the CONTACT POSE = the held
                connector wrt the recorded target (mm / deg) and the settled wrench
-    retract    compliant, un-guarded, straight back out to the standoff
+    retract    compliant, un-guarded, straight back out to the standoff -- UNLESS retract: false,
+               for mates the robot cannot back out of (a fully assembled hose needs a human on
+               the unlock button). Then the arm is left AT the contact and the run ends after
+               that single probe.
 
 After `cycles` repetitions: per-axis mean / std / min / max of the contact pose, and the DRIFT
 (linear slope of contact x vs cycle). Contact x should sit near the physical face-to-face
@@ -69,9 +72,14 @@ def build_and_run(cfg, robot, camera, args):
     v_mm_s = float(cfg.get_path('speed.approach_translation_mm_s', 2.0))
     rv_mm_s = float(cfg.get_path('speed.retract_translation_mm_s', 20.0))
     settle_s = float(cfg.get_path('compliance.settle_s', 1.0))
+    retract = bool(cfg.get('retract', True))
     if cycles < 1 or standoff_m <= 0 or overshoot_m < 0:
         log.error('cycles must be >= 1, standoff_distance_m > 0, overshoot_m >= 0.')
         return False
+    if not retract and cycles > 1:
+        log.warning('retract: false leaves the arm AT the contact, so only ONE probe can run '
+                    '(%d cycles requested). Capping to 1.', cycles)
+        cycles = 1
 
     adm = AdmittanceController(robot.arm, cfg.section('compliance'))
     guard = ForceGuard(robot.arm, cfg.section('force_guard'))
@@ -151,9 +159,14 @@ def build_and_run(cfg, robot, camera, args):
                      pose6[2], pose6[3], pose6[4], pose6[5], fmag,
                      '  [REACHED END -- no contact before the overshoot!]' if reached_end
                      else '')
-            # compliant straight retract to the standoff reference
-            adm.ramp(last_ref, refs[0], seg_time(last_ref, refs[0], rv_mm_s), guard=None)
-            adm.stop()
+            if retract:
+                # compliant straight retract to the standoff reference
+                adm.ramp(last_ref, refs[0], seg_time(last_ref, refs[0], rv_mm_s), guard=None)
+                adm.stop()
+            else:
+                adm.stop()
+                log.warning('retract: false -- the arm is LEFT AT THE CONTACT. Press the '
+                            'unlock/release button before commanding any robot motion.')
     finally:
         fout.close()
 

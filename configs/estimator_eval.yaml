@@ -86,9 +86,13 @@ eval:
   #   A1  where the observations LAND inside the map under each correction
   #   A2  where, and in WHICH CHANNEL, the truth is penalised (vs depth)
   #   C   per-row match quality vs insertion depth
-  #   D   residual split by channel: translation / rotation / force / torque
+  #   D   residual of ALL 12 DOFs individually (x y z roll pitch yaw fx fy fz tx ty tz)
   #   E   neighbour votes -- which part of the map the rows actually resemble
   #   F   each channel's OWN energy minimum next to the total's
+  # Plus a companion figure (..._match_dof.png): one panel per DOF, that dimension's own
+  # energy over the candidate grid with truth and estimate marked. Read it as a vote count --
+  # a DOF whose curve bottoms out at the truth was OUTVOTED; a flat one carries no
+  # information. This is what exposed the pitch dim_weight problem noted under dim_weights.
   # Reading it: if the truth's points sit off the map's support, the map or the calibration is
   # wrong; if both fit but a rival fits better, that is aliasing; if one channel's minimum sits
   # at the truth while the total's does not, the WEIGHTING is the bug. MEASURED on the
@@ -310,15 +314,28 @@ estimation:
   # others in the match (partial dicts fill with 1.0; delete the block for the uniform metric).
   # 0 is allowed only on dimensions NOT being estimated. Example: y is fixtured (down-weight),
   # z is the decisive channel (up-weight).
+  # MEASURED 2026-08-14 on the 49 BNC attempts (analysis/bnc_tuning): pitch_deg 10.0 was
+  # actively HARMFUL. Up-weighting a dimension makes the kNN pick neighbours BY that
+  # dimension, so its residual stops measuring "is this correction right" and starts measuring
+  # "how far from the map's dense centre in pitch" -- a bowl centred at 0 that pulls every
+  # estimate toward no-correction. At weight 10 the pitch DOF's energy range was 16.4 against
+  # 4.2 for the next largest, so it decided the argmin nearly alone, with its minimum at
+  # -0.25 deg when the truth was -5. Win rate falls monotonically with the weight:
+  # 1 -> 88%, 2 -> 84%, 5 -> 80%, 10 -> 78%, 20 -> 76%. Uniform it is.
   dim_weights:
     x_mm: 1.0
     y_mm: 1.0
     z_mm: 1.0
     roll_deg: 1.0
-    pitch_deg: 10.0
+    pitch_deg: 1.0
     yaw_deg: 1.0
-  scaling_constant_unit_force_to_mm: 1.0
-  scaling_constant_unit_torque_to_mm: 1.0
+  # Also measured on the same 49 attempts, in THIS family (rawcap, uniform weights):
+  # s_force 2.0 / s_torque 0.0 gives median |remaining pitch| 2.00 deg at a 92% win rate,
+  # against 2.75 deg / 78% for the previous 1.0 / 1.0 / pitch-weight-10 combination
+  # (5.00 deg = no correction). Torque weight only hurt here: every s_torque > 0 variant
+  # scored at or below its s_torque 0 sibling.
+  scaling_constant_unit_force_to_mm: 2.0
+  scaling_constant_unit_torque_to_mm: 0.0
   min_force_n: 3.0
   min_observations: 20
   estimate_dims: [pitch_deg]

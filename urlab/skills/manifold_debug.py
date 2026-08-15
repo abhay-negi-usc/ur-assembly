@@ -30,6 +30,8 @@ the manifold KD-tree with the same soft-kNN interpolation the energy uses, so a 
 off these plots is the number the energy actually summed.
 """
 
+import os
+
 import numpy as np
 
 from .. import log as urlog
@@ -43,6 +45,17 @@ CHANNELS = (('translation', slice(0, 3), 'tab:blue'),
             ('rotation', slice(3, 6), 'tab:orange'),
             ('force', slice(6, 9), 'tab:green'),
             ('torque', slice(9, 12), 'tab:red'))
+
+# The same 12 dimensions ONE AT A TIME. The block view above can hide the decisive detail: a
+# block is a 3-vector norm, so a single axis inside it (say fz, or the y translation the
+# fixture pins) can carry the whole residual while its two partners contribute nothing. Every
+# per-DOF number here is in METRIC space -- i.e. AFTER s_rot, dim_weights and the wrench
+# scalings -- because that is what the energy actually sums. A dimension whose weight is 0
+# reads as a flat zero, which is itself worth seeing.
+DOFS = (('x', 0, 'tab:blue'), ('y', 1, 'tab:blue'), ('z', 2, 'tab:blue'),
+        ('roll', 3, 'tab:orange'), ('pitch', 4, 'tab:orange'), ('yaw', 5, 'tab:orange'),
+        ('fx', 6, 'tab:green'), ('fy', 7, 'tab:green'), ('fz', 8, 'tab:green'),
+        ('tx', 9, 'tab:red'), ('ty', 10, 'tab:red'), ('tz', 11, 'tab:red'))
 
 
 def _theta6(theta, idx):
@@ -89,6 +102,7 @@ def channel_energy(est, vec6, w6, grid6):
     Y = mats_from_vec6(np.asarray(vec6, dtype=float))
     w = np.asarray(w6, dtype=float)
     out = {name: np.empty(len(grid6)) for name, _, _ in CHANNELS}
+    out.update({name: np.empty(len(grid6)) for name, _, _ in DOFS})
     out['total'] = np.empty(len(grid6))
     k = max(int(est.interp_neighbors), 1)
     # chunk over candidates -- the gather is (candidates x rows, k, 12) and must not blow up
@@ -111,6 +125,8 @@ def channel_energy(est, vec6, w6, grid6):
         out['total'][lo:hi] = np.linalg.norm(r, axis=2).mean(axis=1)
         for name, sl, _ in CHANNELS:
             out[name][lo:hi] = np.linalg.norm(r[:, :, sl], axis=2).mean(axis=1)
+        for name, j, _ in DOFS:                  # per-DOF: |residual| of that axis alone
+            out[name][lo:hi] = np.abs(r[:, :, j]).mean(axis=1)
     return out
 
 
@@ -217,15 +233,21 @@ def figures(est, vec6, w6, theta_est, theta_true, out_path, title='', max_rows=2
 
     # ---- D: channel decomposition ----------------------------------------------------
     ax = axes[1, 0]
-    names = [n for n, _, _ in CHANNELS]
+    names = [n for n, _, _ in DOFS]
     xpos = np.arange(len(names))
     for i, (name, p) in enumerate(packs.items()):
-        vals = [np.linalg.norm(p['res'][:, sl], axis=1).mean() for _, sl, _ in CHANNELS]
+        vals = [np.abs(p['res'][:, j]).mean() for _, j, _ in DOFS]
         ax.bar(xpos + (i - 0.5) * 0.38, vals, 0.38, color=colors[name], label=name)
-    ax.set_xticks(xpos, names, fontsize=8)
-    ax.set_ylabel('mean residual (mm-eq)')
-    ax.set_title('D. WHICH CHANNEL rejects the truth (equal bars = no channel objects)',
-                 fontsize=9)
+    for k, (_, _, c) in enumerate(DOFS):         # colour-code the block each DOF belongs to
+        ax.get_xticklabels()
+    ax.set_xticks(xpos, names, fontsize=7)
+    for lbl, (_, _, c) in zip(ax.get_xticklabels(), DOFS):
+        lbl.set_color(c)
+    for b in (2.5, 5.5, 8.5):                    # block boundaries: trans | rot | force | torque
+        ax.axvline(b, color='0.7', lw=0.8, ls=':')
+    ax.set_ylabel('mean |residual| per DOF (metric units)')
+    ax.set_title('D. PER-DOF residual, all 12 (label colour = block; equal bars = no '
+                 'objection)', fontsize=9)
     ax.legend(fontsize=7)
     ax.grid(alpha=0.3, axis='y')
 
@@ -285,6 +307,52 @@ def figures(est, vec6, w6, theta_est, theta_true, out_path, title='', max_rows=2
     fig.tight_layout()
     fig.savefig(out_path, dpi=110)
     plt.close(fig)
+
+    # ---- companion figure: EVERY DOF on its own -------------------------------------
+    # The 12 axes do not have to agree, and the block view cannot show it when they do not.
+    # Each panel is one dimension's own contribution to the energy over the candidate grid,
+    # with the committed estimate and the truth marked, and that dimension's mean residual at
+    # both in the subtitle. Read it as a vote count: a dimension whose curve bottoms out at
+    # the truth was OUTVOTED by the rest; a flat one carries no information about this
+    # correction at all (and a zero-weight dimension is flat by construction).
+    dof_path = os.path.splitext(out_path)[0] + '_dof.png'
+    fig2, ax2 = plt.subplots(3, 4, figsize=(17, 9), sharex=(len(dims) == 1))
+    for k, (name, j, col) in enumerate(DOFS):
+        a = ax2.ravel()[k]
+        y = np.asarray(E[name], dtype=float)
+        flat = float(np.ptp(y)) <= 1e-12 * max(abs(y).max(), 1.0)
+        if len(dims) == 1:
+            a.plot(gaxes[0], y, color=col, lw=1.6)
+            if not flat:
+                a.plot(gaxes[0][int(np.argmin(y))], y.min(), 'o', color=col, ms=6)
+            if t_tru is not None:
+                a.axvline(t_tru[0], color='tab:green', ls='--', lw=1.6)
+            if t_est is not None:
+                a.axvline(t_est[0], color='tab:orange', ls=':', lw=1.6)
+            a.set_xlabel(dims[0], fontsize=7)
+            head = 'flat: NO information' if flat else \
+                f'min @ {gaxes[0][int(np.argmin(y))]:+.2f}'
+        else:
+            a.imshow(y.reshape(shape), origin='lower', aspect='auto',
+                     extent=[gaxes[1][0], gaxes[1][-1], gaxes[0][0], gaxes[0][-1]],
+                     cmap='magma')
+            if t_tru is not None:
+                a.plot(t_tru[1], t_tru[0], '*', c='lime', ms=12, mec='k')
+            if t_est is not None:
+                a.plot(t_est[1], t_est[0], 'x', c='w', ms=9, mew=2)
+            head = 'flat: NO information' if flat else 'min marked'
+        bits = '   '.join(f'{nm[:3]} {np.abs(pk["res"][:, j]).mean():.3f}'
+                          for nm, pk in packs.items())
+        a.set_title(f'{name}:  {head}' + chr(10) + bits, fontsize=8,
+                    color=(col if not flat else '0.5'))
+        a.tick_params(labelsize=6)
+        a.grid(alpha=0.25)
+    fig2.suptitle((title or 'per-DOF energy') +
+                  '   |   green dashed = truth, orange dotted = committed estimate   |   '
+                  'subtitle = mean |residual| for that DOF at each')
+    fig2.tight_layout()
+    fig2.savefig(dof_path, dpi=110)
+    plt.close(fig2)
     return out_path
 
 

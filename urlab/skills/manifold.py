@@ -100,6 +100,14 @@ def vec6_from_mats(T):
 # estimated in them, so (unlike dim_weights) a zero here is always legal.
 WRENCH_DIMS = ('fx', 'fy', 'fz', 'tx', 'ty', 'tz')
 
+# The four physical BLOCKS of the 12-D point. They are the granularity at which the kNN kernel
+# can be given separate bandwidths (estimation.interp_softness as a dict): pose geometry and
+# contact wrench are sampled at different densities and carry different noise, so one bandwidth
+# for all twelve is a compromise. MEASURED (2026-08-14 BNC, analysis/bnc_tuning): translation
+# wants ~5x the bandwidth the others do.
+BLOCKS = (('translation', slice(0, 3)), ('rotation', slice(3, 6)),
+          ('force', slice(6, 9)), ('torque', slice(9, 12)))
+
 
 def scaled12(vec6, w6, s_rot, dim_w=None):
     """The common 12-D point: [t (mm) | rot (deg x s_rot) | scaled unit f | scaled unit tau].
@@ -145,6 +153,13 @@ class ManifoldEstimator:
         # insertion) and the two lateral axes mean physically different things, and one
         # dominating axis silently decides the match. Zero is always legal here (no wrench
         # axis is ever estimated), so an axis can be switched off outright.
+        # The logged wrench lives in the BELIEVED connector frame, so a candidate correction
+        # moves it exactly as it moves the pose -- the same re-basing _rebase_rows applies when
+        # a correction is COMMITTED. Evaluating candidates without it scores every non-zero
+        # theta with its wrench in the wrong frame (measured 2026-08-14: the force channel's
+        # tracking of the truth nearly tripled, gain 0.18 -> 0.52, once this was applied).
+        # Off only to reproduce pre-2026-08-14 numbers.
+        self.wrench_follows_correction = bool(c.get('wrench_follows_correction', True))
         ww = dict(c.get('wrench_weights', {}) or {})
         bad = [k for k in ww if k not in WRENCH_DIMS]
         if bad:
@@ -228,7 +243,24 @@ class ManifoldEstimator:
         if isinstance(kn, str) and kn.strip().lower() in ('none', 'null', '~', ''):
             kn = 1
         self.interp_neighbors = max(1, int(kn)) if kn else 1
-        self.interp_softness = float(c.get('interp_softness', 1.0))
+        # KERNEL BANDWIDTH, tau = interp_softness x the map's median spacing. A NUMBER applies
+        # one bandwidth to the joint 12-D distance (the original). A DICT keyed by block
+        # (translation / rotation / force / torque) gives each block its own bandwidth AND its
+        # own interpolated target, each measured against that block's own spacing so the number
+        # stays dimensionless. Missing blocks default to 1.0.
+        soft = c.get('interp_softness', 1.0)
+        if isinstance(soft, dict):
+            badb = [k for k in soft if k not in [b for b, _ in BLOCKS]]
+            if badb:
+                raise ValueError(f'estimation.interp_softness keys {badb} not in '
+                                 f'{[b for b, _ in BLOCKS]}')
+            self.softness_by_block = {b: float(soft.get(b, 1.0)) for b, _ in BLOCKS}
+            if any(v < 0 for v in self.softness_by_block.values()):
+                raise ValueError('estimation.interp_softness values must be >= 0')
+            self.interp_softness = float(np.mean(list(self.softness_by_block.values())))
+        else:
+            self.softness_by_block = None
+            self.interp_softness = float(soft)
         self.min_observations = int(c.get('min_observations', 20))
         # MIXTURE over the finals. `mode_bandwidth` is the mm-equivalent distance below which two
         # finals count as the SAME mode -- it defaults to ransac_tol because that is already this
@@ -291,6 +323,26 @@ class ManifoldEstimator:
             self.interp_tau = max(spacing * self.interp_softness, 1e-9)
             log.info('Interpolated matching: k=%d, tau=%.3f mm-eq (median manifold spacing %.3f)',
                      self.interp_neighbors, self.interp_tau, spacing)
+            if self.softness_by_block is not None:
+                # Each block needs its OWN spacing reference or a bandwidth of 1.0 would mean
+                # something different in each: the blocks live at very different scales.
+                self.tau_by_block = {}
+                sample = self.M12[np.linspace(0, len(self.M12) - 1,
+                                              min(len(self.M12), 4000)).astype(int)]
+                _, nnb = self.tree.query(sample, k=min(8, len(self.M12)), workers=-1)
+                for b, sl in BLOCKS:
+                    db = np.linalg.norm(self.M12[nnb][:, 1:, sl] - sample[:, None, sl], axis=2)
+                    db = np.where(db > 0, db, np.inf).min(axis=1)
+                    db = db[np.isfinite(db)]
+                    sp_b = float(np.median(db)) if len(db) else 0.0
+                    self.tau_by_block[b] = max(sp_b * self.softness_by_block[b], 1e-12)
+                log.info('   per-block bandwidths: %s', {b: round(v, 4) for b, v
+                                                         in self.tau_by_block.items()})
+                log.warning('Per-block interp_softness shapes the ENERGY paths (grid, '
+                            'landscape, commit: argmin). The multi-start ICP keeps the joint '
+                            'blend, because it needs a single interpolated TARGET to step '
+                            'toward, not just a residual -- so aggregator and argmin will not '
+                            'agree exactly while this is set.')
         log.info('Support reference: median %d-th NN distance %.3f mm-eq global, depth-'
                  'conditional %.3f..%.3f across x %.1f..%.1f mm -- a query row whose k-th '
                  'neighbour sits much further than ITS DEPTH\'s reference is extrapolating.',
@@ -344,6 +396,58 @@ class ManifoldEstimator:
         return (np.hstack([unit_rows(f, self.s_force), unit_rows(tau, self.s_torque)])
                 * self.wrench_w)
 
+    def wrench6_at(self, f_raw, tau_raw, theta6):
+        """The wrench FEATURE re-expressed in the frame a candidate correction implies.
+
+        Mirrors _rebase_rows exactly: with T = mats_from_vec6(theta6) and its inverse carrying
+        (R, p), the wrench in the corrected frame is f' = R f, tau' = R tau + p x f'. p is the
+        translation in METRES (theta is in mm), and it vanishes for a pure-rotation correction,
+        which is why a pitch-only estimate needs no lever arm. The feature is rebuilt from the
+        rotated RAW wrench, so saturation (rawcap) is applied to the correct vector."""
+        th = np.asarray(theta6, dtype=float)
+        T = mats_from_vec6(th)
+        Ti = np.linalg.inv(T)
+        R = Ti[:3, :3]
+        p = Ti[:3, 3] / 1000.0                       # theta translation is mm; torque wants m
+        f = np.asarray(f_raw, dtype=float) @ R.T
+        tau = np.asarray(tau_raw, dtype=float) @ R.T + np.cross(p, f)
+        return self._wrench6(f, tau)
+
+    def blend_residual(self, pts, dist=None, nn=None):
+        """Per-row residual to the soft-kNN target -- THE quantity every energy sums.
+
+        One bandwidth (interp_softness a number): one interpolated 12-D target, residual is its
+        distance. Per-block bandwidths (a dict): each block forms its own target from the SAME
+        neighbours using its own distances and tau, and the residual is the L2 over blocks.
+        Neighbour SELECTION stays joint in both cases -- it has to, because a candidate
+        correction reaches the wrench channels only through the correspondences they share with
+        pose."""
+        pts = np.asarray(pts, dtype=float)
+        k = max(int(self.interp_neighbors), 1)
+        if dist is None or nn is None:
+            dist, nn = self.tree.query(pts, k=k, workers=-1)
+        if np.ndim(dist) == 1:
+            dist, nn = dist[:, None], nn[:, None]
+        if k <= 1:
+            return dist[:, 0]
+        M = self.M12[nn]
+        if self.softness_by_block is None:
+            bw = np.exp(-(dist - dist[:, :1]) / self.interp_tau)
+            bw /= bw.sum(axis=1, keepdims=True)
+            return np.linalg.norm(np.einsum('mk,mkd->md', bw, M) - pts, axis=1)
+        R = M - pts[:, None, :]
+        tot = np.zeros(len(pts))
+        for b, sl in BLOCKS:
+            tau = self.tau_by_block.get(b, self.interp_tau)
+            db = np.linalg.norm(R[:, :, sl], axis=2)
+            if not np.any(db > 0):
+                continue                             # block switched off (zero weight/scale)
+            bw = np.exp(-(db - db.min(axis=1, keepdims=True)) / tau)
+            bw /= bw.sum(axis=1, keepdims=True)
+            tot += np.linalg.norm(np.einsum('mk,mkd->md', bw, M[:, :, sl]) - pts[:, sl],
+                                  axis=1) ** 2
+        return np.sqrt(tot)
+
     def prepare_observations(self, vec6, f_raw, tau_raw):
         """Filter (min force) + normalize raw observations -> (vec6, w6) ready for estimate()."""
         vec6 = np.asarray(vec6, dtype=float)
@@ -351,6 +455,10 @@ class ManifoldEstimator:
         if self.min_force_n is not None:
             keep = np.linalg.norm(f_raw, axis=1) >= float(self.min_force_n)
             vec6, f_raw, tau_raw = vec6[keep], f_raw[keep], tau_raw[keep]
+        # Stash the FILTERED raw wrench: candidate-aware re-basing (wrench6_at) needs the raw
+        # vectors, and every caller already hands them to this method. Aligned with the
+        # returned rows by construction.
+        self.last_raw = (f_raw, tau_raw)
         return vec6, self._wrench6(f_raw, tau_raw)
 
     # ------------------------------------------------------------------ solver
@@ -396,17 +504,24 @@ class ManifoldEstimator:
                  for c in mix.components]
         return Mixture(comps, self.estimate_dims)
 
-    def estimate(self, vec6, w6, seeds=None):
+    def estimate(self, vec6, w6, seeds=None, raw=None):
         """The belief correction from one set of observations (believed poses + their wrench).
 
         `vec6` (N,6): BELIEVED connector-wrt-target poses [mm, deg]. `w6` (N,6): the scaled unit
         wrench rows (from prepare_observations). `seeds`: optional hypotheses (each a vector over
         estimate_dims, in mm/deg) to concentrate part of the guess budget around. Returns
+        `raw`: the (f, tau) the features came from -- pass it (or leave None to reuse the
+        estimator's own `last_raw` from prepare_observations) so the wrench can follow each
+        candidate correction into the frame that candidate claims. Returns
         (T_corr, info) -- believed @ T_corr ~= true -- or (None, reason) when there is not enough
         data. info carries theta_corr (the correction in physical units on estimate_dims), inlier
         count, the final residual, and the mixture over the finals."""
         if len(vec6) < self.min_observations:
             return None, f'only {len(vec6)} observations (< min_observations {self.min_observations})'
+        if raw is None:
+            raw = getattr(self, 'last_raw', None)
+            if raw is not None and len(raw[0]) != len(vec6):
+                raw = None                       # stale stash: never guess, just skip re-basing
 
         # RECENCY weights: observations are TIME-ORDERED (the caller logs them sequentially), and
         # the in-hand pose may have drifted mid-attempt -- the fit leans toward the newest rows.
@@ -432,7 +547,17 @@ class ManifoldEstimator:
         kq = self.interp_neighbors
         for k in range(K):
             C = np.einsum('nij,gjk->gnik', Y, T_corr)
-            pts = scaled12(vec6_from_mats(C), w6, self.s_rot, self.dim_w)
+            # The wrench rides with the candidate correction (wrench_follows_correction):
+            # the logged rows are in the BELIEVED frame, and this guess claims the true frame
+            # is believed (.) T_corr, so the wrench must be re-expressed there before it is
+            # compared with the map -- the same re-basing that runs when a correction is
+            # committed. Per guess, so it is inside the loop.
+            wg = w6
+            if self.wrench_follows_correction and raw is not None:
+                wg = np.stack([self.wrench6_at(raw[0], raw[1], t6) for t6 in
+                               vec6_from_mats(T_corr)]) if T_corr.ndim == 3 else \
+                    self.wrench6_at(raw[0], raw[1], vec6_from_mats(T_corr[None])[0])
+            pts = scaled12(vec6_from_mats(C), wg, self.s_rot, self.dim_w)
             dist, nn = self.tree.query(pts.reshape(-1, 12), k=kq, workers=-1)
             if kq > 1:
                 # soft correspondence: blend the close-enough neighbours so the target

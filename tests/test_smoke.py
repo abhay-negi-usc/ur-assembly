@@ -1494,6 +1494,77 @@ def test_grid_estimator_support_flags_thin_evidence():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_wrench_follows_the_candidate_correction():
+    """skills\manifold: the logged wrench lives in the BELIEVED connector frame, so scoring a
+    candidate correction must re-express it in the frame that candidate claims -- the same
+    re-basing _rebase_rows does when a correction is COMMITTED. Evaluating candidates without
+    it scored every non-zero theta with its wrench in the wrong frame (fixed 2026-08-14: the
+    force channel's tracking of the truth roughly tripled).
+
+    Pinned here: identity is a no-op, a pure rotation rotates the feature without changing its
+    magnitude, the lever arm appears only when the correction TRANSLATES, and a frame error is
+    recoverable from the wrench ALONE -- which is the information the old code discarded."""
+    import csv as _csv
+    import shutil
+    import tempfile
+
+    from urlab.skills.manifold import (FORCE_COLS, POSE_COLS, TORQUE_COLS, ManifoldEstimator,
+                                       mats_from_vec6, vec6_from_mats)
+
+    tmp = tempfile.mkdtemp()
+    try:
+        rows = []
+        for p_ in np.arange(-12.0, 12.01, 1.0):
+            for x in np.linspace(-20.0, -4.0, 40):
+                rows.append([x, 0.0, 0.0, 0.0, p_, 0.0, -5.0, 0.0, 0.0, 0.0, 0.2, 0.0])
+        path = os.path.join(tmp, 'm.csv')
+        with open(path, 'w', newline='') as fh:
+            w = _csv.writer(fh)
+            w.writerow(POSE_COLS + FORCE_COLS + TORQUE_COLS)
+            w.writerows(rows)
+        cfg = {'manifold_csv': path, 'estimate_dims': ['pitch_deg'], 'min_observations': 5,
+               'scaling_constant_unit_force_to_mm': 2.0,
+               'scaling_constant_unit_torque_to_mm': 1.0, 'min_force_n': 1.0,
+               'num_initial_guesses': 40, 'icp_iterations': 12, 'random_seed': 3}
+        est = ManifoldEstimator(cfg)
+        assert est.wrench_follows_correction, 'must default ON'
+
+        f = np.array([[3.0, 4.0, 12.0]])
+        tau = np.array([[0.3, 0.4, 1.2]])
+        assert np.allclose(est.wrench6_at(f, tau, np.zeros(6)), est._wrench6(f, tau)),             'identity correction must leave the wrench untouched'
+        th = np.zeros(6)
+        th[4] = 10.0
+        w10 = est.wrench6_at(f, tau, th)
+        w00 = est._wrench6(f, tau)
+        assert np.allclose(np.linalg.norm(w10[:, :3]), np.linalg.norm(w00[:, :3])),             'a rotation must preserve the force feature MAGNITUDE'
+        assert not np.allclose(w10[:, :3], w00[:, :3]), 'and must change its DIRECTION'
+        # lever arm: a pure rotation has none; a TRANSLATING correction must move the torque
+        # by p x f on top of the rotation (mirrors _rebase_rows, p in metres)
+        tz = np.zeros(6)
+        tz[2] = 5.0                                   # 5 mm of z, no rotation at all
+        wz = est.wrench6_at(f, tau, tz)
+        assert np.allclose(wz[:, :3], w00[:, :3]), 'no rotation -> force is unchanged'
+        assert not np.allclose(wz[:, 3:], w00[:, 3:]), 'but the torque gets the lever arm'
+
+        # THE POINT: with the wrench re-based, a frame error is identifiable from the wrench
+        # alone -- here the pose is IDENTICAL for every candidate, so only the wrench can speak.
+        src = np.array([r for r in rows if abs(r[4]) < 1e-9])
+        D = mats_from_vec6([0.0, 0.0, 0.0, 0.0, 4.0, 0.0])
+        obs = vec6_from_mats(mats_from_vec6(src[:, :6]) @ D)
+        v6, w6 = est.prepare_observations(obs, src[:, 6:9] @ D[:3, :3], src[:, 9:12] @ D[:3, :3])
+        T, info = est.estimate(v6, w6)
+        assert T is not None, info
+        assert abs(info['theta_corr']['pitch_deg'] + 4.0) <= 1.5,             f"wrench-only recovery should find -4 deg, got {info['theta_corr']}"
+        # and with the re-basing OFF the same evidence is uninformative -> a worse estimate
+        frozen = ManifoldEstimator({**cfg, 'wrench_follows_correction': False})
+        v6f, w6f = frozen.prepare_observations(obs, src[:, 6:9] @ D[:3, :3],
+                                               src[:, 9:12] @ D[:3, :3])
+        _, info_f = frozen.estimate(v6f, w6f)
+        assert abs(info_f['theta_corr']['pitch_deg'] + 4.0) >             abs(info['theta_corr']['pitch_deg'] + 4.0),             'freezing the wrench must lose information, not gain it'
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_grid_estimator_fuses_probes_and_flags_uncertainty():
     """skills\\grid_estimator: the exhaustive-grid estimator must (a) recover a rigid belief error
     without multi-start, (b) FUSE probes by adding their energies -- the algebra the probe app
@@ -1572,10 +1643,16 @@ def test_grid_estimator_fuses_probes_and_flags_uncertainty():
         flat = GridManifoldEstimator(dict(cfg, grid=dict(cfg['grid'], info_weighting='none')))
         assert np.allclose(flat.row_weights(v6), 1.0 / len(v6))
 
-        # (d) uncertainty: against a manifold whose wrench does NOT vary with pitch, every
-        # correction matches equally well (the aliasing case) -- the basin flattens, so
-        # 1/curvature must blow up relative to the identifiable manifold above.
-        alias_rows = [[r[0], 0.0, 0.0, 0.0, r[4], 0.0, -4.5, 0.0, 0.0, 0.0, 0.0, 0.0]
+        # (d) uncertainty: against a manifold where pitch is UNIDENTIFIABLE, every correction
+        # matches equally well -- the basin flattens, so 1/curvature must blow up relative to
+        # the identifiable manifold above.
+        # The force here points along Y, the PITCH ROTATION AXIS, and that is load-bearing.
+        # Since wrench_follows_correction (2026-08-14) the observed wrench is re-expressed in
+        # each candidate's frame, so a force with any component OFF the rotation axis is
+        # identifying all by itself -- only the true correction restores the recorded
+        # direction, whatever the contact physics does. A y-aligned force is invariant under a
+        # pitch rotation, so this fixture stays genuinely aliased.
+        alias_rows = [[r[0], 0.0, 0.0, 0.0, r[4], 0.0, 0.0, -4.5, 0.0, 0.0, 0.0, 0.0]
                       for r in rows]
         apath = os.path.join(tmp, 'alias.csv')
         with open(apath, 'w', newline='') as fh:
@@ -1823,6 +1900,15 @@ def test_estimator_eval_collection_config():
         'the diagnostic truth must be inverse(err_before), not err_before'
     dm = cfg['eval'].get('debug_match') or {}
     assert dm.get('enabled') in (True, False), dm
+    assert dm.get('live', True) is not None, dm
+    # The diagnostics must describe the metric the estimator ACTUALLY runs: soft-kNN blending
+    # (not raw nearest neighbour) and the wrench re-based per candidate. Both drifted once
+    # already, which is exactly the failure these assertions exist to catch.
+    dbg = open(os.path.join(os.path.dirname(__file__), '..', 'urlab', 'skills',
+                            'manifold_debug.py')).read()
+    assert '_wrench_at(' in dbg and 'wrench6_at' in dbg,         'match diagnostics must re-base the wrench like the energy does'
+    assert 'interp_tau' in dbg and 'softness_by_block' in dbg,         'match diagnostics must use the soft-kNN kernel, including per-block bandwidths'
+    assert 'estimator_eval_match_dof_live.png' in dbg, 'per-DOF live mirror must be written'
     assert int(dm.get('every_n', 1)) >= 1 and int(dm.get('grid_points', 41)) >= 5, dm
     # The post-insertion dwell must stay UN-GUARDED and UNLOGGED: guarded, it would end on its
     # first cycle (the guard is already tripped at a contact stop); logged, it would flood the

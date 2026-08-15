@@ -60,8 +60,8 @@ eval:
   # [x, y, z (m), roll, pitch, yaw (deg)], applied in the HELD part's OWN frame -- the same
   # right-multiplied frame the estimator corrects in. As set: x +/-5 mm, z +/-5 mm, pitch +/-5 deg.
   perturbation:
-    lower: [-0.000, 0.0, -0.000, 0.0, -5.0, 0.0]
-    upper: [ 0.000, 0.0, +0.000, 0.0, +5.0, 0.0]
+    lower: [-0.000, 0.0, -0.000, 0.0, -3.0, 0.0]
+    upper: [ 0.000, 0.0, +0.000, 0.0, +3.0, 0.0]
   # Grid step per DOF (grid mode only), same order/units as the bounds.
   grid_resolution: [0.001, 0.0, 0.001, 0.0, 1.0, 0.0]
 
@@ -102,6 +102,12 @@ eval:
   debug_match:
     enabled: true
     every_n: 1                   # figure on every Nth attempt (1 = all)
+    # LIVE mirrors, alongside estimator_eval_live.png: both figures are also written to ONE
+    # fixed path each and atomically replaced, so an image viewer left open follows the run.
+    #   <data_dir>/experiments/estimator_eval_match_live.png       (the 6-panel figure)
+    #   <data_dir>/experiments/estimator_eval_match_dof_live.png   (all 12 DOFs, one each)
+    # true = the experiments directory; a string = an explicit directory; false disables.
+    live: true
     max_rows: 250                # observation rows drawn/matched (shape is unaffected)
     grid_points: 41              # candidate grid per estimated dim for panel F
   # ---- P(SEAT) GATE + the single definition of SUCCESS -------------------------------------
@@ -261,7 +267,7 @@ eval:
     # PER-DIMENSION per-waypoint std [x, y, z (m), roll, pitch, yaw (deg)], applied after
     # smoothing; a zero entry leaves that DOF unperturbed. (Legacy scalar keys translation_m /
     # rotation_deg still work when 'std' is absent.)
-    std: [0.000, 0.003, 0.003, 0.0, 3.0, 0.0]
+    std: [0.000, 0.001, 0.001, 0.0, 1.0, 0.0]
     smooth_window: 10            # moving-average window (waypoints) -- keeps the reference smooth
     noise_decay_attempt: 0.1     # fraction to shrink the WHOLE perturbation by each attempt:
                                  # attempt k is scaled (1 - f)^(k-1)
@@ -297,7 +303,7 @@ estimation:
   # rawcap wrench representation -- the 2026-08-09 offline winners. Fall back to the classic
   # setup with: manifold_csv ./configs/data/banana_manifold_20260807_clean.csv,
   # wrench_representation unit, s_force 3.0, s_torque 1.0.
-  manifold_csv: ./configs/data/bnc_manifold.csv
+  manifold_csv: ./configs/data/bnc_manifold_v2.csv
   wrench_representation: rawcap
   # rawcap SATURATION: the wrench feature is unit(f) x min(|f| / rawcap_force_ref_n,
   # rawcap_cap) -- magnitude in units of the reference, CAPPED at rawcap_cap. Saturation
@@ -362,7 +368,7 @@ estimation:
     y_mm: 0.0
     z_mm: 0.0
     roll_deg: 0.0
-    pitch_deg: 10.0
+    pitch_deg: 5.0
     yaw_deg: 0.0
   step_gain: 1.0
   ransac_iters: 100
@@ -377,7 +383,31 @@ estimation:
   residual_gate: 1.5
   recency_half_life_frac: 0.0
   interp_neighbors: 16
-  interp_softness: 1.0
+  # kNN kernel bandwidth: tau = interp_softness x the map's median point spacing, weights
+  # exp(-(d - d_nearest)/tau). It slides between hard nearest-neighbour (-> 0) and a flat
+  # average of all k (large). At 1.0 on the BNC map the top neighbour carries ~11% of the
+  # weight and ~15 of the 16 contribute.
+  #
+  # MAY ALSO BE A DICT, one bandwidth per block, each measured against that block's OWN
+  # spacing (so the number stays dimensionless) and forming its own interpolated target:
+  #     interp_softness: {translation: 2.0, rotation: 1.0, force: 1.0, torque: 1.0}
+  # MEASURED 2026-08-14, all 49 BNC attempts, AFTER the wrench-frame fix below: no per-block
+  # combination beats the plain scalar. Scalar 1.0 gives 2.00 deg median at a 98% win rate --
+  # the best win rate of 29 configurations tried; the best per-block variants tie on median
+  # but at 92-94%. (Before the fix, per-block DID look better -- that advantage was an
+  # artefact of the wrench being compared in the wrong frame.) Keep the scalar unless a new
+  # map changes the picture. NOTE per-block bandwidths shape the ENERGY paths (grid,
+  # landscape, commit: argmin) while the multi-start ICP keeps the joint blend, so the two
+  # stop agreeing exactly; the estimator logs a warning when a dict is set.
+  interp_softness: 10.0
+  # The logged wrench lives in the BELIEVED connector frame, so a candidate correction moves
+  # it exactly as it moves the pose -- the same re-basing applied when a correction is
+  # COMMITTED. Evaluating candidates without it scored every non-zero theta with its wrench in
+  # the wrong frame. MEASURED: 2.50 deg / 92% win -> 2.00 deg / 98% win, and the force
+  # channel's tracking of the truth roughly tripled. It also makes a frame error identifiable
+  # from the wrench ALONE (a force off the rotation axis rotates with the frame), which the
+  # old code discarded. Costs a wrench rebuild per candidate. false reproduces pre-2026-08-14.
+  wrench_follows_correction: true
   random_seed: 1
   # ---- MIXTURE over the multi-start finals (skills/mixture.py) ------------------------------
   # Raising num_initial_guesses helps ACCURACY -- the true basin actually gets found -- but it
@@ -436,13 +466,13 @@ compliance:
 
 force_guard:
   enabled: true
-  max_force_n: 10.0
+  max_force_n: 5.0
   max_torque_nm: 8.0
   # The limit must hold CONTINUOUSLY this long before the guard trips (0 = instant, the
   # original). Raw F/T spikes over the limit for a few samples on every hard contact
   # transient; 0.5 s distinguishes "clipped the rim for 30 ms" from "genuinely jammed".
   # Travel cost while waiting: ~2.5 mm at the 5 mm/s insertion speed.
-  persistence_s: 1.0
+  persistence_s: 5.0
 
 speed:
   # Free-space moves (the approach to each attempt's start and the between-trial stand-off).

@@ -31,6 +31,7 @@ off these plots is the number the energy actually summed.
 """
 
 import os
+import shutil
 
 import numpy as np
 
@@ -58,6 +59,46 @@ DOFS = (('x', 0, 'tab:blue'), ('y', 1, 'tab:blue'), ('z', 2, 'tab:blue'),
         ('tx', 9, 'tab:red'), ('ty', 10, 'tab:red'), ('tz', 11, 'tab:red'))
 
 
+def _blend(est, M, pts, dist, sl=None, name=None):
+    """The interpolated target for one block (or the whole 12-D point), using the estimator's
+    OWN kernel -- soft kNN, weights exp(-(d - d_min)/tau), NOT a raw nearest neighbour.
+
+    Which tau: the per-block one when estimation.interp_softness is a dict (then the block's
+    own distances drive the weights, exactly as blend_residual does), otherwise the joint
+    bandwidth off the joint distance. Keeping this in step with skills/manifold matters --
+    a diagnostic that blends differently from the energy would send debugging the wrong way."""
+    if M.shape[1] <= 1:
+        return M[:, 0] if sl is None else M[:, 0, sl]
+    by_block = getattr(est, 'softness_by_block', None)
+    if sl is not None and by_block is not None and name in getattr(est, 'tau_by_block', {}):
+        d = np.linalg.norm(M[:, :, sl] - pts[:, None, sl], axis=2)
+        tau = est.tau_by_block[name]
+        base = d.min(axis=1, keepdims=True)
+    else:
+        d, tau, base = dist, est.interp_tau, dist[:, :1]
+    bw = np.exp(-(d - base) / max(tau, 1e-12))
+    bw /= bw.sum(axis=1, keepdims=True)
+    return np.einsum('mk,mkd->md', bw, M if sl is None else M[:, :, sl])
+
+
+def _raw_for(est, raw, n):
+    """The raw wrench to re-base with: the caller's, else the estimator's own stash from
+    prepare_observations. Same fallback the energy paths use, so a diagnostic called without
+    `raw` still describes the metric the estimator is actually running."""
+    if raw is None:
+        raw = getattr(est, 'last_raw', None)
+    if raw is not None and len(raw[0]) != n:
+        return None                              # stale or subsampled: never guess alignment
+    return raw
+
+
+def _wrench_at(est, w6, raw, theta6):
+    """The wrench the ESTIMATOR would use for this candidate (see manifold.wrench6_at)."""
+    if raw is not None and getattr(est, 'wrench_follows_correction', False):
+        return est.wrench6_at(raw[0], raw[1], theta6)
+    return w6
+
+
 def _theta6(theta, idx):
     """A 6-vector correction from either a dict {dim: value} or a sequence over `idx`."""
     t6 = np.zeros(6)
@@ -69,31 +110,35 @@ def _theta6(theta, idx):
     return t6
 
 
-def match(est, vec6, w6, theta):
+def match(est, vec6, w6, theta, raw=None):
     """Apply a correction and match to the manifold, exactly as the energy does.
 
     Returns (pts12, tgt12, resid12, pose6) -- the transformed observations in metric space, the
     soft-kNN interpolated manifold target, the signed per-row residual, and the transformed
     observation poses in PHYSICAL units (mm / deg) for plotting."""
     t6 = _theta6(theta, est.idx)
+    raw = _raw_for(est, raw, len(np.asarray(vec6, dtype=float)))
     C = mats_from_vec6(np.asarray(vec6, dtype=float)) @ mats_from_vec6(t6)
     pose6 = vec6_from_mats(C)
-    pts = scaled12(pose6, np.asarray(w6, dtype=float), est.s_rot,
+    # The wrench rides with the candidate exactly as it does in the energy -- without this the
+    # plots would describe a metric the estimator no longer uses.
+    pts = scaled12(pose6, np.asarray(_wrench_at(est, w6, raw, t6), dtype=float), est.s_rot,
                    getattr(est, 'dim_w', None))
     k = max(int(est.interp_neighbors), 1)
     dist, nn = est.tree.query(pts, k=k, workers=-1)
     if dist.ndim == 1:
         dist, nn = dist[:, None], nn[:, None]
-    if k > 1:
-        bw = np.exp(-(dist - dist[:, :1]) / est.interp_tau)
-        bw /= bw.sum(axis=1, keepdims=True)
-        tgt = np.einsum('mk,mkd->md', bw, est.M12[nn])
-    else:
-        tgt = est.M12[nn[:, 0]]
+    M = est.M12[nn]
+    if getattr(est, 'softness_by_block', None) is None:
+        tgt = _blend(est, M, pts, dist)
+    else:                                    # per-block targets, one bandwidth each
+        tgt = np.empty_like(pts)
+        for name, sl, _ in CHANNELS:
+            tgt[:, sl] = _blend(est, M, pts, dist, sl, name)
     return pts, tgt, tgt - pts, pose6, nn
 
 
-def channel_energy(est, vec6, w6, grid6):
+def channel_energy(est, vec6, w6, grid6, raw=None):
     """Per-channel mean residual over a grid of candidate corrections.
 
     Returns {channel: E} plus 'total' -- the same quantity the estimator minimises, decomposed.
@@ -101,6 +146,7 @@ def channel_energy(est, vec6, w6, grid6):
     every channel agrees on the wrong answer, the map or the calibration is the problem."""
     Y = mats_from_vec6(np.asarray(vec6, dtype=float))
     w = np.asarray(w6, dtype=float)
+    raw = _raw_for(est, raw, len(Y))
     out = {name: np.empty(len(grid6)) for name, _, _ in CHANNELS}
     out.update({name: np.empty(len(grid6)) for name, _, _ in DOFS})
     out['total'] = np.empty(len(grid6))
@@ -110,17 +156,24 @@ def channel_energy(est, vec6, w6, grid6):
     for lo in range(0, len(grid6), per):
         hi = min(lo + per, len(grid6))
         C = np.einsum('nij,kjl->knil', Y, mats_from_vec6(grid6[lo:hi]))
-        pts = scaled12(vec6_from_mats(C), w, est.s_rot,
-                       getattr(est, 'dim_w', None)).reshape(-1, 12)
+        if raw is not None and getattr(est, 'wrench_follows_correction', False):
+            wg = np.concatenate([est.wrench6_at(raw[0], raw[1], g) for g in grid6[lo:hi]],
+                                axis=0)
+            pts = scaled12(vec6_from_mats(C).reshape(-1, 6), wg, est.s_rot,
+                           getattr(est, 'dim_w', None))
+        else:
+            pts = scaled12(vec6_from_mats(C), w, est.s_rot,
+                           getattr(est, 'dim_w', None)).reshape(-1, 12)
         dist, nn = est.tree.query(pts, k=k, workers=-1)
         if dist.ndim == 1:
             dist, nn = dist[:, None], nn[:, None]
-        if k > 1:
-            bw = np.exp(-(dist - dist[:, :1]) / est.interp_tau)
-            bw /= bw.sum(axis=1, keepdims=True)
-            tgt = np.einsum('mk,mkd->md', bw, est.M12[nn])
+        M = est.M12[nn]
+        if getattr(est, 'softness_by_block', None) is None:
+            tgt = _blend(est, M, pts, dist)
         else:
-            tgt = est.M12[nn[:, 0]]
+            tgt = np.empty_like(pts)
+            for nm, sl2, _ in CHANNELS:
+                tgt[:, sl2] = _blend(est, M, pts, dist, sl2, nm)
         r = (tgt - pts).reshape(hi - lo, len(vec6), 12)
         out['total'][lo:hi] = np.linalg.norm(r, axis=2).mean(axis=1)
         for name, sl, _ in CHANNELS:
@@ -149,7 +202,7 @@ def manifold_pose(est, rows=None):
 
 
 def figures(est, vec6, w6, theta_est, theta_true, out_path, title='', max_rows=250,
-            grid_n=41):
+            grid_n=41, raw=None, live_dir=None):
     """Write the diagnostic figure comparing the ESTIMATED and TRUE corrections.
 
     Six panels: two physical overlays (depth vs each estimated dim) showing where the
@@ -163,15 +216,18 @@ def figures(est, vec6, w6, theta_est, theta_true, out_path, title='', max_rows=2
 
     v = np.asarray(vec6, dtype=float)
     w = np.asarray(w6, dtype=float)
+    raw = _raw_for(est, raw, len(v))
     if len(v) > max_rows:                       # bound the cost; the shape is unaffected
         sel = np.linspace(0, len(v) - 1, max_rows).astype(int)
         v, w = v[sel], w[sel]
+        if raw is not None:
+            raw = (raw[0][sel], raw[1][sel])
     dims = list(est.estimate_dims)
     packs = {}
     for name, th in (('estimate', theta_est), ('truth', theta_true)):
         if th is None:
             continue
-        pts, tgt, res, pose6, nn = match(est, v, w, th)
+        pts, tgt, res, pose6, nn = match(est, v, w, th, raw=raw)
         packs[name] = dict(pose=pose6, res=res, nn=nn,
                            rowwise=np.linalg.norm(res, axis=1))
     if not packs:
@@ -268,7 +324,7 @@ def figures(est, vec6, w6, theta_est, theta_true, out_path, title='', max_rows=2
     # ---- F: per-channel energy over the candidate grid --------------------------------
     ax = axes[1, 2]
     G, gaxes, shape = grid_over(est, n=grid_n)
-    E = channel_energy(est, v, w, G)
+    E = channel_energy(est, v, w, G, raw=raw)
     t_est = _theta6(theta_est, est.idx)[est.idx] if theta_est is not None else None
     t_tru = _theta6(theta_true, est.idx)[est.idx] if theta_true is not None else None
     if len(dims) == 1:
@@ -353,6 +409,16 @@ def figures(est, vec6, w6, theta_est, theta_true, out_path, title='', max_rows=2
     fig2.tight_layout()
     fig2.savefig(dof_path, dpi=110)
     plt.close(fig2)
+    # LIVE mirrors: one fixed path each, atomically replaced, so an image viewer left open
+    # follows the run instead of chasing per-attempt filenames.
+    if live_dir:
+        os.makedirs(live_dir, exist_ok=True)
+        for src, name in ((out_path, 'estimator_eval_match_live.png'),
+                          (dof_path, 'estimator_eval_match_dof_live.png')):
+            dst = os.path.join(live_dir, name)
+            tmp = dst + '.tmp'
+            shutil.copyfile(src, tmp)
+            os.replace(tmp, dst)
     return out_path
 
 

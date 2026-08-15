@@ -336,6 +336,22 @@ estimation:
   # scored at or below its s_torque 0 sibling.
   scaling_constant_unit_force_to_mm: 2.0
   scaling_constant_unit_torque_to_mm: 0.0
+  # PER-AXIS wrench weights -- the exact counterpart of dim_weights above, for the six wrench
+  # feature columns. The two scalars above stay the BLOCK-level unit conversion; these say how
+  # much each individual axis matters, so the metric has one weight per channel across all
+  # twelve. Unlike dim_weights, zero is always legal here (no wrench axis is ever estimated),
+  # so an axis can be switched off outright. Effective scale = block scalar x this weight, and
+  # with s_torque 0 the three torque entries are already inert whatever they say.
+  # The per-DOF panel of the match diagnostics (eval.debug_match -> ..._match_dof.png) is how
+  # to choose these: it plots each axis's own energy curve, so an axis that is flat carries no
+  # information and one whose minimum sits far from the truth is voting against it.
+  wrench_weights:
+    fx: 1.0                      # along the insertion axis
+    fy: 1.0
+    fz: 1.0
+    tx: 1.0
+    ty: 1.0
+    tz: 1.0
   min_force_n: 3.0
   min_observations: 20
   estimate_dims: [pitch_deg]

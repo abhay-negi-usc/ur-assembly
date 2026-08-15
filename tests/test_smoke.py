@@ -1177,6 +1177,36 @@ def test_manifold_estimator_recovers_belief_error():
         ok0 = ManifoldEstimator({**wcfg, 'dim_weights': {'y_mm': 0.0}})
         assert ok0.dim_w[1] == 0.0
 
+        # PER-AXIS WRENCH WEIGHTS (estimation.wrench_weights): the same idea for the six wrench
+        # columns, applied ON TOP of s_force / s_torque so those stay the block-level unit
+        # conversion. Columns 6..11 of the 12-D point must scale one axis at a time, and zero
+        # must be LEGAL on any of them (nothing is ever estimated in a wrench axis).
+        xest = ManifoldEstimator({**wcfg, 'wrench_weights': {'fy': 0.5, 'fz': 0.0,
+                                                             'tz': 2.0}})
+        assert np.allclose(xest.M12[:, 7], 0.5 * west.M12[:, 7]), 'fy must halve'
+        assert np.allclose(xest.M12[:, 8], 0.0), 'fz must switch off'
+        assert np.allclose(xest.M12[:, 11], 2.0 * west.M12[:, 11]), 'tz must double'
+        assert np.allclose(xest.M12[:, [6, 9, 10]], west.M12[:, [6, 9, 10]]), \
+            'unweighted wrench axes must not move'
+        assert np.allclose(xest.M12[:, :6], west.M12[:, :6]), 'pose block must not move'
+        # the effective scale the metric actually runs with, block scalar x per-axis weight
+        assert np.allclose(xest.wrench_scale6,
+                           xest.wrench_w * np.array([xest.s_force] * 3 +
+                                                    [xest.s_torque] * 3))
+        # observations must go through the SAME weighting as the map, or the two are measured
+        # in different spaces and every residual is meaningless
+        _, xw6 = xest.prepare_observations(obs6, f_raw, tau_raw)
+        _, ww6b = west.prepare_observations(obs6, f_raw, tau_raw)
+        assert np.allclose(xw6[:, 2], 0.0) and np.allclose(xw6[:, 1], 0.5 * ww6b[:, 1]), \
+            'wrench_weights must apply to observations exactly as to the manifold'
+        for bad in ({'wrench_weights': {'fq': 1.0}}, {'wrench_weights': {'fx': -1.0}}):
+            try:
+                ManifoldEstimator({**wcfg, **bad})
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f'{bad} must raise at construction')
+
         # residual_gate: None disables it (like manifold_icp_validation) -- INCLUDING the STRING
         # 'None', because yaml parses a bare `None` as a string (only null/~ are yaml null) and
         # float('None') used to blow up MID-RUN, after the robot had already moved.

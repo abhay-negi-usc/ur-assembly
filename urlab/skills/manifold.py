@@ -8,7 +8,10 @@ collects while inserting land OFF the manifold by exactly that (rigid) belief er
 them back onto the manifold estimates the error. This module does that alignment:
 
   * a common, mm-equivalent 12-D space:  [x, y, z (mm) | r, p, y (deg x s_rot) |
-    unit(f) x s_force | unit(tau) x s_torque]   -- weights decide what "nearest" means;
+    unit(f) x s_force | unit(tau) x s_torque]   -- weights decide what "nearest" means.
+    Every one of the twelve carries its OWN weight on top of that: dim_weights for the six
+    pose dimensions, wrench_weights for the six wrench axes, with s_rot / s_force / s_torque
+    left as the pure UNIT CONVERSIONS they were;
   * multi-start ICP: nearest-neighbour matching across ALL 12 dims, the correction updated in the
     chosen `estimate_dims` only (right-multiplied, i.e. in the part's own frame);
   * RECENCY weighting: the rigid-belief-error assumption can BREAK mid-attempt (the connector
@@ -92,6 +95,12 @@ def vec6_from_mats(T):
     return np.concatenate([T[..., :3, 3], eul], axis=-1)
 
 
+# The six WRENCH feature axes, in the order they occupy columns 6..11 of the 12-D point.
+# Named separately from DIMS because they are FEATURES, not pose dimensions: nothing is ever
+# estimated in them, so (unlike dim_weights) a zero here is always legal.
+WRENCH_DIMS = ('fx', 'fy', 'fz', 'tx', 'ty', 'tz')
+
+
 def scaled12(vec6, w6, s_rot, dim_w=None):
     """The common 12-D point: [t (mm) | rot (deg x s_rot) | scaled unit f | scaled unit tau].
 
@@ -129,6 +138,20 @@ class ManifoldEstimator:
         self.dim_w = np.array([float(dw.get(d, 1.0)) for d in DIMS])
         if np.any(self.dim_w < 0):
             raise ValueError('estimation.dim_weights must be >= 0')
+        # PER-AXIS wrench weights, the exact counterpart of dim_weights for the six wrench
+        # feature columns: s_force / s_torque stay the block-level unit conversion, and these
+        # say how much each INDIVIDUAL axis matters. The block scalars alone cannot express
+        # that the axes carry different information -- on an insertion, fx (along the
+        # insertion) and the two lateral axes mean physically different things, and one
+        # dominating axis silently decides the match. Zero is always legal here (no wrench
+        # axis is ever estimated), so an axis can be switched off outright.
+        ww = dict(c.get('wrench_weights', {}) or {})
+        bad = [k for k in ww if k not in WRENCH_DIMS]
+        if bad:
+            raise ValueError(f'estimation.wrench_weights keys {bad} not in {WRENCH_DIMS}')
+        self.wrench_w = np.array([float(ww.get(k, 1.0)) for k in WRENCH_DIMS])
+        if np.any(self.wrench_w < 0):
+            raise ValueError('estimation.wrench_weights must be >= 0')
         # WRENCH REPRESENTATION (2026-08 offline wrench-lab winner): 'unit' = direction
         # only (the original); 'rawcap' = direction x saturated magnitude -- f/10 N capped
         # at 30 N, tau/1 Nm capped at 3 Nm -- so a 30 N wedge press carries a 3x larger
@@ -156,6 +179,11 @@ class ManifoldEstimator:
             raise ValueError(f'estimation.dim_weights is 0 on ESTIMATED dim(s) {zero_est} -- '
                              'the match cannot see, and the update cannot move, that dimension')
         # the EFFECTIVE per-dim scale (unit conversion x importance): physical <-> metric space
+        # The EFFECTIVE per-axis wrench scale, the counterpart of pose_scale6: block scalar
+        # x per-axis weight. Exposed so diagnostics and tests can read the metric that is
+        # actually in force rather than re-deriving it.
+        self.wrench_scale6 = self.wrench_w * np.array(
+            [self.s_force] * 3 + [self.s_torque] * 3)
         self.pose_scale6 = self.dim_w * np.array([1.0, 1.0, 1.0,
                                                   self.s_rot, self.s_rot, self.s_rot])
         self.iterations = int(c.get('icp_iterations', 10))
@@ -304,7 +332,7 @@ class ManifoldEstimator:
         return scaled12(v6, self._wrench6(f, tau), self.s_rot, self.dim_w)
 
     def _wrench6(self, f, tau):
-        """The 6 wrench feature columns under the configured representation, scales applied."""
+        """The 6 wrench feature columns: representation, block scaling, then per-axis weights."""
         if self.wrench_representation == 'rawcap':
             fm = np.linalg.norm(np.asarray(f, dtype=float), axis=-1)
             tm = np.linalg.norm(np.asarray(tau, dtype=float), axis=-1)
@@ -312,8 +340,9 @@ class ManifoldEstimator:
                                                 self.rawcap_cap)[..., None]
             wt = unit_rows(tau, 1.0) * np.minimum(tm / self.rawcap_torque_ref_nm,
                                                   self.rawcap_cap)[..., None]
-            return np.hstack([wf * self.s_force, wt * self.s_torque])
-        return np.hstack([unit_rows(f, self.s_force), unit_rows(tau, self.s_torque)])
+            return np.hstack([wf * self.s_force, wt * self.s_torque]) * self.wrench_w
+        return (np.hstack([unit_rows(f, self.s_force), unit_rows(tau, self.s_torque)])
+                * self.wrench_w)
 
     def prepare_observations(self, vec6, f_raw, tau_raw):
         """Filter (min force) + normalize raw observations -> (vec6, w6) ready for estimate()."""

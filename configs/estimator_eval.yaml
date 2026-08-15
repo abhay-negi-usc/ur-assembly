@@ -60,8 +60,8 @@ eval:
   # [x, y, z (m), roll, pitch, yaw (deg)], applied in the HELD part's OWN frame -- the same
   # right-multiplied frame the estimator corrects in. As set: x +/-5 mm, z +/-5 mm, pitch +/-5 deg.
   perturbation:
-    lower: [-0.000, 0.0, -0.000, 0.0, -3.0, 0.0]
-    upper: [ 0.000, 0.0, +0.000, 0.0, +3.0, 0.0]
+    lower: [-0.000, 0.0, -0.000, 0.0, -5.0, 0.0]
+    upper: [ 0.000, 0.0, +0.000, 0.0, +5.0, 0.0]
   # Grid step per DOF (grid mode only), same order/units as the bounds.
   grid_resolution: [0.001, 0.0, 0.001, 0.0, 1.0, 0.0]
 
@@ -202,17 +202,6 @@ eval:
     - [0, 0, -0.003, 0, +3, 0]
     - [0, 0, -0.003, 0, +4, 0]
     - [0, 0, -0.003, 0, +5, 0]
-    - [0, 0, -0.002, 0, -5, 0]
-    - [0, 0, -0.002, 0, -4, 0]
-    - [0, 0, -0.002, 0, -3, 0]
-    - [0, 0, -0.002, 0, -2, 0]
-    - [0, 0, -0.002, 0, -1, 0]
-    - [0, 0, -0.002, 0, +0, 0]
-    - [0, 0, -0.002, 0, +1, 0]
-    - [0, 0, -0.002, 0, +2, 0]
-    - [0, 0, -0.002, 0, +3, 0]
-    - [0, 0, -0.002, 0, +4, 0]
-    - [0, 0, -0.002, 0, +5, 0]
     - [0, 0, 0, 0, -5, 0]
     - [0, 0, 0, 0, -4, 0]
     - [0, 0, 0, 0, -3, 0]
@@ -224,17 +213,6 @@ eval:
     - [0, 0, 0, 0, +3, 0]
     - [0, 0, 0, 0, +4, 0]
     - [0, 0, 0, 0, +5, 0]
-    - [0, 0, +0.002, 0, -5, 0]
-    - [0, 0, +0.002, 0, -4, 0]
-    - [0, 0, +0.002, 0, -3, 0]
-    - [0, 0, +0.002, 0, -2, 0]
-    - [0, 0, +0.002, 0, -1, 0]
-    - [0, 0, +0.002, 0, +0, 0]
-    - [0, 0, +0.002, 0, +1, 0]
-    - [0, 0, +0.002, 0, +2, 0]
-    - [0, 0, +0.002, 0, +3, 0]
-    - [0, 0, +0.002, 0, +4, 0]
-    - [0, 0, +0.002, 0, +5, 0]
     - [0, 0, +0.003, 0, -5, 0]
     - [0, 0, +0.003, 0, -4, 0]
     - [0, 0, +0.003, 0, -3, 0]
@@ -281,7 +259,7 @@ eval:
   # from summary.csv).
   final_insertion:
     enabled: true
-    stiffness: [3000.0, 3000.0, 3000.0, 10.0, 10.0, 10.0]
+    stiffness: [100.0, 3000.0, 100.0, 10.0, 10.0, 10.0]
 
 # ===================================================================================================
 # ESTIMATION -- the contact-manifold ICP under test. KEEP IN SYNC with the values
@@ -303,7 +281,7 @@ estimation:
   # rawcap wrench representation -- the 2026-08-09 offline winners. Fall back to the classic
   # setup with: manifold_csv ./configs/data/banana_manifold_20260807_clean.csv,
   # wrench_representation unit, s_force 3.0, s_torque 1.0.
-  manifold_csv: ./configs/data/bnc_manifold_v2.csv
+  manifold_csv: ./configs/data/bnc_manifold_v3.csv
   wrench_representation: rawcap
   # rawcap SATURATION: the wrench feature is unit(f) x min(|f| / rawcap_force_ref_n,
   # rawcap_cap) -- magnitude in units of the reference, CAPPED at rawcap_cap. Saturation
@@ -333,15 +311,15 @@ estimation:
     y_mm: 1.0
     z_mm: 1.0
     roll_deg: 1.0
-    pitch_deg: 1.0
+    pitch_deg: 10.0
     yaw_deg: 1.0
   # Also measured on the same 49 attempts, in THIS family (rawcap, uniform weights):
   # s_force 2.0 / s_torque 0.0 gives median |remaining pitch| 2.00 deg at a 92% win rate,
   # against 2.75 deg / 78% for the previous 1.0 / 1.0 / pitch-weight-10 combination
   # (5.00 deg = no correction). Torque weight only hurt here: every s_torque > 0 variant
   # scored at or below its s_torque 0 sibling.
-  scaling_constant_unit_force_to_mm: 2.0
-  scaling_constant_unit_torque_to_mm: 0.0
+  scaling_constant_unit_force_to_mm: 1.0
+  scaling_constant_unit_torque_to_mm: 1.0
   # PER-AXIS wrench weights -- the exact counterpart of dim_weights above, for the six wrench
   # feature columns. The two scalars above stay the BLOCK-level unit conversion; these say how
   # much each individual axis matters, so the metric has one weight per channel across all
@@ -382,7 +360,7 @@ estimation:
   softmax_temp: 0.15
   residual_gate: 1.5
   recency_half_life_frac: 0.0
-  interp_neighbors: 16
+  interp_neighbors: 128
   # kNN kernel bandwidth: tau = interp_softness x the map's median point spacing, weights
   # exp(-(d - d_nearest)/tau). It slides between hard nearest-neighbour (-> 0) and a flat
   # average of all k (large). At 1.0 on the BNC map the top neighbour carries ~11% of the
@@ -449,7 +427,7 @@ compliance:
   enabled: true
   tare_before: true
   mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
-  stiffness:     [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
+  stiffness:     [100.0, 250.0, 100.0, 10.0, 10.0, 10.0]
   damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0
@@ -458,7 +436,7 @@ compliance:
   # DWELL after every insertion, on top of settle_s. Unlike settle_s this hold is UN-GUARDED
   # (it will not be cut short by the force limit it is pressing against) and is NOT logged as
   # observations, so changing it cannot change the estimate. 0 = off.
-  hold_after_insertion_s: 0.0
+  hold_after_insertion_s: 5.0
   lookahead_time_s: 0.1
   servo_gain: 300.0
   max_delta_m: 0.05

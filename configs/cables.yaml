@@ -94,8 +94,8 @@ cables:
     # frames: banana_connector_finger_holder + targets: banana_connector_finger_holder.)
 
   bnc:
-    connector: [197, 206]
-    cable: 221
+    connector: [196, 211]
+    cable: 224
     junction_in_fingertip:    # MEASURE (see banana); zeros = junction exactly at the fingertip
       xyz_mm:  [0.0, 0.0, 0.0]
       rpy_deg: [0.0, 0.0, 0.0]

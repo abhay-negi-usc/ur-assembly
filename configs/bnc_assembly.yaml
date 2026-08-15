@@ -222,13 +222,13 @@ confirm_each_step: true
 debug: false
 
 reset:
-  home_joints_deg: [-80, -155, -120, 5, 90, 10]
+  home_joints_deg: [-80, -155, -120, 5, 90, 190]
   # (the home move is a guarded position moveJ, paced by the speed caps above -- no duration key)
   max_force_n: 50.0
   compliance:
     tare_before: true
     mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
-    stiffness:     [2000.0, 2000.0, 2000.0, 15.0, 15.0, 15.0]
+    stiffness:     [500.0, 500.0, 500.0, 15.0, 15.0, 15.0]
     damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     selected_axes: [1, 1, 1, 1, 1, 1]
     reference_rate_hz: 125.0
@@ -365,15 +365,15 @@ assembly:
     mass: null
     damping_ratio: null
     settle_s: null               # logged settle at the stop; feeds no estimate here
-    hold_after_insertion_s: null # UN-GUARDED dwell -- the knob for pressing an irreversible
+    hold_after_insertion_s: 1.0  # UN-GUARDED dwell -- the knob for pressing an irreversible
                                  # mate home, or holding it while a force reading settles
     # --- force guard overrides (else force_guard:) ---
     # The commit is where a HIGHER limit belongs: measured 2026-08-15, depth is the strongest
     # predictor of a well-behaved estimate (deepest row > +3.9 mm -> 0.25 deg median error vs
     # 1.62 deg below +2.1 mm), and the guard is what stops the part short.
-    max_force_n: null
-    max_torque_nm: null
-    persistence_s: null
+    max_force_n: 1.0
+    max_torque_nm: 8.0
+    persistence_s: 1.0
     # --- pacing, pause and noise for the commit ---
     # SPEED: the probing passes are paced for gathering contact; the commit can go slower (a
     # gentler seat, crisper stop) or faster. null = speed.max_cartesian_* x phase_scale.
@@ -440,6 +440,22 @@ estimation:
   #               for the aggregator. Use it to see landscape quality end-to-end, not to run
   #               production. The `commit` column in trials.csv records what was used.
   commit: argmin
+  # ---- THE IN-HAND BELIEF, decoupled from the grasp -----------------------------------------
+  # fingertip -> CONNECTOR, i.e. the same physical thing frames.yaml calls
+  # bnc_connector_finger_holder (and that targets: was recorded through). Without this key the
+  # app falls back to cables.yaml junction_in_fingertip, which serves a DIFFERENT purpose: it
+  # sets where the fingers land on the part (fingertip target = detected junction @ inverse of
+  # it), and it is tuned for the PICKUP. The two only coincide when the connector frame sits
+  # exactly at the junction, which it does not here -- they differed by 180 deg and 45.7 mm,
+  # so the assembly drove the connector in backwards along the insertion axis.
+  # Setting it here fixes the assembly belief WITHOUT touching the grasp.
+  #   value = inverse(fingertip_grasp) @ frames[bnc_connector_finger_holder]
+  # UNITS: m / rad. NOT xyz_mm/rpy_deg -- _pose_si only converts cables.yaml's
+  # junction_in_fingertip, so mm/deg keys here would be silently ignored and the connector
+  # would be placed at the fingertip origin.
+  initial_connector_in_fingertip:
+    xyz: [-0.0457, 0.0000, 0.0240]             # m
+    rpy: [0.0, 0.0, 3.14159265358979]       # rad (exactly 180 deg yaw)
   # The AUGMENTED manifold (clean map + 30k truth-corrected production-process rows) and the
   # rawcap wrench representation -- the 2026-08-09 offline winners. Fall back to the classic
   # setup with: manifold_csv ./configs/data/banana_manifold_20260807_clean.csv,

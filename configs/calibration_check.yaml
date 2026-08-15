@@ -39,7 +39,7 @@ compliance:
   enabled: true
   tare_before: true
   mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
-  stiffness:     [1500.0, 1500.0, 250.0, 10.0, 10.0, 10.0]
+  stiffness:     [3000.0, 3000.0, 3000.0, 10.0, 10.0, 10.0]
   damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
   settle_s: 1.0                  # hold at the stop before reading the contact pose
 

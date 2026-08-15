@@ -63,9 +63,10 @@ from .. import log as urlog
 from .. import tool_frames
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import trajectory as traj
-from ..skills.manifold import (FORCE_COLS, POSE_COLS, TORQUE_COLS,
+from ..skills.manifold import (DIMS, FORCE_COLS, POSE_COLS, TORQUE_COLS,
                                mats_from_vec6, scaled12, vec6_from_mats)
 from ..skills.mixture import from_energy
+from ..skills import manifold_debug
 from ..skills.solution_check import CheckedManifoldEstimator
 from ..skills.success_basin import SuccessBasin
 from ..transforms import inverse, matrix_to_xyzrpy, pose_error, translation_matrix
@@ -300,6 +301,49 @@ def _basin_contour(ax, basin, dims, ja, jb, xlim, ylim, levels, rest=None, n=56)
         return cs
     except Exception:                              # noqa: BLE001 -- overlay is never essential
         return None
+
+
+def _argmin_estimate(estimator, vec6, w6):
+    """The estimate WITHOUT the multi-start ICP: build the dense landscape and take its
+    minimum (estimation.commit: argmin).
+
+    The ICP is the expensive half of an attempt -- num_initial_guesses starts x
+    icp_iterations, seconds to tens of seconds -- and in argmin mode its answer is discarded,
+    so it is skipped outright rather than computed and thrown away. Everything the caller
+    needs still comes from the landscape, which was already being built for the plots and
+    P(seat): the correction, the curvature+mixture covariance, the mode structure.
+
+    Returns (T_corr_mm, info, land_pack), or (None, reason, None) when there is too little
+    evidence. `info` mirrors the solver's dict except for the ICP-only keys (theta_hist,
+    res_hist, check) which are absent -- callers must treat them as optional."""
+    if len(vec6) < estimator.min_observations:
+        return None, f'too few observations ({len(vec6)} < {estimator.min_observations})', None
+    pack = _landscape(estimator, vec6, w6)
+    axes, E, sigma, argmin, cov, mix, support = pack
+    theta = [float(argmin[d]) for d in estimator.estimate_dims]
+    c6 = np.zeros(6)
+    c6[estimator.idx] = theta
+    Emin = float(np.min(E))
+    info = {
+        'theta_corr': {d: float(v) for d, v in zip(estimator.estimate_dims, theta)},
+        'final_residual': Emin,
+        'n_observations': int(len(vec6)),
+        'sigma': dict(sigma),
+        'covariance': cov,
+        'mixture': mix,
+        'n_mixture_modes': mix.n_modes,
+        'ambiguity': mix.ambiguity,
+        'between_frac': mix.between_frac,
+        'separation': mix.separation,
+        'support_ratio': support,
+        # 'inliers' has no consensus meaning here; report the share of the grid within 5% of
+        # the minimum, the same flatness reading the grid solver logs.
+        'inliers': int(np.sum(np.asarray(E) <= Emin * 1.05)),
+        'guesses': int(np.asarray(E).size),
+        'seeded_guesses': 0,
+        'aggregator': 'argmin',
+    }
+    return mats_from_vec6(c6), info, pack
 
 
 def _as_error(errb, theta, idx):
@@ -716,6 +760,21 @@ def build_and_run(cfg, robot, camera, args):
     #                 so this costs nothing extra -- it is the hardware version of the offline
     #                 argmin study (analysis/landscape_sweep), where it measured 3.3-9.6 mm
     #                 |z'| at ~50% win vs ~2.0 mm / 84% for the aggregator.
+    # MATCH DIAGNOSTICS (eval.debug_match): per-attempt figures showing where the observations
+    # land in the map under the COMMITTED correction versus the TRUE one, the residual split by
+    # channel, which map rows the data actually resembles, and each channel's own energy
+    # minimum. This is the tool for 'the argmin is not the truth' -- it separates 'the truth
+    # does not fit' from 'a rival fits better' from 'one channel decides'. Only meaningful in
+    # this app, where the truth is known. Costs a landscape per channel, so it is opt-in and
+    # can be thinned with every_n.
+    dbg = cfg.get_path('eval.debug_match') or {}
+    dbg_on = bool(dbg.get('enabled', False))
+    dbg_every = max(int(dbg.get('every_n', 1)), 1)
+    dbg_rows = int(dbg.get('max_rows', 250))
+    dbg_grid = int(dbg.get('grid_points', 41))
+    if dbg_on:
+        log.info('Match diagnostics ON: a debug figure every %d attempt(s) -> '
+                 'trial_XXX_attempt_YY_match.png', dbg_every)
     commit = str(cfg.get_path('estimation.commit', 'aggregator')).strip().lower()
     if commit not in ('aggregator', 'argmin'):
         log.error("estimation.commit %r must be 'aggregator' or 'argmin'.", commit)
@@ -970,6 +1029,22 @@ def build_and_run(cfg, robot, camera, args):
     tare = (lambda: robot.arm.zero_ft(settle=False)) \
         if bool(cfg.get_path('compliance.tare_before', True)) else None
     settle_s = float(cfg.get_path('compliance.settle_s', 0.5))
+    # DWELL at the end of an insertion, AFTER the logged settle. Two differences from
+    # settle_s, both deliberate:
+    #   * NOT LOGGED -- it adds no observation rows, so lengthening the dwell cannot change
+    #     what the estimator sees (settle_s does: its rows are all at the deepest contact).
+    #   * UN-GUARDED -- settle_s passes the force guard, so an already-tripped guard ends that
+    #     hold on its first cycle. A dwell meant to keep PRESSING (letting a stiff connector
+    #     finish seating, or holding a mate steady for inspection/force reading) must not be
+    #     cut short by the limit it is deliberately sitting on. The admittance spring still
+    #     bounds the force: it settles at stiffness x reference penetration, no integration.
+    hold_s = float(cfg.get_path('compliance.hold_after_insertion_s', 0.0))
+    if hold_s < 0:
+        log.error('compliance.hold_after_insertion_s must be >= 0 (got %.2f).', hold_s)
+        return False                               # bad values fail HERE, pre-motion
+    if hold_s > 0:
+        log.info('Post-insertion dwell: %.1f s of UN-guarded hold at the stop after every '
+                 'insertion (not logged as observations).', hold_s)
     v_mm_s = float(cfg.get_path('speed.max_cartesian_translation_mm_s', 5.0))
     w_deg_s = float(cfg.get_path('speed.max_cartesian_rotation_deg_s', 6.0))
     rv_mm_s = float(cfg.get_path('speed.retract_translation_mm_s', v_mm_s))
@@ -1044,6 +1119,9 @@ def build_and_run(cfg, robot, camera, args):
             log.info('PECK: %d contact event(s), stop depths %s mm.', len(stops),
                      [round(s, 1) for s in stops])
         adm_ctl.hold(last_ref, settle_s, guard, on_step=log_cb)
+        if hold_s > 0:                             # dwell: un-guarded, unlogged (see above)
+            log.info('   holding the stop for %.1f s.', hold_s)
+            adm_ctl.hold(last_ref, hold_s, guard=None)
 
         # Kinematic check numbers (BELIEVED pose), for the record only.
         lin, ang = pose_error(robot.tool0() @ T_bel, T_base_tconn)
@@ -1185,7 +1263,12 @@ def build_and_run(cfg, robot, camera, args):
                 # attempt meant to tell two hypotheses apart can silently re-examine just one of
                 # them. Seeds are corrections relative to the belief that produced them, so they
                 # are carried through each belief update below rather than reused verbatim.
-                T_corr_mm, info = estimator.estimate(vec6, w6, seeds=seeds)
+                land_pack = None
+                if commit == 'argmin':
+                    # NO ICP: the multi-start solver's answer would only be discarded below.
+                    T_corr_mm, info, land_pack = _argmin_estimate(estimator, vec6, w6)
+                else:
+                    T_corr_mm, info = estimator.estimate(vec6, w6, seeds=seeds)
                 seeds = None
                 land, p_seat, icp_paths = None, float('nan'), None
                 row = {'trial': trial, 'attempt': attempt, 'n_observations': len(obs),
@@ -1207,8 +1290,7 @@ def build_and_run(cfg, robot, camera, args):
                     # The LANDSCAPE moves ahead of the belief update: mode ranking picks the
                     # committed correction from it, and the diagnostics below reuse the pack
                     # (it depends only on the PRE-update observations, so nothing changes).
-                    land_pack = None
-                    if (save_plots and plot_land) or basin is not None or commit == 'argmin':
+                    if land_pack is None and ((save_plots and plot_land) or basin is not None):
                         try:
                             land_pack = _landscape(estimator, vec6, w6)
                         except Exception as exc:   # noqa: BLE001 -- diagnostics never fatal
@@ -1222,21 +1304,9 @@ def build_and_run(cfg, robot, camera, args):
                     # makes the landscape's own quality visible end-to-end on hardware.
                     row['commit'] = commit
                     if commit == 'argmin':
-                        if land_pack is None:
-                            log.warning('commit: argmin needs the landscape and it failed -- '
-                                        'falling back to the aggregator on this attempt.')
-                            row['commit'] = 'aggregator (landscape failed)'
-                        else:
-                            th_a = land_pack[3]        # {dim: value} at the landscape minimum
-                            log.info('COMMIT ARGMIN: %s (aggregator said %s).',
-                                     {d: round(float(v), 2) for d, v in th_a.items()},
-                                     {d: round(float(v), 2)
-                                      for d, v in info['theta_corr'].items()})
-                            c6a = np.zeros(6)
-                            c6a[estimator.idx] = [th_a[d] for d in estimator.estimate_dims]
-                            T_corr_mm = mats_from_vec6(c6a)
-                            info['theta_corr'] = {d: float(th_a[d])
-                                                  for d in estimator.estimate_dims}
+                        log.info('COMMIT ARGMIN (no ICP): %s.',
+                                 {d: round(float(v), 2)
+                                  for d, v in info['theta_corr'].items()})
                     # MODE RANKING at commitment (seat_gate.mode_ranking: p_seat): the
                     # aggregator's estimate is only the default candidate -- a rival mode of
                     # the multi-start finals that does MORE for P(seat) wins. NOTE icp_residual
@@ -1273,6 +1343,23 @@ def build_and_run(cfg, robot, camera, args):
                                 row['ranked_mode'] = best[2]
                         except Exception as exc:   # noqa: BLE001 -- ranking is best-effort
                             log.warning('mode ranking skipped (%s)', exc)
+                    if dbg_on and (attempt - 1) % dbg_every == 0:
+                        try:
+                            # errb is the belief error BEFORE this update, so the correction
+                            # that would cancel it exactly is its inverse -- the TRUTH the
+                            # committed estimate is being compared against.
+                            t6 = vec6_from_mats(np.linalg.inv(
+                                mats_from_vec6(np.asarray(errb, dtype=float))))
+                            manifold_debug.figures(
+                                estimator, vec6, w6, dict(info['theta_corr']),
+                                {d: float(t6[DIMS.index(d)])
+                                 for d in estimator.estimate_dims},
+                                os.path.join(out_dir, f'trial_{trial:03d}_attempt_'
+                                                      f'{attempt:02d}_match.png'),
+                                title=f'trial {trial} attempt {attempt}',
+                                max_rows=dbg_rows, grid_n=dbg_grid)
+                        except Exception as exc:   # noqa: BLE001 -- diagnostics never fatal
+                            log.warning('match diagnostics skipped (%s)', exc)
                     T_believed = T_believed @ _corr_to_m(T_corr_mm)   # believed @ corr ~= true
                     if accumulate:
                         # keep every stored row expressed in the belief JUST updated
@@ -1302,12 +1389,17 @@ def build_and_run(cfg, robot, camera, args):
                         # Carry the modes into the NEXT attempt, re-expressed in the belief we
                         # are about to adopt: mode M satisfied believed @ M ~= true, and the new
                         # belief is believed @ C, so the same hypothesis is now inverse(C) @ M.
+                        # Seeds only steer the multi-start, so they are pointless without it.
                         try:
+                            if commit == 'argmin':
+                                raise StopIteration
                             m6 = np.zeros((mix_icp.n_modes, 6))
                             m6[:, estimator.idx] = np.array([c.mean for c in mix_icp.components])
                             nxt = vec6_from_mats(np.linalg.inv(T_corr_mm)
                                                  @ mats_from_vec6(m6))[:, estimator.idx]
                             seeds = [row_ for row_ in nxt]
+                        except StopIteration:
+                            seeds = None               # commit: argmin -- no multi-start to seed
                         except Exception as exc:   # noqa: BLE001 -- seeding is an optimisation
                             log.debug('mode seeding skipped (%s)', exc)
                     # TRUST readout (observational): both scores + the raw signals, so the
@@ -1319,20 +1411,27 @@ def build_and_run(cfg, robot, camera, args):
                         row.update({f'trust_{k}': v for k, v in chk['signals'].items()
                                     if k in _TRUST_SIGNALS})
                     trackr.append(float(info['final_residual']))
-                    trackg.append(np.asarray(info['res_hist'], dtype=float)[:, -1])
-                    # the whole ICP run (guesses x iterations x dims) + the belief error it was
-                    # solved from, so the phase plot can draw the convergence in error coords
-                    icp_paths = (np.asarray(info['theta_hist'], dtype=float),
-                                 np.asarray(errb, dtype=float))
-                    # Per-guess would-be OUTCOME: the ground-truth L2 error left if guess g's
-                    # correction had been applied to the PRE-update belief (errb, mm/deg).
-                    th6 = np.zeros((len(info['theta_hist']), 6))
-                    th6[:, estimator.idx] = info['theta_hist'][:, -1]
-                    rem6 = vec6_from_mats(
-                        mats_from_vec6(np.asarray(errb)) @ mats_from_vec6(th6))
-                    trackl2.append(np.sqrt(
-                        (rem6[:, :3] ** 2).sum(axis=1)
-                        + ((estimator.s_rot * rem6[:, 3:]) ** 2).sum(axis=1)))
+                    # The per-guess populations exist only when the ICP ran (commit:
+                    # aggregator). In argmin mode there are no guesses to plot, so the
+                    # consensus/outcome tracks stay empty and the figures just omit them.
+                    if info.get('theta_hist') is not None:
+                        trackg.append(np.asarray(info['res_hist'], dtype=float)[:, -1])
+                        # the whole ICP run (guesses x iterations x dims) + the belief error it
+                        # was solved from, so the phase plot draws convergence in error coords
+                        icp_paths = (np.asarray(info['theta_hist'], dtype=float),
+                                     np.asarray(errb, dtype=float))
+                        # Per-guess would-be OUTCOME: the ground-truth L2 error left if guess
+                        # g's correction had been applied to the PRE-update belief (mm/deg).
+                        th6 = np.zeros((len(info['theta_hist']), 6))
+                        th6[:, estimator.idx] = info['theta_hist'][:, -1]
+                        rem6 = vec6_from_mats(
+                            mats_from_vec6(np.asarray(errb)) @ mats_from_vec6(th6))
+                        trackl2.append(np.sqrt(
+                            (rem6[:, :3] ** 2).sum(axis=1)
+                            + ((estimator.s_rot * rem6[:, 3:]) ** 2).sum(axis=1)))
+                    else:
+                        trackg.append(np.zeros(0))
+                        trackl2.append(np.zeros(0))
                     # The landscape the correction was picked from, with the TRUE correction
                     # (believed @ C = true, so C = inverse(err_before)) for reference.
                     # (Computed ONCE above, before the belief update, for the mode ranking.)
@@ -1356,7 +1455,9 @@ def build_and_run(cfg, robot, camera, args):
                             # best cases exactly when the process is right.
                             land = (ax_l, E_l, sig_l, amin_l, dict(info['theta_corr']),
                                     np.asarray(errb, dtype=float),
-                                    np.asarray(info['theta_hist'], dtype=float)[:, -1, :],
+                                    (np.asarray(info['theta_hist'], dtype=float)[:, -1, :]
+                                     if info.get('theta_hist') is not None
+                                     else np.zeros((0, len(estimator.idx)))),
                                     list(estimator.idx), trk, cov_l, p_seat, mix_l)
                             row.update({f'sigma_{d}': v for d, v in sig_l.items()})
                             row.update({f'cov_{a}{b}': float(cov_l[a, b])

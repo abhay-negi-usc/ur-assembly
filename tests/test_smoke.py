@@ -1771,9 +1771,44 @@ def test_estimator_eval_collection_config():
                             'estimator_eval.py')).read()
     assert "'aggregator', 'argmin'" in src, \
         'estimator_eval must validate estimation.commit pre-motion'
-    assert "commit == 'argmin'" in src and 'land_pack[3]' in src, \
+    assert "commit == 'argmin'" in src and '_argmin_estimate' in src, \
         'commit: argmin must commit the dense landscape argmin, not the ICP finals'
+    # commit: argmin must SKIP the multi-start solver, not run it and throw the answer away --
+    # the ICP is the expensive half of an attempt (num_initial_guesses x icp_iterations).
+    body = src.split('def _argmin_estimate')[1].split('\ndef ')[0]
+    assert 'estimator.estimate(' not in body and '.estimate(' not in body, \
+        '_argmin_estimate must not invoke the ICP solver'
+    assert '# NO ICP' in src, 'the estimate call must branch on commit BEFORE running the ICP'
+    # ICP-only diagnostics must be optional, or argmin mode crashes on its first attempt
+    assert "info.get('theta_hist') is not None" in src, \
+        'theta_hist/res_hist are ICP-only and must be guarded'
     assert "+ ['commit']" in src, 'trials.csv must record which commit path ran'
+    # Match diagnostics: opt-in, and the TRUTH passed in must be the inverse of the belief
+    # error (believed @ C = true), not the error itself -- a sign slip here would draw a
+    # mirrored 'truth' and send the debugging in the wrong direction.
+    assert 'manifold_debug.figures(' in src and 'eval.debug_match' in src, \
+        'estimator_eval must be able to emit match diagnostics'
+    call = src.split('manifold_debug.figures(')[0][-600:]
+    assert 'np.linalg.inv(' in call and 'mats_from_vec6' in call, \
+        'the diagnostic truth must be inverse(err_before), not err_before'
+    dm = cfg['eval'].get('debug_match') or {}
+    assert dm.get('enabled') in (True, False), dm
+    assert int(dm.get('every_n', 1)) >= 1 and int(dm.get('grid_points', 41)) >= 5, dm
+    # The post-insertion dwell must stay UN-GUARDED and UNLOGGED: guarded, it would end on its
+    # first cycle (the guard is already tripped at a contact stop); logged, it would flood the
+    # observation set with duplicate deepest-contact rows and change the estimate.
+    for app in ('estimator_eval.py', 'mode_pose_estimator_eval.py'):
+        s = open(os.path.join(os.path.dirname(__file__), '..', 'urlab', 'apps', app)).read()
+        assert 'hold_after_insertion_s' in s, app
+        assert 'adm_ctl.hold(last_ref, hold_s, guard=None)' in s, \
+            f'{app}: the dwell must be un-guarded'
+        assert 'adm_ctl.hold(last_ref, hold_s, guard=None)\n' in s and \
+            'on_step' not in s.split('adm_ctl.hold(last_ref, hold_s')[1][:80], \
+            f'{app}: the dwell must not log observations'
+    for cf in ('estimator_eval.yaml', 'mode_pose_estimator_eval.yaml'):
+        with open(os.path.join(os.path.dirname(__file__), '..', 'configs', cf)) as fh:
+            comp = yaml.safe_load(fh)['compliance']
+        assert float(comp.get('hold_after_insertion_s', 0.0)) >= 0.0, cf
 
 
 def test_manifold_interpolation_reduces_latching():

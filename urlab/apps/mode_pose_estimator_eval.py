@@ -413,6 +413,16 @@ def build_and_run(cfg, robot, camera, args):
     tare = (lambda: robot.arm.zero_ft(settle=False)) \
         if bool(cfg.get_path('compliance.tare_before', True)) else None
     settle_s = float(cfg.get_path('compliance.settle_s', 0.5))
+    # Post-insertion DWELL (parity with estimator_eval): held AFTER the logged settle, with
+    # the guard OFF and no observation rows recorded -- so it keeps the part pressed without
+    # being cut short by the force limit it is sitting on, and without changing the estimate.
+    hold_s = float(cfg.get_path('compliance.hold_after_insertion_s', 0.0))
+    if hold_s < 0:
+        log.error('compliance.hold_after_insertion_s must be >= 0 (got %.2f).', hold_s)
+        return False
+    if hold_s > 0:
+        log.info('Post-insertion dwell: %.1f s of UN-guarded hold at the stop (unlogged).',
+                 hold_s)
     v_mm_s = float(cfg.get_path('speed.max_cartesian_translation_mm_s', 5.0))
     w_deg_s = float(cfg.get_path('speed.max_cartesian_rotation_deg_s', 30.0))
     rv = float(cfg.get_path('speed.retract_translation_mm_s', 50.0))
@@ -448,6 +458,9 @@ def build_and_run(cfg, robot, camera, args):
                 break
             last_ref = refs[i]
         adm_ctl.hold(last_ref, settle_s, guard, on_step=log_cb)
+        if hold_s > 0:                             # dwell: un-guarded, unlogged (see above)
+            log.info('   holding the stop for %.1f s.', hold_s)
+            adm_ctl.hold(last_ref, hold_s, guard=None)
         lin, ang = pose_error(robot.tool0() @ T_bel, T_base_tconn)
         xyz, rpy = matrix_to_xyzrpy(inverse(T_base_tconn) @ robot.tool0() @ T_true)
         seat6 = list(xyz * 1000.0) + list(np.degrees(rpy))

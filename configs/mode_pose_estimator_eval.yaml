@@ -160,6 +160,10 @@ compliance:
   stiffness:     [1500.0, 250.0, 250.0, 10.0, 10.0, 10.0]
   damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
   settle_s: 2.0                  # SETTLED wrench -- stage 1 lives on the wrench channel
+  # Extra dwell after every insertion: UN-GUARDED and NOT logged (so it cannot change the
+  # estimate, unlike settle_s). For letting a stiff mate finish seating or holding it steady
+  # while a force reading settles. 0 = off.
+  hold_after_insertion_s: 0.0
 
 force_guard:
   enabled: true

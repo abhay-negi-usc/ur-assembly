@@ -49,9 +49,13 @@ frames:
     xyz_mm:  [0.0, -78.0, 159.0]
     rpy_deg: [180.0, 0.0, +90.0]
 
-  # The hose connector fixtured between the closed fingers (tool0 -> connector).
+  # The BNC connector fixtured between the closed fingers (tool0 -> connector).
+  # CORRECTED 2026-08-15: y was -45.7 (sign error, and the comment was a copy of the hose
+  # entry). The error was a PURE +91.4 mm translation along the connector's own +x, which
+  # CANCELS for a straight insertion but acts as a LEVER ARM on any pitch: a commanded 5 deg
+  # displaced the part 8 mm in z. targets: below was re-derived by the same correction.
   bnc_connector_finger_holder:
-    xyz_mm:  [0.0, -45.7, 159.0]
+    xyz_mm:  [0.0, +45.7, 159.0]
     rpy_deg: [180.0, 0.0, +90.0]
 
 # ============================================================================
@@ -72,7 +76,12 @@ targets:
     xyz_mm:  [-49.99, 947.55, -139.50]
     rpy_deg: [-86.91, +1.45, +94.20]
 
-  # bnc_connector_finger_holder at the mate (read off the monitor).
+  # bnc_connector_finger_holder at the mate. RE-DERIVED 2026-08-15: the original reading was
+  # taken off the monitor while frames: carried the -45.7 y sign error, so it inherited that
+  # same +91.4 mm offset along the connector's +x. Corrected here by the identical transform
+  # (target_new = target_old @ E), which keeps the recorded mate physically where it was.
+  # Prefer a FRESH monitor reading when there is bench time -- this is arithmetic, not a
+  # measurement.  (was xyz_mm [+108.52, +1013.93, -141.11])
   bnc_connector_finger_holder:
-    xyz_mm:  [+108.52, +1013.93,  -141.11]
-    rpy_deg: [-56.19,   -1.11,  +93.48]
+    xyz_mm:  [+102.97, +1105.14, -139.34]
+    rpy_deg: [-56.19, -1.11, +93.48]

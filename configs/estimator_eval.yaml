@@ -68,8 +68,8 @@ eval:
   # A trial CONVERGES when the remaining GROUND-TRUTH error (not the believed check!) is within
   # both tolerances; stop_when_converged skips its remaining attempts.
   success_tolerance:
-    pos_mm: 0.25
-    rot_deg: 0.25
+    pos_mm: 1.0
+    rot_deg: 1.0
   stop_when_converged: true
 
   # PHYSICAL success: the measured (TRUE) connector pose wrt the TARGET connector at the end
@@ -77,7 +77,7 @@ eval:
   # Success TERMINATES the trial; the live figure shows the running success rate.
   success_pose_tol: [2.0, 1.0, 5.0, 5.0, 5.0, 1.0]
 
-  random_seed: 1                 # >0 = replayable perturbation stream; 0 = nondeterministic
+  random_seed: 2                 # >0 = replayable perturbation stream; 0 = nondeterministic
   log_decimation: 5              # observation every Nth servo cycle (125 Hz / N -> ~25 Hz)
   save_observations: true        # per-attempt observation CSVs (the post-analysis raw data)
   # ---- P(SEAT) GATE + the single definition of SUCCESS -------------------------------------
@@ -161,14 +161,62 @@ eval:
     # offset_sweep: commanded offsets [x, y, z (m), roll, pitch, yaw (deg)] in the held part's
     # own frame. null = the default pitch sweep -4..+4 deg in 2 deg steps, other dims zero.
     sweep_offsets: 
-      - [0, -0.003, -0.003, 0, -3.0, 0]
-      - [0, +0.003, -0.003, 0, -3.0, 0]
-      - [0, -0.003, +0.003, 0, -3.0, 0]
-      - [0, +0.003, +0.003, 0, -3.0, 0]
-      - [0, -0.003, -0.003, 0, +3.0, 0]
-      - [0, +0.003, -0.003, 0, +3.0, 0]
-      - [0, -0.003, +0.003, 0, +3.0, 0]
-      - [0, +0.003, +0.003, 0, +3.0, 0]
+    - [0, 0, -0.003, 0, -5, 0]
+    - [0, 0, -0.003, 0, -4, 0]
+    - [0, 0, -0.003, 0, -3, 0]
+    - [0, 0, -0.003, 0, -2, 0]
+    - [0, 0, -0.003, 0, -1, 0]
+    - [0, 0, -0.003, 0, +0, 0]
+    - [0, 0, -0.003, 0, +1, 0]
+    - [0, 0, -0.003, 0, +2, 0]
+    - [0, 0, -0.003, 0, +3, 0]
+    - [0, 0, -0.003, 0, +4, 0]
+    - [0, 0, -0.003, 0, +5, 0]
+    - [0, 0, -0.002, 0, -5, 0]
+    - [0, 0, -0.002, 0, -4, 0]
+    - [0, 0, -0.002, 0, -3, 0]
+    - [0, 0, -0.002, 0, -2, 0]
+    - [0, 0, -0.002, 0, -1, 0]
+    - [0, 0, -0.002, 0, +0, 0]
+    - [0, 0, -0.002, 0, +1, 0]
+    - [0, 0, -0.002, 0, +2, 0]
+    - [0, 0, -0.002, 0, +3, 0]
+    - [0, 0, -0.002, 0, +4, 0]
+    - [0, 0, -0.002, 0, +5, 0]
+    - [0, 0, 0, 0, -5, 0]
+    - [0, 0, 0, 0, -4, 0]
+    - [0, 0, 0, 0, -3, 0]
+    - [0, 0, 0, 0, -2, 0]
+    - [0, 0, 0, 0, -1, 0]
+    - [0, 0, 0, 0, +0, 0]
+    - [0, 0, 0, 0, +1, 0]
+    - [0, 0, 0, 0, +2, 0]
+    - [0, 0, 0, 0, +3, 0]
+    - [0, 0, 0, 0, +4, 0]
+    - [0, 0, 0, 0, +5, 0]
+    - [0, 0, +0.002, 0, -5, 0]
+    - [0, 0, +0.002, 0, -4, 0]
+    - [0, 0, +0.002, 0, -3, 0]
+    - [0, 0, +0.002, 0, -2, 0]
+    - [0, 0, +0.002, 0, -1, 0]
+    - [0, 0, +0.002, 0, +0, 0]
+    - [0, 0, +0.002, 0, +1, 0]
+    - [0, 0, +0.002, 0, +2, 0]
+    - [0, 0, +0.002, 0, +3, 0]
+    - [0, 0, +0.002, 0, +4, 0]
+    - [0, 0, +0.002, 0, +5, 0]
+    - [0, 0, +0.003, 0, -5, 0]
+    - [0, 0, +0.003, 0, -4, 0]
+    - [0, 0, +0.003, 0, -3, 0]
+    - [0, 0, +0.003, 0, -2, 0]
+    - [0, 0, +0.003, 0, -1, 0]
+    - [0, 0, +0.003, 0, +0, 0]
+    - [0, 0, +0.003, 0, +1, 0]
+    - [0, 0, +0.003, 0, +2, 0]
+    - [0, 0, +0.003, 0, +3, 0]
+    - [0, 0, +0.003, 0, +4, 0]
+    - [0, 0, +0.003, 0, +5, 0]
+
     peck_retract_mm: 10.0         # back-off after each force stop
     peck_timeout_s: 60.0         # time budget for one peck attempt
 
@@ -185,15 +233,15 @@ eval:
   # contact instead of the same nominal path every time. Uses its OWN random stream, so
   # toggling it does not change the injected-error draws (noised/nominal runs stay pairable).
   trajectory_noise:
-    enabled: false
+    enabled: true
     # PER-DIMENSION per-waypoint std [x, y, z (m), roll, pitch, yaw (deg)], applied after
     # smoothing; a zero entry leaves that DOF unperturbed. (Legacy scalar keys translation_m /
     # rotation_deg still work when 'std' is absent.)
-    std: [0.000, 0.005, 0.005, 0.0, 5.0, 0.0]
+    std: [0.000, 0.003, 0.003, 0.0, 3.0, 0.0]
     smooth_window: 10            # moving-average window (waypoints) -- keeps the reference smooth
     noise_decay_attempt: 0.1     # fraction to shrink the WHOLE perturbation by each attempt:
                                  # attempt k is scaled (1 - f)^(k-1)
-    noise_decay_traj: 0.5        # fraction shed linearly over the trajectory: full at the first
+    noise_decay_traj: 0.2        # fraction shed linearly over the trajectory: full at the first
                                  # waypoint -> x(1 - f) at the last (converge onto nominal at seat)
 
   # OPTIONAL final insertion: after a trial's estimation attempts, ONE more guarded assemble
@@ -203,7 +251,7 @@ eval:
   # from summary.csv).
   final_insertion:
     enabled: true
-    stiffness: [1500.0, 1500.0, 250.0, 10.0, 10.0, 10.0]
+    stiffness: [3000.0, 3000.0, 3000.0, 10.0, 10.0, 10.0]
 
 # ===================================================================================================
 # ESTIMATION -- the contact-manifold ICP under test. KEEP IN SYNC with the values
@@ -220,13 +268,13 @@ estimation:
   #               where the argmin measured |z'| 3.3-9.6 mm at ~50% win against ~2.0 mm / 84%
   #               for the aggregator. Use it to see landscape quality end-to-end, not to run
   #               production. The `commit` column in trials.csv records what was used.
-  commit: aggregator
+  commit: argmin
   # The AUGMENTED manifold (clean map + 30k truth-corrected production-process rows) and the
   # rawcap wrench representation -- the 2026-08-09 offline winners. Fall back to the classic
   # setup with: manifold_csv ./configs/data/banana_manifold_20260807_clean.csv,
   # wrench_representation unit, s_force 3.0, s_torque 1.0.
   manifold_csv: ./configs/data/bnc_manifold.csv
-  wrench_representation: unit
+  wrench_representation: rawcap
   # rawcap SATURATION: the wrench feature is unit(f) x min(|f| / rawcap_force_ref_n,
   # rawcap_cap) -- magnitude in units of the reference, CAPPED at rawcap_cap. Saturation
   # therefore sits at ref x cap: 10 N x 3.0 = 30 N force, 1 Nm x 3.0 = 3 Nm torque. Above
@@ -247,10 +295,10 @@ estimation:
     y_mm: 1.0
     z_mm: 1.0
     roll_deg: 1.0
-    pitch_deg: 1.0
+    pitch_deg: 10.0
     yaw_deg: 1.0
   scaling_constant_unit_force_to_mm: 1.0
-  scaling_constant_unit_torque_to_mm: 0.0
+  scaling_constant_unit_torque_to_mm: 1.0
   min_force_n: 3.0
   min_observations: 20
   estimate_dims: [pitch_deg]
@@ -277,7 +325,7 @@ estimation:
   recency_half_life_frac: 0.0
   interp_neighbors: 16
   interp_softness: 1.0
-  random_seed: 0
+  random_seed: 1
   # ---- MIXTURE over the multi-start finals (skills/mixture.py) ------------------------------
   # Raising num_initial_guesses helps ACCURACY -- the true basin actually gets found -- but it
   # wrecks the usual uncertainty number: the std of the finals then measures the DISTANCE
@@ -331,7 +379,7 @@ compliance:
 
 force_guard:
   enabled: true
-  max_force_n: 30.0
+  max_force_n: 10.0
   max_torque_nm: 8.0
   # The limit must hold CONTINUOUSLY this long before the guard trips (0 = instant, the
   # original). Raw F/T spikes over the limit for a few samples on every hard contact
@@ -346,7 +394,7 @@ speed:
   max_cartesian_velocity_m_s: 0.25
   # INSERT reference pacing -- matches the pick app's effective assemble speed
   # (global 25 mm/s / 30 deg/s x phase_scale.assemble 0.2).
-  max_cartesian_translation_mm_s: 10.0
+  max_cartesian_translation_mm_s: 30.0
   max_cartesian_rotation_deg_s: 30.0
   # RETRACT -- free-space escape back along a path just proven clear.
   retract_translation_mm_s: 100.0

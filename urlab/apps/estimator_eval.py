@@ -161,7 +161,7 @@ def _fieldnames(dims):
             + ['converged', 'diverged'])
 
 
-def _landscape(estimator, vec6, w6, max_pts=2600, row_cap=120):
+def _landscape(estimator, vec6, w6, max_pts=2600, row_cap=120, raw=None):
     """The ICP energy over a DENSE GRID of candidate corrections, in the estimator's own metric.
 
     The multi-start solver never builds this -- it only samples it from random starts -- so the
@@ -183,9 +183,16 @@ def _landscape(estimator, vec6, w6, max_pts=2600, row_cap=120):
     for j, m in zip(estimator.idx, mesh):
         G[:, j] = m.ravel()
     v6, w = np.asarray(vec6, dtype=float), np.asarray(w6, dtype=float)
+    if raw is None:                                # candidate-aware wrench (see wrench6_at)
+        raw = getattr(estimator, 'last_raw', None)
+        if raw is not None and len(raw[0]) != len(v6):
+            raw = None                             # stale stash: skip re-basing, never guess
+    sel = None
     if len(v6) > row_cap:                          # bound the cost; the shape is unaffected
         sel = np.linspace(0, len(v6) - 1, row_cap).astype(int)
         v6, w = v6[sel], w[sel]
+    if raw is not None and sel is not None:
+        raw = (raw[0][sel], raw[1][sel])           # keep the raw wrench aligned with the rows
     # CHUNKED over candidates: the neighbour gather is (candidates x rows, k, 12) float64, which
     # at k=64 runs to gigabytes in ONE allocation -- a diagnostic must not be able to
     # MemoryError a hardware run.
@@ -196,17 +203,22 @@ def _landscape(estimator, vec6, w6, max_pts=2600, row_cap=120):
     for lo in range(0, len(G), per):
         hi = min(lo + per, len(G))
         C = np.einsum('nij,kjl->knil', Ym, mats_from_vec6(G[lo:hi]))
-        pts = scaled12(vec6_from_mats(C), w, estimator.s_rot,
-                       getattr(estimator, 'dim_w', None)).reshape(-1, 12)
+        if getattr(estimator, 'wrench_follows_correction', False) and raw is not None:
+            # the wrench follows each candidate into the frame that candidate claims
+            wg = np.concatenate([estimator.wrench6_at(raw[0], raw[1], g) for g in G[lo:hi]],
+                                axis=0)
+            pts = scaled12(vec6_from_mats(C).reshape(-1, 6), wg, estimator.s_rot,
+                           getattr(estimator, 'dim_w', None))
+        else:
+            pts = scaled12(vec6_from_mats(C), w, estimator.s_rot,
+                           getattr(estimator, 'dim_w', None)).reshape(-1, 12)
         dist, nn = estimator.tree.query(pts, k=sk, workers=-1)
         dist = dist[:, None] if dist.ndim == 1 else dist
-        if estimator.interp_neighbors > 1:
-            bw = np.exp(-(dist - dist[:, :1]) / estimator.interp_tau)
-            bw /= bw.sum(axis=1, keepdims=True)
-            tgt = np.einsum('mk,mkd->md', bw, estimator.M12[nn])
-            d1 = np.linalg.norm(tgt - pts, axis=1)
-        else:
-            d1 = dist[:, 0]
+        # ONE implementation of the blend (skills/manifold.blend_residual) so the landscape and
+        # the solver cannot drift apart -- per-block bandwidths included.
+        kn = estimator.interp_neighbors
+        d1 = (estimator.blend_residual(pts, dist[:, :kn], nn[:, :kn]) if kn > 1
+              else dist[:, 0])
         Ef[lo:hi] = d1.reshape(hi - lo, len(v6)).mean(axis=1)
         # support as a DEPTH-NORMALISED ratio per row (a global reference confounds support
         # with insertion depth -- the map is dense shallow, sparse deep; see support_ref_at)

@@ -147,7 +147,7 @@ class GridManifoldEstimator(ManifoldEstimator):
         s = w.sum()
         return w / s if s > 0 else np.full(len(vec6), 1.0 / max(len(vec6), 1))
 
-    def energy(self, vec6, w6):
+    def energy(self, vec6, w6, raw=None):
         """Mean (info-weighted) soft-kNN residual at every grid candidate.
 
         Returns (E, n_rows, S). S is the companion SUPPORT curve: the weighted mean of the
@@ -161,24 +161,32 @@ class GridManifoldEstimator(ManifoldEstimator):
         Y = mats_from_vec6(vec6)
         rw = self.row_weights(vec6)
         n_c, n_r = len(self.grid6), len(vec6)
+        if raw is None:                          # candidate-aware wrench (see wrench6_at)
+            raw = getattr(self, 'last_raw', None)
+            if raw is not None and len(raw[0]) != len(vec6):
+                raw = None                       # stale stash: skip re-basing, never guess
         E, S = np.empty(n_c), np.empty(n_c)
         per = max(int(self.max_query_bytes
                       // max(n_r * self.support_k * 12 * 8, 1)), 1)
         for lo in range(0, n_c, per):               # chunked: see max_query_bytes
             hi = min(lo + per, n_c)
             C = np.einsum('nij,kjl->knil', Y, self._gridm[lo:hi])
-            pts = scaled12(vec6_from_mats(C), w6, self.s_rot, self.dim_w).reshape(-1, 12)
+            if self.wrench_follows_correction and raw is not None:
+                # the logged wrench is in the BELIEVED frame, so it rides with each candidate
+                wg = np.concatenate([self.wrench6_at(raw[0], raw[1], g)
+                                     for g in self.grid6[lo:hi]], axis=0)
+                pts = scaled12(vec6_from_mats(C).reshape(-1, 6), wg, self.s_rot, self.dim_w)
+            else:
+                pts = scaled12(vec6_from_mats(C), w6, self.s_rot, self.dim_w).reshape(-1, 12)
             # query support_k (>= 2), so the last column is the SAME k the support reference was
             # measured at -- d1 still comes from the first interp_neighbors columns.
             dist, nn = self.tree.query(pts, k=self.support_k, workers=-1)
             dist = dist[:, None] if dist.ndim == 1 else dist
-            if self.interp_neighbors > 1:
-                bw = np.exp(-(dist - dist[:, :1]) / self.interp_tau)
-                bw /= bw.sum(axis=1, keepdims=True)
-                tgt = np.einsum('mk,mkd->md', bw, self.M12[nn])
-                d1 = np.linalg.norm(tgt - pts, axis=1)
-            else:
-                d1 = dist[:, 0]
+            # ONE implementation of the blend (manifold.blend_residual) so the grid, the ICP
+            # and the app's landscape cannot drift apart -- per-block bandwidths included.
+            d1 = (self.blend_residual(pts, dist[:, :self.interp_neighbors],
+                                      nn[:, :self.interp_neighbors])
+                  if self.interp_neighbors > 1 else dist[:, 0])
             E[lo:hi] = d1.reshape(hi - lo, n_r) @ rw
             # per-row RATIO against the reference at that row's depth (pts[:, 0] is x in mm) --
             # a global reference confounds support with depth (see support_ref_at).

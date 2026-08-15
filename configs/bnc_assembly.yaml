@@ -1,171 +1,288 @@
-# In-hand pose ESTIMATOR EVALUATION -- the manifold ICP scored against a KNOWN ground truth.
-# The connector is RIGIDLY FIXTURED between the CLOSED gripper fingers (like uncertain_sampling's
-# held part), so the true in-hand pose IS the shared catalogue's held_frame entry. Each trial
-# injects a known belief error (eval.perturbation), runs the same assemble -> retract -> estimate
-# loop as cable_pick_estimate_assemble, and logs the exact ground-truth error left after every
-# update. THE GRIPPER IS NEVER OPENED OR CLOSED (it is not even constructed).
-# See urlab/apps/estimator_eval.py.
+# BNC ASSEMBLY -- cable_pick_estimate_assemble's pipeline with estimator_eval's estimator.
+# See urlab/apps/bnc_assembly.py.
 #
-# ASSUMPTION: LINEAR (PEG-IN-HOLE) ASSEMBLY -- single-axis insertion along the connector's +X;
-# the retract is the reverse translation along that same axis.
+# COMPOSED from configs/cable_pick_estimate_assemble.yaml (the whole PICK half: camera, sam3,
+# scan, grasp, reset, speed) and configs/estimator_eval.yaml (estimation:, compliance:,
+# force_guard:, and the collection / trajectory_noise / final_insertion / debug_match blocks,
+# which live under assembly: here). Those blocks are copied VERBATIM, comments and all, so the
+# 2026-08 BNC tuning and the reasoning behind it carry over exactly -- re-copy after retuning.
+#
+# WHAT DIFFERS FROM estimator_eval: the part is really PICKED, so there is no ground truth --
+# no injected error, no err_before/after, and success is the OPERATOR's call at the check.
+# assembly.target_frame is the recorded mate (frames.yaml targets:), and the in-hand belief
+# starts from the grasp geometry (estimation.initial_connector_in_fingertip overrides it).
 
 robot:
   ip: 192.168.125.2
   dry_run: false
-  # Tool payload (gripper + coupler + camera + the fixtured connector) so getActualTCPForce()
-  # reports true EXTERNAL force. Same values as cable_pick_estimate_assemble.
   payload:
     mass_kg: 1.3
     cog_m: [-0.026, 0.028, 0.030]
 base_frame: base_link
 tip_frame: tool0
+camera_frame: camera1_color_optical_frame
 
-# ---- GROUND TRUTH from the SHARED catalogue (configs/frames.yaml) ----
-# frames: entry  = the true tool0 -> connector pose of the fixtured part;
-# targets: entry = the recorded base_link mate. Both REQUIRED -- this app cannot run without them.
-held_frame: bnc_connector_finger_holder
+hand_eye:
+  xyz: [-0.009, -0.080, 0.031] # accounting for plate deformation
+  rpy: [0.0, 0.0, 0.0]
 
-# ---- Path (same trajectory the pick app assembles with) ----
-trajectory_csv: assembly_trajectory.csv
-trajectory_angles_deg: false
-translational_resolution_m: 0.001
-rotational_resolution_deg: 1.0
+camera:
+  serial_no: "218622272137"
+  width: 1280
+  height: 720
+  fps: 15                          # D405 max at 1280x720 is 15 fps
 
-# Stand-off: the DISASSEMBLED rest between trials -- the trajectory START backed off a further
-# standoff_distance_m along standoff_axis, planned from the TRUE held pose (a fixed physical
-# spot regardless of the current belief). Visited once at start and after every trial.
-standoff_distance_m: 0.050
-standoff_axis: [-1.0, 0.0, 0.0]
+sam3:
+  repo_path: /abhay_ws/sam3-abhay
+  mode: junction
+  cable_prompt: cable
+  connector_prompt: connector
+  adaptive: true
+  confidence_floor: 0.2
+  min_contrast: 0.0
+  work_dim: 1024
+  overlay_opacity: 0.5
 
-# After each attempt: back straight out along the BELIEVED connector's own -X by this distance.
-# Must exceed the insertion depth so the part is fully clear before the next free-space move.
-retract_distance_m: 0.030
+connector_estimator:
+  min_views: 3
+  min_inlier_views: 3
+  min_parallax_deg: 3.0
+  inlier_dist_m: 0.010
+  max_range_m: 0.10
+  reject_dist_m: 0.05
+  up_axis: [0.0, 0.0, 1.0]
+  workspace_min: [-10.0, -10.0, -10.0]
+  workspace_max: [10.0, 10.0, 10.0]
+
+# ---- Ground-plane manual-select scan (the default scan.mode) ----
+ground_plane:
+  z_m: -0.760
+  max_cables: 8
+  new_view_translation_m: 0.04
+  z_step_m: 0.05
+
+connector_frame: connector
+
+cable_end:
+  enabled: true
+  switch_distance_m: 0.250
+
+# (The grasp pose comes from <cable>.junction_in_fingertip in cables.yaml -- the junction pose wrt
+# the fingertip at the grasp; the old connector_grasp block is obsolete.)
+grasp_tcp_offset:
+  xyz: [0.0, 0.0, 0.0]
+  rpy: [0.0, 0.0, 0.0]
+fingertip_grasp:
+  xyz: [0.0, 0.0, 0.183]
+  rpy: [3.14159, 0.0, -1.5708]
+
+scan:
+  mode: ground_plane
+  require_detection: true
+  min_good_views: 3
+  max_passes: 3
+  view_settle_s: 0.5
+  max_view_distance_m: 0.250
+  approach:
+    enabled: true
+    step_m: 0.250
+    min_distance_m: 0.250
+    nominal_distance_m: 0.23
+    scale_offsets: true
+    recenter: true
+    max_view_delta_m: 0.10
+    max_view_delta_deg: 45.0
+  relative_bounds:
+    xyz: [0.08, 0.08, 0.05]
+    rpy: [0.35, 0.35, 0.10]
+  offsets:
+    - {xyz: [ 0.000,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
+    - {xyz: [ 0.040,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
+    - {xyz: [ 0.028,  0.028, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
+    - {xyz: [ 0.000,  0.040, 0.00], rpy: [ 0.1722,  0.0000, 0.0]}
+    - {xyz: [-0.028,  0.028, 0.00], rpy: [ 0.1224,  0.1224, 0.0]}
+    - {xyz: [-0.040,  0.000, 0.00], rpy: [ 0.0000,  0.1722, 0.0]}
+    - {xyz: [-0.028, -0.028, 0.00], rpy: [-0.1224,  0.1224, 0.0]}
+    - {xyz: [ 0.000, -0.040, 0.00], rpy: [-0.1722,  0.0000, 0.0]}
+    - {xyz: [ 0.028, -0.028, 0.00], rpy: [-0.1224, -0.1224, 0.0]}
+  refine:
+    enabled: true
+    orbit_deg: [12.0, -12.0, 20.0, -20.0]
+    max_orbit_deg: 25.0
+    min_height_m: 0.12
+
+save_scan_images: true
+data_dir: data
+scan_images_subdir: bnc_assembly
+save_raw_images: true
+overlay_debug: true
+save_last_camera_image: true
+save_junction_plot: true
+
+approach_distance_m: 0.10
+approach_axis: [0.0, 0.0, 1.0]
+lift_distance_m: 0.10
+lift_axis: [0.0, 0.0, 1.0]
+
+pickup:
+  mode: compliance
+  # SPEED-based pacing (no time-based motion in this app): the ramp duration is derived from the
+  # ACTUAL distance, paced by the GLOBAL cartesian limits (speed: block below) like every other
+  # pre-assembly motion.
+  settle_s: 0.5
+  # PICKUP HEIGHT from the gripper kinematic model. Assumes the connector RESTS ON THE GROUND
+  # PLANE (ground_plane.z_m): the grasp target = plane + connector d_max/2 (centerline) + the
+  # fingertip ADVANCE between fingertip_ref_separation_mm (where fingertip_grasp z was
+  # calibrated: 0 = measured with the gripper closed; 83.56 = at full open) and the expected
+  # stall separation. Separations are ZERO-COMPRESSION values -- real grasps squeeze the pads
+  # (desired, grip pressure); the calibrated groove depth absorbs the average squeeze and the
+  # advance is insensitive to it near closure, so pad_compression_mm usually stays 0.
+  height_from_model:
+    enabled: true
+    fingertip_ref_separation_mm: 0.0
+    pad_compression_mm: 0.0
+  compliance:
+    enabled: true
+    tare_before: true
+    mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+    stiffness:     [500.0, 500.0, 500.0, 15.0, 15.0, 15.0]
+    damping_ratio: [1.5, 1.5, 1.5, 1.5, 1.5, 1.5]
+    selected_axes: [1, 1, 1, 1, 1, 1]
+    reference_rate_hz: 125.0
+    lookahead_time_s: 0.1
+    servo_gain: 300.0
+    max_delta_m: 0.05
+    max_delta_rad: 0.5
+  force_guard:
+    enabled: false
+    max_force_n: 30.0
+    max_torque_nm: 5.0
+
+# Gripper endpoints + grasp-check counts come SOLELY from configs/cables.yaml for this cable.
+cable: banana
+
+grasp_check:
+  enabled: true
+  tolerance_counts: 1
+  detect_empty: true
+  settle_s: 1.0
+  max_retries: 2
+  # LIFT SLIP CHECK: raise height_m, RE-CLOSE the gripper, and re-read the counts. (A slipped
+  # cable is invisible without the re-close -- the fingers HOLD their stalled position when the
+  # part vanishes.) Still held -> finish the lift; slipped -> open and retry the whole
+  # scan->grasp from the start.
+  lift_check:
+    enabled: true
+    height_m: 0.020
+    # After a detected slip: NO full reset -- open, rise this much straight up, and rescan from
+    # there with a fresh operator prompt (the dropped cable moved; ground-plane scan re-numbers).
+    slip_raise_m: 0.10
+  # Between FULL retries (rescan included), perturb the grasp along the junction +/-x by
+  # 0, +d, -d, +2d, -2d, ... -- a deterministic scan->grasp->fail loop is a FIXED POINT (the
+  # fresh scan reproduces the same junction estimate and therefore the same wrong grasp);
+  # stepping along the connector axis breaks it. 0 disables.
+  retry_perturb_x_m: 0.003
+  capture_images: true
+  capture_rate_hz: 1.0
+  recovery:
+    enabled: true
+    max_tries: 25
+    finger_width_m: 0.02278
+    cable_shift_fraction: 0.8
+    empty_drop_m: 0.003
+    # EDGE PINCH: a stall within this many counts of the model's FREE-CLOSURE point (~216 =
+    # separation ~0, held width at the 2*groove floor -- thinner than any connector) means the
+    # grooves closed PAST the connector's fat section: too SHALLOW. Reseat edge_drop_m in -z,
+    # IN toward the connector.
+    edge_tolerance_counts: 1
+    edge_drop_m: 0.003
+
+# GLOBAL speed limits -- ONE set of four, all enforced simultaneously (whichever binds): the
+# joint caps bound every joint directly; the cartesian caps bound the TOOL (converted to an
+# equivalent joint bound for moveJ, and pacing the compliant reference ramps + moveL directly).
+speed:
+  max_joint_velocity_deg_s: 90.0
+  max_joint_acceleration_deg_s2: 30.0
+  max_cartesian_translation_mm_s: 25.0
+  max_cartesian_rotation_deg_s: 90.0
+  # Per-PHASE scaling of ALL FOUR limits above (1.0 = the global limit itself), one entry per
+  # phase of cable_pick_estimate_assemble. An absent phase runs at 1.0.
+  phase_scale:
+    reset: 1.5       # start/end home moves (and the between-retry homes)
+    scan: 1.0        # the multi-view scan + grasp-align + reseat moves
+    pickup: 1.5      # the compliant grasp descent
+    lift: 0.8        # the compliant lift (including the slip-check partial lift)
+    standoff: 1.0    # the move to stand-off + the per-attempt realign moveJs
+    assemble: 1.2      # the insertion reference ramp
+    retract: 4.0       # the between-attempt retract + the release escape
+
+move_timeout_s: 60.0
+settle_s: 0.5
+confirm_each_step: true
+debug: false
+
+reset:
+  home_joints_deg: [-80, -155, -120, 5, 90, 10]
+  # (the home move is a guarded position moveJ, paced by the speed caps above -- no duration key)
+  max_force_n: 50.0
+  compliance:
+    tare_before: true
+    mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
+    stiffness:     [2000.0, 2000.0, 2000.0, 15.0, 15.0, 15.0]
+    damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    selected_axes: [1, 1, 1, 1, 1, 1]
+    reference_rate_hz: 125.0
+    max_delta_m: 0.05
+    max_delta_rad: 0.5
 
 # ===================================================================================================
-# EVAL -- the trial loop and the injected belief errors
+# ASSEMBLY -- the estimate-while-assemble loop
 # ===================================================================================================
-eval:
-  num_trials: 50                 # IGNORED when mode: grid (the grid derives the count)
-  max_attempts: 1                # assemble -> estimate updates per trial
+assembly:
+  # The KNOWN target (where the CONNECTOR must end up, base_link): names a configs/frames.yaml
+  # frame whose `targets:` entry is the recorded mate -- the same catalogue record
+  # uncertain_sampling and estimator_eval assemble to, one per socket. MEASURE: hand-guide to a
+  # good mate, read `base_link <- <frame>` off the monitor, paste it under targets: (mm/deg).
+  # (The old assembly.target_connector / connector_holder_target keys are IGNORED with a warning.)
+  target_frame: bnc_connector_finger_holder
 
-  # HOW the injected errors are chosen: 'random' draws uniformly inside the bounds for
-  # num_trials; 'grid' sweeps every combination at grid_resolution (count derived, like
-  # uncertain_sampling's grid mode); 'bounds' tests the +/- bound extremes (count derived) --
-  # one DOF at a time by default (2 per two-sided DOF, 1 per degenerate DOF), or with
-  # bounds_simultaneous every CORNER of the box at once (2^k for k two-sided DOFs).
-  mode: bounds
-  bounds_simultaneous: true     # bounds mode only: false = 1 DOF at a time; true = all
-                                 # active DOFs at an extreme simultaneously (box corners)
-  # Injected BELIEF error bounds, uncertain_sampling's convention: ABSOLUTE lower/upper per DOF
-  # [x, y, z (m), roll, pitch, yaw (deg)], applied in the HELD part's OWN frame -- the same
-  # right-multiplied frame the estimator corrects in. As set: x +/-5 mm, z +/-5 mm, pitch +/-5 deg.
-  perturbation:
-    lower: [-0.000, 0.0, -0.000, 0.0, -5.0, 0.0]
-    upper: [ 0.000, 0.0, +0.000, 0.0, +5.0, 0.0]
-  # Grid step per DOF (grid mode only), same order/units as the bounds.
-  grid_resolution: [0.001, 0.0, 0.001, 0.0, 1.0, 0.0]
+  # The ideal insertion path: CONNECTOR w.r.t. the TARGET connector, last row = identity (the mate).
+  trajectory_csv: assembly_trajectory.csv
+  trajectory_angles_deg: false
+  translational_resolution_m: 0.001
+  rotational_resolution_deg: 1.0
 
+  # Stand-off beyond the trajectory START (target-connector frame), approached once after the lift.
+  standoff:
+    axis: [-1.0, 0.0, 0.0]
+    distance_m: 0.100
+
+  # Between attempts: back out along the CONNECTOR's OWN -X from wherever the insert stopped.
+  retract_distance_m: 0.030
+
+  # (Assembly-phase speeds = the global speed: block x speed.phase_scale.assemble.)
+
+  # The loop: assemble -> check -> retract -> estimate -> realign, at most this many attempts.
+  max_attempts: 1
+
+  # LIVE run figure (like estimator_eval's): the cumulative belief corrections, per-attempt
+  # residuals (all guesses + aggregated) and the correction phase plot, atomically overwritten
+  # at ONE fixed path after every estimate -- keep it open in an image viewer during a run.
+  # true = data/experiments/cable_pick_live.png; a string = explicit path; false disables.
+  # (The same figure is also written to the run folder as run_corrections.png.)
+  live_plot: true
+
+  log_decimation: 5              # observation every Nth servo cycle (125 Hz / N)
+
+  # AFTER SUCCESS: release, then back the fingertip out along the CONNECTOR's OWN -X by this
+  # distance (peg-in-hole -- the escape direction follows the mated part, never a base-frame axis).
+  # The end reset then takes the arm home.
+  release_retract_distance_m: 0.080
   # A trial CONVERGES when the remaining GROUND-TRUTH error (not the believed check!) is within
   # both tolerances; stop_when_converged skips its remaining attempts.
   success_tolerance:
     pos_mm: 1.0
     rot_deg: 1.0
-  stop_when_converged: true
-
-  # PHYSICAL success: the measured (TRUE) connector pose wrt the TARGET connector at the end
-  # of an insertion within these per-DOF tolerances [x, y, z (mm), roll, pitch, yaw (deg)].
-  # Success TERMINATES the trial; the live figure shows the running success rate.
-  success_pose_tol: [2.0, 1.0, 5.0, 5.0, 5.0, 1.0]
-
-  random_seed: 0                 # >0 = replayable perturbation stream; 0 = nondeterministic
-  log_decimation: 5              # observation every Nth servo cycle (125 Hz / N -> ~25 Hz)
-  save_observations: true        # per-attempt observation CSVs (the post-analysis raw data)
-  # ---- MATCH DIAGNOSTICS: why is the argmin not the truth? ---------------------------------
-  # Per attempt, a 6-panel figure (trial_XXX_attempt_YY_match.png) comparing the COMMITTED
-  # correction against the TRUE one (this app knows the truth, so it can show both):
-  #   A1  where the observations LAND inside the map under each correction
-  #   A2  where, and in WHICH CHANNEL, the truth is penalised (vs depth)
-  #   C   per-row match quality vs insertion depth
-  #   D   residual of ALL 12 DOFs individually (x y z roll pitch yaw fx fy fz tx ty tz)
-  #   E   neighbour votes -- which part of the map the rows actually resemble
-  #   F   each channel's OWN energy minimum next to the total's
-  # Plus a companion figure (..._match_dof.png): one panel per DOF, that dimension's own
-  # energy over the candidate grid with truth and estimate marked. Read it as a vote count --
-  # a DOF whose curve bottoms out at the truth was OUTVOTED; a flat one carries no
-  # information. This is what exposed the pitch dim_weight problem noted under dim_weights.
-  # Reading it: if the truth's points sit off the map's support, the map or the calibration is
-  # wrong; if both fit but a rival fits better, that is aliasing; if one channel's minimum sits
-  # at the truth while the total's does not, the WEIGHTING is the bug. MEASURED on the
-  # 2026-08-14 BNC data: the truth's residual is only 7% worse than the argmin's, i.e. the
-  # metric barely discriminates -- which is what these panels are for finding out.
-  # Costs one landscape per channel per attempt; thin it with every_n on long runs.
-  debug_match:
-    enabled: true
-    every_n: 1                   # figure on every Nth attempt (1 = all)
-    # LIVE mirrors, alongside estimator_eval_live.png: both figures are also written to ONE
-    # fixed path each and atomically replaced, so an image viewer left open follows the run.
-    #   <data_dir>/experiments/estimator_eval_match_live.png       (the 6-panel figure)
-    #   <data_dir>/experiments/estimator_eval_match_dof_live.png   (all 12 DOFs, one each)
-    # true = the experiments directory; a string = an explicit directory; false disables.
-    live: true
-    max_rows: 250                # observation rows drawn/matched (shape is unaffected)
-    grid_points: 41              # candidate grid per estimated dim for panel F
-  # ---- P(SEAT) GATE + the single definition of SUCCESS -------------------------------------
-  # The manifold's own trials are labelled by how deep they got, which turns it into a dataset
-  # of (offset -> seated?) and gives P(seat | offset) by k-NN. The estimator never knows its
-  # remaining error, so the gate uses the POSTERIOR quantity E_p[P(seat)] over the energy
-  # landscape -- not P(seat) at the point estimate. Once it clears p_seat_threshold the trial
-  # stops probing and commits to ONE insertion with NO trajectory noise. The SAME depth rule
-  # then decides whether that insertion actually seated, so gate and verdict cannot disagree.
-  seat_gate:
-    enabled: false
-    # Commit once the posterior says the belief will seat this often. CEILING WARNING: P(seat)
-    # is bounded by how repeatably the PROCESS seats, not just by the estimate. On the 2026-08
-    # hose map, trials at near-identical offsets agree on seated/not only 67% of the time (a
-    # ~83% per-trial ceiling) and P(seat) at ZERO offset is 72% with the settings below -- so a
-    # 0.95 gate would never open even from a perfect estimate. The startup log prints both
-    # ceilings; keep this below the ZERO-offset one, or relax seat_margin_mm to raise it
-    # (margin 6.0 -> 84% at zero offset, margin 10.0 -> 96%).
-    p_seat_threshold: 0.80
-    # MODE RANKING at commitment. 'energy' = apply the multi-start aggregator's estimate
-    # untouched (the original behaviour). 'p_seat' = candidates are that estimate PLUS every
-    # mode centre of the mixture over the ICP finals, and the one whose application maximises
-    # E_p[P(seat)] over the dense-landscape posterior is committed instead. Motivation
-    # (2026-08-12 validation): the truth sat in a NON-dominant mode in 70% of these eval
-    # attempts -- depth/consensus misranks rivals, but P(seat) is the quantity the gate acts
-    # on anyway. trials.csv logs ranked_mode (-1 = aggregator kept) and p_seat_unranked next
-    # to p_seat, so the re-ranking's win-rate is measurable offline. icp_residual/icp_inliers
-    # keep describing the aggregator's own solution either way.
-    mode_ranking: p_seat
-    seat_margin_mm: 4.0          # seated := reached within this of the reference depth
-    # WHICH depth counts as fully inserted: 'max' is the literal deepest manifold row, a NUMBER
-    # is that percentile of the per-trial maxima. MEASURED on the 2026-08 hose map: 'max' sets
-    # the threshold at +24.9 mm -- a crush-through outlier that NOTHING reaches, so 0% of trials
-    # count as seated and the gate can never open; p95 sets it at -5.1 mm with 61% seating,
-    # which matches the force-verified seat rate. Hence the percentile default. The startup log
-    # prints the seat rate for 'max' and for 99.9/99/95/90 so this can be re-checked per map.
-    depth_reference: 95.0
-    neighbors: 25                # k for the P(seat) vote
-    posterior_temp: 0.05         # Gibbs temperature (relative to E_min) for the posterior
-  # Extra column on the trial/live figure: the ICP energy over a DENSE GRID of candidate
-  # corrections, with the APPLIED estimate and its +/- sigma (from the curvature at the minimum,
-  # in each dim's own units) against the TRUE correction, plus every multi-start final. This is
-  # the panel that separates "the solver picked badly" (truth sits in a deep basin it missed)
-  # from "the landscape's minimum is in the wrong place" (truth sits on a slope -- a DATA
-  # problem). Costs one grid-x-observations kNN sweep per attempt; both are capped in code.
-  # The sigma values also land in trials.csv as sigma_<dim>.
-  plot_landscape: true
-  save_plots: true               # per-TRIAL error figure (trial_TTT_errors.png), RE-SAVED after
-                                 # every attempt: ground-truth error vs attempt, all attempts
-                                 # co-plotted (x = 0 is the injected error), plus the ICP
-                                 # residual track and a residual-vs-L2-outcome scatter
-
-  # LIVE figure: ONE fixed path OUTSIDE the per-experiment folder, atomically overwritten with
-  # the current trial's figure after every attempt -- keep it open in an image viewer across
-  # trials and runs. true = data/experiments/estimator_eval_live.png; a string = explicit path;
-  # false disables. (Needs save_plots: true.)
-  live_plot: true
-
   # ACCUMULATE observations across a trial's attempts (the part is FIXTURED, so the rigid
   # belief-error assumption holds for the whole trial): each estimate uses ALL of the trial's
   # observations so far -- prior attempts RE-PROJECTED into the current belief after every
@@ -212,14 +329,6 @@ eval:
 
     peck_retract_mm: 10.0         # back-off after each force stop
     peck_timeout_s: 60.0         # time budget for one peck attempt
-
-  # ---- DIVERGENCE BOUNDS: terminate the TRIAL (no further attempts, no final insertion) the
-  # moment the post-update belief error exceeds these. A diverged belief drives every later
-  # pass into contact the map has never seen and, at ~15 deg, toward the gripper/fixture
-  # collision regime. Eval-only safety net (uses the known ground truth). <= 0 disables.
-  abort_bounds:
-    pos_mm: 10.0
-    rot_deg: 15.0
 
   # OPTIONAL trajectory noising: smoothed zero-mean Gaussian offsets applied to EVERY waypoint
   # in the connector's OWN frame, REDRAWN per attempt -- exercises the estimator with varied
@@ -283,6 +392,37 @@ eval:
       enabled: false
       std: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   # [x, y, z (m), roll, pitch, yaw (deg)]
       smooth_window: 10
+
+  # ---- MATCH DIAGNOSTICS: why is the argmin not the truth? ---------------------------------
+  # Per attempt, a 6-panel figure (trial_XXX_attempt_YY_match.png) comparing the COMMITTED
+  # correction against the TRUE one (this app knows the truth, so it can show both):
+  #   A1  where the observations LAND inside the map under each correction
+  #   A2  where, and in WHICH CHANNEL, the truth is penalised (vs depth)
+  #   C   per-row match quality vs insertion depth
+  #   D   residual of ALL 12 DOFs individually (x y z roll pitch yaw fx fy fz tx ty tz)
+  #   E   neighbour votes -- which part of the map the rows actually resemble
+  #   F   each channel's OWN energy minimum next to the total's
+  # Plus a companion figure (..._match_dof.png): one panel per DOF, that dimension's own
+  # energy over the candidate grid with truth and estimate marked. Read it as a vote count --
+  # a DOF whose curve bottoms out at the truth was OUTVOTED; a flat one carries no
+  # information. This is what exposed the pitch dim_weight problem noted under dim_weights.
+  # Reading it: if the truth's points sit off the map's support, the map or the calibration is
+  # wrong; if both fit but a rival fits better, that is aliasing; if one channel's minimum sits
+  # at the truth while the total's does not, the WEIGHTING is the bug. MEASURED on the
+  # 2026-08-14 BNC data: the truth's residual is only 7% worse than the argmin's, i.e. the
+  # metric barely discriminates -- which is what these panels are for finding out.
+  # Costs one landscape per channel per attempt; thin it with every_n on long runs.
+  debug_match:
+    enabled: true
+    every_n: 1                   # figure on every Nth attempt (1 = all)
+    # LIVE mirrors, alongside estimator_eval_live.png: both figures are also written to ONE
+    # fixed path each and atomically replaced, so an image viewer left open follows the run.
+    #   <data_dir>/experiments/estimator_eval_match_live.png       (the 6-panel figure)
+    #   <data_dir>/experiments/estimator_eval_match_dof_live.png   (all 12 DOFs, one each)
+    # true = the experiments directory; a string = an explicit directory; false disables.
+    live: true
+    max_rows: 250                # observation rows drawn/matched (shape is unaffected)
+    grid_points: 41              # candidate grid per estimated dim for panel F
 
 # ===================================================================================================
 # ESTIMATION -- the contact-manifold ICP under test. KEEP IN SYNC with the values
@@ -475,20 +615,3 @@ force_guard:
   # Travel cost while waiting: ~2.5 mm at the 5 mm/s insertion speed.
   persistence_s: 5.0
 
-speed:
-  # Free-space moves (the approach to each attempt's start and the between-trial stand-off).
-  max_joint_velocity_deg_s: 30.0
-  joint_acceleration_rad_s2: 1.0
-  max_cartesian_velocity_m_s: 0.25
-  # INSERT reference pacing -- matches the pick app's effective assemble speed
-  # (global 25 mm/s / 30 deg/s x phase_scale.assemble 0.2).
-  max_cartesian_translation_mm_s: 30.0
-  max_cartesian_rotation_deg_s: 30.0
-  # RETRACT -- free-space escape back along a path just proven clear.
-  retract_translation_mm_s: 100.0
-  retract_rotation_deg_s: 10.0
-
-move_timeout_s: 120.0
-settle_s: 0.2
-confirm_each_step: false
-debug: false

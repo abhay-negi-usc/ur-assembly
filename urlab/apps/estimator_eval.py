@@ -1053,6 +1053,28 @@ def build_and_run(cfg, robot, camera, args):
         if v is not None and v < 0:
             log.error('eval.final_insertion.%s must be >= 0 (got %.2f).', k, v)
             return False                           # bad values fail HERE, pre-motion
+    # Pacing, dwell and noise for the COMMIT, all in the same grouped block. The commit is
+    # deliberately ZERO-NOISE by default -- the jitter exists to gather varied contact while
+    # probing and has no place in the attempt meant to seat -- so enabling
+    # final_insertion.trajectory_noise is an explicit opt-out of that, useful only when the
+    # seat itself is being characterised rather than achieved.
+    fi_v = None if fi.get('speed_translation_mm_s') is None \
+        else float(fi['speed_translation_mm_s'])
+    fi_w = None if fi.get('speed_rotation_deg_s') is None \
+        else float(fi['speed_rotation_deg_s'])
+    fi_pause = float(fi.get('pause_s', 0.0) or 0.0)
+    fin = fi.get('trajectory_noise', {}) or {}
+    fi_noise_on = bool(fin.get('enabled', False))
+    fi_noise_std = [float(v) for v in (fin.get('std') or [0.0] * 6)]
+    fi_noise_w = max(1, int(fin.get('smooth_window', 10)))
+    for nm, v in (('speed_translation_mm_s', fi_v), ('speed_rotation_deg_s', fi_w),
+                  ('pause_s', fi_pause)):
+        if v is not None and v < 0:
+            log.error('eval.final_insertion.%s must be >= 0 (got %.2f).', nm, v)
+            return False
+    if fi_noise_on and len(fi_noise_std) != 6:
+        log.error('final_insertion.trajectory_noise.std must have 6 entries.')
+        return False
     if fi_on:
         comp_final = dict(cfg.section('compliance'))
         for src, dst in (('stiffness', 'stiffness'), ('mass', 'mass'),
@@ -1106,7 +1128,7 @@ def build_and_run(cfg, robot, camera, args):
         return max(t_lin, t_ang, min_seg_s)
 
     def run_insertion(adm_ctl, refs, T_bel, peck=False, guard_ctl=None, settle=None,
-                      hold=None):
+                      hold=None, speed=None, pause=None):
         """One admittance-followed insertion along refs, collecting observations (same law and
         logging as cable_pick_estimate_assemble), the seated kinematic check, then the compliant
         UN-guarded retract along the believed part's own -X (a seated part is already over the
@@ -1125,6 +1147,7 @@ def build_and_run(cfg, robot, camera, args):
         guard = guard_ctl if guard_ctl is not None else guard_shared
         settle_s = settle if settle is not None else settle_shared
         hold_s = hold if hold is not None else hold_shared
+        sv, sw = speed if speed is not None else (None, None)
         obs, cnt = [], [0]
 
         def log_cb():
@@ -1139,7 +1162,8 @@ def build_and_run(cfg, robot, camera, args):
         t0 = time.time()
         prev, i = refs[0], 1
         while i < len(refs):
-            res = adm_ctl.ramp(prev, refs[i], seg_time(prev, refs[i]), guard, on_step=log_cb)
+            res = adm_ctl.ramp(prev, refs[i], seg_time(prev, refs[i], sv, sw), guard,
+                               on_step=log_cb)
             last_ref = refs[i]
             if res == 'seated':
                 seated = True
@@ -1173,6 +1197,12 @@ def build_and_run(cfg, robot, camera, args):
         if hold_s > 0:                             # dwell: un-guarded, unlogged (see above)
             log.info('   holding the stop for %.1f s.', hold_s)
             adm_ctl.hold(last_ref, hold_s, guard=None)
+        if pause:
+            # PAUSE: servo released, the arm simply stands still. Unlike the dwell above it
+            # applies no force -- it is inspection/measurement time, not press time.
+            adm_ctl.stop()
+            log.info('   pausing %.1f s at the seat (servo stopped).', float(pause))
+            time.sleep(float(pause))
 
         # Kinematic check numbers (BELIEVED pose), for the record only.
         lin, ang = pose_error(robot.tool0() @ T_bel, T_base_tconn)
@@ -1577,7 +1607,9 @@ def build_and_run(cfg, robot, camera, args):
             # by the SAME rule that labels the basin -- the true depth reached vs the manifold's
             # deepest insertion less seat_margin_mm -- so the gate and the verdict agree.
             if (fi_on or gate_open) and not abandoned and not diverged:
-                refs = [T_base_tconn @ row @ inverse(T_believed) for row in dense]
+                rows_f = (traj.noised(dense, noise_rng, fi_noise_std, fi_noise_w, 0.0, 1.0)
+                          if fi_noise_on else dense)
+                refs = [T_base_tconn @ row @ inverse(T_believed) for row in rows_f]
                 q = robot.arm.ik(refs[0], seed_q)
                 if q is None or not robot.arm.move_j(q, label=f'trial {trial} final insertion'):
                     log.warning('IK/approach failed for the final insertion of trial %d.', trial)
@@ -1585,7 +1617,8 @@ def build_and_run(cfg, robot, camera, args):
                     seed_q = q
                     obs, seated, lin, ang, seat6, _ = run_insertion(
                         adm_final, refs, T_believed, guard_ctl=guard_final,
-                        settle=fi_settle, hold=fi_hold)
+                        settle=fi_settle, hold=fi_hold,
+                        speed=(fi_v, fi_w) if (fi_v or fi_w) else None, pause=fi_pause)
                     if save_obs:
                         _save_observations(os.path.join(
                             out_dir, f'trial_{trial:03d}_final_insertion_observations.csv'), obs)

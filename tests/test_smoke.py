@@ -1844,6 +1844,53 @@ def test_force_guard_persistence_debounces_transients():
     assert g0(), 'persistence_s absent/0 must trip on the first sample, as before'
 
 
+def test_bnc_assembly_shares_the_tuned_estimator():
+    """apps\bnc_assembly is cable_pick_estimate_assemble's pipeline with estimator_eval's
+    estimator, so the two must not drift: the estimator internals are IMPORTED (not copied),
+    the physics blocks live at the same top-level names, and the tuned values match.
+
+    Also pinned: the app must NOT expect ground truth (a real pick has none) -- it passes None
+    as the diagnostic truth, so nothing may index an injected error."""
+    import yaml
+    root = os.path.join(os.path.dirname(__file__), '..')
+    src = open(os.path.join(root, 'urlab', 'apps', 'bnc_assembly.py')).read()
+    # shared internals, IMPORTED rather than reimplemented -- a copy would drift the moment
+    # either app is retuned, which is the failure this whole test exists to prevent
+    assert 'from .estimator_eval import _argmin_estimate, _landscape' in src, \
+        'the argmin estimator must be imported from estimator_eval, not duplicated'
+    assert 'from .cable_pick_estimate_assemble import' in src, \
+        'the pick-side helpers must be imported from the app this derives from'
+    assert 'def _argmin_estimate' not in src and 'def _observe' not in src, \
+        'no copies of the shared helpers'
+    # NO GROUND TRUTH: a real pick has none, so the diagnostics get None for the truth and
+    # none of estimator_eval's injected-error machinery may appear (comments excluded, so the
+    # docstring may still explain the difference)
+    assert "info['theta_corr']), None," in src, \
+        'a real pick has no ground truth -- the diagnostic truth must be None'
+    code = '\n'.join(ln for ln in src.splitlines() if not ln.lstrip().startswith('#'))
+    body = code.split('"""', 2)[-1]                # drop the module docstring
+    for banned in ('_gt_error', 'T_true', 'inj_', 'abort_bounds'):
+        assert banned not in body, \
+            f'bnc_assembly must not use the ground-truth machinery ({banned})'
+    # the physics blocks sit where estimator_eval reads them, with the same tuned values
+    with open(os.path.join(root, 'configs', 'bnc_assembly.yaml')) as fh:
+        b = yaml.safe_load(fh)
+    with open(os.path.join(root, 'configs', 'estimator_eval.yaml')) as fh:
+        e = yaml.safe_load(fh)
+    for k in ('estimation', 'compliance', 'force_guard'):
+        assert k in b, f'bnc_assembly.yaml must carry a top-level {k}: block'
+    assert b['compliance']['stiffness'] == e['compliance']['stiffness'], \
+        'stiffness must match the tuned estimator_eval values'
+    for k in ('manifold_csv', 'commit', 'estimate_dims', 'dim_weights', 'wrench_weights',
+              'scaling_constant_deg_to_mm', 'scaling_constant_unit_force_to_mm',
+              'scaling_constant_unit_torque_to_mm', 'interp_softness',
+              'wrench_follows_correction'):
+        assert b['estimation'][k] == e['estimation'][k], f'estimation.{k} drifted'
+    assert b['assembly']['final_insertion'] == e['eval']['final_insertion'], \
+        'the final-insertion block must match estimator_eval exactly'
+    assert str(b['assembly']['collection']['mode']) in ('attempts', 'offset_sweep', 'peck')
+
+
 def test_estimator_eval_collection_config():
     """configs/estimator_eval.yaml eval.collection must match the app's schema: a known mode,
     positive peck parameters, and -- when sweep_offsets is explicit -- 6-vectors. The app
@@ -1882,11 +1929,26 @@ def test_estimator_eval_collection_config():
     # inherits the shared block -- and the app must thread them through rather than reading
     # the shared values for the commit.
     for k in ('stiffness', 'mass', 'damping_ratio', 'settle_s', 'hold_after_insertion_s',
-              'max_force_n', 'max_torque_nm', 'persistence_s'):
+              'max_force_n', 'max_torque_nm', 'persistence_s', 'speed_translation_mm_s',
+              'speed_rotation_deg_s', 'pause_s', 'trajectory_noise'):
         assert k in fi, f'eval.final_insertion is missing the {k} override'
+        if k == 'trajectory_noise':
+            continue
         assert fi[k] is None or isinstance(fi[k], (int, float, list)), (k, fi[k])
-    for k in ('settle_s', 'hold_after_insertion_s', 'max_force_n', 'persistence_s'):
+    for k in ('settle_s', 'hold_after_insertion_s', 'max_force_n', 'persistence_s',
+              'speed_translation_mm_s', 'speed_rotation_deg_s', 'pause_s'):
         assert fi[k] is None or float(fi[k]) >= 0, (k, fi[k])
+    # The commit is deliberately ZERO-NOISE: the jitter gathers varied contact while PROBING
+    # and has no place in the attempt meant to seat. Enabling it is a real choice, so it must
+    # not be the shipped default.
+    fnoise = fi.get('trajectory_noise') or {}
+    assert fnoise.get('enabled') is False,         'final_insertion.trajectory_noise must ship OFF -- the commit is the zero-noise attempt'
+    assert len(fnoise.get('std', [0] * 6)) == 6, fnoise
+    # both apps must thread the pacing/pause through rather than reusing the probing values
+    for app in ('estimator_eval.py', 'bnc_assembly.py'):
+        a_src = open(os.path.join(os.path.dirname(__file__), '..', 'urlab', 'apps', app)).read()
+        assert 'speed=(fi_v' in a_src and 'pause=fi_pause' in a_src,             f'{app}: the commit must use its own speed and pause'
+        assert 'fi_noise_on' in a_src, f'{app}: the commit must honour its own noise setting'
     assert 'guard_ctl=guard_final' in src and 'settle=fi_settle' in src, \
         'the commit must run with its OWN guard/settle/dwell when they are overridden'
     assert 'guard_shared' in src and 'settle_shared' in src, \

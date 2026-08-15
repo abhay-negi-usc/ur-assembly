@@ -74,5 +74,5 @@ targets:
 
   # bnc_connector_finger_holder at the mate (read off the monitor).
   bnc_connector_finger_holder:
-    xyz_mm:  [+110.97, +1012.02,  -139.79]
-    rpy_deg: [-56.22,   -1.21,  +93.90]
+    xyz_mm:  [+108.52, +1013.93,  -141.11]
+    rpy_deg: [-56.19,   -1.11,  +93.48]

@@ -1029,25 +1029,50 @@ def build_and_run(cfg, robot, camera, args):
     # COMPLIANCE + guard + speeds: same shape as uncertain_sampling; the config mirrors the pick
     # app's assembly values so the estimator sees production-like observations.
     adm = AdmittanceController(robot.arm, cfg.section('compliance'))
-    guard = ForceGuard(robot.arm, cfg.section('force_guard'))
+    guard_shared = ForceGuard(robot.arm, cfg.section('force_guard'))
     # OPTIONAL FINAL INSERTION: one extra guarded assemble per trial from the FINAL corrected
     # belief under a DIFFERENT stiffness (same compliance section otherwise) -- does the
     # corrected belief actually seat? Built here so a bad stiffness list fails pre-motion.
     # Default ON (2026-08-13): EVERY collection mode ends its trial with one zero-noise
     # insertion from the final corrected belief -- the jitter/sweep/peck exist to gather
     # observations, and have no place in the attempt that is meant to seat.
+    # EVERY knob that may differ for the commit insertion lives in this ONE block. The probing
+    # attempts and the attempt meant to SEAT want different physics -- probing wants a light,
+    # early-stopping touch that gathers varied contact; the commit wants to press home -- and
+    # before this grouping those settings were spread across compliance:, force_guard: and
+    # here, so a change made for probing silently changed the commit too. Anything left unset
+    # (or null) inherits the shared block, so the default behaviour is unchanged.
     fi = ev.get('final_insertion', {}) or {}
     fi_on = bool(fi.get('enabled', True))
-    adm_final = None
+    adm_final, guard_final = None, None
+    fi_settle = fi.get('settle_s')
+    fi_hold = fi.get('hold_after_insertion_s')
+    fi_settle = None if fi_settle is None else float(fi_settle)
+    fi_hold = None if fi_hold is None else float(fi_hold)
+    for k, v in (('settle_s', fi_settle), ('hold_after_insertion_s', fi_hold)):
+        if v is not None and v < 0:
+            log.error('eval.final_insertion.%s must be >= 0 (got %.2f).', k, v)
+            return False                           # bad values fail HERE, pre-motion
     if fi_on:
         comp_final = dict(cfg.section('compliance'))
-        if fi.get('stiffness') is not None:
-            comp_final['stiffness'] = [float(v) for v in fi['stiffness']]
+        for src, dst in (('stiffness', 'stiffness'), ('mass', 'mass'),
+                         ('damping_ratio', 'damping_ratio')):
+            if fi.get(src) is not None:
+                comp_final[dst] = [float(v) for v in fi[src]]
         adm_final = AdmittanceController(robot.arm, comp_final)
-        log.info('Final insertion ON: stiffness %s.', comp_final.get('stiffness'))
+        gsec = dict(cfg.section('force_guard'))
+        over_g = {k: fi[k] for k in ('max_force_n', 'max_torque_nm', 'persistence_s')
+                  if fi.get(k) is not None}
+        guard_final = ForceGuard(robot.arm, {**gsec, **over_g}) if over_g else None
+        log.info('Final insertion ON: stiffness %s, guard %.0f N (persistence %.2f s)%s%s.',
+                 comp_final.get('stiffness'),
+                 float(over_g.get('max_force_n', gsec.get('max_force_n', 0.0))),
+                 float(over_g.get('persistence_s', gsec.get('persistence_s', 0.0))),
+                 f', settle {fi_settle:.1f} s' if fi_settle is not None else '',
+                 f', dwell {fi_hold:.1f} s' if fi_hold is not None else '')
     tare = (lambda: robot.arm.zero_ft(settle=False)) \
         if bool(cfg.get_path('compliance.tare_before', True)) else None
-    settle_s = float(cfg.get_path('compliance.settle_s', 0.5))
+    settle_shared = float(cfg.get_path('compliance.settle_s', 0.5))
     # DWELL at the end of an insertion, AFTER the logged settle. Two differences from
     # settle_s, both deliberate:
     #   * NOT LOGGED -- it adds no observation rows, so lengthening the dwell cannot change
@@ -1057,13 +1082,14 @@ def build_and_run(cfg, robot, camera, args):
     #     finish seating, or holding a mate steady for inspection/force reading) must not be
     #     cut short by the limit it is deliberately sitting on. The admittance spring still
     #     bounds the force: it settles at stiffness x reference penetration, no integration.
-    hold_s = float(cfg.get_path('compliance.hold_after_insertion_s', 0.0))
-    if hold_s < 0:
-        log.error('compliance.hold_after_insertion_s must be >= 0 (got %.2f).', hold_s)
+    hold_shared = float(cfg.get_path('compliance.hold_after_insertion_s', 0.0))
+    if hold_shared < 0:
+        log.error('compliance.hold_after_insertion_s must be >= 0 (got %.2f).', hold_shared)
         return False                               # bad values fail HERE, pre-motion
-    if hold_s > 0:
+    if hold_shared > 0:
         log.info('Post-insertion dwell: %.1f s of UN-guarded hold at the stop after every '
-                 'insertion (not logged as observations).', hold_s)
+                 'insertion (not logged as observations). eval.final_insertion may override '
+                 'it for the commit.', hold_shared)
     v_mm_s = float(cfg.get_path('speed.max_cartesian_translation_mm_s', 5.0))
     w_deg_s = float(cfg.get_path('speed.max_cartesian_rotation_deg_s', 6.0))
     rv_mm_s = float(cfg.get_path('speed.retract_translation_mm_s', v_mm_s))
@@ -1079,7 +1105,8 @@ def build_and_run(cfg, robot, camera, args):
         t_ang = (np.degrees(ang_rad) / w) if w > 0 else 0.0
         return max(t_lin, t_ang, min_seg_s)
 
-    def run_insertion(adm_ctl, refs, T_bel, peck=False):
+    def run_insertion(adm_ctl, refs, T_bel, peck=False, guard_ctl=None, settle=None,
+                      hold=None):
         """One admittance-followed insertion along refs, collecting observations (same law and
         logging as cable_pick_estimate_assemble), the seated kinematic check, then the compliant
         UN-guarded retract along the believed part's own -X (a seated part is already over the
@@ -1093,6 +1120,11 @@ def build_and_run(cfg, robot, camera, args):
         Returns (obs, seated, lin, ang, seat6, stops) with `stops` the believed stop depth(s)
         in mm -- one per contact event (peck), one for the single stop (normal), or the deepest
         point reached when the trajectory completed without a force stop."""
+        # The commit insertion may run its own guard / settle / dwell (eval.final_insertion);
+        # everything else passes None and gets the shared ones.
+        guard = guard_ctl if guard_ctl is not None else guard_shared
+        settle_s = settle if settle is not None else settle_shared
+        hold_s = hold if hold is not None else hold_shared
         obs, cnt = [], [0]
 
         def log_cb():
@@ -1551,8 +1583,9 @@ def build_and_run(cfg, robot, camera, args):
                     log.warning('IK/approach failed for the final insertion of trial %d.', trial)
                 else:
                     seed_q = q
-                    obs, seated, lin, ang, seat6, _ = run_insertion(adm_final, refs,
-                                                                    T_believed)
+                    obs, seated, lin, ang, seat6, _ = run_insertion(
+                        adm_final, refs, T_believed, guard_ctl=guard_final,
+                        settle=fi_settle, hold=fi_hold)
                     if save_obs:
                         _save_observations(os.path.join(
                             out_dir, f'trial_{trial:03d}_final_insertion_observations.csv'), obs)

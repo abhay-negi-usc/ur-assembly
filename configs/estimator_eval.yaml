@@ -252,14 +252,34 @@ eval:
     noise_decay_traj: 0.2        # fraction shed linearly over the trajectory: full at the first
                                  # waypoint -> x(1 - f) at the last (converge onto nominal at seat)
 
-  # OPTIONAL final insertion: after a trial's estimation attempts, ONE more guarded assemble
-  # along the NOMINAL trajectory from the FINAL corrected belief, with this stiffness override
-  # (other compliance values unchanged) -- does the corrected belief actually seat? No
-  # estimation, no belief update; logged to trials.csv as attempt='final_insertion' (excluded
-  # from summary.csv).
+  # ---- FINAL INSERTION -- the COMMIT ---------------------------------------------------------
+  # After a trial's estimation attempts, ONE more guarded assemble along the NOMINAL trajectory
+  # from the FINAL corrected belief: does the corrected belief actually seat? No estimation, no
+  # belief update, no trajectory noise; logged to trials.csv as attempt='final_insertion'
+  # (excluded from summary.csv).
+  #
+  # EVERY setting that may differ for the commit lives HERE, in one block. Probing and
+  # committing want different physics -- probing wants a light, early-stopping touch that
+  # gathers varied contact, the commit wants to press home -- and these knobs used to be spread
+  # across compliance: and force_guard:, so tuning one silently changed the other. Each key
+  # below OVERRIDES the shared block for this insertion only; null (or absent) inherits it, so
+  # leaving them null reproduces the old behaviour exactly.
   final_insertion:
     enabled: true
+    # --- compliance overrides (else compliance:) ---
     stiffness: [100.0, 3000.0, 100.0, 10.0, 10.0, 10.0]
+    mass: null
+    damping_ratio: null
+    settle_s: null               # logged settle at the stop; feeds no estimate here
+    hold_after_insertion_s: null # UN-GUARDED dwell -- the knob for pressing an irreversible
+                                 # mate home, or holding it while a force reading settles
+    # --- force guard overrides (else force_guard:) ---
+    # The commit is where a HIGHER limit belongs: measured 2026-08-15, depth is the strongest
+    # predictor of a well-behaved estimate (deepest row > +3.9 mm -> 0.25 deg median error vs
+    # 1.62 deg below +2.1 mm), and the guard is what stops the part short.
+    max_force_n: null
+    max_torque_nm: null
+    persistence_s: null
 
 # ===================================================================================================
 # ESTIMATION -- the contact-manifold ICP under test. KEEP IN SYNC with the values

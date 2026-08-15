@@ -1876,6 +1876,21 @@ def test_estimator_eval_collection_config():
     assert commit in ('aggregator', 'argmin'), commit
     src = open(os.path.join(os.path.dirname(__file__), '..', 'urlab', 'apps',
                             'estimator_eval.py')).read()
+    # EVERY knob that may differ for the COMMIT insertion belongs in eval.final_insertion.
+    # They used to be spread across compliance: and force_guard:, so retuning the probing
+    # attempts silently retuned the commit as well. Each must be OPTIONAL -- null or absent
+    # inherits the shared block -- and the app must thread them through rather than reading
+    # the shared values for the commit.
+    for k in ('stiffness', 'mass', 'damping_ratio', 'settle_s', 'hold_after_insertion_s',
+              'max_force_n', 'max_torque_nm', 'persistence_s'):
+        assert k in fi, f'eval.final_insertion is missing the {k} override'
+        assert fi[k] is None or isinstance(fi[k], (int, float, list)), (k, fi[k])
+    for k in ('settle_s', 'hold_after_insertion_s', 'max_force_n', 'persistence_s'):
+        assert fi[k] is None or float(fi[k]) >= 0, (k, fi[k])
+    assert 'guard_ctl=guard_final' in src and 'settle=fi_settle' in src, \
+        'the commit must run with its OWN guard/settle/dwell when they are overridden'
+    assert 'guard_shared' in src and 'settle_shared' in src, \
+        'the shared guard/settle must be named apart from the per-insertion locals'
     assert "'aggregator', 'argmin'" in src, \
         'estimator_eval must validate estimation.commit pre-motion'
     assert "commit == 'argmin'" in src and '_argmin_estimate' in src, \

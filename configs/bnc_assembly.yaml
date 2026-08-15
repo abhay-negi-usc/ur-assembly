@@ -223,11 +223,13 @@ debug: false
 
 reset:
   home_joints_deg: [-80, -155, -120, 5, 90, 190]
+  home_joints_deg: [-80, -155, -120, 5, 90, 190]
   # (the home move is a guarded position moveJ, paced by the speed caps above -- no duration key)
   max_force_n: 50.0
   compliance:
     tare_before: true
     mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
+    stiffness:     [500.0, 500.0, 500.0, 15.0, 15.0, 15.0]
     stiffness:     [500.0, 500.0, 500.0, 15.0, 15.0, 15.0]
     damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     selected_axes: [1, 1, 1, 1, 1, 1]
@@ -366,11 +368,15 @@ assembly:
     damping_ratio: null
     settle_s: null               # logged settle at the stop; feeds no estimate here
     hold_after_insertion_s: 1.0  # UN-GUARDED dwell -- the knob for pressing an irreversible
+    hold_after_insertion_s: 1.0  # UN-GUARDED dwell -- the knob for pressing an irreversible
                                  # mate home, or holding it while a force reading settles
     # --- force guard overrides (else force_guard:) ---
     # The commit is where a HIGHER limit belongs: measured 2026-08-15, depth is the strongest
     # predictor of a well-behaved estimate (deepest row > +3.9 mm -> 0.25 deg median error vs
     # 1.62 deg below +2.1 mm), and the guard is what stops the part short.
+    max_force_n: 1.0
+    max_torque_nm: 8.0
+    persistence_s: 1.0
     max_force_n: 1.0
     max_torque_nm: 8.0
     persistence_s: 1.0

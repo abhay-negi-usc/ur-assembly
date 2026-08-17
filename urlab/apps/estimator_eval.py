@@ -35,6 +35,13 @@ feeding its own stop depth to the stop-signature fusion; 'peck' = a force stop o
 part off a few mm before advancing again (end of trajectory or a time budget ends the attempt),
 so one attempt logs a SEQUENCE of contact events, each a stop signature.
 
+Under eval.collection.match_sampling (default on) an offset_sweep pass IS one apps/
+uncertain_sampling TRIAL: the path is built by that app's own traj.perturb call, with its
+perturb_frame, its chunk_fraction and its per-waypoint uniform jitter, all inherited from
+configs/uncertain_sampling.yaml at run time. An attempt is then N of those trials pooled before a
+single estimate. The one difference that remains is the point of the eval: uncertain_sampling
+plans from the TRUE held frame and this app plans from the BELIEF.
+
 Options: eval.trajectory_noise adds smoothed per-waypoint noise (redrawn per attempt, its own
 random stream); eval.live_plot mirrors the current trial's figure to ONE fixed path outside the
 experiment folder, atomically, so it can stay open in an image viewer across trials and runs.
@@ -124,18 +131,15 @@ def _observe(robot, T_tool0_conn, T_base_tconn):
     return list(xyz * 1000.0) + list(np.degrees(rpy)) + list(w)
 
 
-def _report_sampling_divergence(cfg, ref_name='uncertain_sampling.yaml'):
-    """Log every contact-physics setting that differs from apps/uncertain_sampling's config.
+def _sampling_reference(cfg, ref_name='uncertain_sampling.yaml'):
+    """apps/uncertain_sampling's config, parsed -- or None if it cannot be read.
 
-    Parity in the CODE is only half of it. The map is a record of contact under a particular
-    stiffness, force limit and approach speed; collect against a different set and the observations
-    describe different physics, which is exactly the failure this whole switch exists for. Those
-    values live in the config and this function cannot responsibly rewrite them -- changing the
-    physics of an eval is the user's decision -- so it reports them and leaves them alone.
-
-    Read from the reference config at run time rather than hardcoded, so it cannot go stale
-    silently. The caveat that carries: this compares against what that file says TODAY, which is
-    not necessarily what the map was actually collected under."""
+    The map these observations are matched against was collected by that app under that config, so
+    it is the reference for BOTH halves of parity: the contact physics (reported by
+    _report_sampling_divergence) and the way a perturbed pass is built (inherited by the
+    offset_sweep collection mode). Read at run time rather than hardcoded, so it cannot go stale
+    silently. The caveat that carries either way: this is what the file says TODAY, which is not
+    necessarily what the map was actually collected under."""
     import os as _os
 
     try:
@@ -146,23 +150,53 @@ def _report_sampling_divergence(cfg, ref_name='uncertain_sampling.yaml'):
             p = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(
                 _os.path.abspath(__file__)))), 'configs', ref_name)
         if not _os.path.exists(p):
-            log.info('  (no %s to compare against -- match the contact physics by hand)', ref_name)
-            return
-        ref = _yaml.safe_load(open(p)) or {}
+            log.info('  (no %s to compare against -- match the sampling behaviour by hand)',
+                     ref_name)
+            return None
+        return _yaml.safe_load(open(p)) or {}
     except Exception as exc:                       # noqa: BLE001 -- never fatal, this is advisory
         log.info('  (could not read %s: %s)', ref_name, exc)
+        return None
+
+
+def _report_sampling_divergence(cfg, ref, ref_name='uncertain_sampling.yaml'):
+    """Log every contact-physics setting that differs from apps/uncertain_sampling's config.
+
+    Parity in the CODE is only half of it. The map is a record of contact under a particular
+    stiffness, force limit and approach speed; collect against a different set and the observations
+    describe different physics, which is exactly the failure this whole switch exists for. Those
+    values live in the config and this function cannot responsibly rewrite them -- changing the
+    physics of an eval is the user's decision -- so it reports them and leaves them alone."""
+    if ref is None:
         return
 
+    # (block, key) -- block None means a TOP-LEVEL key. The geometry of the pass (how far it backs
+    # out, how far off it stands) belongs here as much as the stiffness does: a 30 mm retract from
+    # a 5 mm one is a different unload, and both are recorded in the map's rows.
     checks = [('compliance', 'stiffness'), ('compliance', 'mass'), ('compliance', 'damping_ratio'),
               ('compliance', 'settle_s'), ('compliance', 'tare_before'),
+              ('compliance', 'warmup_s'), ('compliance', 'reference_rate_hz'),
               ('force_guard', 'max_force_n'), ('force_guard', 'max_torque_nm'),
               ('force_guard', 'persistence_s'),
               ('speed', 'max_cartesian_translation_mm_s'),
-              ('speed', 'max_cartesian_rotation_deg_s')]
+              ('speed', 'max_cartesian_rotation_deg_s'),
+              ('speed', 'retract_translation_mm_s'), ('speed', 'retract_rotation_deg_s'),
+              (None, 'retract_distance_m'), (None, 'standoff_distance_m'),
+              (None, 'standoff_axis'), (None, 'trajectory_csv'),
+              (None, 'translational_resolution_m'), (None, 'rotational_resolution_deg')]
     diffs = []
     for blk, key in checks:
-        theirs = (ref.get(blk) or {}).get(key)
-        mine = (cfg.section(blk) or {}).get(key)
+        if blk is None:
+            theirs, mine = ref.get(key), cfg.get(key)
+            # uncertain_sampling keeps the resample resolutions under sampling:, this app at the
+            # top level -- same quantity, different home, so look in both.
+            if theirs is None:
+                theirs = (ref.get('sampling') or {}).get(key)
+            name = key
+        else:
+            theirs = (ref.get(blk) or {}).get(key)
+            mine = (cfg.section(blk) or {}).get(key)
+            name = f'{blk}.{key}'
         if theirs is None:
             continue
         if isinstance(theirs, list) or isinstance(mine, list):
@@ -173,7 +207,13 @@ def _report_sampling_divergence(cfg, ref_name='uncertain_sampling.yaml'):
             except (TypeError, ValueError):
                 same = theirs == mine
         if not same:
-            diffs.append((f'{blk}.{key}', mine, theirs))
+            diffs.append((name, mine, theirs))
+    # The row RATE, which decides how densely a pass is sampled into the map / into the
+    # observations. Same quantity, different home in each config, so it cannot go through the loop.
+    their_dec = (ref.get('sampling') or {}).get('log_decimation')
+    my_dec = (cfg.section('eval') or {}).get('log_decimation')
+    if their_dec is not None and my_dec is not None and int(their_dec) != int(my_dec):
+        diffs.append(('log_decimation', my_dec, their_dec))
     if not diffs:
         log.info('  contact physics matches %s exactly.', ref_name)
         return
@@ -183,6 +223,56 @@ def _report_sampling_divergence(cfg, ref_name='uncertain_sampling.yaml'):
     for name, mine, theirs in diffs:
         log.warning('    %-42s this run %-28s %s %s', name, str(mine), ref_name.split('.')[0],
                     str(theirs))
+
+
+_SWEEP_DIMS = ('x', 'y', 'z', 'roll', 'pitch', 'yaw')
+
+
+def _report_sweep_coverage(offsets, inj_lo, inj_hi, map_box):
+    """Whether the sweep's passes can actually land inside the region the MAP covers.
+
+    A sweep pass is one uncertain_sampling trial, so it is a map row only if its misalignment is
+    one the map's grid spans. Two things add up to that misalignment, both right-multiplied in the
+    connector frame: the COMMANDED sweep offset, and the trial's INJECTED belief error (which the
+    part rides as inverse(delta), hence the symmetric bound). For deltas this small the composition
+    is additive per DOF to well under the grid step, so a linear bound is the useful check -- it is
+    an approximation, and a deliberately conservative one, not a proof.
+
+    Reported, never enforced: driving deliberately off-map is a legitimate experiment (that is what
+    match_sampling: false is for), and a pass that leaves the box is still a real observation. What
+    is NOT legitimate is doing it without knowing, which is the failure this whole switch exists
+    for -- the v5 collection put 30% of its rows at forces the map never saw and nobody noticed
+    until the landscape had already been blamed."""
+    if not map_box:
+        log.info('  (no sampling.uncertainty in the reference -- cannot check sweep coverage)')
+        return
+    box_lo = [float(v) for v in (map_box.get('lower') or [0.0] * 6)]
+    box_hi = [float(v) for v in (map_box.get('upper') or [0.0] * 6)]
+    if len(box_lo) != 6 or len(box_hi) != 6:
+        return
+    inj = [max(abs(float(a)), abs(float(b))) for a, b in zip(inj_lo, inj_hi)]
+    worst, out = {}, 0
+    for o in offsets:
+        over = []
+        for i in range(6):
+            hi_i, lo_i = o[i] + inj[i], o[i] - inj[i]      # the reachable interval for this pass
+            ex = max(hi_i - box_hi[i], box_lo[i] - lo_i, 0.0)
+            if ex > 1e-12:
+                over.append(i)
+                worst[i] = max(worst.get(i, 0.0), ex)
+        if over:
+            out += 1
+    if not out:
+        log.info('  sweep coverage: all %d offsets stay inside the map box even at the worst '
+                 'injected error.', len(offsets))
+        return
+    log.warning('  SWEEP COVERAGE: %d of %d offsets can leave the map box once the injected '
+                'belief error is added -- those passes collect rows the map does not contain, '
+                'and the estimate is only as good as the rows that do:', out, len(offsets))
+    for i, ex in sorted(worst.items()):
+        unit, scale = ('mm', 1000.0) if i < 3 else ('deg', 1.0)
+        log.warning('    %-5s map box [%+7.2f, %+7.2f] %-3s  exceeded by up to %6.2f %s',
+                    _SWEEP_DIMS[i], box_lo[i] * scale, box_hi[i] * scale, unit, ex * scale, unit)
 
 
 def _measured(robot, T_true, T_base_tconn):
@@ -1084,6 +1174,8 @@ def build_and_run(cfg, robot, camera, args):
     #                 (1 -> 3+ trajectories: truth-in-top-2 basin 15% -> 51%) as a collection
     #                 mode. The belief is NOT updated between sweep passes, so their evidence
     #                 fuses exactly (each pass measures the same correction inverse(E)).
+    #                 Under match_sampling each pass IS one apps/uncertain_sampling TRIAL --
+    #                 same path construction, same jitter model, same chunk (see below).
     # 'peck'          on a force stop the connector does NOT fully retract: it backs off a few
     #                 mm, advances again, and keeps going until the end of the trajectory or a
     #                 time budget -- one attempt logs a whole sequence of contact events, each
@@ -1146,22 +1238,136 @@ def build_and_run(cfg, robot, camera, args):
     #     settles guarded and logged, then retracts. This press is unlogged, so it adds load
     #     without adding evidence -- and it is the most likely source of the force gap above.
     #   * the PAUSE at the seat (final_insertion.pause_s).
-    #   * PECK and OFFSET_SWEEP. uncertain_sampling realises its misalignment by perturbing the
-    #     trajectory and driving it ONCE; both of these visit contact states it never records.
+    #   * PECK. On a force stop it backs off and drives in AGAIN, so one pass logs re-contact from
+    #     a partially-inserted state -- something uncertain_sampling never records, because it
+    #     always retracts fully and re-approaches through free space.
+    #
+    # OFFSET_SWEEP is ALLOWED under parity, and is the reason the sampling block below exists. A
+    # sweep pass is not a departure from uncertain_sampling's loop; it IS that loop, run several
+    # times per attempt at different deliberate misalignments before estimating once. uncertain
+    # _sampling's own `mode: grid` does exactly this -- one perturbed pass per grid point, over a
+    # z x pitch grid -- so a sweep whose offsets are grid points of the SAME box is collecting map
+    # rows, not off-map ones. Under parity the pass is therefore built by uncertain_sampling's OWN
+    # code path (traj.perturb + its jitter bounds + its chunk), not by this app's trajectory_noise.
     #
     # It cannot reach across into the config, so the compliance/force_guard/speed blocks still have
     # to be matched by hand -- the divergences are logged below rather than silently corrected,
     # because changing this app's physics to match is the USER's call, not this function's.
     match_sampling = bool(col.get('match_sampling', True))
+    samp_ref = None
+    # SAMPLING RECIPE for a parity sweep pass: how uncertain_sampling turns one misalignment into
+    # one driven path. Each key defaults to null = INHERIT from that app's config, read at run
+    # time, so the two cannot drift apart silently; setting one here is an explicit divergence.
+    sw_frame, sw_chunk, sweep_k = 'connector', 1.0, len(dense)
+    sw_noise_lo, sw_noise_hi = [0.0] * 6, [0.0] * 6
+    sweep_rng = np.random.default_rng(seed + 2 if seed > 0 else None)
+    sweep_as_sampling = False
     if match_sampling:
-        if col_mode != 'attempts':
-            log.error("eval.collection.match_sampling is on, so mode must be 'attempts': "
-                      "uncertain_sampling drives ONE perturbed pass per trial, and %r visits "
-                      "contact states the map does not contain. Set match_sampling false to "
-                      "collect data that is deliberately off-map.", col_mode)
+        if col_mode == 'peck':
+            log.error("eval.collection.match_sampling is on, so mode must be 'attempts' or "
+                      "'offset_sweep': peck re-advances from a partially-inserted state, which "
+                      "uncertain_sampling never records. Set match_sampling false to collect "
+                      "data that is deliberately off-map.")
             return False
-        log.info('SAMPLING PARITY on: one pass per attempt, no un-guarded dwell, no pause.')
-        _report_sampling_divergence(cfg)
+        log.info('SAMPLING PARITY on: no un-guarded dwell, no pause%s.',
+                 ', sweep passes driven as uncertain_sampling trials'
+                 if col_mode == 'offset_sweep' else ', one pass per attempt')
+        samp_ref = _sampling_reference(cfg)
+        _report_sampling_divergence(cfg, samp_ref)
+
+    # ---- TRAJECTORY ANCHORING -- where the path's last row actually lands --------------------
+    # configs/assembly_trajectory.csv states its last row MUST be the identity (the connector
+    # coincides with the target). uncertain_sampling does not take that on trust: it ANCHORS, via
+    # traj.anchor_target, so the last row lands on the recorded mate whatever the row says. This
+    # app applied each row DIRECTLY to the recorded mate instead, which is the same thing ONLY for
+    # a conforming trajectory -- and the BNC one is not conforming. Its last row is +10 mm, an
+    # overpress someone added deliberately, so the sampler silently cancelled it (mapping -20 ->
+    # 0 mm) while this app kept it (driving -10 -> +10 mm): a 10 mm difference in COMMANDED depth
+    # between the app that builds the map and the app that is matched against it, from one shared
+    # CSV. That is a large part of the depth gap measured in the v5 diagnosis (map x_mm p50 -7.61
+    # with ZERO rows past +2; eval p50 -1.70 with 255 rows past +2 at ~90 N) -- the achieved gap is
+    # smaller than 10 mm only because the force guard cuts the advance short.
+    #
+    # Anchoring is a NO-OP on a conforming trajectory (inverse(identity)), so this only ever moves
+    # a path that was already lying about where it ends. Default: on under parity, off otherwise,
+    # because removing an overpress is a physical change and outside parity nobody asked for it.
+    anchor = ev.get('anchor_trajectory')
+    anchor = bool(match_sampling) if anchor is None else bool(anchor)
+    T_base_targetobj = T_base_tconn @ inverse(mats[-1]) if anchor else T_base_tconn
+    shift_mm, shift_deg = pose_error(T_base_targetobj, T_base_tconn)
+    shift_mm *= 1000.0
+    if shift_mm > 1e-6 or np.degrees(shift_deg) > 1e-6:
+        (log.info if anchor else log.warning)(
+            '%s trajectory_csv\'s last row is NOT the identity it is documented to be '
+            '(off by %.2f mm / %.2f deg). %s',
+            'ANCHORING:' if anchor else 'UNANCHORED:', shift_mm, np.degrees(shift_deg),
+            'Anchored like uncertain_sampling, so PROBING passes end ON the recorded mate. The '
+            'commit keeps its own overpress (final_insertion.overpress_mm).'
+            if anchor else 'Rows are applied directly to the mate, so every reference sits that '
+            'much PAST it -- uncertain_sampling anchors, so its map does not. Set '
+            'eval.anchor_trajectory: true to probe on-map, or fix the CSV.')
+
+
+    if match_sampling and col_mode == 'offset_sweep':
+        sweep_as_sampling = True
+        sw = col.get('sampling') or {}
+        ref_s = ((samp_ref or {}).get('sampling') or {})
+
+        def _inherit(key, fallback):
+            """eval.collection.sampling.<key>, or uncertain_sampling's sampling.<key>, or a
+            documented fallback -- reporting which of the three it landed on."""
+            if sw.get(key) is not None:
+                return sw[key], 'eval.collection.sampling'
+            if ref_s.get(key) is not None:
+                return ref_s[key], 'uncertain_sampling.yaml'
+            return fallback, 'default'
+
+        sw_frame, src_f = _inherit('perturb_frame', 'connector')
+        sw_frame = str(sw_frame).lower()
+        if sw_frame not in traj.PERTURB_FRAMES:
+            log.error('sweep perturb_frame %r must be one of %s.', sw_frame, traj.PERTURB_FRAMES)
+            return False
+        sw_chunk, src_c = _inherit('chunk_fraction', 1.0)
+        sw_chunk = float(sw_chunk)
+        if not 0.0 < sw_chunk <= 1.0:
+            log.error('sweep chunk_fraction must be in (0, 1] (got %.3f).', sw_chunk)
+            return False
+        # The same expression uncertain_sampling uses: >= 2 waypoints so there is a ramp to run.
+        sweep_k = max(2, int(np.ceil(sw_chunk * len(dense))))
+        if sweep_k < len(dense):
+            log.info('  sweep pass drives %d/%d waypoints (chunk %.2f) -- it stops SHORT of the '
+                     'mate, so these passes gather approach contact, not seat contact.',
+                     sweep_k, len(dense), sw_chunk)
+        # PER-WAYPOINT JITTER, uncertain_sampling's model: a fresh UNIFORM draw inside
+        # lower/upper at every waypoint, un-smoothed. This app's own trajectory_noise is a
+        # DIFFERENT model (smoothed Gaussian, decaying along the path and across attempts), so
+        # under parity it is replaced rather than added to -- mixing them would give the pass a
+        # jitter spectrum neither the map nor this app has ever recorded.
+        sw_noise, src_n = _inherit('noise', {'lower': [0.0] * 6, 'upper': [0.0] * 6})
+        sw_noise_lo = [float(v) for v in ((sw_noise or {}).get('lower') or [0.0] * 6)]
+        sw_noise_hi = [float(v) for v in ((sw_noise or {}).get('upper') or [0.0] * 6)]
+        if len(sw_noise_lo) != 6 or len(sw_noise_hi) != 6:
+            log.error('sweep sampling.noise lower/upper must each have 6 entries.')
+            return False
+        if any(h < l for l, h in zip(sw_noise_lo, sw_noise_hi)):
+            log.error('sweep sampling.noise upper < lower on some DOF.')
+            return False
+        sw_seed = sw.get('random_seed')
+        sw_seed = (seed + 2 if seed > 0 else 0) if sw_seed is None else int(sw_seed)
+        sweep_rng = np.random.default_rng(sw_seed if sw_seed > 0 else None)
+        log.info('  sweep pass = one uncertain_sampling trial: perturb_frame %s (%s), '
+                 'chunk %.2f (%s), jitter %s (%s), seed %s.',
+                 sw_frame, src_f, sw_chunk, src_c,
+                 'off' if not any(sw_noise_lo) and not any(sw_noise_hi)
+                 else f'+/-[{max(abs(sw_noise_lo[1]), abs(sw_noise_hi[1])) * 1000:.1f}, '
+                      f'{max(abs(sw_noise_lo[2]), abs(sw_noise_hi[2])) * 1000:.1f}] mm yz / '
+                      f'{max(abs(sw_noise_lo[4]), abs(sw_noise_hi[4])):.1f} deg pitch per waypoint',
+                 src_n, sw_seed or 'nondeterministic')
+        if tn_on:
+            log.warning('  SAMPLING PARITY: eval.trajectory_noise (smoothed Gaussian) is NOT '
+                        'applied to sweep passes -- they carry uncertain_sampling\'s '
+                        'per-waypoint uniform jitter instead. It still applies elsewhere.')
+        _report_sweep_coverage(sweep_offsets, lo, hi, ref_s.get('uncertainty'))
 
     # ---- DIVERGENCE BOUNDS (eval.abort_bounds): terminate the TRIAL when the belief error
     # left after an update exceeds them. A diverged belief drives every later pass into contact
@@ -1246,6 +1452,52 @@ def build_and_run(cfg, robot, camera, args):
                  float(over_g.get('persistence_s', gsec.get('persistence_s', 0.0))),
                  f', settle {fi_settle:.1f} s' if fi_settle is not None else '',
                  f', dwell {fi_hold:.1f} s' if fi_hold is not None else '')
+
+    # ---- PRELOAD -- the press, deliberate, and for the COMMIT only ---------------------------
+    # Driving the reference PAST the mate is how this rig presses a connector home: the part stops
+    # at the mate, the reference keeps going, and the admittance spring converts the leftover
+    # travel into contact force. That is a real technique and it belongs on the attempt meant to
+    # SEAT. It does NOT belong on a probing pass, for two reasons measured here:
+    #
+    #   * uncertain_sampling anchors, so the map contains no rows past the mate at all. Probing
+    #     with a preload puts every row deeper than anything the map has ever seen.
+    #   * past the mate the part is jammed while the gripper advances, so the logged pose is FK
+    #     through a rigidity assumption that has already failed -- the connector is not where the
+    #     row says it is. Those rows are not just off-map, they are wrong.
+    #
+    # It used to live as an extra +10 mm row in the trajectory CSV, which is the one place it
+    # cannot work: the anchoring apps normalise the last row away, so the preload was DELETED for
+    # them and driven for everyone else -- 10 mm of disagreement about the mate, from one shared
+    # file. Named here, it survives anchoring and lands only on the insertion that wants it.
+    #
+    # WHAT IT DELIVERS (the controller's own ODE at 125 Hz against a stiff stop, admittance.py's
+    # law F = S x delta at steady state): a SPIKE, not a press. 10 mm peaks at 54-207 N depending
+    # on how rigid the jam is -- which is where the measured 169 N came from -- then decays, since
+    # the yield time constant D/S is 6-9 s against a ~0.3 s push. The sustained press is only
+    # S x 10 mm: 2.5 N at 250 N/m, 5 N at 500, 30 N at 3000. If a HELD force is wanted, raise
+    # final_insertion.stiffness on the insertion axis (already 3000 N/m); the preload sets the
+    # break-in spike, the stiffness sets the press. The force guard cannot bound the spike either:
+    # persistence_s 5.0 s at 30 mm/s is 150 mm of further commanded travel, against a trajectory
+    # with nothing like that left.
+    #
+    # 10.0 mm = what the CSV's extra row was driving, so the COMMIT is unchanged by the CSV fix;
+    # only the probing passes moved onto the map. 0 disables.
+    pre_mm = float(fi.get('preload_mm', 10.0) or 0.0)
+    if pre_mm < 0:
+        log.error('eval.final_insertion.preload_mm must be >= 0 (got %.2f).', pre_mm)
+        return False                               # bad values fail HERE, pre-motion
+    T_base_commit = T_base_targetobj @ translation_matrix([pre_mm / 1000.0, 0.0, 0.0])
+    if pre_mm > 0 and fi_on:
+        # comp_final only exists when the commit is enabled, hence the split.
+        s_ins = max(float(v) for v in (comp_final.get('stiffness') or [0.0])[:3])
+        log.info('Commit PRELOAD: %.1f mm past the mate along the connector\'s +X -- probing '
+                 'passes do NOT preload. The spring can HOLD %.1f N of that (stiffest '
+                 'translational axis %.0f N/m); the peak on contact is a transient several times '
+                 'larger, and the guard cannot bound it at this persistence.',
+                 pre_mm, s_ins * pre_mm / 1000.0, s_ins)
+    elif pre_mm > 0:
+        log.info('Commit PRELOAD: %.1f mm configured, but final_insertion is DISABLED -- so '
+                 'nothing presses this run.', pre_mm)
     tare = (lambda: robot.arm.zero_ft(settle=False)) \
         if bool(cfg.get_path('compliance.tare_before', True)) else None
     settle_shared = float(cfg.get_path('compliance.settle_s', 0.5))
@@ -1421,7 +1673,7 @@ def build_and_run(cfg, robot, camera, args):
     standoff_axis = np.asarray(cfg.get('standoff_axis', [-1, 0, 0]), dtype=float)
     T_standoff_row = translation_matrix(
         standoff_axis * float(cfg.get('standoff_distance_m', 0.02))) @ mats[0]
-    T_standoff_ref = T_base_tconn @ T_standoff_row @ inverse(T_true)
+    T_standoff_ref = T_base_targetobj @ T_standoff_row @ inverse(T_true)
     q_home = robot.arm.q()
     q = robot.arm.ik(T_standoff_ref, q_home)
     if q is None or not robot.arm.move_j(q, label='approach standoff'):
@@ -1467,13 +1719,20 @@ def build_and_run(cfg, robot, camera, args):
                 seated, lin, ang, seat6 = False, 0.0, 0.0, [0.0] * 6
                 for pi, poff in enumerate(passes):
                     bias = poff                    # sweep offset, or None for a plain pass
-                    if tn_on or bias is not None:
+                    if sweep_as_sampling and bias is not None:
+                        # PARITY PASS: built by uncertain_sampling's OWN call, with its chunk, its
+                        # frame and its per-waypoint uniform jitter -- so this pass differs from a
+                        # trial of that app only in which pose the reference is planned FROM (the
+                        # belief here, the truth there), which is the whole point of the eval.
+                        rows_t = traj.perturb(dense[:sweep_k], traj.delta_from(bias),
+                                              sw_noise_lo, sw_noise_hi, sweep_rng, frame=sw_frame)
+                    elif tn_on or bias is not None:
                         rows_t = traj.noised(dense, noise_rng,
                                              tn_std if tn_on else [0.0] * 6, tn_w, tn_dt,
                                              (1.0 - tn_da) ** (attempt - 1), bias)
                     else:
                         rows_t = dense
-                    refs = [T_base_tconn @ row @ inverse(T_believed) for row in rows_t]
+                    refs = [T_base_targetobj @ row @ inverse(T_believed) for row in rows_t]
 
                     # To the pass start -- stiff, free space (retract/stand-off cleared it).
                     label = (f'trial {trial} attempt {attempt}'
@@ -1795,7 +2054,7 @@ def build_and_run(cfg, robot, camera, args):
             if (fi_on or gate_open) and not abandoned and not diverged:
                 rows_f = (traj.noised(dense, noise_rng, fi_noise_std, fi_noise_w, 0.0, 1.0)
                           if fi_noise_on else dense)
-                refs = [T_base_tconn @ row @ inverse(T_believed) for row in rows_f]
+                refs = [T_base_commit @ row @ inverse(T_believed) for row in rows_f]
                 q = robot.arm.ik(refs[0], seed_q)
                 if q is None or not robot.arm.move_j(q, label=f'trial {trial} final insertion'):
                     log.warning('IK/approach failed for the final insertion of trial %d.', trial)

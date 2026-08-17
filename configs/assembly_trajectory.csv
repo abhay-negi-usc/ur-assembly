@@ -2,10 +2,22 @@
 # Columns: x,y,z,roll,pitch,yaw   (meters, radians unless trajectory_angles_deg: true)
 # Execution order top -> bottom. The LAST row is the assembled state and MUST be identity
 # (the connector coincides with the target connector). This is a direct -X insertion: the
-# connector backs off along the target's -X, 5 cm -> 0 (assembled = connector == target connector).
+# connector backs off along the target's -X, 20 mm -> 0 (assembled = connector == target connector).
+#
+# DO NOT put an insertion PRELOAD here. Pressing the connector home by driving the reference past
+# the mate is a real and wanted technique, but a trajectory row is the wrong place for it:
+# apps/uncertain_sampling and apps/kinematic_assembly ANCHOR this path (traj.anchor_target
+# normalises the last row onto the recorded mate), so a preload written as a row is silently
+# DELETED for them and driven for everyone else. That is exactly what happened -- the last row
+# carried +10 mm, so the contact map was built with the press removed while the eval and the
+# assembly apps drove it, putting their observations 10 mm deeper than anything the map contains.
+# The preload is now a named parameter, applied to the COMMIT insertion only:
+#   estimator_eval.yaml  eval.final_insertion.preload_mm
+#   bnc_assembly.yaml    assembly.final_insertion.preload_mm
+# Keep this last row at identity and every app agrees about where the mate is.
 x,y,z,roll,pitch,yaw
+-0.020,0.0,0.0,0.0,0.0,0.0
+-0.015,0.0,0.0,0.0,0.0,0.0
 -0.010,0.0,0.0,0.0,0.0,0.0
 -0.005,0.0,0.0,0.0,0.0,0.0
 0.0,0.0,0.0,0.0,0.0,0.0
-0.005,0.0,0.0,0.0,0.0,0.0
-0.010,0.0,0.0,0.0,0.0,0.0

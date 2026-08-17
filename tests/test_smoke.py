@@ -3059,6 +3059,248 @@ def test_bnc_clocking_config():
         'the single `clock` phase was split per maneuver -- a leftover entry paces nothing'
 
 
+def test_estimator_eval_sweep_is_a_sampling_trial():
+    """A parity sweep pass must be built by uncertain_sampling's OWN call, not an approximation.
+
+    The map is a record of paths that app drove. `traj.noised` (smoothed Gaussian, decaying along
+    the path and across attempts) and `traj.perturb` (per-waypoint UNIFORM, un-smoothed) are
+    different jitter models, so a pass built with the wrong one is off-map before contact even
+    starts. This pins the branch to the identical call with identical arguments: same bias, same
+    seed, same bounds -> byte-identical rows."""
+    from urlab.skills import trajectory as traj
+
+    dense = traj.resample(traj.load_csv(os.path.join(ROOT, 'configs', 'assembly_trajectory.csv')),
+                          0.001, 1.0)
+    bias6 = [0.0, 0.0, -0.003, 0.0, -5.0, 0.0]
+    nl, nh = [0.0, 0.0, -0.005, 0.0, -5.0, 0.0], [0.0, 0.0, 0.005, 0.0, 5.0, 0.0]
+    us = traj.perturb(dense, traj.delta_from(bias6), nl, nh, np.random.default_rng(7),
+                      frame='connector')                        # uncertain_sampling's call
+    ev = traj.perturb(dense[:len(dense)], traj.delta_from(bias6), nl, nh,
+                      np.random.default_rng(7), frame='connector')   # the parity branch
+    assert all(approx(a, b, 0.0) for a, b in zip(us, ev))
+    # ...and the OLD branch is measurably NOT that path, so the test above is not vacuous.
+    old = traj.noised(dense, np.random.default_rng(7), [0.0, 0.002, 0.002, 0.0, 2.0, 0.0],
+                      10, 0.2, 1.0, bias6)
+    assert not all(approx(a, b, 1e-6) for a, b in zip(us, old))
+
+    src = open(os.path.join(ROOT, 'urlab', 'apps', 'estimator_eval.py'), encoding='utf-8').read()
+    assert 'traj.perturb(dense[:sweep_k]' in src, 'the parity pass must use traj.perturb'
+    assert "if col_mode == 'peck':" in src and "must be 'attempts' or " in src,         'peck stays rejected under parity; offset_sweep must not be'
+
+
+def test_estimator_eval_sampling_recipe_inherits():
+    """The sweep's sampling recipe defaults to null = inherit from uncertain_sampling.yaml.
+
+    A COPY of those values here would drift the moment the sampler is re-tuned, and the drift is
+    exactly what nobody notices -- so the config must leave them null and the app must read the
+    reference at run time."""
+    import yaml
+
+    ev = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'estimator_eval.yaml')))['eval']
+    sw = ev['collection']['sampling']
+    for k in ('perturb_frame', 'chunk_fraction', 'noise', 'random_seed'):
+        assert k in sw, f'collection.sampling.{k} missing'
+        assert sw[k] is None, f'collection.sampling.{k} must default to null (inherit), not a copy'
+    ref = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'uncertain_sampling.yaml')))
+    for k in ('perturb_frame', 'chunk_fraction', 'noise'):
+        assert ref['sampling'].get(k) is not None,             f'nothing to inherit: uncertain_sampling sampling.{k} is unset'
+    # peck is the only mode parity rejects
+    assert ev['collection']['mode'] in ('attempts', 'offset_sweep')
+
+
+def test_trajectory_csv_ends_on_the_mate():
+    """The shared trajectory's LAST ROW must be the identity, as its own header requires.
+
+    Two apps ANCHOR this path (uncertain_sampling, kinematic_assembly -- traj.anchor_target
+    normalises the last row onto the recorded mate) and the rest apply rows directly. Those agree
+    only while the last row IS the identity. It once carried a deliberate +10 mm press, and the
+    result was that the app building the contact map drove 20 -> 0 mm while the apps matched
+    against it drove 10 -> +10: the same file, 10 mm apart, silently. A press belongs in
+    final_insertion.preload_mm, which survives anchoring; this test is what keeps it out of here."""
+    from urlab.skills import trajectory as traj
+
+    mats = traj.load_csv(os.path.join(ROOT, 'configs', 'assembly_trajectory.csv'))
+    assert approx(mats[-1], np.eye(4), 1e-12), \
+        'trajectory last row must be identity -- put an insertion press in preload_mm instead'
+    # ...so anchoring is a NO-OP, which is what makes anchored and direct apps agree
+    mate = T.xyzrpy_to_matrix([0.4, -0.1, 0.3], [0.1, -0.2, 0.3])     # any mate; arbitrary
+    assert approx(mate @ T.inverse(mats[-1]), mate)
+    # the path still approaches from 20 mm out -- the sweep the map was collected over
+    assert abs(T.matrix_to_xyzrpy(mats[0])[0][0] * 1000.0 + 20.0) < 1e-6
+    # and it is monotonic in +X: a direct insertion, never backing up mid-path
+    xs = [T.matrix_to_xyzrpy(m)[0][0] for m in mats]
+    assert all(b > a for a, b in zip(xs, xs[1:])), 'the insertion must advance monotonically'
+
+
+def test_apps_anchor_the_trajectory_like_the_sampler():
+    """estimator_eval and bnc_assembly must anchor, so a future bad CSV cannot silently offset them.
+
+    The CSV is conforming today, which makes anchoring a no-op -- and that is exactly why it needs
+    a test rather than trust: nothing about a passing run would reveal its absence until someone
+    edits the last row again."""
+    for app, anchor_expr in (
+            ('estimator_eval',
+             'T_base_targetobj = T_base_tconn @ inverse(mats[-1]) if anchor else T_base_tconn'),
+            ('bnc_assembly', 'T_base_targetobj = T_base_tconn @ inverse(mats[-1])')):
+        src = open(os.path.join(ROOT, 'urlab', 'apps', f'{app}.py'), encoding='utf-8').read()
+        assert anchor_expr in src, f'{app} must anchor the trajectory'
+        assert 'T_base_commit = T_base_targetobj @ translation_matrix(' in src, \
+            f'{app}: the commit anchor is the probing anchor PLUS the named preload'
+
+    src = open(os.path.join(ROOT, 'urlab', 'apps', 'estimator_eval.py'), encoding='utf-8').read()
+    # The MEASUREMENT frame must stay the RECORDED mate -- that is what the map's own columns are
+    # expressed in, so anchoring it too would double-count.
+    for meas in ('inverse(T_base_tconn) @ robot.tool0() @ T_true',
+                 'pose_error(robot.tool0() @ T_bel, T_base_tconn)'):
+        assert meas in src, 'the measurement frame must remain the RECORDED mate'
+
+    # bnc_assembly: trajectory rows go through traj_ref (anchored); poses given DIRECTLY wrt the
+    # mate -- the wiggle target, whose +5 mm is its own press -- must keep using tool0_ref.
+    bnc = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8').read()
+    assert 'refs = [traj_ref(row, T_tool0_conn) for row in rows_t]' in bnc
+    assert 'refs = [traj_ref(row_, T_tool0_conn, commit=True) for row_ in rows_f]' in bnc
+    assert 'return tool0_ref(_corr_to_m(mats_from_vec6(v)), T_tool0_conn)' in bnc, \
+        'the wiggle target is stated wrt the mate, not as a trajectory row -- it must not anchor'
+
+
+def test_estimator_eval_sweep_coverage_check():
+    """The start-up check must fire when offset + injected error can leave the map's box."""
+    import logging
+    from urlab.apps import estimator_eval as ee
+
+    box = {'lower': [0.0, 0.0, -0.005, 0.0, -5.0, 0.0],
+           'upper': [0.0, 0.0, 0.005, 0.0, 5.0, 0.0]}
+    inj_lo, inj_hi = [0.0] * 6, [0.0, 0.0, 0.0, 0.0, 5.0, 0.0]        # +/-5 deg pitch injected
+
+    def warned(offsets, lo, hi, ref_box=box):
+        """True iff the check logged at WARNING -- it returns None, so the LOG is the assertion."""
+        rec = []
+        h = logging.Handler()
+        h.emit = lambda r: rec.append(r)
+        ee.log.addHandler(h)
+        lvl = ee.log.level
+        ee.log.setLevel(logging.INFO)              # else the all-clear INFO is never even created
+        try:
+            ee._report_sweep_coverage(offsets, lo, hi, ref_box)
+        finally:
+            ee.log.removeHandler(h)
+            ee.log.setLevel(lvl)
+        assert rec, 'the check must say SOMETHING -- silence would make every case below vacuous'
+        return any(r.levelno >= logging.WARNING for r in rec)
+
+    # +5 deg commanded under a +/-5 deg injection reaches 10 deg -- outside a +/-5 deg box
+    assert warned([[0.0, 0.0, 0.0, 0.0, 5.0, 0.0]], inj_lo, inj_hi)
+    # the same offsets with NO injected error stay inside
+    assert not warned([[0.0, 0.0, 0.0, 0.0, 5.0, 0.0]], [0.0] * 6, [0.0] * 6)
+    # and z is checked too, in metres
+    assert warned([[0.0, 0.0, 0.006, 0.0, 0.0, 0.0]], [0.0] * 6, [0.0] * 6)
+    assert not warned([[0.0, 0.0, 0.003, 0.0, 0.0, 0.0]], [0.0] * 6, [0.0] * 6)
+    # no reference box = advisory only, never a warning (but still not silent)
+    assert not warned([[0.0, 0.0, 0.9, 0.0, 90.0, 0.0]], [0.0] * 6, [0.0] * 6, ref_box=None)
+
+
+def test_preload_is_commit_only_and_preserves_the_seat():
+    """The deliberate 10 mm press must land on the COMMIT and nowhere else.
+
+    The press is intentional -- it is how the connector is driven home. Moving it out of the
+    trajectory CSV (where the anchoring apps deleted it) must not lose it: the commit has to
+    reproduce exactly the path it drove before, while every observation-collecting pass stops at
+    the mate, which is where the contact map is."""
+    import yaml
+    from urlab.skills import trajectory as traj
+
+    mats = traj.load_csv(os.path.join(ROOT, 'configs', 'assembly_trajectory.csv'))
+    dense = traj.resample(mats, 0.001, 1.0)
+    mate = np.eye(4)                                   # depths are relative to the mate anyway
+
+    def depths(anchor_to):
+        return [T.matrix_to_xyzrpy(anchor_to @ r)[0][0] * 1000.0 for r in dense]
+
+    anchored = mate @ T.inverse(mats[-1])
+    probe = depths(anchored)
+    assert abs(probe[-1]) < 1e-9, 'probing must end exactly ON the mate -- that is where the map is'
+    assert abs(probe[0] + 20.0) < 1e-6, 'and still approach over the 20 mm the map was swept over'
+
+    # BOTH apps press by the same named amount, and it reproduces the old CSV path exactly:
+    # the retired last row was +10 mm, so the commit must run -10 -> +10.
+    for cfg_name, block in (('estimator_eval.yaml', ('eval', 'final_insertion')),
+                            ('bnc_assembly.yaml', ('assembly', 'final_insertion'))):
+        c = yaml.safe_load(open(os.path.join(ROOT, 'configs', cfg_name)))
+        for k in block:
+            c = c[k]
+        pre = float(c['preload_mm'])
+        assert pre == 10.0, f'{cfg_name}: preload_mm must restore the retired CSV row'
+        comm = depths(anchored @ T.translation_matrix([pre / 1000.0, 0.0, 0.0]))
+        assert abs(comm[-1] - 10.0) < 1e-6 and abs(comm[0] + 10.0) < 1e-6, \
+            f'{cfg_name}: the commit must drive -10 -> +10 mm, as the CSV used to'
+        assert comm[-1] > probe[-1], 'the commit presses and the probing passes do not'
+
+    # ...and each app applies it through its OWN commit anchor, exactly once.
+    for app, probing, commit in (
+            ('estimator_eval', 'T_base_targetobj @ row @ inverse(T_believed)',
+             'T_base_commit @ row @ inverse(T_believed)'),
+            ('bnc_assembly', 'traj_ref(row, T_tool0_conn)',
+             'traj_ref(row_, T_tool0_conn, commit=True)')):
+        src = open(os.path.join(ROOT, 'urlab', 'apps', f'{app}.py'), encoding='utf-8').read()
+        assert src.count(commit) == 1, f'{app}: exactly ONE insertion presses, and it is the commit'
+        assert src.count(probing) == 1, f'{app}: probing passes must not press'
+
+
+def test_preload_force_is_a_spike_not_a_press():
+    """What the preload can HOLD is stiffness x preload -- small. The configs must not promise more.
+
+    admittance.py's law is F_ext = M x'' + D x' + S (x - x_d), so a static force holds a steady
+    deflection F / S and nothing more. 10 mm against the PROBING stiffness sustains single-digit
+    newtons; the 169 N measured on the v5 run was a contact TRANSIENT, not a press. This pins the
+    arithmetic so the comments cannot drift away from the configs they describe."""
+    import yaml
+    from urlab.skills import trajectory as traj
+
+    for name, block in (('estimator_eval.yaml', 'eval'), ('bnc_assembly.yaml', 'assembly')):
+        cfg = yaml.safe_load(open(os.path.join(ROOT, 'configs', name)))
+        fi = cfg[block]['final_insertion']
+        pre_m = float(fi['preload_mm']) / 1000.0
+        probe_S = max(float(v) for v in cfg['compliance']['stiffness'][:3])
+        commit_S = max(float(v) for v in fi['stiffness'][:3])
+        assert probe_S * pre_m < 10.0, \
+            f'{name}: the probing spring cannot hold a large press -- keep the comment honest'
+        assert commit_S * pre_m > probe_S * pre_m, \
+            f'{name}: the commit stiffness is what buys a sustained press; it must exceed probing'
+        # THE GUARD CANNOT BOUND THE SPIKE, and the comments say so, so pin the arithmetic behind
+        # that claim. The guard needs the limit held CONTINUOUSLY for persistence_s. The WORST
+        # case for that claim is contact from the very first waypoint -- the connector catching a
+        # chamfer well before the mate -- so compare persistence against the whole commit ramp,
+        # not just the preload. If even that cannot outlast persistence_s, the guard provably
+        # never ends the advance; it can only trip in the settle that follows, at zero velocity.
+        # Use the SLOWEST speed the commit can run at, since a slower ramp is the case closest to
+        # tripping: a null speed override means speed.max_cartesian_* x the assemble phase scale.
+        v = float(cfg['speed']['max_cartesian_translation_mm_s'])
+        if fi.get('speed_translation_mm_s') is not None:
+            v = float(fi['speed_translation_mm_s'])
+        else:
+            scales = cfg['speed'].get('phase_scale') or {}
+            v *= float(scales.get('assemble', 1.0))
+        mats = traj.load_csv(os.path.join(ROOT, 'configs', 'assembly_trajectory.csv'))
+        path_mm = (T.matrix_to_xyzrpy(mats[-1])[0][0]
+                   - T.matrix_to_xyzrpy(mats[0])[0][0]) * 1000.0 + float(fi['preload_mm'])
+        ramp_s = path_mm / v
+        persist = float(cfg['force_guard']['persistence_s'])
+        if fi.get('persistence_s') is not None:
+            persist = float(fi['persistence_s'])
+        assert ramp_s <= persist + 1e-9, (
+            f'{name}: the whole commit ramp takes {ramp_s:.2f} s and the guard trips after '
+            f'{persist:.2f} s -- the guard CAN now end the advance, so the "cannot bound it" '
+            f'comments in {name} and the app are stale')
+        # MARGIN, reported through the assertion message rather than a bare pass: bnc_assembly
+        # currently sits at EXACTLY zero (a 30 mm commit ramp at 30 mm/s = 1.00 s against a
+        # persistence of 1.00 s, with the commit guard at 1 N -- which the connector exceeds on
+        # first touch). It is on the boundary, not past it, so the press still completes; but any
+        # slowing of the commit, lengthening of the path, or raising of the preload tips it over
+        # and the guard starts cutting the press short. Flagged, not silently "fixed": changing a
+        # force limit or a speed is a physical decision.
+        assert persist - ramp_s >= 0.0, f'{name}: negative guard margin'
+
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     failed = 0

@@ -174,6 +174,31 @@ eval:
   # z-pitch valley) and recency weighting decays them naturally. false = current attempt only.
   accumulate_observations: true
 
+  # ---- TRAJECTORY ANCHORING -- where the path's LAST ROW lands -------------------------------
+  # configs/assembly_trajectory.csv says its last row MUST be the identity (connector coincident
+  # with the target). apps/uncertain_sampling and apps/kinematic_assembly do not take that on
+  # trust: they ANCHOR (traj.anchor_target) so the last row lands on the RECORDED MATE whatever
+  # the row says. This app applied each row directly to the mate instead -- identical for a
+  # conforming trajectory, and not identical otherwise.
+  #
+  # It was not conforming: the last row carried a deliberate +10 mm press. The sampler silently
+  # cancelled it (driving -20 -> 0 mm) while this app and bnc_assembly drove it (-10 -> +10 mm) --
+  # 10 mm apart in commanded depth between the app that BUILDS the contact map and the apps
+  # MATCHED AGAINST it, from one shared file. That is a large part of the depth gap the v5
+  # diagnosis measured (map p50 -7.61 mm with ZERO rows past +2; eval p50 -1.70 mm with 255 rows
+  # past +2 at ~90 N). The press now lives in final_insertion.preload_mm and the CSV ends at 0, so
+  # all six apps that read it agree; this switch remains as the thing that keeps a future edit to
+  # that last row from silently offsetting the eval again.
+  #
+  # true  = anchor: PROBING passes end ON the recorded mate, like uncertain_sampling.
+  # false = rows applied directly to the mate: a press written into the CSV is DRIVEN, on every
+  #         pass -- which is what put the v5 observations off the map.
+  # null  = follow collection.match_sampling (on -> anchor).
+  #
+  # With a conforming CSV this is a NO-OP either way. It is not redundant: nothing about a passing
+  # run would reveal its absence until someone edits that last row again.
+  anchor_trajectory: null
+
   # ---- OBSERVATION COLLECTION MODE ----------------------------------------------------------
   # attempts       the original loop: one noised insertion per attempt.
   # offset_sweep   each attempt COMMANDS every offset in sweep_offsets (belief held fixed, so
@@ -181,6 +206,10 @@ eval:
   #                estimates once and moves on -- trajectory diversity by design, the measured
   #                strongest lever (truth-in-top-2 basin 15% -> 51% from 1 -> 3 trajectories).
   #                Each pass also feeds its own stop depth to the stop-signature fusion.
+  #                Under match_sampling a pass IS one apps/uncertain_sampling TRIAL -- same
+  #                traj.perturb call, same jitter model, same chunk, all inherited from that
+  #                app's config (collection.sampling below). An attempt is then N of its trials
+  #                pooled before one estimate, which is what its own mode: grid already does.
   # peck           a force stop does not end the attempt: back off peck_retract_mm, advance
   #                again, until the trajectory ends or peck_timeout_s runs out -- ONE attempt
   #                logs a sequence of contact events, each a stop signature of its own.
@@ -197,19 +226,31 @@ eval:
     # agreeing. The SAME map identifies synthetic errors generated from itself 83-87% of the time,
     # so the map and the metric were fine and the collection was not.
     #
-    # true  = collect like uncertain_sampling: one pass per attempt, no un-guarded post-stop
-    #         dwell, no pause. Also logs every compliance/force_guard/speed value that still
-    #         differs from configs/uncertain_sampling.yaml -- those it will NOT change for you,
-    #         because altering an eval's physics is a decision, not a default.
+    # true  = collect like uncertain_sampling: no un-guarded post-stop dwell, no pause, and every
+    #         pass built the way that app builds one. Also logs every compliance / force_guard /
+    #         speed / retract / stand-off value that still differs from
+    #         configs/uncertain_sampling.yaml -- those it will NOT change for you, because
+    #         altering an eval's physics is a decision, not a default.
     # false = the old behaviour, for deliberately collecting off-map data.
     match_sampling: true
-    # NOTE offset_sweep and peck are REJECTED under match_sampling: uncertain_sampling realises its
-    # misalignment by perturbing the trajectory and driving it ONCE, so both visit contact states
-    # the map does not contain.
-    mode: attempts               # attempts | offset_sweep | peck
+    # NOTE PECK is REJECTED under match_sampling: it re-advances from a partially-inserted state,
+    # which uncertain_sampling never records (that app always retracts fully and re-approaches
+    # through free space). OFFSET_SWEEP is allowed -- see collection.sampling below.
+    mode: offset_sweep           # attempts | offset_sweep | peck
     # offset_sweep: commanded offsets [x, y, z (m), roll, pitch, yaw (deg)] in the held part's
     # own frame. null = the default pitch sweep -4..+4 deg in 2 deg steps, other dims zero.
-    sweep_offsets: 
+    #
+    # These are MAP GRID POINTS, and that is the whole idea: uncertain_sampling's own mode: grid
+    # sweeps a z x pitch box one perturbed pass per point, so a sweep over points of the SAME box
+    # collects rows the map contains. As set, z {-3, 0, +3} mm x pitch {-5, -3, -1, +1, +3, +5}
+    # deg -- 18 passes per attempt.
+    #
+    # WATCH THE TOTAL. The commanded offset and the trial's INJECTED belief error both act in the
+    # connector frame and ADD, so a +5 deg offset under a +/-5 deg eval.perturbation reaches 10
+    # deg -- outside the map's +/-5 deg box. The app reports exactly this at start-up (SWEEP
+    # COVERAGE) and does not stop you: driving off-map on purpose is a valid experiment, doing it
+    # unawares is what produced the v5 mess above.
+    sweep_offsets:
     - [0, 0, -0.003, 0, -5, 0]
     - [0, 0, -0.003, 0, -3, 0]
     - [0, 0, -0.003, 0, -1, 0]
@@ -228,6 +269,31 @@ eval:
     - [0, 0, +0.003, 0, +1, 0]
     - [0, 0, +0.003, 0, +3, 0]
     - [0, 0, +0.003, 0, +5, 0]
+
+    # ---- SWEEP PASS = ONE uncertain_sampling TRIAL (match_sampling + offset_sweep only) --------
+    # How a commanded offset becomes a driven path. Under parity the pass is built by
+    # uncertain_sampling's OWN traj.perturb call rather than this app's trajectory_noise, so these
+    # are that app's sampling: keys. EVERY ONE DEFAULTS TO null = INHERIT the live value from
+    # configs/uncertain_sampling.yaml, read at run time -- so re-tuning the sampler re-tunes the
+    # eval and the two cannot drift apart unnoticed. Setting one here is an explicit divergence and
+    # is logged as such.
+    sampling:
+      # 'connector' (= in-hand pose error, right-multiplied: the part rides the nominal path
+      # tilted) or 'target' (= socket pose error, left-multiplied: the whole approach is
+      # misaimed). Must match how the MAP was collected -- the two reach different paths.
+      perturb_frame: null
+      # Fraction of the resampled trajectory a pass drives. < 1 stops SHORT of the mate, so those
+      # passes record approach contact and never seat contact; the app says so at start-up.
+      chunk_fraction: null
+      # PER-WAYPOINT jitter, uncertain_sampling's model: a fresh UNIFORM draw inside these bounds
+      # at every waypoint, un-smoothed, [x, y, z (m), roll, pitch, yaw (deg)]. This is a DIFFERENT
+      # model from eval.trajectory_noise (smoothed Gaussian, decaying along the path and across
+      # attempts), which is why parity REPLACES that one for sweep passes instead of adding to it
+      # -- a pass carrying both would have a jitter spectrum neither the map nor this app records.
+      noise: null
+      # >0 = replayable jitter stream; null = eval.random_seed + 2 (its own stream, so toggling
+      # the sweep cannot shift the injected-error draws); 0 = nondeterministic.
+      random_seed: null
 
     peck_retract_mm: 10.0         # back-off after each force stop
     peck_timeout_s: 60.0         # time budget for one peck attempt
@@ -294,6 +360,30 @@ eval:
     # which keeps pressing under admittance: this is inspection/measurement time, that is press
     # time. Runs after the dwell, before the retract. 0 = off.
     pause_s: 0.0
+    # PRELOAD: drive the commit's reference this far PAST the mate along the connector's +X.
+    # The part stops at the mate, the reference keeps going, and the admittance spring turns the
+    # leftover travel into contact force -- how this rig presses a connector home.
+    #
+    # It used to live as an extra +10 mm row in configs/assembly_trajectory.csv, which is the one
+    # place it cannot work: apps/uncertain_sampling and apps/kinematic_assembly ANCHOR the
+    # trajectory (traj.anchor_target normalises the last row onto the recorded mate), so the map
+    # was collected with the press silently REMOVED while this app and bnc_assembly drove it.
+    # Same CSV, 10 mm apart -- a large part of the map-vs-eval depth gap. Named here, it survives
+    # anchoring and applies only where it is meant to: the COMMIT. Probing passes end on the mate,
+    # which is where the map is.
+    #
+    # WHAT IT DELIVERS (admittance.py's own law, F = S x delta at steady state, integrated at
+    # 125 Hz against a stiff stop): a SPIKE, not a press. 10 mm peaks at 54-207 N depending on how
+    # rigid the jam is -- that is the source of the 169 N measured on the v5 run -- then decays,
+    # because the yield time constant D/S is 6-9 s against a 0.3 s push. What it can HOLD is only
+    # S x 10 mm: 2.5 N at 250 N/m, 5 N at 500, 30 N at the 3000 N/m insertion axis below. So the
+    # preload buys the initial break-in force; the STIFFNESS buys the sustained press. Raise
+    # stiffness, not this, if the connector needs holding home. And note the force guard cannot
+    # bound the spike: persistence_s 5.0 at 30 mm/s is 150 mm of commanded travel, against a
+    # trajectory with nothing like that left.
+    #
+    # 10.0 = exactly what the CSV's extra row was driving, so the commit is unchanged. 0 = off.
+    preload_mm: 10.0
     # NOISE on the commit trajectory. OFF by default and deliberately so: the jitter exists to
     # gather varied contact while PROBING and has no place in the attempt meant to seat.
     # Enable it only to characterise the seat itself (e.g. how repeatably it mates under

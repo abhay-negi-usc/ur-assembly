@@ -476,6 +476,24 @@ assembly:
     # which keeps pressing under admittance: this is inspection/measurement time, that is press
     # time. Runs after the dwell, before the retract. 0 = off.
     pause_s: 0.0
+    # PRELOAD: drive the commit's reference this far PAST the mate along the connector's +X. The
+    # connector stops at the mate, the reference keeps going, and the admittance spring turns the
+    # leftover travel into contact force -- how this rig presses a connector home.
+    #
+    # It used to live as an extra +10 mm row in configs/assembly_trajectory.csv, which is the one
+    # place it cannot work: apps/uncertain_sampling ANCHORS that path (traj.anchor_target
+    # normalises the last row onto the recorded mate), so the contact map the estimator matches
+    # against was collected with the press REMOVED while this app drove it. Every observation
+    # therefore sat 10 mm deeper than anything the map contained. Named here, it survives
+    # anchoring and applies only to the COMMIT; probing passes now end on the mate, where the map
+    # is. 10.0 = exactly what the CSV row was driving, so the seat is unchanged. 0 = off.
+    #
+    # What it buys is the BREAK-IN spike, not a sustained press: 10 mm peaks in the tens-to-low-
+    # hundreds of N against a stiff jam, then decays as the spring yields (time constant D/S is
+    # 6-9 s, far longer than the push). What it can HOLD is stiffness x preload -- 30 N at the
+    # 3000 N/m insertion axis above. If the connector needs HOLDING home, raise that stiffness;
+    # if it needs breaking in, raise this.
+    preload_mm: 10.0
     # NOISE on the commit trajectory. OFF by default and deliberately so: the jitter exists to
     # gather varied contact while PROBING and has no place in the attempt meant to seat.
     # Enable it only to characterise the seat itself (e.g. how repeatably it mates under

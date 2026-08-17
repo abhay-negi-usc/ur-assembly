@@ -278,6 +278,21 @@ def build_and_run(cfg, robot, camera, args):
     fi_wr = None if fi.get('speed_rotation_deg_s') is None \
         else float(fi['speed_rotation_deg_s'])
     fi_pause = float(fi.get('pause_s', 0.0) or 0.0)
+    # PRELOAD -- the press, on the COMMIT only. Drives the commit's reference this far PAST the
+    # mate along the connector's +X: the part stops at the mate, the reference keeps going, and
+    # the admittance spring turns the leftover travel into contact force.
+    #
+    # It used to be an extra +10 mm row in configs/assembly_trajectory.csv, the one place it
+    # cannot work -- apps/uncertain_sampling anchors that path, so the contact map this app's
+    # estimator matches against was collected with the press REMOVED while this app drove it,
+    # putting every observation 10 mm deeper than anything the map held. Named here it survives
+    # anchoring and lands only on the insertion meant to SEAT; the probing passes end on the mate.
+    #
+    # What it buys is the break-in SPIKE (a 10 mm preload peaks in the tens-to-low-hundreds of N
+    # against a stiff jam, then decays as the spring yields over D/S ~ 6-9 s). What it can HOLD is
+    # only stiffness x preload, so raise final_insertion.stiffness if a sustained press is what
+    # the connector needs. 0 disables.
+    fi_preload_mm = float(fi.get('preload_mm', 10.0) or 0.0)
     fin = fi.get('trajectory_noise', {}) or {}
     fi_noise_on = bool(fin.get('enabled', False))
     fi_noise_std = [float(v) for v in (fin.get('std') or [0.0] * 6)]
@@ -286,7 +301,7 @@ def build_and_run(cfg, robot, camera, args):
         log.error('final_insertion.trajectory_noise.std must have 6 entries.')
         return False
     for nm, v in (('speed_translation_mm_s', fi_v), ('speed_rotation_deg_s', fi_wr),
-                  ('pause_s', fi_pause)):
+                  ('pause_s', fi_pause), ('preload_mm', fi_preload_mm)):
         if v is not None and v < 0:
             log.error('assembly.final_insertion.%s must be >= 0 (got %.2f).', nm, v)
             return False
@@ -303,6 +318,12 @@ def build_and_run(cfg, robot, camera, args):
         guard_final = ForceGuard(robot.arm, {**gsec, **over_g}) if over_g else None
         log.info('Final insertion ON: stiffness %s, guard %.0f N.', comp_final.get('stiffness'),
                  float(over_g.get('max_force_n', gsec.get('max_force_n', 0.0))))
+        if fi_preload_mm > 0:
+            s_ins = max(float(v) for v in (comp_final.get('stiffness') or [0.0])[:3])
+            log.info('   PRELOAD %.1f mm past the mate on the commit (probing passes do NOT '
+                     'press). The spring holds %.1f N of it at %.0f N/m; the contact peak is a '
+                     'transient several times larger.',
+                     fi_preload_mm, s_ins * fi_preload_mm / 1000.0, s_ins)
 
     # ---- INSERTION MODE: estimate | wiggle ----------------------------------------------------
     # ESTIMATE  the original: insert, observe, fit the contact manifold, correct the in-hand
@@ -468,6 +489,27 @@ def build_and_run(cfg, robot, camera, args):
     mats = traj.load_csv(csv_in, angles_deg=bool(a.get('trajectory_angles_deg', False)))
     dense = traj.resample(mats, float(a.get('translational_resolution_m', 0.001)),
                           float(a.get('rotational_resolution_deg', 1.0)))
+
+    # ---- ANCHORING: the path ENDS on the recorded mate ---------------------------------------
+    # traj.anchor_target normalises the trajectory so its last row lands exactly on the target,
+    # whatever that row says. apps/uncertain_sampling -- which builds the contact map this app's
+    # estimator matches against -- has always done this; this app applied rows straight to the
+    # target instead. Identical for a conforming trajectory, and NOT identical for one carrying a
+    # deliberate press in its last row, which the shipped CSV did (+10 mm): the map was collected
+    # with that press removed and this app drove it, so every observation sat 10 mm deeper than
+    # anything the map contained. The press now lives in final_insertion.preload_mm, applied to
+    # the COMMIT alone, and this anchoring keeps the probing passes where the map is.
+    #
+    # With the CSV fixed this is a no-op (inverse(identity)); it stays because it is the thing
+    # that makes a future non-conforming CSV harmless instead of silently 10 mm wrong.
+    T_base_targetobj = T_base_tconn @ inverse(mats[-1])
+    T_base_commit = T_base_targetobj @ translation_matrix([fi_preload_mm / 1000.0, 0.0, 0.0])
+    _sh_m, _sh_r = pose_error(T_base_targetobj, T_base_tconn)
+    if _sh_m * 1000.0 > 1e-6 or np.degrees(_sh_r) > 1e-6:
+        log.warning('trajectory_csv\'s last row is NOT identity (off by %.2f mm / %.2f deg) -- '
+                    'ANCHORED onto the recorded mate, like uncertain_sampling. A press belongs '
+                    'in assembly.final_insertion.preload_mm, not in a trajectory row.',
+                    _sh_m * 1000.0, np.degrees(_sh_r))
 
     # ---- COLLECTION MODE (estimator_eval.eval.collection semantics) ----
     col = a.get('collection', {}) or {}
@@ -1057,12 +1099,24 @@ def build_and_run(cfg, robot, camera, args):
         * float(st.get('distance_m', 0.01))) @ mats[0]
 
     def tool0_ref(row, T_tool0_conn):
+        """A pose given DIRECTLY in the target-connector frame -> a tool0 reference.
+
+        For poses that mean what they say wrt the mate -- the wiggle's target, for one, whose
+        +5 mm along +X is its own press. NOT for trajectory rows: those go through traj_ref,
+        which anchors them (see T_base_targetobj)."""
         return T_base_tconn @ row @ inverse(T_tool0_conn)
+
+    def traj_ref(row, T_tool0_conn, commit=False):
+        """A TRAJECTORY row -> a tool0 reference, anchored so the path ends on the mate.
+
+        `commit=True` adds the final insertion's preload, so the press applies to the attempt
+        meant to SEAT and to nothing that collects observations."""
+        return (T_base_commit if commit else T_base_targetobj) @ row @ inverse(T_tool0_conn)
 
     phase('standoff')
     seed_q = robot.arm.q()
     T_tool0_conn = robot.T_tool0_fingertip @ T_ftip_conn
-    q = robot.arm.ik(tool0_ref(T_standoff_row, T_tool0_conn), seed_q)
+    q = robot.arm.ik(traj_ref(T_standoff_row, T_tool0_conn), seed_q)
     if q is None or not _guarded(robot, guard_shared,
                                  lambda: robot.arm.move_j(q, label='stand-off')):
         return False
@@ -1109,7 +1163,7 @@ def build_and_run(cfg, robot, camera, args):
                                          tn_w, tn_dt, (1.0 - tn_da) ** (it - 1), poff)
                 else:
                     rows_t = dense
-                refs = [tool0_ref(row, T_tool0_conn) for row in rows_t]
+                refs = [traj_ref(row, T_tool0_conn) for row in rows_t]
                 phase('standoff')
                 label = (f'attempt {it}'
                          + (f' sweep {pi + 1}/{len(passes)}' if poff is not None else '')
@@ -1231,7 +1285,7 @@ def build_and_run(cfg, robot, camera, args):
             T_tool0_conn = robot.T_tool0_fingertip @ T_ftip_conn
             rows_f = (traj.noised(dense, noise_rng, fi_noise_std, fi_noise_w, 0.0, 1.0)
                       if fi_noise_on else dense)
-            refs = [tool0_ref(row_, T_tool0_conn) for row_ in rows_f]
+            refs = [traj_ref(row_, T_tool0_conn, commit=True) for row_ in rows_f]
             phase('standoff')
             q = robot.arm.ik(refs[0], seed_q)
             if q is None or not _guarded(robot, guard_shared,

@@ -2659,6 +2659,309 @@ def test_check_app_config_is_wired():
     assert 'on_flag' not in eest['check']
 
 
+def test_bnc_clocking_geometry():
+    """The post-mate clocking maneuvers are pure geometry layered on the mate, and each identity
+    below is load-bearing -- these are the ways this code goes wrong SILENTLY, moving the arm
+    somewhere plausible but wrong rather than raising.
+
+      * the SCREW is a rotation about +X composed with a translation ALONG +X, so the two commute
+        and the reference is a true helix; if they did not, composition order would quietly change
+        the path;
+      * the BELIEF RESET must put the connector exactly AT the target -- that is what makes the
+        screw axis the target's +X instead of the estimate's;
+      * ADVANCE must be read along the ENGAGED frame's +X, and a pure roll must contribute ZERO to
+        it (the maneuver aims at a virtual target, so a roll-coupled reading would fake success);
+      * the COLLAR must land a fixed offset along the connector's own +X with the CLOSED fingertip
+        frame on it, and the turn must ORBIT the connector axis -- a point on the axis unmoved, no
+        translation along it -- or the fingers scrub across the collar instead of turning it;
+      * the two RETRACT legs read their axes in DIFFERENT frames (gripper/tool0 then target), so
+        one is a right-multiply and the other a left-multiply. Swapping them is the classic bug and
+        sends the arm off in a direction that looks reasonable until it collides.
+    """
+    import numpy as np
+
+    from urlab.apps.bnc_assembly import _AnyGuard, _ScrewAdvance
+    from urlab.transforms import (inverse, matrix_to_xyzrpy, rotate_about_axis,
+                                  translation_matrix, xyzrpy_to_matrix)
+
+    push_m, rot, off = 0.005, np.radians(90.0), 0.025
+    screw = xyzrpy_to_matrix([push_m, 0.0, 0.0], [rot, 0.0, 0.0])
+    Rx = xyzrpy_to_matrix([0.0, 0.0, 0.0], [rot, 0.0, 0.0])
+    Tx = translation_matrix([push_m, 0.0, 0.0])
+    assert np.allclose(Rx @ Tx, Tx @ Rx, atol=1e-12), 'push must be ALONG the rotation axis'
+    assert np.allclose(screw, Rx @ Tx, atol=1e-12)
+
+    # a deliberately non-axis-aligned mate and stand: an error that cancels in a nice frame will
+    # not cancel here
+    T_base_tconn = xyzrpy_to_matrix([0.4, -0.2, 0.3], [0.3, -0.4, 1.1])
+    T_tool0_engaged = xyzrpy_to_matrix([0.35, -0.25, 0.45], [0.1, 0.2, -0.7])
+
+    # BELIEF RESET
+    T_tool0_conn = inverse(T_tool0_engaged) @ T_base_tconn
+    assert np.allclose(T_tool0_engaged @ T_tool0_conn, T_base_tconn, atol=1e-12), \
+        'the reset must place the connector exactly at the target'
+
+    def ref_of(S):
+        return T_base_tconn @ S @ inverse(T_tool0_conn)
+
+    assert np.allclose(ref_of(np.eye(4)), T_tool0_engaged, atol=1e-12), \
+        'the identity screw must be the pose the arm is standing at'
+    assert np.allclose(ref_of(screw) @ T_tool0_conn, T_base_tconn @ screw, atol=1e-12)
+
+    # THE STROKE, as the app writes it: a base-frame screw about the fixed axis LINE through the
+    # engaged connector origin. It must equal the belief-based form (so it is the same motion) yet
+    # be free of T_tool0_conn (so a REGRASP, which invalidates that belief, cannot change it).
+    ref_goal = (T_base_tconn @ screw @ inverse(T_base_tconn)) @ T_tool0_engaged
+    assert np.allclose(ref_goal, ref_of(screw), atol=1e-12), \
+        'the axis-line form of the stroke must be identical to the belief-based one'
+
+    # ADVANCE, measured from the arm pose
+    class _Arm:
+        dry_run = False
+
+    class _FakeRobot:
+        arm = _Arm()
+
+        def __init__(self, T):
+            self._T = T
+
+        def tool0(self):
+            return self._T
+
+    rb = _FakeRobot(T_tool0_engaged)
+    det = _ScrewAdvance(rb, T_tool0_conn, T_base_tconn, push_m)
+    assert abs(det.advance_m()) < 1e-12 and not det.check()
+    rb._T = ref_of(translation_matrix([0.003, 0.0, 0.0]))          # 3 mm: short of the threshold
+    assert abs(det.advance_m() - 0.003) < 1e-12 and not det.check()
+    rb._T = ref_of(Rx)                                            # pure 90 deg roll, no advance
+    assert abs(det.advance_m()) < 1e-12 and not det.check(), \
+        'a roll must not register as advance'
+    rb._T = ref_of(screw)                                         # the full screw: success
+    assert abs(det.advance_m() - push_m) < 1e-12 and det.check()
+    assert 'advance' in det.tripped_by and abs(det.peak_m - push_m) < 1e-12
+
+    # THE REGRASP RATCHET. A retry releases, returns the GRIPPER to the engaged pose and re-grips;
+    # the connector is captive and stays where it screwed to. So advance must stay CUMULATIVE from
+    # the ORIGINAL engaged pose across that regrasp -- if the detector were not rebased it would
+    # read zero again at every retry and a cumulative threshold could never be reached.
+    partial = xyzrpy_to_matrix([0.002, 0.0, 0.0], [np.radians(30.0), 0.0, 0.0])   # 2 mm gained
+    det2 = _ScrewAdvance(rb, T_tool0_conn, T_base_tconn, 0.005)
+    rb._T = ref_of(partial)
+    assert abs(det2.advance_m() - 0.002) < 1e-12 and not det2.check()
+    C_conn = rb.tool0() @ det2.T_tool0_conn                       # captured BEFORE releasing
+    assert np.allclose(C_conn, T_base_tconn @ partial, atol=1e-12)
+    rb._T = T_tool0_engaged                                       # gripper back at engaged pose
+    det2.rebase(inverse(rb.tool0()) @ C_conn)                     # re-grip: adopt the new relation
+    assert abs(det2.advance_m() - 0.002) < 1e-12, \
+        'the 2 mm already gained must survive the regrasp'
+    assert not np.allclose(det2.T_tool0_conn, T_tool0_conn, atol=1e-9), \
+        'the connector-in-gripper relation MUST change across a regrasp'
+    # the second identical stroke then adds to it rather than restarting from zero
+    rb._T = (T_base_tconn @ screw @ inverse(T_base_tconn)) @ T_tool0_engaged
+    assert abs(det2.advance_m() - (0.002 + push_m)) < 1e-12 and det2.check(), \
+        'a second stroke after the regrasp must accumulate onto the first'
+
+    # _AnyGuard must remember WHICH watchdog fired -- success and jam are the same 'seated'
+    class _Trip:
+        def __init__(self, hit):
+            self.hit, self.tripped_by = hit, ('boom' if hit else None)
+
+        def check(self):
+            return self.hit
+
+        def reset(self):
+            pass
+
+    quiet, loud = _Trip(False), _Trip(True)
+    g = _AnyGuard(quiet, loud, None)                              # None guards are dropped
+    assert len(g.guards) == 2 and g.check() and g.tripped is loud and g.tripped_by == 'boom'
+    g.reset()
+    assert g.tripped is None and g.tripped_by is None
+    assert not _AnyGuard(quiet).check()
+
+    # COLLAR: offset along the connector's OWN +X, CLOSED fingertip frame on it
+    T_base_conn = T_base_tconn @ screw                            # where cable clocking left it
+    T_ftip = xyzrpy_to_matrix([0.0, 0.0, 0.183], [np.pi, 0.0, -np.pi / 2])
+    T_collar = T_base_conn @ translation_matrix([off, 0.0, 0.0])
+    T_ref = T_collar @ inverse(T_ftip)
+    assert np.allclose(T_ref @ T_ftip, T_collar, atol=1e-12), \
+        'the CLOSED fingertip frame must coincide with the collar frame'
+    d_xyz, _d_rpy = matrix_to_xyzrpy(inverse(T_base_conn) @ (T_ref @ T_ftip))
+    assert abs(d_xyz[0] - off) < 1e-12 and np.allclose(d_xyz[1:], 0.0, atol=1e-12), \
+        'the collar must sit purely along the connector +X'
+
+    # the collar TURN orbits the connector axis
+    axis, point = T_base_conn[:3, 0], T_base_conn[:3, 3]
+    assert np.allclose(rotate_about_axis(T_base_conn, axis, point, rot)[:3, 3], point,
+                       atol=1e-12), 'a point ON the axis must not move'
+    end = rotate_about_axis(T_ref, axis, point, rot)
+    r_xyz, r_rpy = matrix_to_xyzrpy(inverse(T_base_conn) @ (end @ T_ftip))
+    assert abs(r_rpy[0] - rot) < 1e-9 and np.allclose(r_rpy[1:], 0.0, atol=1e-9), \
+        'the collar turn must be a pure roll about the connector +X'
+    assert abs(r_xyz[0] - off) < 1e-12 and np.allclose(r_xyz[1:], 0.0, atol=1e-12), \
+        'and must not translate the collar along or off the axis'
+
+    # RETRACT: leg 1 in the GRIPPER frame (right-multiply), leg 2 in the TARGET frame (left)
+    T1 = T_ref @ translation_matrix([0.0, 0.0, -0.1])
+    assert np.allclose(T1[:3, 3] - T_ref[:3, 3], -0.1 * T_ref[:3, 2], atol=1e-12), \
+        'leg 1 must travel along the GRIPPER z, not a base axis'
+    T2 = translation_matrix(T_base_tconn[:3, :3] @ np.array([-0.1, 0.0, 0.0])) @ T1
+    assert np.allclose(T2[:3, 3] - T1[:3, 3], -0.1 * T_base_tconn[:3, 0], atol=1e-12), \
+        'leg 2 must travel along the TARGET x, not the gripper x'
+    for T_before, T_after in ((T_ref, T1), (T1, T2)):
+        assert np.allclose(T_before[:3, :3], T_after[:3, :3], atol=1e-12), \
+            'a retract leg is a pure translation -- it must not rotate the tool'
+
+
+def test_bnc_clocking_enable_gating():
+    """Both post-mate maneuvers are OPTIONAL and independently switchable, with one dependency:
+    collar clocking requires cable clocking, and that combination is REJECTED rather than silently
+    reinterpreted (it would otherwise turn the collar on a connector still proud of the socket,
+    using a connector pose that was never established).
+
+    Tested through the pure function the app calls, because a config rule that only exists inside
+    the robot routine can only be checked by running the robot -- which means it never gets checked.
+    """
+    from urlab.apps.bnc_assembly import _clocking_plan
+
+    assert _clocking_plan({'enabled': False}, {'enabled': False}) == (False, False)
+    assert _clocking_plan({'enabled': True}, {'enabled': False}) == (True, False)
+    assert _clocking_plan({'enabled': True}, {'enabled': True}) == (True, True)
+    # an absent block, an absent key, or a null must all mean OFF -- a config predating these
+    # maneuvers must not start moving the robot in new ways
+    for cable, collar in ((None, None), ({}, {}), ({'enabled': None}, {'enabled': None})):
+        assert _clocking_plan(cable, collar) == (False, False), (cable, collar)
+    # the one forbidden combination, and the message must name both keys so it is actionable
+    try:
+        _clocking_plan({'enabled': False}, {'enabled': True})
+    except ValueError as exc:
+        assert 'collar_clocking' in str(exc) and 'cable_clocking' in str(exc), str(exc)
+    else:
+        raise AssertionError('collar clocking without cable clocking must be REJECTED')
+    # and the app must route the rejection to a pre-motion failure, not an exception at runtime
+    src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py')).read()
+    assert '_clocking_plan(cc, cl)' in src and 'except ValueError as exc' in src, \
+        'build_and_run must call _clocking_plan and fail cleanly before the robot moves'
+
+
+def test_bnc_clocking_state_vocabulary():
+    """The run reports progress as ENGAGED -> SEATED -> LOCKED -> ASSEMBLED, and that vocabulary is
+    STRUCTURAL rather than prose: the app walks CLOCK_STATES through _advance_state, so a future
+    edit that skips a step -- calling collar clocking without cable clocking, or advancing twice --
+    raises instead of quietly logging LOCKED for a connector that was never seated.
+
+    Also pinned: 'seated' is OVERLOADED. AdmittanceController.ramp returns the string 'seated' to
+    mean "a guard tripped", which is the robot layer's word and says nothing about the assembly
+    state. Reading that return into a variable called `seated` is the mistake this guards against,
+    so the clocking code must name it `stopped`.
+    """
+    from urlab.apps.bnc_assembly import CLOCK_STATES, _advance_state
+
+    assert CLOCK_STATES == ('engaged', 'seated', 'locked')
+    assert _advance_state('engaged', 'engaged') == 'seated'
+    assert _advance_state('seated', 'seated') == 'locked'
+    for state, expected in (('engaged', 'seated'), ('seated', 'engaged'), ('locked', 'seated')):
+        try:
+            _advance_state(state, expected)
+        except AssertionError:
+            continue
+        raise AssertionError(f'advancing from {state!r} as {expected!r} must not be allowed')
+
+    # the ramp-return / state collision: every `== 'seated'` comparison in the clocking code must
+    # land in a variable named `stopped`, never `seated`
+    src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py')).read()
+    code = '\n'.join(ln for ln in src.splitlines() if not ln.lstrip().startswith('#'))
+    for bad in ("seated = res == 'seated'", "seated = (res == 'seated')"):
+        assert bad not in code, \
+            "ramp's 'seated' means a guard tripped -- do not bind it to a variable called `seated`"
+    assert code.count("stopped = res == 'seated'") == 2, \
+        'both clocking maneuvers must read the ramp return into `stopped`'
+
+
+def test_bnc_clocking_config():
+    """configs/bnc_assembly.yaml must match what the app validates pre-motion, and the two
+    settings that make the maneuver possible at all must not be lost in a retune:
+
+      * the SUCCESS threshold has to be reachable given the push the virtual target commands --
+        asking for more advance than the screw aims for can never succeed;
+      * the guard must OVERRIDE the shared force_guard:. That block is tuned for a light probing
+        insertion (5 N) and a deliberate press-and-twist exceeds it on the first cycle, so an
+        inherited guard means the screw never runs.
+    """
+    import yaml
+    with open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')) as fh:
+        a = yaml.safe_load(fh)['assembly']
+    cc, cl = a['cable_clocking'], a['collar_clocking']
+    assert 'retry_mode' not in cc, \
+        'retry_mode is gone -- a retry is always a regrasp at the engaged pose, never an unscrew'
+    assert float(cc['success_advance_mm']) > 0, 'no way to tell the screw worked'
+    assert int(cc['max_tries']) >= 1
+    if int(cc['max_tries']) > 1:
+        assert cc['open_gripper_after'], 'a retry regrasps, so it needs the gripper to open'
+    assert float(cc['max_force_n']) > 0 and float(cc['max_torque_nm']) > 0
+    # `enabled` is the MANEUVER's switch; the guard's is force_guard_enabled. Writing `enabled`
+    # twice in one block is silently legal in YAML (last wins), so the guard override would have
+    # eaten the maneuver's own switch -- assert the guard key is the distinct one.
+    for blk, nm in ((cc, 'cable_clocking'), (cl, 'collar_clocking')):
+        assert 'force_guard_enabled' in blk, f'{nm} must name the guard switch separately'
+    with open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')) as fh:
+        lines = fh.read().splitlines()
+    for nm in ('cable_clocking', 'collar_clocking', 'clocking_retract'):
+        start = next(i for i, ln in enumerate(lines) if ln.strip() == f'{nm}:')
+        indent = len(lines[start]) - len(lines[start].lstrip())
+        body = []
+        for ln in lines[start + 1:]:
+            if ln.strip() and (len(ln) - len(ln.lstrip())) <= indent:
+                break
+            body.append(ln)
+        # DERIVE the child indent instead of assuming it. Assuming indent + 4 when the real depth
+        # is indent + 2 skipped every line and made this whole check silently vacuous -- it passed
+        # against a deliberately injected duplicate. Hence the closing assert too.
+        kids = [ln for ln in body if ln.strip() and not ln.strip().startswith(('#', '-'))]
+        assert kids, f'assembly.{nm} has no settings'
+        child = min(len(ln) - len(ln.lstrip()) for ln in kids)
+        assert child > indent, (nm, child, indent)
+        seen = set()
+        for ln in kids:
+            s = ln.strip()
+            if ':' not in s or (len(ln) - len(ln.lstrip())) != child:
+                continue
+            key = s.split(':', 1)[0]
+            assert key not in seen, f'assembly.{nm}.{key} is defined twice -- YAML keeps the last'
+            seen.add(key)
+        assert len(seen) >= 3, f'duplicate scan saw only {seen} under {nm} -- it is vacuous'
+    # Advance is CUMULATIVE across regrasp retries, so the reachable ceiling is the stroke times
+    # the number of bites -- not a single stroke.
+    assert float(cc['success_advance_mm']) <= float(cc['push_mm']) * int(cc['max_tries']) + 1e-9, \
+        'success_advance_mm exceeds what max_tries strokes of push_mm can deliver'
+    shared = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))
+    assert float(cc['max_force_n']) >= float(shared['force_guard']['max_force_n']), \
+        'the screw guard must not be TIGHTER than the probing guard or it trips immediately'
+    # each maneuver carries its OWN guard block, so they can be tuned apart
+    for blk, nm in ((cc, 'cable_clocking'), (cl, 'collar_clocking')):
+        for k in ('max_force_n', 'max_torque_nm', 'persistence_s'):
+            assert blk.get(k) is not None, f'{nm} must set its own {k}'
+    # and its OWN phase scale, so the strokes can be paced apart from each other and from the
+    # insertion. A maneuver whose speed_* keys are null depends on this entry existing.
+    ps = shared['speed']['phase_scale']
+    for nm in ('cable_clock', 'collar_clock', 'clock_retract'):
+        assert nm in ps and float(ps[nm]) > 0, f'speed.phase_scale.{nm} missing or non-positive'
+    for blk, nm in ((cc, 'cable_clock'), (cl, 'collar_clock')):
+        if blk.get('speed_rotation_deg_s') is None:
+            assert float(ps[nm]) * float(shared['speed']['max_cartesian_rotation_deg_s']) > 0
+    assert len(cc['stiffness']) == 6 and len(cl['stiffness']) == 6
+    assert float(cl['collar_offset_mm']) > 0
+    if cl.get('enabled'):
+        assert cc.get('enabled'), 'collar clocking depends on cable clocking'
+    r = a['clocking_retract']
+    for k in ('gripper_axis', 'target_axis'):
+        assert len(r[k]) == 3 and any(abs(float(v)) > 1e-9 for v in r[k]), r[k]
+    for k in ('gripper_distance_m', 'target_distance_m'):
+        assert float(r[k]) > 0, k
+    assert 'clock' not in ps, \
+        'the single `clock` phase was split per maneuver -- a leftover entry paces nothing'
+
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     failed = 0

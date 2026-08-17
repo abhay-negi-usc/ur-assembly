@@ -226,6 +226,17 @@ speed:
     cable_clock: 0.12    # the bayonet screw stroke
     collar_clock: 0.12   # the collar turn
     clock_retract: 2.0   # the shared two-leg escape (free space, gripper already clear)
+    # POST-MATE CLOCKING, one scale per maneuver. These pace the CONTACT ramps; the free-space
+    # moves inside a maneuver (the retry realign, the collar align) stay on standoff/retract like
+    # every other positioning move in this app. NOTE a non-null speed_translation_mm_s /
+    # speed_rotation_deg_s in the maneuver's own block OVERRIDES its scale entirely -- they ship
+    # null so these are what actually govern.
+    # 0.12 x the global caps = ~3 mm/s and ~11 deg/s: a deliberate screw the cams can follow and
+    # the guard can react to. One scale multiplies BOTH caps, which is why 0.12 was picked -- it
+    # lands translation and rotation where they are both wanted at once.
+    cable_clock: 0.12    # the bayonet screw stroke
+    collar_clock: 0.12   # the collar turn
+    clock_retract: 2.0   # the shared two-leg escape (free space, gripper already clear)
 
 move_timeout_s: 60.0
 settle_s: 0.5
@@ -785,10 +796,15 @@ force_guard:
   # insertion on almost any contact, and 5 s of travel at the insertion speed is ~25 mm -- far
   # enough that the guard was no longer stopping the thing it was watching for.
   max_force_n: 30.0
+  # 2026-08-17: raised 5 -> 30 N with persistence 1.0 s (was 5.0 s). 5 N stopped the probing
+  # insertion on almost any contact, and 5 s of travel at the insertion speed is ~25 mm -- far
+  # enough that the guard was no longer stopping the thing it was watching for.
+  max_force_n: 30.0
   max_torque_nm: 8.0
   # The limit must hold CONTINUOUSLY this long before the guard trips (0 = instant, the
   # original). Raw F/T spikes over the limit for a few samples on every hard contact
   # transient; 0.5 s distinguishes "clipped the rim for 30 ms" from "genuinely jammed".
   # Travel cost while waiting: ~2.5 mm at the 5 mm/s insertion speed.
+  persistence_s: 1.0
   persistence_s: 1.0
 

@@ -262,6 +262,16 @@ class ManifoldEstimator:
             self.softness_by_block = None
             self.interp_softness = float(soft)
         self.min_observations = int(c.get('min_observations', 20))
+        # ROWS the dense energy landscape is built from. With `commit: argmin` the landscape IS
+        # the estimate, so this is an ACCURACY parameter, not just a cost bound -- measured on
+        # the 59 corrected BNC attempts (analysis/bnc_tuning, README section 14):
+        #   120 rows (the old hard-coded value) -> median |remaining pitch| 1.00 deg, and
+        #                                          indistinguishable from a fixed constant
+        #   320 rows                            -> 0.75 deg, 46% within 0.5 deg, and the first
+        #                                          setting that separates from that control
+        # Above ~320 it is flat, and using ALL rows is slightly WORSE than an evenly spaced
+        # subsample (dwell-heavy stretches get over-weighted), so this stays a subsample.
+        self.landscape_row_cap = int(c.get('landscape_row_cap', 320))
         # MIXTURE over the finals. `mode_bandwidth` is the mm-equivalent distance below which two
         # finals count as the SAME mode -- it defaults to ransac_tol because that is already this
         # config's answer to "how far apart is a different solution". `mode_min_weight` folds

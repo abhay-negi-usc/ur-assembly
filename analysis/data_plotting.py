@@ -46,6 +46,13 @@ A second ALPHA variant of the same cloud (rot3d_xzpitch_alpha) uses much smaller
 per-point OPACITY following |F| (same percentile-clipped scale as the colour): barely-loaded
 samples fade toward invisible, so the loaded manifold structure reads through the overplot.
 
+ZERO-REFERENCE AXES (CONFIG['zero_axes']): the three coordinate axes through the origin, so the
+ideal mate reads as a crosshair. A 3D scatter otherwise gives no cue where zero is, which is the
+whole question whenever a cloud is compared against the mate -- "does this sit ON it or beside
+it". Drawn AFTER the data has set the view, with the limits then restored, so adding a reference
+never rescales the plot; an axis whose two companions do not bracket zero is skipped, since that
+line would miss the visible origin.
+
 Usage:
     python analysis/data_plotting.py
     python analysis/data_plotting.py --csv data/my_log.csv --description "trial B, 3 mm bias"
@@ -135,6 +142,17 @@ CONFIG = {
     'gif_fps': 12,
     'gif_elev_deg': 22.0,
     'gif_azim_start_deg': -60.0,
+    # ---- zero-reference axes ----------------------------------------------------------------
+    # The three coordinate axes through the ORIGIN, i.e. the ideal mate. Without them a 3D
+    # scatter gives no cue where zero is, which is the whole question whenever a cloud is being
+    # compared against the mate ("does this sit ON it or beside it" -- e.g. after re-centring a
+    # map on its engaged density peak). Recessive but legible: a reference, never a data mark.
+    # An axis is skipped when the other two do not bracket zero, since the line would then miss
+    # the visible origin entirely.
+    'zero_axes': True,
+    'zero_axis_alpha': 0.35,
+    'zero_axis_color': '#1f4e79',
+    'zero_axis_width': 1.0,
     'point_size': 28,                # scatter marker area (pt^2)
     'alpha_point_size': 6,           # marker area for the ALPHA variant (much smaller)
     'alpha_range': [0.04, 0.9],      # per-point opacity at the force scale's [min, max]; the
@@ -310,6 +328,35 @@ def _style_axes(ax, axis_idx):
         pane_axis._axinfo['grid'].update(color='#ededed', linewidth=0.6)
 
 
+def _zero_axes(ax, cfg):
+    """The three coordinate AXES through the origin -- a crosshair at the ideal mate.
+
+    One line per axis, drawn only when the OTHER two axes both bracket zero (otherwise the line
+    would not pass through the visible origin and is just a stray rule across the box). Drawn
+    AFTER the scatter and after any equalisation, because the DATA must set the view; the limits
+    are captured first and restored afterwards so adding a reference never rescales the plot.
+
+    (An earlier revision also filled the three zero PLANES at alpha 0.06. They read as a haze
+    over the cloud without adding location information the lines do not already give, so only the
+    lines remain -- at an opacity that is legible on its own rather than as a plane accent.)"""
+    if not (cfg.get('zero_axes', cfg.get('zero_planes'))):    # old key still honoured
+        return
+    alpha = float(cfg.get('zero_axis_alpha', 0.35))
+    color = matplotlib.colors.to_rgba(cfg.get('zero_axis_color', '#1f4e79'), alpha)
+    lw = float(cfg.get('zero_axis_width', 1.0))
+    lims = [ax.get_xlim(), ax.get_ylim(), ax.get_zlim()]
+    for free in range(3):
+        others = [a for a in range(3) if a != free]
+        if not all(lims[a][0] < 0.0 < lims[a][1] for a in others):
+            continue
+        p0, p1 = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
+        p0[free], p1[free] = lims[free][0], lims[free][1]
+        ax.plot(*zip(p0, p1), '-', lw=lw, color=color, zorder=1, solid_capstyle='butt')
+    ax.set_xlim(lims[0])
+    ax.set_ylim(lims[1])
+    ax.set_zlim(lims[2])
+
+
 def _equalise(ax, pts):
     """Cube limits centred on the data -- physically-true proportions."""
     lo, hi = pts.min(axis=0), pts.max(axis=0)
@@ -385,6 +432,7 @@ def rotating_3d_figure(pose, axis_idx, color_idx, out_stem, cfg, title, groups=N
     _style_axes(ax, axis_idx)
     if cfg.get('equal_aspect'):
         _equalise(ax, pts)
+    _zero_axes(ax, cfg)
     _channel_legend(fig, color_idx, ranges)
     return _render_rotating(fig, ax, out_stem, cfg)
 
@@ -402,6 +450,7 @@ def rotating_3d_plain_figure(pose, axis_idx, out_stem, cfg, title, groups=None):
     _style_axes(ax, axis_idx)
     if cfg.get('equal_aspect'):
         _equalise(ax, pts)
+    _zero_axes(ax, cfg)
     return _render_rotating(fig, ax, out_stem, cfg)
 
 
@@ -424,6 +473,7 @@ def rotating_3d_scalar_figure(pose, axis_idx, values, out_stem, cfg, title,
     _style_axes(ax, axis_idx)
     if cfg.get('equal_aspect'):
         _equalise(ax, pts)
+    _zero_axes(ax, cfg)
     _add_force_colorbar(fig, sc, values, vmax, value_label, value_unit)
     return _render_rotating(fig, ax, out_stem, cfg)
 
@@ -465,6 +515,7 @@ def rotating_3d_alpha_figure(pose, axis_idx, values, out_stem, cfg, title, group
     _style_axes(ax, axis_idx)
     if cfg.get('equal_aspect'):
         _equalise(ax, pts)
+    _zero_axes(ax, cfg)
     return _render_rotating(fig, ax, out_stem, cfg)
 
 
@@ -548,6 +599,7 @@ def show_xzpitch_window(pose, fmag, cfg, groups=None):
     _style_axes(ax, axis_idx)
     if cfg.get('equal_aspect'):
         _equalise(ax, pts)
+    _zero_axes(ax, cfg)
     ax.view_init(elev=float(cfg['gif_elev_deg']), azim=float(cfg['gif_azim_start_deg']))
     plt.show()
 

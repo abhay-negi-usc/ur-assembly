@@ -368,15 +368,11 @@ assembly:
     damping_ratio: null
     settle_s: null               # logged settle at the stop; feeds no estimate here
     hold_after_insertion_s: 1.0  # UN-GUARDED dwell -- the knob for pressing an irreversible
-    hold_after_insertion_s: 1.0  # UN-GUARDED dwell -- the knob for pressing an irreversible
                                  # mate home, or holding it while a force reading settles
     # --- force guard overrides (else force_guard:) ---
     # The commit is where a HIGHER limit belongs: measured 2026-08-15, depth is the strongest
     # predictor of a well-behaved estimate (deepest row > +3.9 mm -> 0.25 deg median error vs
     # 1.62 deg below +2.1 mm), and the guard is what stops the part short.
-    max_force_n: 1.0
-    max_torque_nm: 8.0
-    persistence_s: 1.0
     max_force_n: 1.0
     max_torque_nm: 8.0
     persistence_s: 1.0
@@ -467,7 +463,7 @@ estimation:
   # rawcap wrench representation -- the 2026-08-09 offline winners. Fall back to the classic
   # setup with: manifold_csv ./configs/data/banana_manifold_20260807_clean.csv,
   # wrench_representation unit, s_force 3.0, s_torque 1.0.
-  manifold_csv: ./configs/data/bnc_manifold_4_fixed.csv
+  manifold_csv: ./configs/data/bnc_manifold_v4_fixed.csv
   wrench_representation: rawcap
   # rawcap SATURATION: the wrench feature is unit(f) x min(|f| / rawcap_force_ref_n,
   # rawcap_cap) -- magnitude in units of the reference, CAPPED at rawcap_cap. Saturation
@@ -478,7 +474,7 @@ estimation:
   rawcap_force_ref_n: 10.0
   rawcap_torque_ref_nm: 1.0
   rawcap_cap: 3.0
-  scaling_constant_deg_to_mm: 1.0
+  scaling_constant_deg_to_mm: 0.25
   # PER-DIMENSION pose weights, ON TOP of the unit scaling above: the scaling constant stays
   # the mm <-> deg CONVERSION, dim_weights say how much each dimension MATTERS relative to the
   # others in the match (partial dicts fill with 1.0; delete the block for the uniform metric).
@@ -497,7 +493,7 @@ estimation:
     y_mm: 1.0
     z_mm: 1.0
     roll_deg: 1.0
-    pitch_deg: 10.0
+    pitch_deg: 1.0
     yaw_deg: 1.0
   # Also measured on the same 49 attempts, in THIS family (rawcap, uniform weights):
   # s_force 2.0 / s_torque 0.0 gives median |remaining pitch| 2.00 deg at a 92% win rate,
@@ -524,13 +520,19 @@ estimation:
     tz: 1.0
   min_force_n: 3.0
   min_observations: 20
-  estimate_dims: [pitch_deg]
+  # 2026-08-16: z_mm ADDED. Against the goal (|z| < 1 mm AND |pitch| < 1 deg, jointly) a
+  # pitch-only correction has a CEILING OF 0% -- it cannot move z at all, and after the
+  # connector-frame fix the true error carries a median 4.78 mm of z (README section 15). No
+  # amount of tuning reaches the target from [pitch_deg]; measured 0% -> 20% by adding z_mm.
+  estimate_dims: [z_mm, pitch_deg]
   icp_iterations: 20
   num_initial_guesses: 1000
+  # z_mm must span the true correction or the landscape is clipped: _landscape uses
+  # max(init_guess_range[d], 6.0) as the half-width, and the lever arm needs ~8 mm at 5 deg.
   init_guess_range:
     x_mm: 0.0
     y_mm: 0.0
-    z_mm: 0.0
+    z_mm: 10.0
     roll_deg: 0.0
     pitch_deg: 5.0
     yaw_deg: 0.0
@@ -546,7 +548,12 @@ estimation:
   softmax_temp: 0.15
   residual_gate: 1.5
   recency_half_life_frac: 0.0
-  interp_neighbors: 128
+  # 2026-08-16 retune, corrected frame (analysis/bnc_tuning README section 14). k was 128: the
+  # median is flat in k but the fraction within 0.5 deg is 34% at 128 against 44-46% at 8.
+  interp_neighbors: 8
+  # ROWS the dense landscape is built from -- an ACCURACY setting under `commit: argmin`, not a
+  # cost bound. Was a hard-coded 120 in _landscape(); 120 -> 1.00 deg median, 320 -> 0.75 deg.
+  landscape_row_cap: 320
   # kNN kernel bandwidth: tau = interp_softness x the map's median point spacing, weights
   # exp(-(d - d_nearest)/tau). It slides between hard nearest-neighbour (-> 0) and a flat
   # average of all k (large). At 1.0 on the BNC map the top neighbour carries ~11% of the

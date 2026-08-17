@@ -124,11 +124,39 @@ def _observe(robot, T_tool0_conn, T_base_tconn):
     return list(xyz * 1000.0) + list(np.degrees(rpy)) + list(w)
 
 
-def _save_observations(path, rows):
+def _measured(robot, T_true, T_base_tconn):
+    """The MEASURED connector pose wrt the target: encoders + the ground-truth held frame.
+
+    `_observe` logs the BELIEVED pose -- what the estimator consumes, and what it must be scored
+    against. This is the identical quantity with the belief replaced by the truth:
+
+        inverse(T_base_target) @ tool0 @ T_true      vs      ... @ T_believed
+
+    It is logged alongside so an observation row can be added to a CONTACT MAP directly. Without
+    it the only route to the true pose is `believed . inverse(err_before)`, which silently
+    inherits whatever error frames.yaml's held-frame entry carries -- and that entry has been
+    wrong before (README section 13). This column is computed from the same encoder read in the
+    same cycle, so it needs no reconstruction and no trust in a stored error."""
+    xyz, rpy = matrix_to_xyzrpy(inverse(T_base_tconn) @ robot.tool0() @ T_true)
+    return list(xyz * 1000.0) + list(np.degrees(rpy))
+
+
+# The measured block sits AFTER the 12 estimator columns, so anything reading the first twelve
+# positionally still works and anything reading by name gains a column it can ask for.
+MEAS_COLS = [f'measured_connector_target_{s}' for s in _ERR]
+
+
+def _save_observations(path, rows, meas=None):
+    """rows = the 12 estimator columns (believed pose + wrench). `meas` = the optional parallel
+    list of 6 MEASURED pose values per row, appended as MEAS_COLS."""
     with open(path, 'w', newline='') as fh:
         w = _csv.writer(fh)
-        w.writerow(POSE_COLS + FORCE_COLS + TORQUE_COLS)
-        w.writerows(rows)
+        if meas is None:
+            w.writerow(POSE_COLS + FORCE_COLS + TORQUE_COLS)
+            w.writerows(rows)
+            return
+        w.writerow(POSE_COLS + FORCE_COLS + TORQUE_COLS + MEAS_COLS)
+        w.writerows([list(r) + list(m) for r, m in zip(rows, meas)])
 
 
 # The solution check's signal names (urlab/skills/solution_check.py) -- fixed here so the
@@ -142,6 +170,11 @@ def _fieldnames(dims):
     return (['trial', 'attempt', 'n_observations', 'seated', 'check_pos_mm', 'check_rot_deg']
             + [f'seat_{s}' for s in _ERR] + ['success']
             + [f'inj_{s}' for s in _ERR]
+            # The BELIEF this attempt ran with (tool0 <- connector). It is constant across the
+            # attempt and steps only after each estimate, so a per-attempt row is its natural
+            # home. Logged because it is otherwise unrecoverable: the observation CSV holds
+            # inverse(T_target) @ tool0 @ T_believed, which cannot be unpicked without it.
+            + [f'believed_{s}' for s in _ERR]
             + [f'err_before_{s}' for s in _ERR] + ['err_before_pos_mm', 'err_before_rot_deg']
             + [f'corr_{d}' for d in dims] + [f'sigma_{d}' for d in dims]
             + [f'sigma_within_{d}' for d in dims]
@@ -161,7 +194,7 @@ def _fieldnames(dims):
             + ['converged', 'diverged'])
 
 
-def _landscape(estimator, vec6, w6, max_pts=2600, row_cap=120, raw=None):
+def _landscape(estimator, vec6, w6, max_pts=2600, row_cap=None, raw=None):
     """The ICP energy over a DENSE GRID of candidate corrections, in the estimator's own metric.
 
     The multi-start solver never builds this -- it only samples it from random starts -- so the
@@ -172,8 +205,16 @@ def _landscape(estimator, vec6, w6, max_pts=2600, row_cap=120, raw=None):
     argmin the grid's best correction, `mix` the MIXTURE over the landscape's modes (skills/
     mixture.py -- the honest uncertainty when rivals exist) and `support` the k-th-neighbour
     distance at the argmin over the manifold's own median, so a correction picked from the EDGE
-    of the map is visible as such. Cost is bounded by subsampling grid and rows."""
+    of the map is visible as such. Cost is bounded by subsampling grid and rows.
+
+    row_cap defaults to estimation.landscape_row_cap (320). It used to be a hard-coded 120
+    justified as "bound the cost; the shape is unaffected" -- that was WRONG, and under
+    `commit: argmin` it was costing accuracy directly, because then this curve IS the estimate.
+    Measured on the 59 corrected BNC attempts: 120 rows gives a 1.00 deg median that a fixed
+    constant matches, 320 gives 0.75 deg and beats that control (README section 14)."""
     dims = estimator.estimate_dims
+    if row_cap is None:
+        row_cap = int(getattr(estimator, 'landscape_row_cap', 320))
     halves = [max(float(estimator.init_range.get(d, 8.0)), 6.0 if d.endswith('_mm') else 10.0)
               for d in dims]
     n_per = max(int(round(max_pts ** (1.0 / max(len(dims), 1)))), 9)
@@ -188,7 +229,7 @@ def _landscape(estimator, vec6, w6, max_pts=2600, row_cap=120, raw=None):
         if raw is not None and len(raw[0]) != len(v6):
             raw = None                             # stale stash: skip re-basing, never guess
     sel = None
-    if len(v6) > row_cap:                          # bound the cost; the shape is unaffected
+    if len(v6) > row_cap:      # EVENLY SPACED, not the first row_cap: coverage beats density
         sel = np.linspace(0, len(v6) - 1, row_cap).astype(int)
         v6, w = v6[sel], w[sel]
     if raw is not None and sel is not None:
@@ -1148,12 +1189,15 @@ def build_and_run(cfg, robot, camera, args):
         settle_s = settle if settle is not None else settle_shared
         hold_s = hold if hold is not None else hold_shared
         sv, sw = speed if speed is not None else (None, None)
-        obs, cnt = [], [0]
+        obs, meas, cnt = [], [], [0]
 
         def log_cb():
             cnt[0] += 1
             if cnt[0] % decim == 0:
+                # BELIEVED pose (what the estimator sees) and MEASURED pose (ground truth), from
+                # the SAME encoder read, so the pair is consistent to the cycle.
                 obs.append(_observe(robot, T_bel, T_base_tconn))
+                meas.append(_measured(robot, T_true, T_base_tconn))
 
         adm_ctl.reset()
         adm_ctl.warmup(refs[0], tare_fn=tare)
@@ -1214,7 +1258,7 @@ def build_and_run(cfg, robot, camera, args):
         T_out = _retract_ref(last_ref, T_bel, retract_m)
         adm_ctl.ramp(last_ref, T_out, seg_time(last_ref, T_out, rv_mm_s, rw_deg_s), guard=None)
         adm_ctl.stop()
-        return obs, seated, lin, ang, seat6, stops
+        return obs, meas, seated, lin, ang, seat6, stops
 
     out_dir = os.path.join(cfg.get('data_dir', 'data'), 'experiments',
                            f'estimator_eval_{datetime.now():%Y%m%d_%H%M%S}')
@@ -1222,12 +1266,27 @@ def build_and_run(cfg, robot, camera, args):
     log.info('Experiment folder: %s', out_dir)
     try:
         import json
-        with open(os.path.join(out_dir, 'eval_config.json'), 'w') as fh:
-            json.dump({'held_frame': held_name, 'trajectory_csv': csv_in,
-                       'num_trials': num_trials, 'eval': ev,
-                       'estimation': cfg.section('estimation'),
-                       'compliance': cfg.section('compliance'),
-                       'force_guard': cfg.section('force_guard')}, fh, indent=2, default=str)
+        # GROUND-TRUTH FRAMES, recorded once because they are constant for the whole run and are
+        # otherwise UNRECOVERABLE from the logs: the observation CSV holds only their combined
+        # effect and trials.csv only their difference (err_before). Without these a later reader
+        # cannot reconstruct a true pose, or check the ones it was given, without re-reading a
+        # frames.yaml that may since have changed -- which is exactly how a silent frame error
+        # survives (README section 13).
+        _tx, _tr = matrix_to_xyzrpy(T_base_tconn)
+        _hx, _hr = matrix_to_xyzrpy(T_true)
+        json.dump({'held_frame': held_name, 'trajectory_csv': csv_in,
+                   'num_trials': num_trials, 'eval': ev,
+                   'ground_truth_frames': {
+                       'frames_path': str(tool_frames.frames_path(cfg)),
+                       'target_base_from_connector': {      # base_link <- target connector
+                           'xyz_mm': list(np.round(_tx * 1000.0, 6)),
+                           'rpy_deg': list(np.round(np.degrees(_tr), 6))},
+                       'held_tool0_from_connector_true': {  # tool0 <- connector, GROUND TRUTH
+                           'xyz_mm': list(np.round(_hx * 1000.0, 6)),
+                           'rpy_deg': list(np.round(np.degrees(_hr), 6))}},
+                   'estimation': cfg.section('estimation'),
+                   'compliance': cfg.section('compliance'),
+                   'force_guard': cfg.section('force_guard')}, fh, indent=2, default=str)
     except Exception as exc:                       # noqa: BLE001
         log.warning('eval_config.json skipped (%s)', exc)
     fout = open(os.path.join(out_dir, 'trials.csv'), 'w', newline='')
@@ -1282,7 +1341,7 @@ def build_and_run(cfg, robot, camera, args):
                 # the usual per-waypoint noise when that is enabled.
                 passes = ([list(o) for o in sweep_offsets] if col_mode == 'offset_sweep'
                           else [None])
-                obs, attempt_stops = [], []
+                obs, meas, attempt_stops = [], [], []
                 seated, lin, ang, seat6 = False, 0.0, 0.0, [0.0] * 6
                 for pi, poff in enumerate(passes):
                     bias = poff                    # sweep offset, or None for a plain pass
@@ -1307,9 +1366,10 @@ def build_and_run(cfg, robot, camera, args):
                     seed_q = q
 
                     # ASSEMBLE under admittance (same law as the pick app), check, retract.
-                    obs_i, seated, lin, ang, seat6, stops_i = run_insertion(
+                    obs_i, meas_i, seated, lin, ang, seat6, stops_i = run_insertion(
                         adm, refs, T_believed, peck=(col_mode == 'peck'))
                     obs.extend(obs_i)
+                    meas.extend(meas_i)
                     attempt_stops.extend(stops_i)
                     if poff is not None:
                         log.info('  sweep %d/%d (pitch %+.1f deg, z %+.1f mm): %d obs, '
@@ -1326,7 +1386,8 @@ def build_and_run(cfg, robot, camera, args):
 
                 if save_obs:
                     _save_observations(os.path.join(
-                        out_dir, f'trial_{trial:03d}_attempt_{attempt:02d}_observations.csv'), obs)
+                        out_dir, f'trial_{trial:03d}_attempt_{attempt:02d}_observations.csv'),
+                        obs, meas)
 
                 # ESTIMATE -- always, even on the last attempt: the estimate IS the thing under
                 # test, so every attempt's observations get scored. With accumulation the input
@@ -1358,6 +1419,9 @@ def build_and_run(cfg, robot, camera, args):
                        'err_before_pos_mm': errb_pos, 'err_before_rot_deg': errb_rot}
                 row.update({f'seat_{s}': v for s, v in zip(_ERR, seat6)})
                 row.update({f'inj_{s}': v for s, v in zip(_ERR, inj)})
+                _bx, _br = matrix_to_xyzrpy(T_believed)
+                row.update({f'believed_{s}': v for s, v in zip(
+                    _ERR, list(_bx * 1000.0) + list(np.degrees(_br)))})
                 row.update({f'err_before_{s}': v for s, v in zip(_ERR, errb)})
                 if T_corr_mm is None:
                     log.warning('Estimation skipped (%s) -- belief unchanged.', info)
@@ -1615,13 +1679,14 @@ def build_and_run(cfg, robot, camera, args):
                     log.warning('IK/approach failed for the final insertion of trial %d.', trial)
                 else:
                     seed_q = q
-                    obs, seated, lin, ang, seat6, _ = run_insertion(
+                    obs, meas, seated, lin, ang, seat6, _ = run_insertion(
                         adm_final, refs, T_believed, guard_ctl=guard_final,
                         settle=fi_settle, hold=fi_hold,
                         speed=(fi_v, fi_w) if (fi_v or fi_w) else None, pause=fi_pause)
                     if save_obs:
                         _save_observations(os.path.join(
-                            out_dir, f'trial_{trial:03d}_final_insertion_observations.csv'), obs)
+                            out_dir, f'trial_{trial:03d}_final_insertion_observations.csv'),
+                            obs, meas)
                     errf, errf_pos, errf_rot = _gt_error(T_true, T_believed)
                     # depth actually reached, in the TRUE frame (the basin's own coordinate)
                     depth = float('nan')
@@ -1649,6 +1714,9 @@ def build_and_run(cfg, robot, camera, args):
                                  '-> %s', depth, basin.seat_depth,
                                  'SEATED' if seated_basin else 'NOT seated')
                     frow.update({f'seat_{s}': v for s, v in zip(_ERR, seat6)})
+                    _bx, _br = matrix_to_xyzrpy(T_believed)
+                    frow.update({f'believed_{s}': v for s, v in zip(
+                        _ERR, list(_bx * 1000.0) + list(np.degrees(_br)))})
                     frow.update({f'err_before_{s}': v for s, v in zip(_ERR, errf)})
                     writer.writerow(frow)
                     fout.flush()

@@ -2813,6 +2813,103 @@ def test_bnc_clocking_geometry():
             'a retract leg is a pure translation -- it must not rotate the tool'
 
 
+def test_bnc_insertion_holds_the_seat():
+    """The insertion meant to SEAT must not retract.
+
+    It used to retract unconditionally, which was wrong twice over: the operator was asked whether
+    the mate had succeeded AFTER the gripper had already backed 30 mm out along the connector's own
+    -X (taking the connector with it, since the gripper holds the cable), and cable clocking then
+    read that retracted pose as its "engaged pose" -- anchoring the screw axis and the entire
+    clocking sequence 30 mm away from the actual mate.
+
+    So: retract is now the CALLER's decision, taken after the verdict. Intermediate sweep passes
+    still back off (the next one realigns to a different offset's start); the last pass, a
+    successful attempt and the final insertion all hold the seat.
+    """
+    src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py')).read()
+    code = '\n'.join(ln for ln in src.splitlines() if not ln.lstrip().startswith('#'))
+    assert 'def retract_from(' in code, \
+        'the escape must be callable on its own so the caller can defer it past the verdict'
+    assert 'retract=True' in code, 'run_insertion must take a retract flag'
+    # the commit holds the seat
+    assert 'pause=fi_pause, retract=False' in code, \
+        'the final insertion must NOT retract -- it is the attempt meant to seat'
+    # intermediate sweep passes still back off, the last one does not
+    assert 'retract=(pi < len(passes) - 1)' in code, \
+        'only intermediate sweep passes should retract'
+    # and the retract for a retry happens after the operator verdict
+    v = code.index("row['success']")
+    r = code.index('retract_from(last_ref, T_tool0_conn)')
+    assert r > v, 'the retry retract must come AFTER the success verdict, not before it'
+
+
+def test_bnc_wiggle_config():
+    """The wiggle mode oscillates in the connector's own axes instead of estimating. Two properties
+    are load-bearing and easy to lose in a retune:
+
+      * THE FREQUENCIES MUST BE MUTUALLY PRIME. Two axes at a rational frequency ratio retrace the
+        same closed Lissajous curve forever, so the wiggle would keep re-probing a ONE-dimensional
+        path through the (z, pitch) rectangle instead of sweeping it. Checked as gcd == 1 on the
+        integer frequency ratio, and then checked for real by tracing the waveform and confirming it
+        fills the rectangle in both axes.
+      * THE SAMPLE RATE MUST NOT ALIAS. The reference is rebuilt at sample_rate_hz, so a frequency
+        above a quarter of it produces a slower wiggle than configured -- silently.
+    """
+    import math
+
+    import numpy as np
+    import yaml
+    with open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')) as fh:
+        a = yaml.safe_load(fh)['assembly']
+    assert a['insertion_mode'] in ('estimate', 'wiggle')
+    w = a['wiggle']
+    dims = ('x_mm', 'y_mm', 'z_mm', 'roll_deg', 'pitch_deg', 'yaw_deg')
+    amp = {d: float(w['amplitude'][d]) for d in dims}
+    frq = {d: float(w['frequency_hz'][d]) for d in dims}
+
+    # only z and pitch oscillate, at the requested magnitudes
+    assert amp['z_mm'] == 5.0 and amp['pitch_deg'] == 5.0, amp
+    for d in ('x_mm', 'y_mm', 'roll_deg', 'yaw_deg'):
+        assert amp[d] == 0.0, f'{d} must not oscillate (got {amp[d]})'
+    active = [d for d in dims if amp[d] != 0.0]
+    for d in active:
+        assert frq[d] > 0, f'{d} has amplitude but no frequency -- that is a constant offset'
+
+    # mutually prime, as integers on a common 0.01 Hz grid
+    ints = [int(round(frq[d] * 100)) for d in active]
+    assert math.gcd(*ints) == max(1, math.gcd(*ints)) and math.gcd(*ints) in (1, 10), ints
+    g = math.gcd(*ints) / 100.0
+    assert 1.0 / g >= 5.0, f'the pattern closes every {1.0 / g:.1f} s -- too short to sweep'
+
+    # no aliasing
+    fmax = max(frq[d] for d in active)
+    assert float(w['sample_rate_hz']) >= 4.0 * fmax, \
+        f"sample_rate_hz {w['sample_rate_hz']} aliases a {fmax} Hz oscillation"
+
+    # engagement must be reachable inside the commanded push, and the push must be PAST the mate
+    assert float(w['target'][0]) > 0, 'target x must be past the mate plane so the spring presses'
+    assert 0 < float(w['engage_advance_mm']) <= float(w['target'][0]) + 1e-9, \
+        'engage_advance_mm must be reachable within the commanded target x'
+
+    # noise off by default
+    assert w['noise']['enabled'] is False and all(float(v) == 0.0 for v in w['noise']['std'])
+
+    # THE REAL CHECK: trace the waveform and confirm it sweeps the rectangle, not a line
+    t = np.arange(0.0, 1.0 / g, 1.0 / float(w['sample_rate_hz']))
+    z = amp['z_mm'] * np.sin(2 * np.pi * frq['z_mm'] * t)
+    p = amp['pitch_deg'] * np.sin(2 * np.pi * frq['pitch_deg'] * t)
+    assert z.max() > 0.9 * amp['z_mm'] and z.min() < -0.9 * amp['z_mm'], 'z never reaches full swing'
+    assert p.max() > 0.9 * amp['pitch_deg'] and p.min() < -0.9 * amp['pitch_deg'], 'pitch likewise'
+    # a degenerate (rationally locked) pair would leave most 2-D cells unvisited
+    H, _xe, _ye = np.histogram2d(z, p, bins=6, range=[[-amp['z_mm'], amp['z_mm']],
+                                                     [-amp['pitch_deg'], amp['pitch_deg']]])
+    filled = float((H > 0).mean())
+    assert filled >= 0.4, \
+        f'the (z, pitch) trace visits only {filled:.0%} of the rectangle -- frequencies are locked'
+    assert abs(float(np.corrcoef(z, p)[0, 1])) < 0.5, \
+        'z and pitch are strongly correlated -- the wiggle is a line, not a sweep'
+
+
 def test_bnc_clocking_enable_gating():
     """Both post-mate maneuvers are OPTIONAL and independently switchable, with one dependency:
     collar clocking requires cable clocking, and that combination is REJECTED rather than silently

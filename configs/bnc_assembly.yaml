@@ -286,8 +286,76 @@ assembly:
 
   # (Assembly-phase speeds = the global speed: block x speed.phase_scale.assemble.)
 
-  # The loop: assemble -> check -> retract -> estimate -> realign, at most this many attempts.
+  # The loop: assemble -> check -> estimate -> realign, at most this many attempts. (An attempt
+  # that is about to be RETRIED backs off first; one the operator calls successful does NOT -- it
+  # holds the seat, which is what makes that pose the ENGAGED pose the clocking maneuvers use.)
   max_attempts: 1
+
+  # ---- INSERTION MODE -----------------------------------------------------------------------
+  # estimate  the original: insert, observe, fit the contact manifold, correct the in-hand belief,
+  #           repeat, then commit with final_insertion. Depends on a map that covers the contact
+  #           states production actually visits.
+  # wiggle    no estimation at all. Drive at ONE fixed target pose and oscillate about it in the
+  #           connector's own axes, letting compliance find the mate the way a person jiggles a
+  #           plug in. Reads no map, fits nothing, never touches the belief -- so none of the
+  #           estimator's failure modes apply. Skips the attempt loop AND final_insertion.
+  insertion_mode: estimate
+
+  wiggle:
+    # TARGET, connector w.r.t. the target connector [x, y, z (mm), roll, pitch, yaw (deg)].
+    # x = +5 mm is PAST the mate plane on purpose: the spring should be pushing home throughout,
+    # with the oscillation superimposed on that push rather than replacing it.
+    target: [5.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # AMPLITUDE per axis, in the same units. Zero disables that axis.
+    amplitude:
+      x_mm: 0.0                  # x is the push direction -- `target` owns it, not the wiggle
+      y_mm: 0.0
+      z_mm: 5.0
+      roll_deg: 0.0
+      pitch_deg: 5.0
+      yaw_deg: 0.0
+    # FREQUENCY per axis (Hz), required wherever the amplitude is non-zero.
+    # MUTUALLY PRIME ON PURPOSE. Two axes at a rational frequency ratio retrace the same closed
+    # Lissajous curve forever, so the wiggle would keep re-probing a ONE-dimensional path through
+    # the (z, pitch) rectangle. 0.7 and 1.1 Hz are 7 and 11 in units of 0.1 Hz -- co-prime, so the
+    # orbit is the longest those frequencies admit and closes only every 10 s, sweeping the
+    # rectangle rather than a line through it. Keep any new pair co-prime for the same reason.
+    frequency_hz:
+      x_mm: 0.0
+      y_mm: 0.0
+      z_mm: 0.7
+      roll_deg: 0.0
+      pitch_deg: 1.1
+      yaw_deg: 0.0
+    # OPTIONAL per-axis white noise on the reference, same units. Off by default: the point of the
+    # wiggle is a KNOWN sweep, and noise trades coverage for irreproducibility. Turn it on to break
+    # a wiggle that keeps stalling in the same place.
+    noise:
+      enabled: false
+      std: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # How often the reference is rebuilt. Must be >= 4x the highest frequency or the sampled sine
+    # is aliased into a slower one -- validated pre-motion. 25 Hz against 1.1 Hz is ~23 samples per
+    # cycle.
+    sample_rate_hz: 25.0
+    max_duration_s: 60.0         # give up after this long without engaging
+    # ENGAGEMENT: measured advance of the connector along the target's +X, checked every servo
+    # cycle so success ENDS the motion. Below `target` x so it can actually be reached.
+    engage_advance_mm: 4.0
+    settle_s: 0.5
+    hold_after_s: 0.0
+    # --- compliance overrides (else the top-level compliance:) ---
+    # Stiff along x to keep pressing home; softer across, so the rocking motion yields to the
+    # socket's lead-in instead of grinding on it.
+    stiffness: [2000.0, 400.0, 400.0, 8.0, 8.0, 8.0]
+    mass: null
+    damping_ratio: null
+    # --- force guard overrides (else the top-level force_guard:) ---
+    # A wiggle presses and rocks against the socket, so this wants "genuinely jammed", not "stop on
+    # contact". A trip ends the wiggle as a FAILURE -- at that point it is stuck, not wiggling.
+    force_guard_enabled: true
+    max_force_n: 30.0
+    max_torque_nm: 8.0
+    persistence_s: 1.0
 
   # LIVE run figure (like estimator_eval's): the cumulative belief corrections, per-attempt
   # residuals (all guesses + aggregated) and the correction phase plot, atomically overwritten

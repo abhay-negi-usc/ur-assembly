@@ -187,7 +187,26 @@ eval:
   # Whatever the mode, the trial ends with ONE zero-noise insertion from the final belief
   # (eval.final_insertion, default ON since 2026-08-13).
   collection:
-    mode: offset_sweep               # attempts | offset_sweep | peck
+    # SAMPLING PARITY. The map is built by apps/uncertain_sampling; observations collected under
+    # different contact physics do not lie on it however good the estimator is. MEASURED
+    # 2026-08-17 against bnc_manifold_v5 (analysis/bnc_tuning/v5_*.py): the map's contact force is
+    # a median 4.5 N and this app's observations were 29.6 N, with half the rows above the rawcap
+    # saturation (30 N) carrying an identical force feature and 255 rows past x = +2 mm at ~90 N
+    # -- depths the map never reaches and the connector cannot physically achieve. The landscape
+    # then put the TRUE correction UPHILL of no-correction in 100% of 25 attempts, every channel
+    # agreeing. The SAME map identifies synthetic errors generated from itself 83-87% of the time,
+    # so the map and the metric were fine and the collection was not.
+    #
+    # true  = collect like uncertain_sampling: one pass per attempt, no un-guarded post-stop
+    #         dwell, no pause. Also logs every compliance/force_guard/speed value that still
+    #         differs from configs/uncertain_sampling.yaml -- those it will NOT change for you,
+    #         because altering an eval's physics is a decision, not a default.
+    # false = the old behaviour, for deliberately collecting off-map data.
+    match_sampling: true
+    # NOTE offset_sweep and peck are REJECTED under match_sampling: uncertain_sampling realises its
+    # misalignment by perturbing the trajectory and driving it ONCE, so both visit contact states
+    # the map does not contain.
+    mode: attempts               # attempts | offset_sweep | peck
     # offset_sweep: commanded offsets [x, y, z (m), roll, pitch, yaw (deg)] in the held part's
     # own frame. null = the default pitch sweep -4..+4 deg in 2 deg steps, other dims zero.
     sweep_offsets: 

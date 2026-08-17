@@ -124,6 +124,67 @@ def _observe(robot, T_tool0_conn, T_base_tconn):
     return list(xyz * 1000.0) + list(np.degrees(rpy)) + list(w)
 
 
+def _report_sampling_divergence(cfg, ref_name='uncertain_sampling.yaml'):
+    """Log every contact-physics setting that differs from apps/uncertain_sampling's config.
+
+    Parity in the CODE is only half of it. The map is a record of contact under a particular
+    stiffness, force limit and approach speed; collect against a different set and the observations
+    describe different physics, which is exactly the failure this whole switch exists for. Those
+    values live in the config and this function cannot responsibly rewrite them -- changing the
+    physics of an eval is the user's decision -- so it reports them and leaves them alone.
+
+    Read from the reference config at run time rather than hardcoded, so it cannot go stale
+    silently. The caveat that carries: this compares against what that file says TODAY, which is
+    not necessarily what the map was actually collected under."""
+    import os as _os
+
+    try:
+        import yaml as _yaml
+        from .. import config as _urconfig
+        p = _urconfig.resolve(cfg, _os.path.join('configs', ref_name))
+        if not _os.path.exists(p):
+            p = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(
+                _os.path.abspath(__file__)))), 'configs', ref_name)
+        if not _os.path.exists(p):
+            log.info('  (no %s to compare against -- match the contact physics by hand)', ref_name)
+            return
+        ref = _yaml.safe_load(open(p)) or {}
+    except Exception as exc:                       # noqa: BLE001 -- never fatal, this is advisory
+        log.info('  (could not read %s: %s)', ref_name, exc)
+        return
+
+    checks = [('compliance', 'stiffness'), ('compliance', 'mass'), ('compliance', 'damping_ratio'),
+              ('compliance', 'settle_s'), ('compliance', 'tare_before'),
+              ('force_guard', 'max_force_n'), ('force_guard', 'max_torque_nm'),
+              ('force_guard', 'persistence_s'),
+              ('speed', 'max_cartesian_translation_mm_s'),
+              ('speed', 'max_cartesian_rotation_deg_s')]
+    diffs = []
+    for blk, key in checks:
+        theirs = (ref.get(blk) or {}).get(key)
+        mine = (cfg.section(blk) or {}).get(key)
+        if theirs is None:
+            continue
+        if isinstance(theirs, list) or isinstance(mine, list):
+            same = list(theirs or []) == list(mine or [])
+        else:
+            try:
+                same = abs(float(theirs) - float(mine)) < 1e-9
+            except (TypeError, ValueError):
+                same = theirs == mine
+        if not same:
+            diffs.append((f'{blk}.{key}', mine, theirs))
+    if not diffs:
+        log.info('  contact physics matches %s exactly.', ref_name)
+        return
+    log.warning('  CONTACT PHYSICS DIFFERS from %s in %d setting(s) -- the map records contact '
+                'under THEIR values, so observations collected under these will sit off it:',
+                ref_name, len(diffs))
+    for name, mine, theirs in diffs:
+        log.warning('    %-42s this run %-28s %s %s', name, str(mine), ref_name.split('.')[0],
+                    str(theirs))
+
+
 def _measured(robot, T_true, T_base_tconn):
     """The MEASURED connector pose wrt the target: encoders + the ground-truth held frame.
 
@@ -1054,6 +1115,54 @@ def build_and_run(cfg, robot, camera, args):
         log.info('Collection mode PECK: %.1f mm back-off on force stop, %.0f s budget per '
                  'attempt.', peck_mm, peck_timeout_s)
 
+    # ---- SAMPLING PARITY ---------------------------------------------------------------------
+    # The map these observations are matched against is built by apps/uncertain_sampling. An
+    # observation collected under DIFFERENT CONTACT PHYSICS does not lie on that map however good
+    # the estimator is, and this is not hypothetical -- measured 2026-08-17 (analysis/bnc_tuning,
+    # v5_*.py), against bnc_manifold_v5:
+    #
+    #   contact force |F|      map p50 4.5 N, p95 21.0 N, 0.0% above 60 N
+    #                          eval p50 29.6 N, p95 103.4 N, 30% above 60 N, max 169 N
+    #   insertion depth x_mm   map p50 -7.61, p99 +0.53, ZERO rows past +2
+    #                          eval p50 -1.70, p99 +2.39, 255 rows past +2 at |F| ~ 90 N
+    #
+    # Consequences, all measured: half the eval rows sit above the rawcap saturation (10 N x 3 =
+    # 30 N) and so carry an IDENTICAL force feature; the deepest rows are physically impossible
+    # (a connector cannot be 10 deg off axis and 3 mm past the mate plane -- the gripper advanced
+    # while the connector jammed and the cable deflected, so the logged pose is FK through a
+    # rigidity assumption that had failed); and the resulting landscape put the TRUE correction
+    # UPHILL of no-correction in 100% of 25 attempts, with every one of the 12 channels agreeing.
+    # The same map identifies synthetic errors generated from ITSELF 83-87% of the time, so
+    # neither the map nor the metric is at fault. The collection was.
+    #
+    # match_sampling makes an observation pass follow uncertain_sampling's loop as closely as this
+    # app's extra machinery allows. Already identical, because run_insertion was derived from that
+    # loop: the admittance law, the guarded ramp, the break on the force stop, servo-rate logging
+    # at the same decimation, the guarded+logged settle, and the un-guarded compliant retract along
+    # the part's own -X. What this switch removes is everything uncertain_sampling has NO
+    # counterpart for:
+    #
+    #   * the UN-GUARDED post-stop dwell (compliance.hold_after_insertion_s). uncertain_sampling
+    #     settles guarded and logged, then retracts. This press is unlogged, so it adds load
+    #     without adding evidence -- and it is the most likely source of the force gap above.
+    #   * the PAUSE at the seat (final_insertion.pause_s).
+    #   * PECK and OFFSET_SWEEP. uncertain_sampling realises its misalignment by perturbing the
+    #     trajectory and driving it ONCE; both of these visit contact states it never records.
+    #
+    # It cannot reach across into the config, so the compliance/force_guard/speed blocks still have
+    # to be matched by hand -- the divergences are logged below rather than silently corrected,
+    # because changing this app's physics to match is the USER's call, not this function's.
+    match_sampling = bool(col.get('match_sampling', True))
+    if match_sampling:
+        if col_mode != 'attempts':
+            log.error("eval.collection.match_sampling is on, so mode must be 'attempts': "
+                      "uncertain_sampling drives ONE perturbed pass per trial, and %r visits "
+                      "contact states the map does not contain. Set match_sampling false to "
+                      "collect data that is deliberately off-map.", col_mode)
+            return False
+        log.info('SAMPLING PARITY on: one pass per attempt, no un-guarded dwell, no pause.')
+        _report_sampling_divergence(cfg)
+
     # ---- DIVERGENCE BOUNDS (eval.abort_bounds): terminate the TRIAL when the belief error
     # left after an update exceeds them. A diverged belief drives every later pass into contact
     # the map has never seen (the drift-out-of-distribution spiral) and, at 15 deg, toward the
@@ -1104,6 +1213,10 @@ def build_and_run(cfg, robot, camera, args):
     fi_w = None if fi.get('speed_rotation_deg_s') is None \
         else float(fi['speed_rotation_deg_s'])
     fi_pause = float(fi.get('pause_s', 0.0) or 0.0)
+    if match_sampling and fi_pause > 0:
+        # uncertain_sampling never stops at the seat: settle, then retract.
+        log.warning('SAMPLING PARITY: ignoring final_insertion.pause_s (%.1f s).', fi_pause)
+        fi_pause = 0.0
     fin = fi.get('trajectory_noise', {}) or {}
     fi_noise_on = bool(fin.get('enabled', False))
     fi_noise_std = [float(v) for v in (fin.get('std') or [0.0] * 6)]
@@ -1149,6 +1262,15 @@ def build_and_run(cfg, robot, camera, args):
     if hold_shared < 0:
         log.error('compliance.hold_after_insertion_s must be >= 0 (got %.2f).', hold_shared)
         return False                               # bad values fail HERE, pre-motion
+    if match_sampling and hold_shared > 0:
+        # uncertain_sampling has no un-guarded dwell: it settles GUARDED and LOGGED, then
+        # retracts. Pressing on with the guard off after the stop is the single behaviour most
+        # likely to have produced the measured force gap (map |F| p50 4.5 N vs eval 29.6 N), and
+        # because it is unlogged it buys no evidence in exchange.
+        log.warning('SAMPLING PARITY: ignoring compliance.hold_after_insertion_s (%.1f s) for '
+                    'observation passes -- uncertain_sampling has no un-guarded dwell.',
+                    hold_shared)
+        hold_shared = 0.0
     if hold_shared > 0:
         log.info('Post-insertion dwell: %.1f s of UN-guarded hold at the stop after every '
                  'insertion (not logged as observations). eval.final_insertion may override '

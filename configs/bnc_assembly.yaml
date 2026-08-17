@@ -215,6 +215,17 @@ speed:
     standoff: 1.0    # the move to stand-off + the per-attempt realign moveJs
     assemble: 1.2      # the insertion reference ramp
     retract: 4.0       # the between-attempt retract + the release escape
+    # POST-MATE CLOCKING, one scale per maneuver. These pace the CONTACT ramps; the free-space
+    # moves inside a maneuver (the retry realign, the collar align) stay on standoff/retract like
+    # every other positioning move in this app. NOTE a non-null speed_translation_mm_s /
+    # speed_rotation_deg_s in the maneuver's own block OVERRIDES its scale entirely -- they ship
+    # null so these are what actually govern.
+    # 0.12 x the global caps = ~3 mm/s and ~11 deg/s: a deliberate screw the cams can follow and
+    # the guard can react to. One scale multiplies BOTH caps, which is why 0.12 was picked -- it
+    # lands translation and rotation where they are both wanted at once.
+    cable_clock: 0.12    # the bayonet screw stroke
+    collar_clock: 0.12   # the collar turn
+    clock_retract: 2.0   # the shared two-leg escape (free space, gripper already clear)
 
 move_timeout_s: 60.0
 settle_s: 0.5
@@ -394,6 +405,123 @@ assembly:
       enabled: false
       std: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   # [x, y, z (m), roll, pitch, yaw (deg)]
       smooth_window: 10
+
+  # ===========================================================================================
+  # POST-MATE CLOCKING -- runs only after the operator calls the assembly successful.
+  # ===========================================================================================
+  # STATE VOCABULARY, in order (see urlab/apps/bnc_assembly.py):
+  #   ENGAGED    the initial assembly mated the connector -- where the estimate/insert loop ends
+  #   SEATED     cable clocking succeeded: the bayonet cams pulled the connector home
+  #   LOCKED     collar clocking succeeded: the locking collar has been turned
+  #   ASSEMBLED  all of the above; the connector/cable is done
+  # Each maneuver advances the state by one and the app walks the progression, so it cannot report
+  # LOCKED for a connector that was never SEATED. Disabling collar_clocking caps a run at SEATED:
+  # the configured sequence still succeeds, but the run is NOT reported as assembled, because a
+  # seated-but-unlocked BNC can back out.
+  # CABLE CLOCKING: the bayonet screw. Rotate about the connector's +X while pushing along that
+  # same axis, aiming at a VIRTUAL target past where the connector can physically go -- so
+  # compliance follows whatever path the bayonet cams allow instead of fighting a pose the part
+  # cannot reach.
+  #
+  # THE BELIEF RESET, first thing this maneuver does: the mate is made, so the connector's pose is
+  # known from a PHYSICAL CONSTRAINT (it is AT assembly.target_frame) rather than estimated. That
+  # replaces the estimated in-hand belief, which is what makes the screw axis the target's +X
+  # exactly instead of inheriting the accumulated in-hand error. The log prints how far the belief
+  # moved -- a large shift there is a useful read on how wrong the estimate had been.
+  cable_clocking:
+    enabled: true
+    rotation_deg: 90.0            # + about the CONNECTOR's +X
+    # PUSH: how far past the engaged pose the virtual target aims, along the connector +X. This is
+    # a target, not a prediction -- the connector advances as far as the cams allow and the
+    # compliant deflection absorbs the rest. TUNE: too small and the cams never engage; too large
+    # and the spring loads the mate harder than needed (deflection = push x stiffness).
+    push_mm: 5.0
+    # SUCCESS: measured advance of the connector along the ENGAGED frame's +X, read from the
+    # MEASURED arm pose (never the commanded reference -- under admittance the difference between
+    # them IS the signal here). Checked every servo cycle, so reaching it ENDS the rotation early.
+    # TUNE together with push_mm: this must be reachable, i.e. <= what the cams actually pull.
+    # ...and it is CUMULATIVE across retries, because a retry does not give back progress.
+    success_advance_mm: 5.0
+    max_tries: 3
+    # WHAT A RETRY DOES -- a REGRASP, never an unscrew. The gripper has turned with the cable, so
+    # the stroke cannot just be repeated; undoing it would hand back whatever the cams gained. So
+    # the gripper OPENS, returns to the SAVED ENGAGED POSE, RE-GRIPS (counts-checked), and repeats
+    # the identical stroke. The connector is captive in the socket and keeps its progress while the
+    # gripper travels -- a ratchet handle taking a fresh bite. Tries therefore ACCUMULATE, which is
+    # why success_advance_mm is measured from the original engaged pose and not per try.
+    open_gripper_after: true      # the FINAL release, after success or max tries -- then the escape
+    settle_s: 0.5                 # compliant settle at whatever pose the screw reached
+    hold_after_s: 0.0             # extra un-guarded dwell on top of settle_s
+    # TARE at warm-up. OFF here, unlike the insertion, because the arm is standing in a MATED,
+    # LOADED pose when clocking starts: re-zeroing the F/T there defines the mate load as zero, so
+    # the guard would only ever see force ADDED by the screw and the absolute limit below would
+    # mean nothing. Left off, the guard sees true force; the cost is that the spring yields a
+    # little to the standing mate load during warm-up. Turn on if that transient matters more.
+    tare_before: false
+    # PACING. null = speed.max_cartesian_* x speed.phase_scale.cable_clock, which is where this is
+    # tuned (0.12 -> ~11 deg/s, ~3 mm/s). Set a number here only to break the two apart -- one
+    # phase scale multiplies both caps, so an unusual rotation:translation ratio needs these.
+    speed_rotation_deg_s: null
+    speed_translation_mm_s: null
+    # --- compliance overrides (else the top-level compliance:) ---
+    # Stiff along x (press the cams home) and soft in rotation about x (let the bayonet steer the
+    # roll rather than forcing it) -- the whole point of aiming at a virtual target.
+    stiffness: [2000.0, 500.0, 500.0, 5.0, 10.0, 10.0]
+    mass: null
+    damping_ratio: null
+    # --- force guard overrides (else the top-level force_guard:) ---
+    # NOT optional in practice: force_guard: is tuned for a light probing insertion (5 N) and a
+    # deliberate press-and-twist exceeds that on the first cycle, so inheriting it would mean the
+    # screw never runs. Set for "stop if genuinely jammed", not "stop on contact".
+    # (force_guard_enabled, not `enabled` -- `enabled` above is this MANEUVER's own switch.)
+    force_guard_enabled: true
+    max_force_n: 30.0
+    max_torque_nm: 8.0
+    persistence_s: 1.0
+
+  # COLLAR CLOCKING: grasp the locking collar and turn it. Runs ONLY if cable clocking succeeded
+  # (it needs the connector pose that maneuver establishes). The opened gripper aligns its CLOSED
+  # fingertip frame with the collar frame, closes, and turns about the BELIEVED connector frame's
+  # +X -- an axis fixed IN SPACE, so the fingers orbit the collar instead of scrubbing across it.
+  collar_clocking:
+    enabled: true
+    # The collar frame = the connector (cable junction) frame translated this far along its +X.
+    collar_offset_mm: 25.0
+    rotation_deg: 90.0
+    settle_s: 0.5
+    tare_before: false            # see cable_clocking.tare_before -- same reasoning
+    # null = the global caps x speed.phase_scale.collar_clock (see cable_clocking for why).
+    speed_rotation_deg_s: null
+    speed_translation_mm_s: null
+    # --- compliance overrides ---
+    # Softer than the screw: this turns a ring that is already captive, so it should yield rather
+    # than force a mis-estimated axis.
+    stiffness: [500.0, 500.0, 500.0, 5.0, 10.0, 10.0]
+    mass: null
+    damping_ratio: null
+    # --- force guard overrides ---
+    # A collar that has reached its lock STOPS TURNING, so a trip here is the intended end state
+    # as often as it is a jam -- the app logs the achieved angle and does not call it a failure.
+    force_guard_enabled: true
+    max_force_n: 30.0
+    max_torque_nm: 8.0
+    persistence_s: 1.0
+    # TODO: grasp verification + failure recovery on the close (agreed, not yet implemented) --
+    # a missed collar currently turns an empty gripper.
+
+  # THE SHARED ESCAPE, after either path -- a failed screw and a finished collar turn leave the
+  # arm in the same place. Two guarded straight legs, NOT the compliant retract used between
+  # attempts: the part is released by now, so there is no held connector to thread out along its
+  # own axis and the escape belongs to the gripper and the fixture instead.
+  clocking_retract:
+    # Leg 1, in the GRIPPER's own (tool0) frame: -Z lifts the open fingers straight off the
+    # connector. (tool0 +Z points from the flange toward the fingertips -- see fingertip_grasp.)
+    gripper_axis: [0.0, 0.0, -1.0]
+    gripper_distance_m: 0.100
+    # Leg 2, in the TARGET CONNECTOR frame (assembly.target_frame): -X backs away from the socket
+    # along the insertion axis.
+    target_axis: [-1.0, 0.0, 0.0]
+    target_distance_m: 0.100
 
   # ---- MATCH DIAGNOSTICS: why is the argmin not the truth? ---------------------------------
   # Per attempt, a 6-panel figure (trial_XXX_attempt_YY_match.png) comparing the COMMITTED
@@ -637,11 +765,14 @@ compliance:
 
 force_guard:
   enabled: true
-  max_force_n: 5.0
+  # 2026-08-17: raised 5 -> 30 N with persistence 1.0 s (was 5.0 s). 5 N stopped the probing
+  # insertion on almost any contact, and 5 s of travel at the insertion speed is ~25 mm -- far
+  # enough that the guard was no longer stopping the thing it was watching for.
+  max_force_n: 30.0
   max_torque_nm: 8.0
   # The limit must hold CONTINUOUSLY this long before the guard trips (0 = instant, the
   # original). Raw F/T spikes over the limit for a few samples on every hard contact
   # transient; 0.5 s distinguishes "clipped the rim for 30 ms" from "genuinely jammed".
   # Travel cost while waiting: ~2.5 mm at the 5 mm/s insertion speed.
-  persistence_s: 5.0
+  persistence_s: 1.0
 

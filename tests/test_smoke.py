@@ -13,6 +13,8 @@ import sys
 
 import numpy as np
 
+from urlab.skills import trajectory as traj_mod
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
@@ -2843,74 +2845,91 @@ def test_bnc_insertion_holds_the_seat():
     assert r > v, 'the retry retract must come AFTER the success verdict, not before it'
 
 
-def test_bnc_wiggle_config():
-    """The wiggle mode oscillates in the connector's own axes instead of estimating. Two properties
-    are load-bearing and easy to lose in a retune:
+def test_bnc_engage_config():
+    """The engage block's oscillation must be able to do its job. Four ways it silently cannot.
 
-      * THE FREQUENCIES MUST BE MUTUALLY PRIME. Two axes at a rational frequency ratio retrace the
-        same closed Lissajous curve forever, so the wiggle would keep re-probing a ONE-dimensional
-        path through the (z, pitch) rectangle instead of sweeping it. Checked as gcd == 1 on the
-        integer frequency ratio, and then checked for real by tracing the waveform and confirming it
-        fills the rectangle in both axes.
-      * THE SAMPLE RATE MUST NOT ALIAS. The reference is rebuilt at sample_rate_hz, so a frequency
-        above a quarter of it produces a slower wiggle than configured -- silently.
+      * MUTUALLY PRIME frequencies. A rational ratio retraces one closed Lissajous path forever,
+        so the oscillation re-probes a ONE-dimensional line through the (z, pitch) rectangle
+        instead of sweeping it.
+      * NO ALIASING. The reference is rebuilt at sample_rate_hz; a frequency above a quarter of
+        that produces a slower oscillation than configured, silently.
+      * WHOLE CYCLES INSIDE THE INSERTION. This one is unique to engage: the insertion lasts
+        path/speed_mm_s, and a frequency that completes less than one cycle in that time is a
+        constant OFFSET, not a wiggle. The standalone wiggle had no such constraint because it
+        ran on its own timeout.
+      * AMPLITUDE WITHOUT FREQUENCY is a constant offset too, and belongs in the trajectory.
     """
     import math
 
-    import numpy as np
     import yaml
     with open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')) as fh:
         a = yaml.safe_load(fh)['assembly']
-    assert a['insertion_mode'] in ('estimate', 'wiggle')
-    w = a['wiggle']
-    dims = ('x_mm', 'y_mm', 'z_mm', 'roll_deg', 'pitch_deg', 'yaw_deg')
-    amp = {d: float(w['amplitude'][d]) for d in dims}
-    frq = {d: float(w['frequency_hz'][d]) for d in dims}
+    assert a['insertion_mode'] in ('estimate', 'engage'), \
+        "the standalone 'wiggle' mode is retired"
+    assert 'wiggle' not in a, (
+        'assembly.wiggle must be gone -- two blocks with the same shape, one live and one dead, '
+        'is how the wrong one gets tuned')
 
-    # z and pitch are the axes that oscillate; the MAGNITUDES are an operator knob (they set
-    # the search area, and since 2026-08-17 the speed cap sets speed independently), so pin the
-    # structure rather than today's numbers.
-    assert amp['z_mm'] > 0.0 and amp['pitch_deg'] > 0.0,         f'z and pitch are the search axes -- both must oscillate: {amp}'
-    for d in ('x_mm', 'y_mm', 'roll_deg', 'yaw_deg'):
-        assert amp[d] == 0.0, f'{d} must not oscillate (got {amp[d]})'
+    e = a['engage']
+    dims = ('x_mm', 'y_mm', 'z_mm', 'roll_deg', 'pitch_deg', 'yaw_deg')
+    amp = {d: float(e['amplitude'][d]) for d in dims}
+    frq = {d: float(e['frequency_hz'][d]) for d in dims}
+
+    assert amp['x_mm'] == 0.0, \
+        'x is the push direction -- the trajectory owns it, not the oscillation'
     active = [d for d in dims if amp[d] != 0.0]
     for d in active:
         assert frq[d] > 0, f'{d} has amplitude but no frequency -- that is a constant offset'
 
-    # mutually prime, as integers on a common 0.01 Hz grid
-    ints = [int(round(frq[d] * 100)) for d in active]
-    assert math.gcd(*ints) == max(1, math.gcd(*ints)) and math.gcd(*ints) in (1, 10), ints
-    g = math.gcd(*ints) / 100.0
-    assert 1.0 / g >= 5.0, f'the pattern closes every {1.0 / g:.1f} s -- too short to sweep'
+    if not active:
+        return                                  # a direct insertion: nothing else to check
 
     # no aliasing
     fmax = max(frq[d] for d in active)
-    assert float(w['sample_rate_hz']) >= 4.0 * fmax, \
-        f"sample_rate_hz {w['sample_rate_hz']} aliases a {fmax} Hz oscillation"
+    assert float(e['sample_rate_hz']) >= 4.0 * fmax, \
+        f"sample_rate_hz {e['sample_rate_hz']} aliases a {fmax} Hz oscillation"
 
-    # engagement must be reachable inside the commanded push, and the push must be PAST the mate
-    assert float(w['target'][0]) > 0, 'target x must be past the mate plane so the spring presses'
-    assert 0 < float(w['engage_advance_mm']) <= float(w['target'][0]) + 1e-9, \
-        'engage_advance_mm must be reachable within the commanded target x'
+    # THE ORBIT MUST BE LONG relative to a single axis' period. The Lissajous figure closes at
+    # 1/gcd(frequencies); when that equals the slowest axis' own period -- which is what a 1:1 or
+    # 1:2 ratio gives -- the pattern degenerates to a line and the oscillation re-probes it.
+    # Checking gcd == 1 on an arbitrary grid would be wrong: 0.7 and 1.1 Hz are the intended
+    # co-prime pair (7:11) yet share a factor of 10 on a 0.01 Hz grid.
+    if len(active) >= 2:
+        ints = [int(round(frq[d] * 1000)) for d in active]
+        g = 0
+        for n in ints:
+            g = math.gcd(g, n)
+        orbit_s = 1000.0 / g
+        slowest = 1.0 / min(frq[d] for d in active)
+        assert orbit_s >= 3.0 * slowest, (
+            f'frequencies {[frq[d] for d in active]} Hz close their orbit every {orbit_s:.1f} s '
+            f"against a slowest single-axis period of {slowest:.1f} s -- the ratio is too simple, "
+            'so the figure is a line rather than a sweep of the rectangle')
 
-    # noise off by default
-    assert w['noise']['enabled'] is False and all(float(v) == 0.0 for v in w['noise']['std'])
+    # whole cycles must fit inside the insertion
+    mats = traj_mod.load_csv(os.path.join(ROOT, 'configs', 'assembly_trajectory.csv'))
+    span = abs(T.matrix_to_xyzrpy(mats[0])[0][0] - T.matrix_to_xyzrpy(mats[-1])[0][0]) * 1000.0
+    total = span + float(e['preload_mm'])
+    v = e['speed_mm_s']
+    if v is None:
+        with open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')) as fh:
+            spd = yaml.safe_load(fh)['speed']
+        v = float(spd['max_cartesian_translation_mm_s']) * float(
+            (spd.get('phase_scale') or {}).get('assemble', 1.0))
+    dur = total / float(v)
+    for d in active:
+        assert frq[d] * dur >= 1.0, (
+            f'{d} completes {frq[d] * dur:.2f} cycles in the {dur:.2f} s insertion '
+            f'({total:.1f} mm at {float(v):.2f} mm/s) -- under one cycle it acts as a constant '
+            'OFFSET. Raise the frequency or lower engage.speed_mm_s')
 
-    # THE REAL CHECK: trace the waveform and confirm it sweeps the rectangle, not a line
-    t = np.arange(0.0, 1.0 / g, 1.0 / float(w['sample_rate_hz']))
-    z = amp['z_mm'] * np.sin(2 * np.pi * frq['z_mm'] * t)
-    p = amp['pitch_deg'] * np.sin(2 * np.pi * frq['pitch_deg'] * t)
-    assert z.max() > 0.9 * amp['z_mm'] and z.min() < -0.9 * amp['z_mm'], 'z never reaches full swing'
-    assert p.max() > 0.9 * amp['pitch_deg'] and p.min() < -0.9 * amp['pitch_deg'], 'pitch likewise'
-    # a degenerate (rationally locked) pair would leave most 2-D cells unvisited
-    H, _xe, _ye = np.histogram2d(z, p, bins=6, range=[[-amp['z_mm'], amp['z_mm']],
-                                                     [-amp['pitch_deg'], amp['pitch_deg']]])
-    filled = float((H > 0).mean())
-    assert filled >= 0.4, \
-        f'the (z, pitch) trace visits only {filled:.0%} of the rectangle -- frequencies are locked'
-    assert abs(float(np.corrcoef(z, p)[0, 1])) < 0.5, \
-        'z and pitch are strongly correlated -- the wiggle is a line, not a sweep'
-
+    # the axial limit must be BELOW the general guard, or the jam limit fires first and the
+    # normal early stop never happens
+    gen = float(e.get('max_force_n') or yaml.safe_load(
+        open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))['force_guard']['max_force_n'])
+    assert float(e['max_axial_force_n']) < gen, (
+        f"the axial limit {e['max_axial_force_n']} N must sit below the general guard {gen} N -- "
+        'otherwise a jam trip pre-empts the normal force-stop the phase is designed around')
 
 def test_bnc_clocking_enable_gating():
     """Both post-mate maneuvers are OPTIONAL and independently switchable, with one dependency:
@@ -3161,13 +3180,16 @@ def test_apps_anchor_the_trajectory_like_the_sampler():
                  'pose_error(robot.tool0() @ T_bel, T_base_tconn)'):
         assert meas in src, 'the measurement frame must remain the RECORDED mate'
 
-    # bnc_assembly: trajectory rows go through traj_ref (anchored); poses given DIRECTLY wrt the
-    # mate -- the wiggle target, whose +5 mm is its own press -- must keep using tool0_ref.
+    # bnc_assembly: EVERY reference is now an anchored trajectory row. There used to be a
+    # second helper (tool0_ref) for poses stated directly wrt the recorded mate, needed
+    # only by the standalone wiggle's fixed target; both are retired, so a reappearance of
+    # an unanchored path would mean a preload had crept back in as a trajectory row.
     bnc = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8').read()
     assert 'refs = [traj_ref(row, T_tool0_conn) for row in rows_t]' in bnc
     assert 'refs = [traj_ref(row_, T_tool0_conn, commit=True) for row_ in rows_f]' in bnc
-    assert 'return tool0_ref(_corr_to_m(mats_from_vec6(v)), T_tool0_conn)' in bnc, \
-        'the wiggle target is stated wrt the mate, not as a trajectory row -- it must not anchor'
+    assert 'def tool0_ref(' not in bnc, (
+        'tool0_ref is retired along with the standalone wiggle -- if it is back, some pose is '
+        'bypassing the anchoring that keeps every app agreeing about where the mate is')
 
 
 def test_estimator_eval_sweep_coverage_check():
@@ -3833,12 +3855,20 @@ def test_wiggle_cap_is_wired_into_both_apps():
         src = open(os.path.join(ROOT, 'urlab', 'apps', f'{app}.py'), encoding='utf-8').read()
         assert 'wiggle_time_scale(' in src, f'{app} must derive the scale from the shared helper'
         # the clock is dilated, the frequency list is NOT rewritten
-        assert 'wg_scale' in src or 'scale=1.0' in src
+        assert ('en_scale' in src or 'scale=1.0' in src), (
+            f'{app}: the derived scale must be applied -- bnc_assembly dilates the '
+            'engage oscillation clock (en_scale), insertion_tester takes it as an arg')
         assert 'traj.wiggle_time_scale' in src, f'{app}: use the shared helper, not a local copy'
 
         cfg = yaml.safe_load(open(os.path.join(ROOT, 'configs', f'{app}.yaml')))
-        wgc = cfg[sect]['wiggle']
-        for k in ('max_speed_mm_s', 'max_rotation_deg_s'):
+        # bnc_assembly retired the standalone wiggle; its oscillation (and the cap) live on
+        # `engage` now. insertion_tester still characterises a fixed-target wiggle.
+        blk, keys = ((cfg[sect]['engage'],
+                      ('max_oscillation_speed_mm_s', 'max_oscillation_rotation_deg_s'))
+                     if app == 'bnc_assembly' else
+                     (cfg[sect]['wiggle'], ('max_speed_mm_s', 'max_rotation_deg_s')))
+        wgc = blk
+        for k in keys:
             assert k in wgc, f'{app}: {k} must be declared so the cap is discoverable'
             assert wgc[k] is None or float(wgc[k]) > 0, (
                 f'{app}: {k} must be null (uncapped) or > 0 -- a zero or negative cap would '
@@ -3848,9 +3878,13 @@ def test_wiggle_cap_is_wired_into_both_apps():
     # value would reject a configuration that samples perfectly well
     for app in ('bnc_assembly', 'insertion_tester'):
         src = open(os.path.join(ROOT, 'urlab', 'apps', f'{app}.py'), encoding='utf-8').read()
-        i = src.index('f_max' if app == 'insertion_tester' else 'fmax = max(wg_frq)')
-        assert 'wg_scale' in src[i:i + 200], (
-            f'{app}: the Nyquist bound must be checked against frequency x time scale')
+        marker, scale = (('f_max', 'wg_scale') if app == 'insertion_tester'
+                         else ('f_live = [en_frq', 'en_scale'))
+        i = src.index(marker)
+        assert scale in src[i:i + 300], (
+            f'{app}: the Nyquist bound must be checked against frequency x time scale -- '
+            'dilation lowers the effective frequency, so testing the raw value rejects '
+            'configurations that sample fine')
 
 
 def test_collar_prewind_makes_room_without_moving_the_grip():
@@ -4086,6 +4120,121 @@ def test_payload_and_joint_acceleration_are_fleet_wide_constants():
                 f'{n}.yaml defines a speed: block without max_joint_acceleration_deg_s2. Blocks '
                 'are owned WHOLESALE (no per-key merge with _common.yaml), so this one falls '
                 "through to the arm's built-in default instead of the fleet value")
+
+
+def test_engage_is_the_trajectory_plus_an_optional_oscillation():
+    """ENGAGE drives the trajectory; the wiggle is an ADDITION to it, not a replacement.
+
+    insertion_mode: wiggle ignores configs/assembly_trajectory.csv entirely and drives at one
+    fixed target. ENGAGE follows the trajectory, extends it by preload_mm, and superimposes the
+    oscillation -- so amplitude 0 is a direct insertion and 'direct' and 'wiggle' are one
+    behaviour at two settings rather than two code paths that drift apart.
+
+    The property worth pinning is the TWO CLOCKS: the path advances by DISTANCE (so the insert
+    takes the time its length implies) while the oscillation advances by TIME (so its frequency
+    is the frequency configured). Pace both by distance -- as seg_time does for every other ramp
+    in this app -- and the wiggle frequency silently becomes a function of the insert speed."""
+    import yaml
+
+    from urlab.skills import trajectory as traj
+    from urlab.skills.manifold import vec6_from_mats
+
+    cfg = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))['assembly']
+    mats = traj.load_csv(os.path.join(ROOT, 'configs', 'assembly_trajectory.csv'))
+    res_m = float(cfg.get('translational_resolution_m', 0.001))
+    dense = traj.resample(mats, res_m, 1.0)
+
+    def build(pre_mm, amp, frq, v_mm_s):
+        """The engage reference, mirroring engage_insertion()."""
+        rows = [np.concatenate([np.asarray(vec6_from_mats(r), float)[:3] * 1000.0,
+                                np.asarray(vec6_from_mats(r), float)[3:]]) for r in dense]
+        if pre_mm > 0:
+            step = res_m * 1000.0
+            n = max(1, int(round(pre_mm / max(step, 1e-6))))
+            base = rows[-1].copy()
+            for k in range(1, n + 1):
+                v = base.copy()
+                v[0] += pre_mm * k / n
+                rows.append(v)
+        seg = [float(np.linalg.norm(rows[i + 1][:3] - rows[i][:3])) for i in range(len(rows) - 1)]
+        cum = np.concatenate([[0.0], np.cumsum(seg)])
+        total = float(cum[-1])
+
+        def ref6(t):
+            d = float(np.clip(v_mm_s * t, 0.0, total))
+            j = max(0, min(int(np.searchsorted(cum, d, side='right') - 1), len(rows) - 2))
+            span = cum[j + 1] - cum[j]
+            f = 0.0 if span <= 1e-12 else (d - cum[j]) / span
+            v = rows[j] + f * (rows[j + 1] - rows[j])
+            for i in range(6):
+                if abs(amp[i]) > 0 and frq[i] > 0:
+                    v[i] += amp[i] * np.sin(2 * np.pi * frq[i] * t)
+            return v
+        return ref6, total
+
+    x0 = T.matrix_to_xyzrpy(mats[0])[0][0] * 1000.0
+
+    # ---- the path is the trajectory, EXTENDED by preload_mm past the mate ----
+    for pre in (0.0, 2.0, 5.0):
+        ref6, total = build(pre, [0] * 6, [0] * 6, 2.5)
+        assert abs(ref6(0.0)[0] - x0) < 1e-9, 'the engage must START on the trajectory first row'
+        assert abs(ref6(total / 2.5)[0] - pre) < 1e-6, (
+            f'preload {pre} mm must END the path that far PAST the mate, got '
+            f'{ref6(total / 2.5)[0]:.3f}')
+        assert abs(total - (abs(x0) + pre)) < 1e-6, 'path length = trajectory + preload'
+
+    # ---- speed is honoured: depth advances at exactly speed_mm_s, then CLAMPS ----
+    ref6, total = build(2.0, [0] * 6, [0] * 6, 2.5)
+    for t in (0.0, 1.0, 4.0):
+        assert abs(ref6(t)[0] - (x0 + 2.5 * t)) < 1e-9, 'depth must advance at speed_mm_s'
+    assert abs(ref6(100.0)[0] - 2.0) < 1e-9, 'past the end it must clamp, not overshoot'
+
+    # ---- TWO CLOCKS: the oscillation period is independent of the path speed ----
+    amp = [0, 0, 1.0, 0, 1.0, 0]
+    frq = [0, 0, 0.7, 0, 1.1, 0]
+    periods = []
+    for v in (1.0, 2.5, 10.0):
+        ref6, total = build(2.0, amp, frq, v)
+        ts = np.linspace(0.0, total / v, 20000)
+        z = np.array([ref6(t)[2] for t in ts])
+        xs = ts[np.where(np.diff(np.sign(z)) != 0)[0]]
+        assert len(xs) > 2, 'the oscillation must actually cross zero'
+        periods.append(2 * float(np.median(np.diff(xs))))
+    for p in periods:
+        assert abs(p - 1.0 / 0.7) < 0.02, (
+            f'the z oscillation period must stay 1/0.7 s at every path speed, got {p:.3f} -- '
+            'pacing the oscillation by distance would make frequency depend on insert speed')
+
+    # ---- amplitude 0 IS a direct insertion ----
+    d, _ = build(2.0, [0] * 6, [0] * 6, 2.5)
+    assert max(abs(d(t)[2]) for t in np.linspace(0, 6, 200)) < 1e-12, \
+        'with every amplitude 0 the engage must reproduce the trajectory exactly'
+
+    # ---- the config and the code agree on what exists ----
+    en = cfg['engage']
+    for k in ('speed_mm_s', 'preload_mm', 'amplitude', 'frequency_hz', 'sample_rate_hz',
+              'max_axial_force_n', 'persistence_s', 'stiffness'):
+        assert k in en, f'assembly.engage.{k} must be declared'
+    assert float(en['preload_mm']) >= 0.0
+    live = [d_ for d_ in en['amplitude'] if abs(float(en['amplitude'][d_])) > 0.0]
+    for d_ in live:
+        assert float(en['frequency_hz'][d_]) > 0.0, f'engage axis {d_} has amplitude but no freq'
+    if live:
+        assert float(en['sample_rate_hz']) >= 4.0 * max(float(en['frequency_hz'][d_])
+                                                        for d_ in live), 'engage would alias'
+
+    src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8').read()
+    assert "ins_mode not in ('estimate', 'engage')" in src, (
+        'engage must be a valid mode, and the standalone wiggle must NOT be -- it is retired, '
+        'with its oscillation living inside engage')
+    # a force stop ends the PHASE, not the run
+    assert "success = en_status in ('complete', 'force')" in src, (
+        'hitting the axial force limit must NOT fail the run -- a connector meeting resistance '
+        'partway is what the clocking screw is for, so the sequence carries on')
+    # and the limit is AXIAL, not |f|
+    assert 'class _AxialForce' in src and 'wrench_in(T_base_conn, T_base_tool0)' in src, (
+        'the engage limit must project onto the connector +X; a |f| limit tight enough to catch '
+        'real resistance also stops on every lateral graze')
 
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]

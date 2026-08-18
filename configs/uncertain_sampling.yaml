@@ -126,7 +126,7 @@ compliance:
 # Contact watchdog: a trip during insertion = the connector SEATED (stop advancing). NOT armed during
 # retract (a seated part is already over the limit; a guarded retract would block itself).
 force_guard:
-  max_force_n: 10.0
+  max_force_n: 5.0
   max_torque_nm: 8.0
   # The limit must hold CONTINUOUSLY this long before tripping (0 = instant). 10 ms rides out
   # single-sample F/T spikes at the 125 Hz servo rate (~1-2 samples) without materially moving

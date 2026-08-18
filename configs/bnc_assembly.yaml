@@ -183,7 +183,7 @@ grasp_check:
   capture_rate_hz: 1.0
   recovery:
     enabled: true
-    max_tries: 25
+    max_tries: 5
     finger_width_m: 0.02278
     cable_shift_fraction: 0.8
     empty_drop_m: 0.003
@@ -211,7 +211,7 @@ speed:
     pickup: 1.5      # the compliant grasp descent
     lift: 0.8        # the compliant lift (including the slip-check partial lift)
     standoff: 1.0    # the move to stand-off + the per-attempt realign moveJs
-    assemble: 0.1      # the insertion reference ramp
+    assemble: 0.5      # the insertion reference ramp
     retract: 4.0       # the between-attempt retract + the release escape
     # POST-MATE CLOCKING, one scale per maneuver. These pace the CONTACT ramps; the free-space
     # moves inside a maneuver (the retry realign, the collar align) stay on standoff/retract like
@@ -289,6 +289,90 @@ assembly:
   # holds the seat, which is what makes that pose the ENGAGED pose the clocking maneuvers use.)
   max_attempts: 1
 
+  # ===========================================================================================
+  # ENGAGE -- the trajectory-following insertion (insertion_mode: engage)
+  # ===========================================================================================
+  # Drives configs/assembly_trajectory.csv from its first row to the mate, extends it by
+  # preload_mm, and superimposes an optional oscillation on the way. With every amplitude at 0
+  # this is a plain DIRECT insertion, so "direct" and "wiggle" are the same behaviour at two
+  # settings rather than two code paths that drift apart.
+  #
+  # NOT the same as insertion_mode: engage, which ignores the trajectory entirely and drives at
+  # ONE fixed target past the mate.
+  #
+  # TWO CLOCKS, on purpose. The PATH advances by DISTANCE (speed_mm_s), so the insertion takes
+  # the time its length implies whatever the oscillation is doing; the OSCILLATION advances by
+  # TIME, so its frequency is the frequency written here whatever the path speed is. Pacing both
+  # by distance -- as seg_time does for every other ramp in this app -- would make the wiggle
+  # frequency a function of the insert speed.
+  engage:
+    # SPEED for this phase. null = speed.max_cartesian_translation_mm_s x phase_scale.assemble.
+    #
+    # Set EXPLICITLY here, for two reasons that happen to agree. (1) Contact force is driven hard
+    # by approach speed -- simulated on this spring, peak force runs 7 N at 2 mm/s and 187 N at
+    # 50 -- so an insertion wants the slow end. (2) The oscillation only works if whole cycles fit
+    # INSIDE the insertion: at 12.5 mm/s a 17 mm path lasts 1.36 s and the 0.7 Hz axis completes
+    # 0.95 cycles, i.e. it acts as a constant offset rather than a wiggle. At 2.5 mm/s the path
+    # lasts 6.8 s and the two axes complete 4.8 and 7.5 cycles.
+    speed_mm_s: 2.5
+
+    # PRELOAD, mm past the mate. The path is extended along the connector's own +X, so the
+    # reference finishes pressing rather than merely arriving. 0 = stop exactly on the mate.
+    # Distinct from final_insertion.preload_mm, which belongs to the estimate-mode commit.
+    preload_mm: 2.0
+
+    # OSCILLATION superimposed on the trajectory, in the connector-w.r.t.-target frame. All
+    # zero = a direct insertion. Frequencies are required wherever an amplitude is non-zero, and
+    # should be MUTUALLY PRIME for the same reason as the wiggle block: a rational ratio retraces
+    # one closed path instead of sweeping the rectangle.
+    # MIGRATED from the retired assembly.wiggle block. All zero = a direct insertion.
+    amplitude:
+      x_mm: 0.0                  # x is the push direction -- the trajectory owns it
+      y_mm: 0.0
+      z_mm: 1.0
+      roll_deg: 0.0
+      pitch_deg: 1.0
+      yaw_deg: 0.0
+    frequency_hz:
+      x_mm: 0.0
+      y_mm: 0.0
+      z_mm: 0.7
+      roll_deg: 0.0
+      pitch_deg: 1.1
+      yaw_deg: 0.0
+    # Reference rebuild rate. Must be >= 4x the highest active frequency or the sampled sine
+    # aliases into a slower one -- validated pre-motion.
+    sample_rate_hz: 25.0
+
+    # OPTIONAL cap on the OSCILLATION's own speed (the path has speed_mm_s; the oscillation adds
+    # amplitude x 2*pi*f on top, which speed_mm_s does not bound). Derives a time dilation of the
+    # oscillation clock alone, so amplitude and the frequency RATIO survive it. null = uncapped.
+    max_oscillation_speed_mm_s: null
+    max_oscillation_rotation_deg_s: null
+
+    # ---- TERMINATION -------------------------------------------------------------------------
+    # AXIAL force limit: the component along the CONNECTOR'S +X, i.e. the insertion reaction.
+    # Reaching it ENDS THE ENGAGE, not the run -- a connector meeting resistance partway is
+    # exactly what the bayonet screw is for, so the sequence carries on to cable clocking and the
+    # gate there is where a person judges the depth reached.
+    #
+    # AXIAL, not |f|, is what lets this be set low. A magnitude limit tight enough to catch real
+    # resistance also stops on every lateral graze against the socket rim, because a glancing
+    # touch raises |f| without opposing the push at all.
+    max_axial_force_n: 15.0
+    persistence_s: 0.10          # the limit must hold this long -- rides out contact spikes
+
+    # ---- compliance overrides (else the top-level compliance:) ---
+    stiffness: [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
+    mass: null
+    damping_ratio: null
+    # ---- force guard overrides (else force_guard:) ---
+    # The GENERAL guard still runs alongside the axial one, and means something different: this
+    # is "hit something unexpected / jammed", and a trip here is reported as a jam rather than a
+    # normal end. Keep it well above max_axial_force_n.
+    max_force_n: 40.0
+    max_torque_nm: 8.0
+
   # ---- INSERTION MODE -----------------------------------------------------------------------
   # estimate  the original: insert, observe, fit the contact manifold, correct the in-hand belief,
   #           repeat, then commit with final_insertion. Depends on a map that covers the contact
@@ -297,93 +381,8 @@ assembly:
   #           connector's own axes, letting compliance find the mate the way a person jiggles a
   #           plug in. Reads no map, fits nothing, never touches the belief -- so none of the
   #           estimator's failure modes apply. Skips the attempt loop AND final_insertion.
-  insertion_mode: wiggle
+  insertion_mode: engage
 
-  wiggle:
-    # TARGET, connector w.r.t. the target connector [x, y, z (mm), roll, pitch, yaw (deg)].
-    # x = +5 mm is PAST the mate plane on purpose: the spring should be pushing home throughout,
-    # with the oscillation superimposed on that push rather than replacing it.
-    target: [5.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    # AMPLITUDE per axis, in the same units. Zero disables that axis.
-    amplitude:
-      x_mm: 0.0                  # x is the push direction -- `target` owns it, not the wiggle
-      y_mm: 0.0
-      z_mm: 1.0
-      roll_deg: 0.0
-      pitch_deg: 1.0
-      yaw_deg: 0.0
-    # FREQUENCY per axis (Hz), required wherever the amplitude is non-zero.
-    # MUTUALLY PRIME ON PURPOSE. Two axes at a rational frequency ratio retrace the same closed
-    # Lissajous curve forever, so the wiggle would keep re-probing a ONE-dimensional path through
-    # the (z, pitch) rectangle. 0.7 and 1.1 Hz are 7 and 11 in units of 0.1 Hz -- co-prime, so the
-    # orbit is the longest those frequencies admit and closes only every 10 s, sweeping the
-    # rectangle rather than a line through it. Keep any new pair co-prime for the same reason.
-    frequency_hz:
-      x_mm: 0.0
-      y_mm: 0.0
-      z_mm: 0.07
-      roll_deg: 0.0
-      pitch_deg: 0.11
-      yaw_deg: 0.0
-    # OPTIONAL per-axis white noise on the reference, same units. Off by default: the point of the
-    # wiggle is a KNOWN sweep, and noise trades coverage for irreproducibility. Turn it on to break
-    # a wiggle that keeps stalling in the same place.
-    noise:
-      enabled: false
-      std: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    # How often the reference is rebuilt. Must be >= 4x the highest frequency or the sampled sine
-    # is aliased into a slower one -- validated pre-motion. 25 Hz against 1.1 Hz is ~23 samples per
-    # cycle.
-    # SPEED CAP for the oscillation. null = uncapped (the historical behaviour).
-    #
-    # WHY THIS EXISTS AS ITS OWN KNOB. The wiggle paces by TIME -- each reference pair is ramped
-    # over exactly one sample period so the frequency it commands is the frequency configured --
-    # which means seg_time() never sees it, and therefore speed.max_cartesian_* and
-    # speed.phase_scale do NOT bound it. It is the only motion in this app with no speed limit of
-    # its own. Peak reference speed is amplitude x 2*pi*frequency.
-    #
-    # HOW IT IS APPLIED. The cap DERIVES a time-dilation factor s = cap / peak, and the waveform
-    # clock is evaluated at t*s. That scales every peak speed by s while leaving
-    #   * amplitude   -- so the search AREA is unchanged; and
-    #   * the frequency RATIO -- so a mutually-prime pair stays mutually prime and the orbit
-    #     still sweeps the rectangle instead of collapsing onto one closed path through it.
-    # The only cost is wall-clock: the orbit takes 1/s times as long to close.
-    #
-    # Stated in physical units rather than as a bare multiplier so it stays correct when an
-    # amplitude or a frequency is edited -- the scale is re-derived every run, not maintained by
-    # hand. Both caps are optional and the binding one wins; the app logs the derived scale, the
-    # resulting peaks, and how much of one orbit max_duration_s now buys.
-    #
-    # RAISE max_duration_s WITH IT. Dilation stretches the orbit but not the timeout, so a cap
-    # silently buys less of the pattern unless the duration follows. The startup line says so.
-    max_speed_mm_s: null
-    max_rotation_deg_s: null
-    sample_rate_hz: 25.0
-    max_duration_s: 60.0         # give up after this long without engaging
-    # ENGAGEMENT: measured advance of the connector along the target's +X, checked every servo
-    # cycle so success ENDS the motion. Below `target` x so it can actually be reached.
-    engage_advance_mm: 4.0
-    settle_s: 0.5
-    hold_after_s: 0.0
-    # --- compliance overrides (else the top-level compliance:) ---
-    # Stiff along x to keep pressing home; softer across, so the rocking motion yields to the
-    # socket's lead-in instead of grinding on it.
-    stiffness: [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
-    mass: null
-    damping_ratio: null
-    # --- force guard overrides (else the top-level force_guard:) ---
-    # A wiggle presses and rocks against the socket, so this wants "genuinely jammed", not "stop on
-    # contact". A trip ends the wiggle as a FAILURE -- at that point it is stuck, not wiggling.
-    force_guard_enabled: true
-    max_force_n: 10.0
-    max_torque_nm: 8.0
-    persistence_s: 1.0
-
-  # LIVE run figure (like estimator_eval's): the cumulative belief corrections, per-attempt
-  # residuals (all guesses + aggregated) and the correction phase plot, atomically overwritten
-  # at ONE fixed path after every estimate -- keep it open in an image viewer during a run.
-  # true = data/experiments/cable_pick_live.png; a string = explicit path; false disables.
-  # (The same figure is also written to the run folder as run_corrections.png.)
   live_plot: true
 
   log_decimation: 5              # observation every Nth servo cycle (125 Hz / N)
@@ -734,8 +733,7 @@ estimation:
   # junction_in_fingertip, so mm/deg keys here would be silently ignored and the connector
   # would be placed at the fingertip origin.
   initial_connector_in_fingertip:
-    # xyz: [-0.0457, 0.0000, 0.0240]             # m
-    xyz: [-0.045, 0.0000, 0.010]             # m
+    xyz: [-0.045, 0.0000, 0.005]             # m
     rpy: [0.0, 0.0, 3.14159265358979]       # rad (exactly 180 deg yaw)
   # The AUGMENTED manifold (clean map + 30k truth-corrected production-process rows) and the
   # rawcap wrench representation -- the 2026-08-09 offline winners. Fall back to the classic

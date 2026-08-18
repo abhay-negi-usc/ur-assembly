@@ -624,6 +624,19 @@ assembly:
     enabled: true
     # The collar frame = the connector (cable junction) frame translated this far along its +X.
     collar_offset_mm: 25.0
+    # APPROACH STATION, mm along the connector +X, measured in the CONNECTOR frame -- so 0.0 is
+    # the cable junction and collar_offset_mm is the collar itself. The gripper aligns and UNWINDS
+    # here, then ADVANCES along the connector +X onto the collar before closing.
+    #
+    # WHY THE ADVANCE EXISTS. The pads close BEHIND the junction (-45.7 mm on this geometry) while
+    # the collar sits AHEAD of it (+25.0 mm), so the fingers are nowhere near the ring when the
+    # cable is released -- 70.7 mm of travel separates them. That travel has to come after the
+    # unwind, not before: unwinding is a 90 deg roll about the connector axis, and it wants to
+    # happen with the fingers clear of the ring rather than wrapped around it.
+    #
+    # null = wherever the fingertip already is when collar clocking starts, which is the station
+    # the open pads are provably occupying at that instant. Set a number to stand further back.
+    approach_mm: null
     rotation_deg: 90.0
     # PRE-WIND, deg. Before grasping, unwind the OPEN gripper this far about the
     # connector's +X, so the turn that follows has the wrist range to complete it.

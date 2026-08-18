@@ -4152,14 +4152,26 @@ def test_collar_prewind_makes_room_without_moving_the_grip():
     src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8').read()
     body = src[src.index('def collar_clocking('):]
     body = body[:body.index('return True')]
-    i_move = body.index("label='collar align (pre-wound)'")
+    # FIVE STEPS, IN THIS ORDER: approach BEHIND the ring, unwind there, advance onto it, close,
+    # turn. Each rotation is anchored on the call that performs it.
+    i_move = body.index("label='collar approach (nominal angle)'")
+    i_unwind = body.index('rotate_about_axis(T_nom_back, axis, point, -cl_prewind * f)')
+    i_adv = body.index("label='collar advance onto the ring'")
     i_close = body.index("gripper.close('grasp collar')")
-    # The turn is now taken through screw_ramp (it follows the true arc rather than the
-    # chord between its endpoints); this anchors on the call that performs it.
     i_turn = body.index('rotate_about_axis(start, axis, point, cl_rot * f)')
-    assert i_move < i_close < i_turn, (
-        'the pre-wind must run BEFORE the gripper closes -- unwinding on a gripped collar turns '
-        'it backwards, undoing the lock instead of making room for it')
+    assert i_move < i_unwind < i_adv < i_close < i_turn, (
+        'the order must be approach -> unwind -> advance -> close -> turn. The unwind precedes '
+        'the close because unwinding on a GRIPPED collar turns it backwards, undoing the lock; '
+        'and it precedes the ADVANCE because the roll wants the fingers clear of the ring')
+    # THE UNWIND MUST ORBIT, NOT TRAVEL. tool0 sits ~183 mm off the connector axis, so a straight
+    # move between two pre-wind poses cuts inside the arc and sweeps the fingertip -- which is ON
+    # that axis -- right through the part.
+    assert 'screw_ramp(' in body[i_unwind - 400:i_adv], (
+        'the unwind must be taken through screw_ramp so it follows the axis')
+    # THE ADVANCE MUST BE A PURE TRANSLATION. It carries the open fingers over the collar, so it
+    # has to arrive along the connector +X rather than swinging in.
+    assert 'T_start_back' in body[:i_adv] and 'adv_m' in body[:i_adv], (
+        'the advance must run from the backed-off pre-wound pose along the connector +X')
     # and both ends are IK-checked before anything grips
     assert body.index('unreachable') < i_close, (
         'reachability must be checked before the close, or an impossible turn leaves the collar '

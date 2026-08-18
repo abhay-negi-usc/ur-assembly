@@ -508,6 +508,7 @@ def build_and_run(cfg, robot, camera, args):
     # warm-up. Turn it on per block if that transient matters more than the absolute limit.
     cc_tare = tare if bool(cc.get('tare_before', False)) else None
     cl_tare = tare if bool(cl.get('tare_before', False)) else None
+    cl_app_mm = cl.get('approach_mm')     # None = the fingertip's station at that moment
     if cc_on and cl_on and not cc_open_after:
         log.error('assembly.collar_clocking needs cable_clocking.open_gripper_after true: the '
                   'collar is grasped by the same gripper, which must release the cable first.')
@@ -640,6 +641,7 @@ def build_and_run(cfg, robot, camera, args):
     g_w = float(spd.get('max_cartesian_rotation_deg_s', 5.0))
     s_asm = float(scales.get('assemble', 1.0))
     s_ret = float(scales.get('retract', 1.0))
+    s_std = float(scales.get('standoff', 1.0))
     min_seg_s = 1.0 / adm.rate
 
     def caps(v=None, w=None):
@@ -1255,14 +1257,35 @@ def build_and_run(cfg, robot, camera, args):
         # slides the grip around the ring without moving off it.
         T_start = rotate_about_axis(T_nominal, axis, point, -cl_prewind)
         T_end = rotate_about_axis(T_start, axis, point, cl_rot)
+        # THE COLLAR IS AHEAD OF THE GRASP, so the gripper cannot close where it stands. The pads
+        # close BEHIND the cable junction (-45.7 mm along the connector +X on this geometry) and
+        # the collar sits AHEAD of it (+collar_offset_mm), so 70.7 mm separates the open fingers
+        # from the ring the moment the cable is released. The gripper unwinds at that near station
+        # -- clear of the collar, which is what makes the roll safe -- and only then ADVANCES along
+        # the connector +X onto the ring.
+        app_x = (float((inverse(T_base_conn) @ robot.tool0()
+                        @ robot.T_tool0_fingertip)[0, 3])
+                 if cl_app_mm is None else float(cl_app_mm) / 1000.0)
+        adv_m = cl_off_m - app_x
+        T_nom_back = (T_base_conn @ translation_matrix([app_x, 0.0, 0.0])
+                      @ inverse(robot.T_tool0_fingertip))
+        T_start_back = rotate_about_axis(T_nom_back, axis, point, -cl_prewind)
+        if adv_m < 0.0:
+            log.warning('COLLAR CLOCKING: the approach station (%+.1f mm) is AHEAD of the collar '
+                        '(%+.1f mm), so the advance runs backwards along the connector +X. Check '
+                        'collar_clocking.approach_mm.', app_x * 1000.0, cl_off_m * 1000.0)
         log.info('--- COLLAR CLOCKING --- collar is %.1f mm along the connector +X. '
-                 'Pre-wind %+.1f deg (gripper OPEN), grasp, then turn %+.1f deg about the '
-                 'connector +X.', cl_off_m * 1000.0, np.degrees(-cl_prewind), np.degrees(cl_rot))
+                 'Align back at %+.1f mm, unwind %+.1f deg by ORBITING the connector +X '
+                 '(gripper OPEN and clear of the ring, so the collar stays put), advance %+.1f mm '
+                 'onto it, grasp, then turn %+.1f deg about the same axis.',
+                 cl_off_m * 1000.0, app_x * 1000.0, np.degrees(-cl_prewind), adv_m * 1000.0,
+                 np.degrees(cl_rot))
         # REACHABILITY of BOTH ends, before anything grips. Discovering mid-turn that the far end
         # is unreachable leaves the collar clamped in a stalled gripper, which is the one failure
         # this maneuver must not have -- and it is exactly what the pre-wind exists to prevent, so
         # a failure here should say so rather than surfacing as a generic move error.
-        for lab, T_chk in (('pre-wound start', T_start), ('turn end', T_end)):
+        for lab, T_chk in (('approach station', T_nom_back), ('pre-wound approach', T_start_back),
+                           ('collar grasp', T_start), ('turn end', T_end)):
             if robot.arm.ik(T_chk, robot.arm.q()) is None:
                 log.error('COLLAR CLOCKING: the %s pose is unreachable. The turn needs '
                           '%.0f deg of range about the connector +X from a start unwound '
@@ -1271,10 +1294,58 @@ def build_and_run(cfg, robot, camera, args):
                           np.degrees(cl_prewind))
                 return False
         phase('standoff')
-        if not _guarded(robot, guard_shared,
-                        lambda: robot.arm.move_l(T_start, label='collar align (pre-wound)')):
-            log.error('Could not reach the pre-wound collar pose.')
+        # 1. ALIGN at the approach station, nominal angle. A straight move is right here: the
+        #    fingers are open and clear of the ring, with nothing to stay concentric with yet.
+        if not _guarded(robot, guard_shared, lambda: robot.arm.move_l(
+                T_nom_back, label='collar approach (nominal angle)')):
+            log.error('Could not reach the collar approach station.')
             return False
+        # THE UNWIND IS AN ORBIT, NOT A STRAIGHT MOVE TO THE PRE-WOUND POSE.
+        #
+        # At the nominal alignment the FINGERTIP SITS ON THE ROTATION AXIS -- the collar frame is
+        # the connector frame slid along its own +X, so it is on the axis by construction (measured
+        # radial offset 0.000 mm). A true orbit about that axis therefore leaves the grip point
+        # exactly where it is and only ROLLS the gripper about the collar. That is what the
+        # pre-wind is: a fresh bite at a different clock angle on the same ring, with the wrist
+        # carried back around its own 183 mm circle. Nothing needs to translate, because the collar
+        # is a body of revolution about that same axis.
+        #
+        # A straight move to the pre-wound pose does not do that. It interpolates the tool0
+        # POSITION linearly while slerping the orientation, and tool0 is 183 mm off the axis, so
+        # the pose cuts inside the arc and carries the fingertip 53.6 mm OFF the collar on the way
+        # -- driving the open fingers through the connector they are supposed to be rolling around.
+        #
+        # Compliant rather than kinematic, and guarded, because this threads open fingers around a
+        # part -- a graze should yield and stop, not push through. Paced by the standoff scale,
+        # matching the move it replaces.
+        if abs(cl_prewind) > 1e-9:
+            adm_cl.reset()
+            adm_cl.warmup(T_nom_back)
+            guard_shared.reset()
+            res_uw = screw_ramp(
+                adm_cl,
+                lambda f: rotate_about_axis(T_nom_back, axis, point, -cl_prewind * f),
+                guard_shared, g_v * s_std, g_w * s_std, abs(np.degrees(cl_prewind)),
+                label='unwind ')
+            adm_cl.stop()
+            robot.arm.servo_stop()
+            if res_uw == 'seated':
+                log.error('COLLAR CLOCKING: the force guard tripped during the unwind (%s). The '
+                          'open fingers hit something on the way around the ring -- the collar '
+                          'is still free, so nothing is clamped.',
+                          guard_shared.tripped_by or 'unknown')
+                return False
+        # 3. ADVANCE onto the ring along the connector +X. A PURE TRANSLATION -- no rotation, so
+        #    a straight move IS the right path here and there is no chord to cut. Guarded, because
+        #    this slides open fingers over a part: a mis-estimated collar should stop the move
+        #    rather than be pushed through.
+        if abs(adv_m) > 1e-6:
+            if not _guarded(robot, guard_shared, lambda: robot.arm.move_l(
+                    T_start, label='collar advance onto the ring')):
+                log.error('Could not advance onto the collar (%+.1f mm along the connector +X). '
+                          'The fingers are still clear of the ring, so nothing is clamped.',
+                          adv_m * 1000.0)
+                return False
         if not robot.gripper.close('grasp collar'):
             log.error('Gripper did not close on the collar.')
             return False

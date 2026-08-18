@@ -3301,6 +3301,216 @@ def test_preload_force_is_a_spike_not_a_press():
         assert persist - ramp_s >= 0.0, f'{name}: negative guard margin'
 
 
+def test_sampling_preload_appends_and_does_not_move_the_sweep():
+    """The map collector's preload must EXTEND the map, never shift it.
+
+    estimator_eval's probing passes end on the mate precisely because uncertain_sampling does, so
+    a preload that moved the whole path would silently break that parity while looking like it had
+    only deepened the press. It has to leave the -X -> 0 sweep alone and append past the mate --
+    which makes a preloaded map a strict superset of an un-preloaded one."""
+    import yaml
+    from urlab.apps import uncertain_sampling as us
+    from urlab.skills import trajectory as traj
+
+    T_tool0_held = T.xyzrpy_to_matrix([0.0, 0.0457, 0.159], np.zeros(3))
+    mats = traj.load_csv(os.path.join(ROOT, 'configs', 'assembly_trajectory.csv'))
+    dense = traj.resample(mats, 0.001, 1.0)
+    mate = np.eye(4)
+    anchor = mate @ T.inverse(mats[-1])
+
+    def conn_x(ref):                       # connector depth wrt the mate, mm
+        return T.matrix_to_xyzrpy(T.inverse(mate) @ (ref @ T_tool0_held))[0][0] * 1000.0
+
+    first = traj.tool0_at(anchor, dense[0], T_tool0_held)
+    last = traj.tool0_at(anchor, dense[-1], T_tool0_held)
+    assert abs(conn_x(first) + 20.0) < 1e-6, 'the sweep must still start 20 mm out'
+    assert abs(conn_x(last)) < 1e-9, 'and still reach the mate exactly -- the preload APPENDS'
+    for p in (5.0, 10.0):                  # the press lands exactly p past the mate
+        assert abs(conn_x(us._axial_ref(last, T_tool0_held, p / 1000.0)) - p) < 1e-6
+
+    # It presses along the PART's own axis, not the target's -- a tilted trial must not be
+    # levered sideways into the socket wall.
+    tilt = T.xyzrpy_to_matrix(np.zeros(3), np.radians([0.0, 8.0, 0.0]))
+    ref_t = last @ T_tool0_held @ tilt @ T.inverse(T_tool0_held)
+    moved = (T.inverse(ref_t @ T_tool0_held)
+             @ (us._axial_ref(ref_t, T_tool0_held, 0.010) @ T_tool0_held))[:3, 3] * 1000.0
+    assert np.allclose(moved, [10.0, 0.0, 0.0], atol=1e-6), \
+        f'a tilted part must press along its OWN +X, got {moved}'
+
+    # The retract keeps its magnitude semantics through the shared helper: a sign slip there
+    # would drive INTO the socket at the end of every trial.
+    for d in (0.005, -0.005):
+        assert abs(conn_x(us._retract_ref(last, T_tool0_held, d)) + 5.0) < 1e-6, \
+            'retract_distance_m is a MAGNITUDE; a negative value must still back out'
+
+    # Default OFF: every map collected before this existed stays reproducible.
+    cfg = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'uncertain_sampling.yaml')))
+    assert float(cfg['sampling'].get('preload_mm', 0.0)) == 0.0, \
+        'shipping a non-zero preload_mm silently changes what every new map contains'
+
+
+
+def test_raw_wrench_representation_keeps_magnitude_and_ood_distance():
+    """`raw` must pass the wrench through untouched, and that is the point of it.
+
+    Both normalising representations rescale an out-of-distribution contact onto the shell the
+    map lives on, so a press the map never recorded finds a confident neighbour at whatever pose
+    merely shares its force direction -- the support machinery cannot flag what it cannot see.
+    `raw` is the option that keeps a far row far. Pinned here so a future "tidy-up" cannot
+    reintroduce a normalisation and quietly delete the property."""
+    import csv as _csv
+    import shutil
+    import tempfile
+
+    from urlab.skills.manifold import (FORCE_COLS, POSE_COLS, TORQUE_COLS, ManifoldEstimator,
+                                       scaled12)
+
+    tmp = tempfile.mkdtemp()
+    try:
+        # a LIGHT-TOUCH map (|f| ~ 5 N), the regime every BNC map was collected in
+        rng = np.random.default_rng(0)
+        rows = []
+        for p_ in np.arange(-8.0, 8.01, 1.0):
+            for x in np.linspace(-20.0, 0.0, 40):
+                f = 5.0 + rng.normal(0.0, 0.5)
+                rows.append([x, 0.0, 0.0, 0.0, p_, 0.0, -f, 0.0, 0.0, 0.0, 0.2, 0.0])
+        path = os.path.join(tmp, 'm.csv')
+        with open(path, 'w', newline='') as fh:
+            w = _csv.writer(fh)
+            w.writerow(POSE_COLS + FORCE_COLS + TORQUE_COLS)
+            w.writerows(rows)
+
+        base = {'manifold_csv': path, 'estimate_dims': ['pitch_deg'], 'min_force_n': 3.0,
+                'min_observations': 5, 'interp_neighbors': 8, 'random_seed': 1}
+
+        # ---- 1. the feature IS the wrench, times the block scale. Nothing else. ----
+        est = ManifoldEstimator({**base, 'wrench_representation': 'raw',
+                                 'scaling_constant_unit_force_to_mm': 0.11,
+                                 'scaling_constant_unit_torque_to_mm': 0.20})
+        f = np.array([[3.0, 0.0, 4.0], [90.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+        tau = np.array([[0.0, 2.0, 0.0], [0.0, 0.0, 0.5], [0.0, 0.0, 0.0]])
+        assert np.allclose(est._wrench6(f, tau),
+                           np.hstack([f * 0.11, tau * 0.20])), \
+            'raw must be a pure scale of the measured wrench -- no normalisation, no cap'
+        assert np.allclose(est._wrench6(f, tau)[2], 0.0), 'a zero wrench must stay zero'
+
+        # ---- 2. NO saturation: unlike rawcap, the feature keeps growing with force ----
+        mags = np.array([5.0, 30.0, 60.0, 120.0])
+        ff = np.stack([[m, 0.0, 0.0] for m in mags])
+        tt = np.zeros_like(ff)
+        lens = {}
+        for rep in ('unit', 'rawcap', 'raw'):
+            e = ManifoldEstimator({**base, 'wrench_representation': rep,
+                                   'scaling_constant_unit_force_to_mm': 1.0,
+                                   'scaling_constant_unit_torque_to_mm': 1.0})
+            lens[rep] = np.linalg.norm(e._wrench6(ff, tt)[:, :3], axis=1)
+        assert np.allclose(lens['unit'], lens['unit'][0]), 'unit discards magnitude entirely'
+        assert lens['rawcap'][-1] == lens['rawcap'][-2], 'rawcap must saturate at ref x cap'
+        assert lens['raw'][-1] > lens['raw'][-2] > lens['raw'][-3], \
+            'raw must NOT saturate -- a harder press has to keep moving the feature'
+        assert np.isclose(lens['raw'][-1] / lens['raw'][0], mags[-1] / mags[0]), \
+            'raw must be exactly proportional to |f|'
+
+        # ---- 3. the property it exists for: a press stays FAR from a light-touch map ----
+        obs = np.zeros((60, 12))
+        obs[:, 0] = np.linspace(-18.0, -2.0, 60)          # in-distribution poses
+        obs[:, 10] = 0.2
+        far = {}
+        for rep, sf in (('unit', 1.0), ('rawcap', 1.0), ('raw', 0.11)):
+            e = ManifoldEstimator({**base, 'wrench_representation': rep,
+                                   'scaling_constant_unit_force_to_mm': sf,
+                                   'scaling_constant_unit_torque_to_mm': sf})
+            d = {}
+            for press in (5.0, 90.0):                      # map regime, then far outside it
+                o = obs.copy()
+                o[:, 6] = -press
+                v6, w6 = e.prepare_observations(o[:, :6], o[:, 6:9], o[:, 9:12])
+                pts = scaled12(v6, w6, e.s_rot, e.dim_w)
+                nn = e.tree.query(pts, k=e.support_k, workers=-1)[0][:, -1]
+                d[press] = float(np.median(nn / e.support_ref_at(v6[:, 0])))
+            far[rep] = d
+        ratio = {r: far[r][90.0] / far[r][5.0] for r in far}
+        # unit is BLIND by construction: it threw the magnitude away, so an 18x harder
+        # press sits at exactly the same distance as the light touch the map does hold.
+        assert ratio['unit'] < 1.05, \
+            f"unit cannot distinguish the press at all, got {ratio['unit']:.2f}x"
+        # rawcap sees some of it, but only up to its ceiling -- past ref x cap it goes
+        # blind too. raw is the one that keeps scaling, and that gap is the whole point.
+        assert ratio['raw'] > 3.0, \
+            f"raw must leave the press visibly off-map, got {ratio['raw']:.2f}x"
+        assert ratio['raw'] > 2.0 * ratio['rawcap'], (
+            f"raw ({ratio['raw']:.2f}x) must separate an out-of-distribution press far "
+            f"more than the saturating option ({ratio['rawcap']:.2f}x) -- if this fails, "
+            'the support gate has lost the only representation able to feed it')
+
+        # ---- 4. a bad value still fails pre-motion, and names all three ----
+        try:
+            ManifoldEstimator({**base, 'wrench_representation': 'rawuncapped'})
+            raise AssertionError('an unknown representation must be rejected BEFORE motion')
+        except ValueError as exc:
+            for name in ('unit', 'rawcap', 'raw'):
+                assert name in str(exc), f'the error must name {name!r} as a valid choice'
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_map_collection_and_eval_share_insert_speed_and_damping():
+    """The map builder and the eval must agree on the two knobs that SET the contact force.
+
+    Neither is a cycle-time detail. Simulated on admittance.py's own ODE against a 5e4 N/m wall,
+    peak contact force runs 7 N at 2 mm/s and 187 N at 50 mm/s on an unchanged spring -- so a map
+    collected at one speed and probed at another records a different contact regime for the SAME
+    pose, which is precisely the mismatch that put the true correction uphill of no-correction in
+    100% of the 17-Aug attempts.
+
+    Damping is pinned on the CONTACT criterion, which is not the configured number: see the
+    comment on the loop below."""
+    import yaml
+
+    us = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'uncertain_sampling.yaml')))
+    ee = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'estimator_eval.yaml')))
+
+    v_us = float(us['speed']['max_cartesian_translation_mm_s'])
+    v_ee = float(ee['speed']['max_cartesian_translation_mm_s'])
+    assert v_us == v_ee, (f'insert speed drifted: sampler {v_us} vs eval {v_ee} mm/s -- the '
+                          'map and the observations would sit in different force regimes')
+
+    # CONTACT damping, not free-air damping. zeta is defined against the admittance
+    # stiffness S, but in contact the loop stiffness is S + k_env, so what governs the
+    # bounce is zeta_contact = zeta * sqrt(S/(S+k_env)) -- with the virtual mass cancelling
+    # out entirely. zeta = 1.0 was tried on hardware on 2026-08-17 and RANG; this is the
+    # criterion that predicts it, so it is the one worth pinning.
+    # k_env measured as dF/dx over the loaded part of 26 real insertions: 3.5-9 N/mm while
+    # probing, ~39 N/mm on the seated final insertion.
+    K_PROBE_MAX, K_SEATED = 9000.0, 39000.0
+    from urlab import tool_frames as _tf
+
+    def axial(K6, R):
+        """Stiffness facing the insertion: compliance acts on TOOL0 axes but the part
+        goes in along the CONNECTOR's +X, and for the BNC frame those differ."""
+        u = R @ np.array([1.0, 0.0, 0.0])
+        return float(u @ (np.asarray(K6[:3], dtype=float) * u))
+
+    for name, cfg in (('uncertain_sampling', us), ('estimator_eval', ee)):
+        R = _tf.load_frames(cfg)[cfg['held_frame']][:3, :3]
+        M = np.array([float(x) for x in cfg['compliance']['mass']])
+        Z = np.array([float(x) for x in cfg['compliance']['damping_ratio']])
+        S_ax = axial(cfg['compliance']['stiffness'], R)
+        # the sampler can be driven into the SEATED contact by sampling.preload_mm; the
+        # eval's probing passes stop at the mate and its commit carries its own stiffness.
+        k_worst = K_SEATED if name == 'uncertain_sampling' else K_PROBE_MAX
+        zc = float(Z[0]) * np.sqrt(S_ax / (S_ax + k_worst))
+        assert zc >= 0.7, (
+            f'{name}: zeta {Z[0]:g} against S_axial {S_ax:.0f} N/m gives zeta_contact '
+            f'{zc:.2f} at k_env {k_worst/1000:.0f} N/mm -- below 0.7 the part BOUNCES off '
+            f'the seat and the logged wrench oscillates instead of settling')
+        # forward Euler at reference_rate_hz needs dt*D/M < 2; HIGH zeta is what breaks it
+        D = Z * 2.0 * np.sqrt(M * np.array([float(x) for x in cfg['compliance']['stiffness']]))
+        dt = 1.0 / float(cfg['compliance'].get('reference_rate_hz', 125.0))
+        assert float(np.max(dt * D / M)) < 1.0, (
+            f'{name}: dt*D/M = {np.max(dt * D / M):.2f}, too close to the forward-Euler '
+            'stability limit of 2')
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     failed = 0

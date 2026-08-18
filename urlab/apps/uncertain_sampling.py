@@ -128,6 +128,34 @@ def build_and_run(cfg, robot, camera, args):
              'in-hand pose error' if perturb_frame != 'target' else 'target/socket pose error',
              list(unc_lo), list(unc_hi))
 
+    # PRELOAD: once the trajectory has reached the mate, press this much FURTHER along the
+    # connector's own +X before settling. 0 = off, and the trial then ends exactly on the mate as
+    # it always has.
+    #
+    # It EXTENDS the map rather than moving it. The trajectory still runs its whole -X -> 0 sweep
+    # and the press APPENDS rows past the mate, so every pose the map already covered it still
+    # covers. That distinction matters: estimator_eval's probing passes are built to end on the
+    # mate precisely because this app does, and shifting the whole path would silently break that
+    # parity for the sake of the same rows this adds on the end.
+    #
+    # WHY it exists. The map is collected at a median contact of 4.5 N while the insertions it is
+    # matched against press at 29.6 N (measured 2026-08-17, analysis/bnc_tuning/v5_*.py). An
+    # observation whose force regime the map never recorded has no honest match in it -- the
+    # nearest map row is not a similar state, merely the closest thing available. The press is
+    # what puts those rows in the map.
+    #
+    # The guard is NOT armed for the press, nor for the settle that follows one -- the same
+    # reason the retract disarms it: at the seat the contact is ALREADY at the limit, so a guarded
+    # press would block the very motion it exists to make. What bounds the force instead is
+    # geometry and the spring: the reference only ever goes preload_mm past wherever the insert
+    # stopped, so the SUSTAINED force is stiffness x preload. The contact TRANSIENT while the
+    # spring loads is several times larger, and that transient is the top of the force range the
+    # map is missing.
+    pre_mm = float(s.get('preload_mm', 0.0) or 0.0)
+    if pre_mm < 0:
+        log.error('sampling.preload_mm must be >= 0 (got %.2f).', pre_mm)
+        return False                               # bad values fail HERE, pre-motion
+
     csv_path = s.get('csv_path', 'data/uncertain_assembly_sampling/log.csv')
     cable = cfg.get('cable')
     if cable:                                    # group each run under a subfolder named by the cable
@@ -171,6 +199,13 @@ def build_and_run(cfg, robot, camera, args):
 
     log.info('Compliant reference: INSERT %.1f mm/s / %.1f deg/s, RETRACT %.1f mm/s / %.1f deg/s.',
              v_mm_s, w_deg_s, rv_mm_s, rw_deg_s)
+    if pre_mm > 0:
+        s_ins = max(float(v) for v in (cfg.get_path('compliance.stiffness') or [0.0])[:3])
+        log.info('PRELOAD %.1f mm past the mate on every trial, logged at the same rate as the '
+                 'rest of the insertion (these are the loaded-contact rows the map wants). The '
+                 'spring HOLDS %.1f N of it at %.0f N/m -- raise compliance.stiffness, not just '
+                 'this distance, to reach a harder press. Guard NOT armed for the press or its '
+                 'settle.', pre_mm, s_ins * pre_mm / 1000.0, s_ins)
     decim = max(1, int(s.get('log_decimation', 5)))        # log every Nth servo cycle (125 Hz / N)
     q_home = robot.arm.q()
 
@@ -234,7 +269,19 @@ def build_and_run(cfg, robot, camera, args):
                     log.info('Contact limit reached at waypoint %d/%d -- connector SEATED.',
                              i, len(refs) - 1)
                     break
-            adm.hold(last_ref, settle_s, guard, on_step=log_cb)   # settle (records the contact wrench)
+            # PRELOAD: press further along the CONNECTOR's own +X from wherever the insert
+            # stopped, logging throughout, so the map gains the loaded-contact rows a production
+            # insertion actually produces. Un-guarded BY DESIGN (see preload_mm above): at the
+            # seat the guard is already tripped, so arming it here would refuse the press. The
+            # distance is the limit.
+            if pre_mm > 0:
+                T_pre = _axial_ref(last_ref, T_tool0_held, pre_mm / 1000.0)
+                adm.ramp(last_ref, T_pre, seg_time(last_ref, T_pre), guard=None, on_step=log_cb)
+                last_ref = T_pre
+            # Settle (records the contact wrench). After a preload the guard is left off for the
+            # same reason: hold() is a ramp, so an armed guard would return 'seated' on the first
+            # cycle and cut short exactly the loaded rows the press was made to record.
+            adm.hold(last_ref, settle_s, None if pre_mm > 0 else guard, on_step=log_cb)
 
             # RETRACT: a LINEAR (peg-in-hole) escape -- straight back along the CONNECTOR's OWN -X by
             # retract_distance_m, from wherever the insert stopped. Still compliant (it yields if it
@@ -265,17 +312,25 @@ def build_and_run(cfg, robot, camera, args):
     return ok
 
 
+def _axial_ref(T_ref, T_tool0_held, distance_m):
+    """The tool0 reference that slides the HELD PART along ITS OWN X by `distance_m` (SIGNED:
+    + drives into the socket, - backs out of it).
+
+    ASSUMES LINEAR (PEG-IN-HOLE) ASSEMBLY: the mate is a single-axis insertion along the connector's
+    +X, so both the preload and the escape are translations along that one axis. Expressed in the
+    CONNECTOR's frame (right-multiply), so it follows the part's ACTUAL, perturbed orientation --
+    a tilted connector presses and backs out along its own axis, not the target's."""
+    step = translation_matrix([float(distance_m), 0.0, 0.0])
+    return T_ref @ T_tool0_held @ step @ inverse(T_tool0_held)
+
+
 def _retract_ref(T_ref, T_tool0_held, distance_m):
     """The tool0 reference that backs the HELD PART straight out along ITS OWN -X by `distance_m`.
 
-    ASSUMES LINEAR (PEG-IN-HOLE) ASSEMBLY: the mate is a single-axis insertion along the connector's
-    +X, so the escape is simply the reverse translation along that same axis. Expressed in the
-    CONNECTOR's frame (right-multiply), so it follows the part's ACTUAL, perturbed orientation --
-    a tilted connector backs out along its own axis, not the target's.
-
-    `distance_m` is used as a magnitude: a negative value would drive INTO the socket."""
-    back = translation_matrix([-abs(float(distance_m)), 0.0, 0.0])
-    return T_ref @ T_tool0_held @ back @ inverse(T_tool0_held)
+    `distance_m` is used as a MAGNITUDE here: a negative value would otherwise drive INTO the
+    socket, which is never what a retract wants (_axial_ref is the signed version, and is what
+    the preload press uses)."""
+    return _axial_ref(T_ref, T_tool0_held, -abs(float(distance_m)))
 
 
 def _pose_fields_mm(T):

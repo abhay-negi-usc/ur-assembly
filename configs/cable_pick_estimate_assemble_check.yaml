@@ -332,6 +332,30 @@ estimation:
   # unit's 0.34 / 69 % / 8 %; torque is DROPPED (s_torque 0 -- it only paid for itself on
   # the wiggle-only map). Fall back to the classic setup with: wrench_representation: unit,
   # s_force 3.0, s_torque 1.0.
+  # WRENCH REPRESENTATION: unit | rawcap | raw.
+  #   unit    direction only -- magnitude discarded entirely.
+  #   rawcap  direction x magnitude, SATURATED (see rawcap_* below).
+  #   raw     the wrench exactly as measured, in N and Nm. No normalisation, no saturation.
+  #
+  # Pick `raw` when the map and the run share contact physics, and you want an out-of-
+  # distribution contact to LOOK out of distribution. Measured 2026-08-17 (v5 map, 17-Aug
+  # observations) as k-th-NN distance over the map's own spacing, where 1.0 = "ordinary map
+  # point": at 60+ N, unit reads 2.4 and rawcap 2.5 -- both close enough to pass for normal --
+  # while raw reads 6.5 and the support gate can actually act on it. Under the normalising
+  # options a 90 N press instead finds a confident neighbour at whatever pose merely shares
+  # its force direction, and that wrong correspondence steers the estimate.
+  #
+  # THE CATCH: magnitude is not regime-invariant. If the map is light touch (median 4.5 N)
+  # and the run presses (median 29.6 N), `raw` puts the same pose in two different places --
+  # honest, but it will match NOTHING until the map is recollected under the run's physics
+  # (uncertain_sampling compliance/speed, plus sampling.preload_mm for the loaded rows).
+  # It converts a silent wrong answer into a visible no-answer; it cannot invent evidence.
+  #
+  # UNITS CHANGE with it: under `raw`, s_force / s_torque are mm PER NEWTON and mm PER
+  # NEWTON-METRE, not mm per unit vector -- a value tuned for unit/rawcap is ~10x too loud.
+  # For the BNC maps, s_force 0.11 / s_torque 0.20 reproduces `unit`'s block loudness. The
+  # "Metric block balance" line logged at startup reports what the metric actually weights,
+  # so this does not have to be guessed.
   wrench_representation: rawcap
   # rawcap SATURATION: the wrench feature is unit(f) x min(|f| / rawcap_force_ref_n,
   # rawcap_cap) -- magnitude in units of the reference, CAPPED at rawcap_cap. Saturation

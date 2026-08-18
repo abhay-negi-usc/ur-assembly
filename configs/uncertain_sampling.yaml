@@ -55,7 +55,56 @@ retract_distance_m: 0.005
 compliance:
   mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]              # virtual inertia [kg / kg*m^2]
   stiffness:     [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]     # restoring spring [N/m, Nm/rad] (10 N -> 20 mm)
-  damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]        # 1 = critically damped; 10 = heavily OVERdamped
+  # DAMPING RATIO (zeta), the multiplier in D = zeta * 2*sqrt(M*S). 1 = critically damped.
+  #
+  # 2026-08-17: 10.0 -> 1.0. At zeta 10 the free-air relaxation time constant D/S is 6.3 s
+  # while the whole insertion lasts 0.67 s at 30 mm/s -- the spring could not respond inside
+  # the motion at all, so the recorded force was set by the CONTACT stiffness and the approach
+  # speed, not by the compliance being configured. Simulated with admittance.py's own ODE at
+  # 125 Hz against a 5e4 N/m wall: what the spring would hold is S x overtravel = 0.5-6 N, but
+  # the actual result was 47-99 N. At zeta 1, D/S = 0.63 s and the spring responds inside the
+  # insertion, which is what makes `stiffness` mean what it says.
+  #
+  # Two things checked before making the change, both favourable:
+  #   * PEAK force goes DOWN, not up (49 N vs 68 N at k_env 5e4; 99 vs 112 at 2e5).
+  #   * Forward-Euler stability at 125 Hz: the limit is dt*D/M < 2, and zeta 10 sat at 0.506
+  #     while zeta 1 sits at 0.051 -- the OLD value was the one near the edge.
+  #
+  # THE ONE COST -- and it decides settle_s. zeta is defined against the ADMITTANCE stiffness,
+  # but in contact the loop stiffness is S + k_env, so the ratio that governs the SETTLE is
+  # D/(2*sqrt(M*(S+k_env))): 1.00 at the old zeta 10, 0.10 at zeta 1. The part therefore
+  # REBOUNDS off the seat once before settling. It does not chatter (a single rebound, no
+  # sustained ringing) and it converges to the same equilibrium force, but it needs roughly
+  # 2 s to get there against 0.4 s before. A settle shorter than that logs the part mid-air at
+  # 0 N instead of seated -- see settle_s below.
+  # DAMPING RATIO (zeta), the multiplier in D = zeta * 2*sqrt(M*S).
+  #
+  # READ THIS BEFORE CHANGING IT. zeta is defined against the ADMITTANCE stiffness S, but the
+  # instant the part touches something the loop stiffness is S + k_env, so the damping ratio
+  # that actually governs the contact is
+  #
+  #     zeta_contact = D / (2*sqrt(M*(S + k_env))) = zeta * sqrt(S / (S + k_env))
+  #
+  # -- and the virtual MASS cancels out of it completely. For a soft spring against a stiff
+  # part (S << k_env) the configured number is divided by a large factor before it reaches the
+  # contact, which is why a value that looks heavily overdamped on paper is merely adequate in
+  # practice, and why zeta = 1.0 RANG ON HARDWARE (observed 2026-08-17).
+  #
+  # k_env is MEASURED, not assumed: dF/dx over the loaded part of 26 real insertions gives
+  # 3.5-9 N/mm while probing and ~39 N/mm on the seated final insertion
+  # (analysis: scratch kenv_measure). S_AXIAL is the entry facing the insertion -- note the
+  # compliance runs in the TOOL0 frame while the insertion is along the CONNECTOR's +X, and for
+  # bnc_connector_finger_holder those are different axes (connector +X -> tool0 +Y).
+  #
+  # zeta = 7.0 keeps zeta_contact >= 0.7 across every contact this app meets (zeta_contact 2.47 at 3.5 N/mm, 1.66 at 8.4, 0.79 at the 39 N/mm a preload reaches).
+  # Simulated on admittance.py's own ODE at 125 Hz: 0% separation from the seat, against 11-22%
+  # at zeta 1.0. Forward-Euler headroom is ample either way (dt*D/M = 0.35, limit 2).
+  #
+  # History: this was 10.0, briefly 1.0 (2026-08-17, reverted the same day -- the change was
+  # argued from the FREE-AIR time constant D/S, which is the wrong one; D/S governs the return
+  # to the reference after contact is lost, while the contact settling is 3/(zeta_c*w_c) with
+  # w_c = sqrt((S+k_env)/M), and that one was already fast enough).
+  damping_ratio: [7.0, 7.0, 7.0, 7.0, 7.0, 7.0]
   selected_axes: [1, 1, 1, 1, 1, 1]                          # which TOOL0 axes yield to contact
   reference_rate_hz: 125.0
   warmup_s: 0.1        # hold the start pose this long (servo-engage transient decays) before the guard arms
@@ -110,6 +159,29 @@ sampling:
     lower: [0.0, -0.000, -0.005, 0.0, -5.0, 0.0]
     upper: [0.0, +0.000, +0.005, 0.0, +5.0, 0.0]
 
+  # PRELOAD (mm past the mate). After the trajectory reaches the mate, press this much further
+  # along the connector's own +X before settling, still logging. 0 = off: the trial ends exactly
+  # on the mate, which is what every map before 2026-08-17 was collected with.
+  #
+  # This APPENDS rows past the mate; it does not move the sweep. The -X -> 0 approach is
+  # unchanged, so a map collected with a preload is a strict SUPERSET of one collected without,
+  # and estimator_eval's probing passes (built to end on the mate because this app does) stay in
+  # parity.
+  #
+  # WHY: the map's contact is a median 4.5 N while the insertions matched against it press at
+  # 29.6 N (2026-08-17, analysis/bnc_tuning/v5_*.py) -- half those observation rows sit above the
+  # rawcap saturation and past depths the map never reaches. An observation in a force regime the
+  # map never recorded has no honest match in it. This is the knob that records that regime.
+  #
+  # FORCE, not distance, is what you are really choosing. The reference stops preload_mm past the
+  # seat, so the SUSTAINED force is stiffness x preload: at compliance.stiffness 500 N/m, 10 mm
+  # holds 5 N. The contact TRANSIENT while the spring loads is several times larger. To collect a
+  # 30 N seat you must raise compliance.stiffness too -- distance alone will not get there.
+  #
+  # The force guard is NOT armed for the press or the settle after it (at the seat it has already
+  # tripped, so arming it would refuse the press). The distance is the limit.
+  preload_mm: 0.0
+
   log_decimation: 5             # log every Nth servo cycle (125 Hz / N -> ~25 Hz rows)
   random_seed: 1                # 0 = nondeterministic; >0 seeds a dedicated RNG for replayable trials
   csv_path: data/uncertain_assembly_sampling/uncertain_assembly_log.csv
@@ -127,7 +199,13 @@ speed:
   # CARTESIAN limits for the COMPLIANT reference. Each ramp segment gets the time its own geometry
   # needs, so neither limit is exceeded. Set any to 0 to disable that limit.
   # INSERT -- the contact phase.
-  max_cartesian_translation_mm_s: 50.0
+  # 2026-08-17: 50 -> 30 mm/s, matching configs/estimator_eval.yaml. Approach speed is a
+  # PRIMARY driver of recorded contact force, not a cycle-time detail: simulated on the
+  # same spring and wall, peak force runs 7 N at 2 mm/s, 37 N at 10, 93 N at 25 and 187 N
+  # at 50 -- so a map collected at 50 while the eval probes at 30 records a different
+  # contact regime for the same pose, which is the mismatch the whole parity effort is
+  # about. Both apps now insert at the same speed.
+  max_cartesian_translation_mm_s: 30.0
   max_cartesian_rotation_deg_s: 50.0
   # RETRACT -- free-space escape back along a path just proven clear, so it need NOT crawl at the
   # insertion speed. Still compliant, so it yields if it does catch. Omit to reuse the insert limits.

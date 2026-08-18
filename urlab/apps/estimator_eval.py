@@ -1489,10 +1489,17 @@ def build_and_run(cfg, robot, camera, args):
     T_base_commit = T_base_targetobj @ translation_matrix([pre_mm / 1000.0, 0.0, 0.0])
     if pre_mm > 0 and fi_on:
         # comp_final only exists when the commit is enabled, hence the split.
-        s_ins = max(float(v) for v in (comp_final.get('stiffness') or [0.0])[:3])
+        # The AXIAL stiffness, not max(): compliance acts on the TOOL0 axes while the
+        # preload pushes along the CONNECTOR's +X, and for this frame those differ
+        # (connector +X -> tool0 +Y). u'Ku is that projection, and it is exact for the
+        # diagonal K the config carries. max() gave the right number for the shipped
+        # stiffness by coincidence and would have kept reporting it after any change.
+        _u = T_true[:3, :3] @ np.array([1.0, 0.0, 0.0])
+        _K = np.asarray((comp_final.get('stiffness') or [0.0] * 3)[:3], dtype=float)
+        s_ins = float(_u @ (_K * _u))
         log.info('Commit PRELOAD: %.1f mm past the mate along the connector\'s +X -- probing '
-                 'passes do NOT preload. The spring can HOLD %.1f N of that (stiffest '
-                 'translational axis %.0f N/m); the peak on contact is a transient several times '
+                 'passes do NOT preload. The spring can HOLD %.1f N of that (%.0f N/m along '
+                 'the insertion axis); the peak on contact is a transient several times '
                  'larger, and the guard cannot bound it at this persistence.',
                  pre_mm, s_ins * pre_mm / 1000.0, s_ins)
     elif pre_mm > 0:

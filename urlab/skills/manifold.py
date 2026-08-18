@@ -8,7 +8,10 @@ collects while inserting land OFF the manifold by exactly that (rigid) belief er
 them back onto the manifold estimates the error. This module does that alignment:
 
   * a common, mm-equivalent 12-D space:  [x, y, z (mm) | r, p, y (deg x s_rot) |
-    unit(f) x s_force | unit(tau) x s_torque]   -- weights decide what "nearest" means.
+    phi(f) x s_force | phi(tau) x s_torque]   -- weights decide what "nearest" means, and
+    `wrench_representation` picks phi: unit() (direction only), rawcap (direction x saturated
+    magnitude), or raw (as measured -- the only one under which an out-of-distribution
+    contact still LOOKS out of distribution).
     Every one of the twelve carries its OWN weight on top of that: dim_weights for the six
     pose dimensions, wrench_weights for the six wrench axes, with s_rot / s_force / s_torque
     left as the pure UNIT CONVERSIONS they were;
@@ -167,18 +170,57 @@ class ManifoldEstimator:
         self.wrench_w = np.array([float(ww.get(k, 1.0)) for k in WRENCH_DIMS])
         if np.any(self.wrench_w < 0):
             raise ValueError('estimation.wrench_weights must be >= 0')
-        # WRENCH REPRESENTATION (2026-08 offline wrench-lab winner): 'unit' = direction
-        # only (the original); 'rawcap' = direction x saturated magnitude -- f/10 N capped
-        # at 30 N, tau/1 Nm capped at 3 Nm -- so a 30 N wedge press carries a 3x larger
-        # feature vector than a 10 N touch. Magnitude IS informative once the manifold
-        # holds production-process data (rawcap: 0.28 mm median vs unit's 0.34 on the
-        # augmented map; harmless-to-mildly-positive on the wiggle-only map). Applied
-        # IDENTICALLY to the manifold rows and the observations; interp_tau self-adapts
-        # because it is derived from the manifold's own spacing AFTER representation.
+        # WRENCH REPRESENTATION -- how a measured wrench becomes six metric columns.
+        #
+        #   'unit'    direction only, magnitude discarded (the original).
+        #   'rawcap'  direction x saturated magnitude -- f/10 N capped at 30 N, tau/1 Nm
+        #             capped at 3 Nm -- so a 30 N wedge press carries a 3x larger feature
+        #             than a 10 N touch, up to the cap. (rawcap: 0.28 mm median vs unit's
+        #             0.34 on the augmented map; neutral on the wiggle-only map.)
+        #   'raw'     the wrench AS MEASURED, in N and Nm. No normalisation, no saturation.
+        #
+        # WHY 'raw' EXISTS. Both normalising representations make an out-of-distribution row
+        # look ordinary -- which is exactly the failure the support/OOD machinery here is
+        # built to catch, and cannot. Measured 2026-08-17 (bnc_manifold_v5 against the
+        # 17-Aug observations) as k-th-NN distance in units of the map's OWN spacing, where
+        # 1.0 means "indistinguishable from a normal map point":
+        #
+        #     observation |f|      3-10 N   30-60 N    60+ N
+        #     unit / rawcap           1.4       1.5      1.8
+        #     raw                     1.3       3.0      6.6
+        #
+        # A 90 N press against a map that is 98% light touch HAS no honest match. Under
+        # 'raw' the distance says so and support_ref_at can act on it; under the normalising
+        # ones it finds a confident neighbour at whatever pose happens to share its force
+        # direction, and that wrong correspondence then steers the energy. Two further
+        # measured reasons: 49.8% of those observation rows sit exactly ON rawcap's ceiling
+        # (against 1.6% of map rows), so half the data carries a byte-identical force
+        # feature; and a unit vector hands the metric the same length whatever the SNR, so a
+        # row at the 3 N gate contributes ~30 deg of direction noise weighted equally with
+        # an 80 N row's ~1 deg (sensor floor measured at 1.05 N/axis, 0.65 Nm/axis).
+        #
+        # THE COST, stated plainly: magnitude is NOT regime-invariant. The map's contact is a
+        # median 4.5 N while production presses at 29.6 N, so under 'raw' the same pose in
+        # the two regimes lands in two different places. That is honest, but it means a map
+        # collected under light touch will not match a production insertion AT ALL until it
+        # is recollected under matching physics (uncertain_sampling's compliance and speed,
+        # plus sampling.preload_mm for the loaded rows). 'raw' turns a silent wrong answer
+        # into a visible no-answer; it cannot conjure evidence that was never collected.
+        #
+        # UNITS. s_force / s_torque remain the block scale, but under 'raw' they are mm PER
+        # NEWTON and mm PER NEWTON-METRE rather than mm per unit vector -- so a value tuned
+        # for 'unit' is roughly 10x too loud here. Across the BNC maps (v1 / v4_fixed / v5,
+        # gated at 3 N) the wrench block matches 'unit's loudness at s_force ~0.11 and
+        # s_torque ~0.20. The "block balance" line logged at load reports what the metric
+        # actually ended up weighting, so this never has to be guessed.
+        #
+        # Applied IDENTICALLY to the manifold rows and the observations; interp_tau
+        # self-adapts because it is derived from the manifold's own spacing AFTER the
+        # representation is applied.
         rep = str(c.get('wrench_representation', 'unit')).strip().lower()
-        if rep not in ('unit', 'rawcap'):
+        if rep not in ('unit', 'rawcap', 'raw'):
             raise ValueError(f"estimation.wrench_representation {rep!r} must be "
-                             "'unit' or 'rawcap'")
+                             "'unit', 'rawcap' or 'raw'")
         self.wrench_representation = rep               # bad values fail HERE, pre-motion
         self.rawcap_force_ref_n = float(c.get('rawcap_force_ref_n', 10.0))
         self.rawcap_torque_ref_nm = float(c.get('rawcap_torque_ref_nm', 1.0))
@@ -290,6 +332,21 @@ class ManifoldEstimator:
         self.M12 = self._load_manifold(path)
         self.tree = cKDTree(self.M12)
         log.info('Contact manifold: %d points from %s', len(self.M12), path)
+        # BLOCK BALANCE -- what the metric is ACTUALLY weighting. In a Euclidean kNN space a
+        # block's LENGTH is its weight, and the representations have wildly different natural
+        # lengths ('unit' is exactly 1 by construction, 'rawcap' is bounded by rawcap_cap, 'raw'
+        # is whatever newtons the data happens to carry). The same s_force therefore means a
+        # different thing under each, and swapping representation silently re-weights the match
+        # unless somebody looks. Reported once, at load, in the metric's own mm-equivalent units.
+        _rms = {b: float(np.sqrt((np.linalg.norm(self.M12[:, sl], axis=1) ** 2).mean()))
+                for b, sl in BLOCKS}
+        _pose = float(np.hypot(_rms['translation'], _rms['rotation']))
+        _wr = float(np.hypot(_rms['force'], _rms['torque']))
+        log.info('Metric block balance (RMS mm-equivalent): %s -- the wrench block carries '
+                 '%.2fx the pose block under representation %r (s_force %.4g, s_torque %.4g). '
+                 'Far from 1 means one half of the 12-D point decides the match.',
+                 {b: round(v, 2) for b, v in _rms.items()}, _wr / max(_pose, 1e-9),
+                 self.wrench_representation, self.s_force, self.s_torque)
         self.interp_neighbors = min(self.interp_neighbors, len(self.M12))
         self.interp_tau = None
         # SUPPORT REFERENCE: how far the k-th neighbour sits for a TYPICAL manifold point. This
@@ -395,6 +452,13 @@ class ManifoldEstimator:
 
     def _wrench6(self, f, tau):
         """The 6 wrench feature columns: representation, block scaling, then per-axis weights."""
+        if self.wrench_representation == 'raw':
+            # AS MEASURED. s_force / s_torque are mm per N and mm per Nm here (see the
+            # constructor): the only transform is the block scale and the per-axis weights, so a
+            # row far from anything the map holds STAYS far. That is the whole point of it.
+            return (np.hstack([np.asarray(f, dtype=float) * self.s_force,
+                               np.asarray(tau, dtype=float) * self.s_torque])
+                    * self.wrench_w)
         if self.wrench_representation == 'rawcap':
             fm = np.linalg.norm(np.asarray(f, dtype=float), axis=-1)
             tm = np.linalg.norm(np.asarray(tau, dtype=float), axis=-1)

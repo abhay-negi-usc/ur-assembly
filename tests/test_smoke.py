@@ -3609,6 +3609,13 @@ def test_a_clocking_stroke_follows_the_arc_and_not_the_chord():
     assert 'screw_ramp(' in body and 'adm_cc.ramp(' not in body, (
         'cable_clocking must take its stroke through screw_ramp, not a single adm_cc.ramp -- a '
         'one-call ramp cuts the chord and drags the connector off its axis')
+    # The RETRY is a rotation too. move_l back to the engaged pose executes the ~90 deg return as
+    # a straight line + slerp -- the same chord, with the OPEN fingers around the captive cable.
+    # It hid for a while because its label said 'realign', not 'rotate'.
+    assert 'move_l(' not in body, (
+        'no move_l inside cable_clocking: the retry return is a ~90 deg rotation about the socket '
+        'axis and must travel the screw in reverse (screw_ramp), not cut the chord to ref_start')
+    assert 'retry-unwind' in body, 'the retry must unwind along the achieved screw'
     body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
     assert 'screw_ramp(' in body and 'adm_cl.ramp(' not in body, (
         'collar_clocking must take its turn through screw_ramp too -- the fingers are CLOSED on '

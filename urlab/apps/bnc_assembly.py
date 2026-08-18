@@ -1174,9 +1174,43 @@ def build_and_run(cfg, robot, camera, args):
                 log.error('Gripper did not open for the clocking retry.')
                 break
             phase('standoff')
-            if not _guarded(robot, guard_shared, lambda: robot.arm.move_l(
-                    ref_start, label=f'realign to the engaged pose (retry {k + 1})')):
-                log.error('Could not realign to the saved engaged pose.')
+            # UNWIND ALONG THE SCREW, do not move_l straight to the engaged pose. The arm stands
+            # up to a full stroke clocked from ref_start, and move_l executes that ~90 deg
+            # reorientation as a straight tool0 line + slerp -- the chord, ~52 mm inside the true
+            # arc -- with the OPEN fingers wrapped around the captive cable. The return is a
+            # rotation about the same socket axis as the stroke itself, so it must travel the
+            # same way: solve the ACHIEVED screw (angle about the axis, advance along it) from
+            # the measured pose and run it in reverse through screw_ramp. The lateral/angular
+            # drift the solve discards is exactly what the socket forbids, so discarding it is
+            # the correction, not an approximation.
+            here_r = robot.tool0()
+            axn_cc = T_base_tconn[:3, 0] / float(np.linalg.norm(T_base_tconn[:3, 0]))
+            pt_cc = T_base_tconn[:3, 3]
+            rel_r = here_r @ inverse(ref_start)
+            phi = float(np.dot(Rotation.from_matrix(rel_r[:3, :3]).as_rotvec(), axn_cc))
+            T_rot = rotate_about_axis(ref_start, T_base_tconn[:3, 0], pt_cc, phi)
+            s_adv = float(np.dot(here_r[:3, 3] - T_rot[:3, 3], axn_cc))
+
+            def back_at(f, _phi=phi, _s=s_adv):
+                g = 1.0 - f          # g=1 is the solved achieved screw, g=0 is the engaged pose
+                return (translation_matrix(_s * g * axn_cc)
+                        @ rotate_about_axis(ref_start, T_base_tconn[:3, 0], pt_cc, _phi * g))
+
+            u_lin, u_ang = pose_error(back_at(0.0), here_r)
+            log.info('  retry unwind: %+.1f deg / %+.2f mm of achieved screw run in reverse '
+                     '(off-screw drift discarded: %.2f mm / %.2f deg -- the socket forbids it)',
+                     np.degrees(-phi), -s_adv * 1000.0, u_lin * 1000.0, np.degrees(u_ang))
+            adm_cc.reset()
+            adm_cc.warmup(back_at(0.0))
+            guard_shared.reset()
+            res_r = screw_ramp(adm_cc, back_at, guard_shared, cc_v, cc_w,
+                               abs(np.degrees(phi)), label=f'retry-unwind {k + 1} ')
+            adm_cc.stop()
+            robot.arm.servo_stop()
+            if res_r == 'seated':
+                log.error('Force guard tripped while unwinding to the engaged pose (%s) -- the '
+                          'open fingers hit something on the way back around the cable.',
+                          guard_shared.tripped_by or 'unknown')
                 break
             if not robot.gripper.close(f'regrasp for clocking retry {k + 1}'):
                 log.error('Gripper did not close on the regrasp.')

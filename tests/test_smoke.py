@@ -3546,11 +3546,18 @@ def test_observation_passes_inherit_the_samplers_preload():
     import yaml
     ee = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'estimator_eval.yaml')))
     samp = (ee['eval']['collection'].get('sampling') or {})
+    us = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'uncertain_sampling.yaml')))
     assert 'preload_mm' in samp, \
         'collection.sampling.preload_mm must exist, or the eval cannot follow the map'
-    assert samp['preload_mm'] is None, (
-        'it must default to null = INHERIT uncertain_sampling.yaml; hardcoding a number here is '
-        'exactly the drift the sampling block was created to prevent')
+    # null = inherit the sampler, a number = an explicit override. EITHER is fine; what is
+    # not fine is an override that DISAGREES with the sampler, because then the eval probes
+    # to a different depth than the map was collected at -- the exact split this closes.
+    if samp['preload_mm'] is not None:
+        assert float(samp['preload_mm']) == float(us['sampling']['preload_mm']), (
+            f"collection.sampling.preload_mm is pinned at {samp['preload_mm']} while the "
+            f"sampler presses {us['sampling']['preload_mm']} mm -- the observations would "
+            'sit off the map at exactly the depths that decide the seat. Match it, or set '
+            'it back to null to inherit.')
     assert "((samp_ref or {}).get('sampling') or {}).get('preload_mm')" in src, \
         'the inherit path must read the sampler config at run time'
 
@@ -3601,10 +3608,14 @@ def test_sampler_and_eval_presses_are_distinct_knobs():
         'the commit press is what drives the connector home'
     assert float(us['sampling']['preload_mm']) >= 0.0, \
         'the sampler press is an operator knob, but it can never be negative'
-    # The eval must FOLLOW the sampler rather than carry its own copy of the number.
-    assert (ee['eval']['collection'].get('sampling') or {}).get('preload_mm') is None, (
-        'collection.sampling.preload_mm must stay null so the eval inherits whatever the '
-        'sampler was set to; pinning a number here is how the two silently diverge')
+    # The eval's observation press must END UP equal to the sampler's, whether it gets there
+    # by inheriting (null) or by an explicit override that agrees.
+    obs_pre = (ee['eval']['collection'].get('sampling') or {}).get('preload_mm')
+    effective = float(us['sampling']['preload_mm'] if obs_pre is None else obs_pre)
+    assert effective == float(us['sampling']['preload_mm']), (
+        f'the eval would preload {effective} mm on its observation passes while the map was '
+        f"collected at {us['sampling']['preload_mm']} mm -- probing and map must reach the "
+        'same depth')
 
     src = open(os.path.join(ROOT, 'urlab', 'apps', 'estimator_eval.py'), encoding='utf-8').read()
     # the commit press is a TARGET shift; the observation press is an AXIAL advance
@@ -3612,6 +3623,108 @@ def test_sampler_and_eval_presses_are_distinct_knobs():
         'the commit press must remain a shift of the reference path'
     assert 'T_pre = _axial_ref(last_ref, T_bel,' in src, \
         'the observation press must remain an advance from the stop point'
+
+
+def test_insertion_tester_injection_sign_and_modes():
+    """The tester's whole output is (offset -> seated?), so the offset had better mean something.
+
+    The injection is estimator_eval's: T_believed = T_true @ delta. The robot then builds every
+    reference as T_base_tconn @ row @ inverse(T_believed), so the connector's TRUE pose w.r.t. the
+    target comes out at row @ inverse(delta) -- the physical misalignment is the INVERSE of the
+    injected belief error, not the belief error itself. Confusing the two silently mirrors every
+    basin this script produces, so the relationship is pinned here and both columns are logged."""
+    from urlab.apps import insertion_tester as it
+    from urlab.apps.estimator_eval import _corr_to_m
+    from urlab.skills.manifold import mats_from_vec6
+
+    # ---- the sign relationship, end to end through the real reference construction ----
+    T_true = T.xyzrpy_to_matrix([0.0, 0.0457, 0.159], np.zeros(3))
+    T_base_tconn = T.xyzrpy_to_matrix([0.4, -0.1, 0.3], np.radians([10.0, -5.0, 20.0]))
+    for off6 in ([0.0, 0.0, 2.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0, 4.0, 0.0],
+                 [1.0, 0.0, -2.0, 0.0, -3.0, 0.0]):
+        delta = _corr_to_m(mats_from_vec6(np.asarray(off6, dtype=float)))
+        T_believed = T_true @ delta
+        # the reference the app commands at the mate (row = identity)
+        ref = T_base_tconn @ np.eye(4) @ T.inverse(T_believed)
+        # ...and where the TRUE connector actually ends up, since the part is fixtured
+        actual = T.inverse(T_base_tconn) @ (ref @ T_true)
+        xyz, rpy = T.matrix_to_xyzrpy(actual)
+        got = list(xyz * 1000.0) + list(np.degrees(rpy))
+        pred = it._physical_offset(mats_from_vec6(np.asarray(off6, dtype=float)))
+        assert np.allclose(got, pred, atol=1e-6), (
+            f'_physical_offset must predict where the part really lands for {off6}: '
+            f'predicted {np.round(pred, 3)}, geometry gives {np.round(got, 3)}')
+        # and it is genuinely the INVERSE, not a copy of the injected number
+        if any(abs(c) > 1e-9 for c in off6):
+            assert not np.allclose(got, off6, atol=1e-6), \
+                'physical and injected offsets must not be conflated -- they differ in sign'
+
+    # ---- both insertion strategies exist and are validated pre-motion ----
+    assert it.MODES == ('direct', 'wiggle'), 'the two strategies under test'
+    src = open(os.path.join(ROOT, 'urlab', 'apps', 'insertion_tester.py'),
+               encoding='utf-8').read()
+    # the maneuvers are IMPORTED from the apps that own them, not re-implemented, or this tester
+    # would slowly stop measuring what production actually runs
+    for owner, name in (('bnc_assembly', '_ScrewAdvance'), ('bnc_assembly', '_AnyGuard'),
+                        ('calibration_check', 'line_rows')):
+        assert name in src and f'from .{owner} import' in src, \
+            f'{name} must come from {owner}, not be copied into the tester'
+
+    # ---- seating is MEASURED on the true pose, never inferred from why the motion ended ----
+    assert 'seated = bool(abs(seat6[0]) <= seat_tol_mm' in src, (
+        'seated must be decided by the measured seat pose: a guard trip AT the mate is a good '
+        'seat and completing the path 3 mm short is not, and only the pose separates them')
+
+
+def test_insertion_tester_config_is_coherent():
+    """The shipped config must describe a test that can actually succeed."""
+    import yaml
+
+    c = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'insertion_tester.yaml')))
+    ins = c['insertion']
+    assert ins['insertion_mode'] in ('direct', 'wiggle')
+    offs = ins['offsets']
+    assert all(len(o) == 6 for o in offs), 'every offset is a 6-vector [mm x3, deg x3]'
+    assert any(not any(abs(float(v)) > 1e-12 for v in o) for o in offs), (
+        'keep a NOMINAL (all-zero) offset as the control -- without it a run cannot distinguish '
+        '"this offset is too big" from "the setup is broken"')
+    assert int(ins['repeats']) >= 2, \
+        'seat success is a RATE; one try per offset cannot separate a 90% basin from a 40% one'
+
+    wg = ins['wiggle']
+    amp, frq = wg['amplitude'], wg['frequency_hz']
+    live = [d for d in amp if abs(float(amp[d])) > 0.0]
+    assert live, 'the wiggle must oscillate on at least one axis'
+    for d in live:
+        assert float(frq[d]) > 0.0, f'wiggle axis {d} has amplitude but no frequency'
+    f_max = max(float(frq[d]) for d in live)
+    assert float(wg['sample_rate_hz']) >= 4.0 * f_max, (
+        f'sample_rate_hz {wg["sample_rate_hz"]} aliases a {f_max} Hz component -- the wiggle '
+        'would silently run at a frequency nobody chose')
+    assert float(wg['engage_advance_mm']) <= float(wg['target'][0]), (
+        'the engagement threshold must sit at or before where the reference pushes to, or the '
+        'wiggle can only ever time out')
+    # co-prime frequencies: a rational ratio retraces one closed Lissajous path forever
+    if len(live) >= 2:
+        fr = sorted(int(round(float(frq[d]) * 10)) for d in live)
+        assert math.gcd(fr[0], fr[1]) == 1, (
+            f'wiggle frequencies {[float(frq[d]) for d in live]} Hz share a common factor, so '
+            'the orbit closes early and re-probes one line through the rectangle')
+
+    # the contact-damping criterion this repo learned the hard way (2026-08-17: zeta 1.0 rang)
+    M = np.array([float(x) for x in c['compliance']['mass']])
+    S = np.array([float(x) for x in c['compliance']['stiffness']])
+    Z = np.array([float(x) for x in c['compliance']['damping_ratio']])
+    # the SOFTEST translational axis is the worst case for bouncing (zeta_contact grows
+    # with S), checked against the stiffest contact actually measured, ~39 N/mm seated
+    S_soft = float(np.min(S[:3]))
+    zc = float(Z[0]) * np.sqrt(S_soft / (S_soft + 39000.0))
+    assert zc >= 0.7, (
+        f'zeta {Z[0]:g} at its softest axis S {S_soft:.0f} gives zeta_contact {zc:.2f} '
+        'against a seated contact -- '
+        'below 0.7 the connector bounces off the seat instead of settling into it')
+    assert float(np.max((1.0 / 125.0) * (Z * 2.0 * np.sqrt(M * S)) / M)) < 1.0, \
+        'forward-Euler headroom at 125 Hz'
 
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]

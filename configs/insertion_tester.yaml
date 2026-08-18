@@ -1,0 +1,167 @@
+# ===================================================================================================
+# INSERTION TESTER -- seat success vs deliberate misalignment (urlab/apps/insertion_tester.py).
+#
+# calibration_check asks "is the recorded mate where the socket is?" and probes a NOMINAL approach.
+# This asks the next question: HOW FAR OFF can the connector be before the insertion stops working,
+# and does a different insertion STRATEGY widen that margin?
+#
+# Offset in, seated/not-seated out. No estimation anywhere: the connector is RIGIDLY FIXTURED
+# between the CLOSED gripper fingers, so its true pose is known exactly and every verdict is a
+# measurement rather than an inference. That is what makes the output a clean success basin --
+# the estimator's failure modes cannot contaminate it.
+#
+# Run:  python -m urlab.apps.insertion_tester --config configs/insertion_tester.yaml
+#       python -m urlab.apps.insertion_tester --set insertion.insertion_mode=wiggle
+# ===================================================================================================
+
+robot:
+  ip: 192.168.125.2
+  dry_run: false
+  payload:                       # same values as estimator_eval -- true EXTERNAL force readout
+    mass_kg: 1.3
+    cog_m: [-0.026, 0.028, 0.030]
+base_frame: base_link
+tip_frame: tool0
+
+# The held connector + its recorded mate (configs/frames.yaml: frames: AND targets: entries).
+held_frame: bnc_connector_finger_holder
+
+insertion:
+  # ---- STRATEGY UNDER TEST -------------------------------------------------------------------
+  #   direct  a straight advance along the connector's +X to the mate, guarded. This is
+  #           calibration_check's motion, so a zero-offset direct run reproduces that script's
+  #           probe -- which makes it the CONTROL the wiggle has to beat.
+  #   wiggle  drive at a fixed target PAST the mate and oscillate about it in the connector's own
+  #           axes, letting compliance find the lead-in the way a person jiggles a plug in. This
+  #           is bnc_assembly's maneuver, imported from that app rather than re-implemented.
+  insertion_mode: direct
+
+  # ---- THE INJECTED OFFSETS ------------------------------------------------------------------
+  # Each entry is [x, y, z (mm), roll, pitch, yaw (deg)] in the HELD CONNECTOR's own frame, and is
+  # injected exactly as estimator_eval injects a belief error: T_believed = T_true @ delta. The
+  # robot then plans a PERFECT insertion against a WRONG belief, so the connector physically
+  # arrives misaligned -- the misalignment is realised by the robot's own motion, never by moving
+  # the target or the fixture.
+  #
+  # NOTE THE SIGN. A belief error of delta puts the part at inverse(delta), so +2 mm injected is
+  # ~2 mm the OTHER way physically. Both numbers are written to the CSV (inj_* and phys_*): the
+  # injected one makes a run comparable with estimator_eval trials, the physical one is the
+  # misalignment the insertion actually had to overcome and is the x-axis of any basin plot.
+  #
+  # As set: a pitch ladder and a z ladder through the range uncertain_sampling's grid covers, plus
+  # the nominal control. Start narrow and widen -- if EVERYTHING seats, the basin is wider than
+  # what was tested and the run says nothing about the margin.
+  offsets:
+    - [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]      # nominal control -- must seat, or suspect the setup
+    - [0.0, 0.0, 0.0, 0.0, 2.0, 0.0]
+    - [0.0, 0.0, 0.0, 0.0, 4.0, 0.0]
+    - [0.0, 0.0, 0.0, 0.0, -4.0, 0.0]     # both signs: lead-ins are rarely symmetric
+    - [0.0, 0.0, 2.0, 0.0, 0.0, 0.0]
+    - [0.0, 0.0, 4.0, 0.0, 0.0, 0.0]
+    - [0.0, 0.0, 2.0, 0.0, 2.0, 0.0]      # combined: the corner is where basins actually fail
+
+  repeats: 3                     # cycles per offset. Seat success is a RATE -- one try per
+                                 # offset cannot distinguish a 90% basin from a 40% one.
+  shuffle: true                  # spread each offset across the run. Running all repeats of one
+                                 # offset back-to-back confounds "this offset is hard" with "the
+                                 # fixture had drifted by then"; shuffling turns a creep into
+                                 # scatter instead of a false difference between offsets.
+  random_seed: 1                 # >0 = the shuffle is replayable; 0 = nondeterministic
+
+  # ---- GEOMETRY ------------------------------------------------------------------------------
+  standoff_distance_m: 0.030     # backed off along the BELIEVED connector's own -X (free space)
+  overshoot_m: 0.002             # command slightly PAST the mate so a good insertion is not
+                                 # stopped one waypoint short of seating
+  resolution_m: 0.001            # straight-line waypoint spacing (direct mode)
+
+  # ---- WHAT COUNTS AS SEATED -----------------------------------------------------------------
+  # Measured on the TRUE connector pose w.r.t. the recorded mate at the end of the motion -- NOT
+  # inferred from how the motion ended. A force trip AT the mate is a good seat; completing the
+  # commanded path 3 mm short is not, and only the pose can tell those apart.
+  seat_tolerance_mm: 1.0
+  seat_tolerance_deg: 2.0
+
+  # ---- WIGGLE (used only when insertion_mode: wiggle) -----------------------------------------
+  wiggle:
+    # TARGET, connector w.r.t. the target connector [x, y, z (mm), roll, pitch, yaw (deg)].
+    # x = +5 mm is PAST the mate plane on purpose: the spring should be pushing home throughout,
+    # with the oscillation superimposed on that push rather than replacing it.
+    target: [5.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    amplitude:
+      x_mm: 0.0                  # x is the push direction -- `target` owns it, not the wiggle
+      y_mm: 0.0
+      z_mm: 5.0
+      roll_deg: 0.0
+      pitch_deg: 5.0
+      yaw_deg: 0.0
+    # FREQUENCY per axis (Hz), required wherever the amplitude is non-zero.
+    # MUTUALLY PRIME ON PURPOSE. Two axes at a rational frequency ratio retrace the same closed
+    # Lissajous curve forever, so the wiggle would keep re-probing a ONE-dimensional path through
+    # the (z, pitch) rectangle. 0.7 and 1.1 Hz are 7 and 11 in units of 0.1 Hz -- co-prime, so the
+    # orbit closes only every 10 s and sweeps the rectangle rather than a line through it. Keep
+    # any new pair co-prime for the same reason.
+    frequency_hz:
+      x_mm: 0.0
+      y_mm: 0.0
+      z_mm: 0.7
+      roll_deg: 0.0
+      pitch_deg: 1.1
+      yaw_deg: 0.0
+    # How often the reference is rebuilt. Must be >= 4x the highest frequency or the sampled sine
+    # aliases into a slower one -- validated pre-motion, because an aliased wiggle looks like it
+    # ran correctly, just at a frequency nobody chose.
+    sample_rate_hz: 25.0
+    max_duration_s: 30.0         # give up after this long without engaging
+    # ENGAGEMENT: measured advance of the TRUE connector along the mate's +X, checked every servo
+    # cycle so success ENDS the motion. Must be below `target` x so it can actually be reached.
+    engage_advance_mm: 4.0
+    # --- compliance overrides (else the top-level compliance:) ---
+    # Stiff along x to keep pressing home; softer across, so the rocking yields to the socket's
+    # lead-in instead of grinding on it.
+    stiffness: [2000.0, 400.0, 400.0, 8.0, 8.0, 8.0]
+    mass: null
+    damping_ratio: null
+    # --- force guard overrides (else the top-level force_guard:) ---
+    # A wiggle presses and rocks against the socket, so this wants "genuinely jammed", not "stop
+    # on first touch" -- a probe-tight limit would end every wiggle on its first contact.
+    max_force_n: 40.0
+    max_torque_nm: 8.0
+    persistence_s: 0.3
+
+speed:
+  approach_translation_mm_s: 2.0 # SLOW on purpose: gentle first contact, crisp trip point
+  retract_translation_mm_s: 20.0
+  max_joint_velocity_deg_s: 30.0 # free-space joint moves between cycles
+
+compliance:
+  enabled: true
+  tare_before: true
+  mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
+  # ANISOTROPIC, matching assembly.final_insertion in configs/bnc_assembly.yaml -- this script
+  # exists to characterise THAT insertion, so it has to run that insertion's spring. Stiff along
+  # the insertion axis to keep pressing home, compliant across it so a misaligned part is guided
+  # by the lead-in instead of grinding on it. A probe's isotropic 3000 (calibration_check) would
+  # measure the contact point crisply and accommodate nothing, which is the wrong experiment.
+  #
+  # MIND THE AXIS. Compliance acts on the TOOL0 axes but the part goes in along the CONNECTOR's
+  # +X, and for bnc_connector_finger_holder those differ: connector +X maps to tool0 +Y. So the
+  # 3000 below is the INSERTION axis and the two 500s are lateral -- not the other way round.
+  stiffness:     [500.0, 3000.0, 500.0, 10.0, 10.0, 10.0]
+  # zeta is defined against the ADMITTANCE stiffness, but in contact the loop stiffness is
+  # S + k_env, so what governs the bounce is zeta * sqrt(S/(S+k_env)) -- with the virtual mass
+  # cancelling out entirely. Measured k_env (dF/dx over 26 real insertions): 3.5-9 N/mm while
+  # probing, ~39 N/mm once seated. Against the SOFTEST axis here (500) the worst case is
+  # 7 * sqrt(500/39500) = 0.79, and along the insertion axis 1.87 -- both comfortably damped,
+  # while dt*D/M stays at 0.87 against the forward-Euler limit of 2.
+  #
+  # Do NOT lower this because it looks overdamped on paper: that argument is about the FREE-AIR
+  # constant D/S, and acting on it is what made the connector ring on 2026-08-17.
+  damping_ratio: [7.0, 7.0, 7.0, 7.0, 7.0, 7.0]
+  settle_s: 1.0                  # hold at the stop before reading the seat pose
+
+force_guard:
+  enabled: true
+  max_force_n: 15.0              # direct mode: a probe should FEEL the face, not press it
+  max_torque_nm: 4.0
+  persistence_s: 0.0             # instant: in direct mode the trip point IS the measurement, and
+                                 # a debounce smears the seat pose by the extra travel

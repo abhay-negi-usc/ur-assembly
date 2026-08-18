@@ -45,6 +45,7 @@ urlab-uncertain-sampling = "urlab.apps.uncertain_sampling:main"
 urlab-cable-pick-place = "urlab.apps.cable_pick_place:main"
 urlab-cable-touch-pick-place = "urlab.apps.cable_touch_pick_place:main"
 urlab-cable-pick-assemble = "urlab.apps.cable_pick_assemble:main"
+urlab-insertion-tester = "urlab.apps.insertion_tester:main"
 
 [tool.setuptools]
 packages = ["urlab", "urlab.robot", "urlab.perception", "urlab.skills", "urlab.apps"]

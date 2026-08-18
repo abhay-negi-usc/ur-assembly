@@ -266,7 +266,10 @@ assembly:
   # uncertain_sampling and estimator_eval assemble to, one per socket. MEASURE: hand-guide to a
   # good mate, read `base_link <- <frame>` off the monitor, paste it under targets: (mm/deg).
   # (The old assembly.target_connector / connector_holder_target keys are IGNORED with a warning.)
-  target_frame: bnc_connector_finger_holder
+  target_frame: bnc_connector_in_fingerpads   # must name the SAME point as
+  # estimation.initial_connector_frame -- the target is one side of
+  # `T_base_targetobj @ row @ inverse(T_tool0_conn)` and the belief is the other, so
+  # naming different points there puts the connector off by exactly their difference.
 
   # The ideal insertion path: CONNECTOR w.r.t. the TARGET connector, last row = identity (the mate).
   trajectory_csv: assembly_trajectory.csv

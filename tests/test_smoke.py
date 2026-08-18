@@ -440,8 +440,23 @@ def test_cable_profile_applies_counts():
 
     bnc = Config({'cable': 'bnc', '_config_dir': CONFIG_DIR})
     apply_cable_profile(bnc)
-    assert bnc.get_path('grasp_check.faces_max_counts') == 196
-    assert bnc.get_path('grasp_check.groove_max_counts') == 206
+    # THE RULE, NOT THE NUMBER. Both thresholds are DERIVED from the connector band, so
+    # pinning the derived value breaks on every legitimate retune of the band -- it did, this
+    # failed on 196 after the bnc band moved while nothing was actually wrong. What must hold
+    # is the arithmetic tying them together:
+    #     faces_max  = band_low - 1   (at or below the band floor = too thick = a face grasp)
+    #     groove_max = band_high      (above the band but below empty = the cable, not the shell)
+    for _c in (cfg, bnc):
+        _lo, _hi = _c.get_path('grasp_check.connector_counts')
+        assert _c.get_path('grasp_check.faces_max_counts') == _lo - 1, (
+            'faces_max_counts must sit one count below the connector band, not float free of it')
+        assert _c.get_path('grasp_check.groove_max_counts') == _hi, (
+            'groove_max_counts must be the connector band ceiling')
+        assert _lo < _hi < _c.get_path('grasp_check.empty_counts'), (
+            'bands must stay ordered: connector inside, cable above it, empty above that')
+    assert (bnc.get_path('grasp_check.connector_counts')
+            != cfg.get_path('grasp_check.connector_counts')), (
+        'the bnc profile must actually override the default band -- equal means it never applied')
 
     # The RETIRED junction_offset_m must fail LOUDLY with the conversion recipe -- a silently
     # ignored offset would grasp at the junction itself.
@@ -3327,8 +3342,12 @@ def test_preload_force_is_a_spike_not_a_press():
         commit_S = max(float(v) for v in fi['stiffness'][:3])
         assert probe_S * pre_m < 10.0, \
             f'{name}: the probing spring cannot hold a large press -- keep the comment honest'
-        assert commit_S * pre_m > probe_S * pre_m, \
-            f'{name}: the commit stiffness is what buys a sustained press; it must exceed probing'
+        # The commit must never be SOFTER than probing -- that would be backwards, a press
+        # yielding more easily than a search. It is no longer required to be STRICTLY stiffer:
+        # the fleet runs one stiffness everywhere by explicit decision, so equal is the intended
+        # state and the press is bought with preload rather than with extra spring.
+        assert commit_S >= probe_S, (
+            f'{name}: the commit spring is softer than the probing spring -- that is inverted')
         # THE GUARD CANNOT BOUND THE SPIKE, and the comments say so, so pin the arithmetic behind
         # that claim. The guard needs the limit held CONTINUOUSLY for persistence_s. The WORST
         # case for that claim is contact from the very first waypoint -- the connector catching a
@@ -3379,6 +3398,63 @@ def test_preload_force_is_a_spike_not_a_press():
         # and the guard starts cutting the press short. Flagged, not silently "fixed": changing a
         # force limit or a speed is a physical decision.
         assert persist - ramp_s >= 0.0, f'{name}: negative guard margin'
+
+
+def test_the_target_frame_and_the_in_hand_belief_name_the_same_point():
+    """The clocking screw axis IS the target frame, so it must be the connector, not a neighbour.
+
+    THE BUG THIS EXISTS TO CATCH, because it is silent and it wrecks the clocking strokes.
+    `assembly.target_frame` names a point on the tool; so does the believed in-hand connector pose.
+    Nothing forces them to be the SAME point, and when they drifted apart the failure showed up
+    nowhere in the logs -- every pose printed looked self-consistent.
+
+    THE INVARIANT. Engage commands tool0 to `target @ inverse(T_tool0_conn)`. At that arm pose the
+    frame named by target_frame sits at `target @ inverse(T_tool0_conn) @ frames[target_frame]`.
+    For that to actually BE the target -- a real mate -- the tail has to vanish:
+
+        frames[assembly.target_frame] == T_tool0_conn
+
+    WHY THE CLOCKING PASSES CARE MOST. cable_clocking resets its belief to the target and screws
+    about THAT frame's +X:  ref_goal = (T_base_tconn @ screw @ inverse(T_base_tconn)) @ T_tool0.
+    That is a rotation about an axis LINE through the target's origin. If the target is `d` off the
+    true connector axis, a `theta` turn drags the connector origin through a chord of
+    `2 d sin(theta/2)` instead of spinning it in place -- 19 mm of offset on a 90 deg stroke is a
+    27 mm arc, which scrubs the connector sideways through the socket rather than clocking it.
+    collar_clocking then inherits the same axis through T_base_conn, so one drift breaks both.
+
+    Checked GEOMETRICALLY rather than by comparing the two config strings, so that an alias frame
+    with the same pose passes and a same-named frame that someone later moves does not."""
+    import numpy as np
+
+    from urlab import config as urconfig, tool_frames
+    from urlab.transforms import from_cfg, pose_error
+
+    cfg = urconfig.load('bnc_assembly')
+    frames = tool_frames.load_frames(cfg)
+    tname = cfg['assembly']['target_frame']
+    assert tname in frames, f'assembly.target_frame {tname!r} is not a declared frame'
+    belief = (from_cfg(cfg['fingertip_grasp'])
+              @ from_cfg(cfg['estimation']['initial_connector_in_fingertip']))
+    lin, ang = pose_error(frames[tname], belief)
+    # Report the consequence in the units the operator cares about: the arc the connector would be
+    # dragged through by the ACTUAL clocking stroke, chord = 2 d sin(theta / 2).
+    theta = np.radians(float(cfg['assembly']['cable_clocking']['rotation_deg']))
+    arc_mm = 2.0 * lin * 1000.0 * abs(np.sin(theta / 2.0))
+    assert lin * 1000.0 < 0.05 and np.degrees(ang) < 0.05, (
+        f'assembly.target_frame {tname!r} sits {lin * 1000.0:.2f} mm / {np.degrees(ang):.2f} deg '
+        f'from the believed in-hand connector, so the clocking screw axis is that far off the '
+        f'connector axis: the {np.degrees(theta):.0f} deg cable_clocking stroke would drag the '
+        f'connector through a {arc_mm:.1f} mm arc instead of spinning it in place, and '
+        f'collar_clocking would inherit the same axis. Point target_frame at the same frame as '
+        f'estimation.initial_connector_frame.')
+
+    # And the two config keys should AGREE BY NAME as well, since that is how a reader checks it.
+    iname = cfg.get_path('estimation.initial_connector_frame')
+    if iname:
+        assert iname == tname, (
+            f'estimation.initial_connector_frame {iname!r} and assembly.target_frame {tname!r} '
+            f'name different frames; they happen to be geometrically equal today, but nothing '
+            f'keeps them that way')
 
 
 def test_sampling_preload_appends_and_does_not_move_the_sweep():

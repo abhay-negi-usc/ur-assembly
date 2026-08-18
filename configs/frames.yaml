@@ -102,3 +102,25 @@ targets:
   bnc_connector_finger_holder:
     xyz_mm:  [98.88, 1096.00, -139.96]
     rpy_deg: [-47.76, 1.77, 94.84]
+
+  # bnc_connector_in_fingerpads at the mate -- the target bnc_assembly drives to.
+  #
+  # DERIVED, NOT MEASURED (2026-08-18). Taken from the finger_holder target above by
+  #     target_new = target_old @ inverse(F_finger_holder) @ F_in_fingerpads
+  # which is the SAME ARM POSE at the mate re-expressed for a different point on the tool
+  # (verified identical to 1e-9 mm). The physical mate is unchanged; only which point the
+  # number names has moved.
+  #
+  # WHY IT WAS NEEDED. bnc_assembly plans with the in_fingerpads frame (the believed in-hand
+  # pose) but was driving to the finger_holder TARGET, and those name points 19 mm apart -- 0.7 mm
+  # along the insertion axis and 19.0 mm LATERAL, which is the shape of error a straight-in push
+  # barely reveals. Both sides of `T_base_targetobj @ row @ inverse(T_tool0_conn)` now name the
+  # same point.
+  #
+  # PREFER A FRESH MONITOR READING when there is bench time -- hand-guide to a good mate and read
+  # `base_link <- bnc_connector_in_fingerpads` off urlab.apps.monitor. This entry inherits every
+  # error the finger_holder reading carried, including that it was itself re-derived arithmetically
+  # on 2026-08-15 rather than measured.
+  bnc_connector_in_fingerpads:
+    xyz_mm:  [112.99, 1096.10, -152.70]
+    rpy_deg: [-47.76, 1.77, 94.84]

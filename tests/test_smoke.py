@@ -3448,6 +3448,64 @@ def test_a_null_speed_override_is_resolved_before_it_reaches_the_arithmetic():
                for k in ('speed_translation_mm_s', 'speed_rotation_deg_s')),         'if no clocking block ships a null any more, this guard has lost its subject'
 
 
+def test_the_collar_axis_offset_is_read_from_config_in_the_connector_frame():
+    """The collar's rotation line is tunable without touching the frame declaration.
+
+    The declared connector frame origin is the mating-face reference, placed for insertion --
+    nothing forces it onto the barrel centreline the collar physically turns about (bench: ~5 mm
+    along the connector -Z). collar_clocking.axis_offset_mm shifts the axis LINE by a vector in
+    the CONNECTOR frame's own axes, scoped to the collar maneuver only; cable clocking keeps the
+    unoffset axis, since the socket physically corrects that captive stroke anyway."""
+    import numpy as np
+    import yaml
+
+    from urlab import config as urconfig, tool_frames
+
+    cl = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))[
+        'assembly']['collar_clocking']
+    off = [float(v) for v in cl['axis_offset_mm']]
+    assert len(off) == 3, 'axis_offset_mm must be connector-frame xyz'
+
+    # the offset must move the LINE by exactly its perpendicular part -- connector-frame Y/Z are
+    # orthogonal to the axis (+X) under any rigid placement, so |lateral| = |(y, z)|
+    cfg = urconfig.load('bnc_assembly')
+    T_t = tool_frames.load_targets(cfg)[cfg['assembly']['target_frame']]
+    axn = T_t[:3, 0] / np.linalg.norm(T_t[:3, 0])
+    d = T_t[:3, :3] @ (np.asarray(off) / 1000.0)
+    lat = float(np.linalg.norm(d - np.dot(d, axn) * axn)) * 1000.0
+    assert abs(lat - float(np.hypot(off[1], off[2]))) < 1e-9, (
+        'a connector-frame offset must shift the axis line by exactly its Y/Z magnitude')
+
+    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
+        src = fh.read()
+    assert "cl.get('axis_offset_mm'" in src, 'the offset must come from the config'
+    body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
+    assert 'T_base_tconn[:3, :3] @ off_conn' in body, (
+        'the offset must be rotated from the CONNECTOR frame into base before shifting the point')
+    cable = src[src.index('def cable_clocking('):src.index('def collar_clocking(')]
+    assert 'off_conn' not in cable and 'axis_offset_mm' not in cable, (
+        'the offset is scoped to the collar maneuver; cable clocking keeps the unoffset axis')
+
+
+def test_the_escape_releases_the_collar_before_retracting():
+    """collar_clocking returns with the fingers CLOSED on the locked collar -- it grips the ring
+    to turn it and nothing in the maneuver lets go. The escape that follows was written for OPEN
+    fingers (its first leg "lifts the open fingers off the connector"), so retracting without a
+    release drags the just-locked assembly sideways by the collar. The release therefore sits
+    between the ESCAPE gate and the retract, gating the retract on its success -- and it must
+    stay on that path for EVERY way into the escape (collar locked, failed, or disabled), which
+    is why it lives at the boundary and not inside collar_clocking."""
+    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
+        src = fh.read()
+    i_gate = src.index("phase_gate('ESCAPE'")
+    tail = src[i_gate:i_gate + 1600]
+    assert "gripper.open('release before escape')" in tail, (
+        'the escape must open the gripper before retracting -- the fingers are still closed on '
+        'the locked collar when collar clocking returns')
+    assert tail.index("gripper.open('release before escape')") < tail.index('clocking_retract()'), (
+        'the release must PRECEDE the retract, and the retract must be gated on it')
+
+
 def test_the_offaxis_tilt_gate_clears_the_screws_own_compliance():
     """The gate must survive the tilt the PREVIOUS maneuver routinely leaves behind.
 

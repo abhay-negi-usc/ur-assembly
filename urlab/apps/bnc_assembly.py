@@ -512,6 +512,11 @@ def build_and_run(cfg, robot, camera, args):
     cl_tare = tare if bool(cl.get('tare_before', False)) else None
     cl_app_mm = cl.get('approach_mm')     # None = the fingertip's station at that moment
     cl_tilt_deg = _num(cl, 'max_offaxis_tilt_deg', 5.0)
+    cl_axis_off = [float(v) for v in (cl.get('axis_offset_mm') or [0.0, 0.0, 0.0])]
+    if len(cl_axis_off) != 3:
+        log.error('assembly.collar_clocking.axis_offset_mm must have 3 entries (connector-frame '
+                  'xyz, mm), got %r.', cl.get('axis_offset_mm'))
+        return False
     if cc_on and cl_on and not cc_open_after:
         log.error('assembly.collar_clocking needs cable_clocking.open_gripper_after true: the '
                   'collar is grasped by the same gripper, which must release the cable first.')
@@ -1302,6 +1307,20 @@ def build_and_run(cfg, robot, camera, args):
         axn = axis / float(np.linalg.norm(axis))
         cammed = float(np.dot(T_base_conn[:3, 3] - T_base_tconn[:3, 3], axn))
         point = T_base_tconn[:3, 3] + cammed * axn
+        # COLLAR AXIS OFFSET (config: collar_clocking.axis_offset_mm, CONNECTOR-frame xyz). The
+        # declared frame origin is the mating-face reference, placed for insertion -- not
+        # necessarily on the barrel centreline the collar physically turns about. This shifts the
+        # LINE the whole collar maneuver works about (centre, unwind, advance, turn) by a vector
+        # expressed in the connector frame's own axes; bench-measured ~5 mm along -Z. The Y/Z
+        # components move the line, X only slides the reference point along it. Scoped to collar
+        # clocking -- cable clocking still turns about the unoffset target axis.
+        off_conn = np.asarray(cl_axis_off, dtype=float) / 1000.0
+        if float(np.linalg.norm(off_conn)) > 0.0:
+            point = point + T_base_tconn[:3, :3] @ off_conn
+            log.info('  collar axis OFFSET by %s mm (connector frame) -> the line moves %.2f mm '
+                     'laterally.', np.round(cl_axis_off, 2).tolist(),
+                     float(np.linalg.norm(off_conn - np.dot(off_conn, [1.0, 0.0, 0.0])
+                                          * np.array([1.0, 0.0, 0.0]))) * 1000.0)
         T_base_axis = T_base_tconn.copy()
         T_base_axis[:3, 3] = point
         here = robot.tool0()
@@ -1840,11 +1859,21 @@ def build_and_run(cfg, robot, camera, args):
                           'itself succeeded; skipping collar clocking and retracting.',
                           cc_tries, 'y' if cc_tries == 1 else 'ies')
             if phase_gate('ESCAPE',
-                           'Clocking done. Next is the two-leg retract: the gripper backs off '
-                           'its own -Z, then away along the target -X.'):
-                ret_ok = clocking_retract()
+                           'Clocking done. Next: RELEASE the gripper, then the two-leg retract '
+                           '(the gripper backs off its own -Z, then away along the target -X).'):
+                # RELEASE FIRST. collar_clocking ends with the fingers still CLOSED on the locked
+                # collar, and the retract's first leg is written for OPEN fingers -- retracting
+                # while clamped drags the just-locked assembly sideways. Idempotent on the paths
+                # where the gripper is already open (collar clocking failed early or disabled).
+                if robot.gripper.open('release before escape'):
+                    ret_ok = clocking_retract()
+                else:
+                    log.error('Gripper did not open before the escape -- leaving the arm in '
+                              'place rather than dragging the locked assembly with clamped '
+                              'fingers.')
             else:
-                log.warning('Escape skipped by the user -- the arm is still at the connector.')
+                log.warning('Escape skipped by the user -- the arm is still at the connector '
+                            'with the gripper in whatever state clocking left it.')
         finally:
             robot.arm.servo_stop()
             if clock_rows:

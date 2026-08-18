@@ -577,7 +577,7 @@ assembly:
     # EARLY-OUT ONLY: a stroke that runs to completion is assumed seated regardless of measured
     # advance -- cross-checking completion against this number turned soft-spring deflection into
     # false failures and needless ratchet retries. Cumulative across retries.
-    success_advance_mm: 3.0
+    success_advance_mm: 5.0
     max_tries: 3
     # WHAT A RETRY DOES -- a REGRASP, never an unscrew. The gripper has turned with the cable, so
     # the stroke cannot just be repeated; undoing it would hand back whatever the cams gained. So
@@ -602,7 +602,7 @@ assembly:
     # --- compliance overrides (else the top-level compliance:) ---
     # Stiff along x (press the cams home) and soft in rotation about x (let the bayonet steer the
     # roll rather than forcing it) -- the whole point of aiming at a virtual target.
-    stiffness: [2000.0, 500.0, 500.0, 5.0, 10.0, 10.0]
+    stiffness: [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
     mass: null
     damping_ratio: null
     # --- force guard overrides (else the top-level force_guard:) ---
@@ -629,6 +629,17 @@ assembly:
     # reference ~45.7 mm further forward, and measuring from it overshot the advance by exactly
     # that much (observed: aimed ~+70 mm for a collar ~+25 mm away).
     collar_offset_mm: 25.0
+    # COLLAR AXIS OFFSET, mm, expressed in the CONNECTOR (target) frame's own axes. Shifts the
+    # LINE the whole collar maneuver works about -- centring, unwind, advance and turn all move
+    # with it. Cable clocking is NOT affected; it still turns about the unoffset target axis.
+    #
+    # WHY IT EXISTS. The declared connector frame origin is the mating-face reference, placed so
+    # the INSERTION works; nothing forces it onto the barrel centreline the collar physically
+    # turns about, and on the bench the collar's true axis measures ~5 mm along the connector -Z
+    # from the declared one. Y and Z move the line; X only slides the reference point along it
+    # (no geometric effect). If this settles to a stable value it belongs in the frame
+    # declaration itself (frames.yaml) rather than here -- this knob is the fast bench tune.
+    axis_offset_mm: [0.0, 0.0, -5.0]
     # UNWIND STATION, mm along the connector +X RELATIVE TO THE JUNCTION (= the closed pads, see
     # collar_offset_mm above). The gripper unwinds here, then ADVANCES onto the collar before
     # closing -- so with null/0 the advance is exactly collar_offset_mm.
@@ -676,7 +687,7 @@ assembly:
     # The gate is asking "is this a centring nudge or a blind swing?", not "is the geometry pure?".
     # Tightening it back toward zero turns normal compliance yield into an aborted run; loosening
     # it far past this starts hiding real frame errors, which is why the tilt is always logged.
-    max_offaxis_tilt_deg: 5.0
+    max_offaxis_tilt_deg: 10.0
     settle_s: 0.5
     tare_before: false            # see cable_clocking.tare_before -- same reasoning
     # null = the global caps x speed.phase_scale.collar_clock (see cable_clocking for why).

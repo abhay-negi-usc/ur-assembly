@@ -3928,6 +3928,165 @@ def test_collar_prewind_makes_room_without_moving_the_grip():
     assert cl['prewind_deg'] is None or float(cl['prewind_deg']) >= 0.0, \
         'prewind_deg is null (= rotation_deg) or a non-negative angle'
 
+
+def test_wrench_in_moves_the_moment_off_the_flange():
+    """A contact moment must be a property of the CONTACT, not of where the arm happens to be.
+
+    The UR script manual for get_tcp_force is explicit: the components are "all measured at the
+    TOOL FLANGE with the orientation of the robot base coordinate system". A moment is only
+    defined about a stated point, so re-expressing it in the connector frame means moving that
+    point first (tau += (p_flange - p_target) x f) and only then rotating.
+
+    Composing the rotation ALONE silently claims the moment was about the BASE ORIGIN, which
+    injects a phantom lever of |base -> flange| -- about a metre on this arm. That bug is not
+    hypothetical: before the fix, the logged BNC connector torque was 90% explained (R^2 0.90) by
+    a single p x f with |p| = 1024 mm against a predicted 1050 mm, and tau came out perpendicular
+    to f in 98.8% of rows. This test is what keeps it from coming back.
+    """
+    from urlab.robot.arm import URArm
+
+    class _FakeArm(URArm):
+        """Just the two readings wrench_in consumes."""
+        def __init__(self, T_flange, w):
+            self._T, self._w = T_flange, np.asarray(w, dtype=float)
+            self.dry_run = False
+
+        def wrench(self):
+            return self._w
+
+        def tcp_pose(self):
+            return self._T
+
+    T_flange = T.xyzrpy_to_matrix([0.10, 1.00, 0.20], np.radians([10.0, 20.0, 30.0]))
+    T_flange_conn = T.xyzrpy_to_matrix([0.0, 0.0457, 0.159], np.radians([180.0, 0.0, 90.0]))
+    T_conn = T_flange @ T_flange_conn
+    p_f, p_c = T_flange[:3, 3], T_conn[:3, 3]
+    assert np.linalg.norm(p_f) > 0.5, 'the flange must be far from the base, or this proves nothing'
+
+    def controller_reports(f_base, tau_true_base):
+        """What the arm would report: the moment about the FLANGE, in base axes."""
+        return np.concatenate([f_base, tau_true_base + np.cross(p_c - p_f, f_base)])
+
+    # ---- a pure force AT the contact carries no moment about the contact ----
+    f_base = np.array([5.0, -3.0, 2.0])
+    w = _FakeArm(T_flange, controller_reports(f_base, np.zeros(3))).wrench_in(T_conn)
+    assert np.linalg.norm(w[3:]) < 1e-12, (
+        f'a pure force at the contact must give ZERO moment about it, got '
+        f'{np.linalg.norm(w[3:]):.4f} Nm -- the reference point was not moved off the flange')
+    assert np.allclose(w[:3], T_conn[:3, :3].T @ f_base, atol=1e-12), 'force is a pure rotation'
+
+    # ---- a real contact moment survives the trip exactly ----
+    tau_true = np.array([0.05, -0.02, 0.11])                       # in CONNECTOR axes
+    w = _FakeArm(T_flange, controller_reports(
+        f_base, T_conn[:3, :3] @ tau_true)).wrench_in(T_conn)
+    assert np.allclose(w[3:], tau_true, atol=1e-12), \
+        f'the contact moment must be recovered exactly, got {w[3:]} want {tau_true}'
+
+    # ---- POSE INVARIANCE: the same contact read from different arm poses is the same wrench ----
+    seen = []
+    for rpy in ([0.0, 0.0, 0.0], [10.0, 20.0, 30.0], [-40.0, 15.0, 120.0]):
+        for t in ([0.10, 1.00, 0.20], [0.30, 0.60, -0.10]):
+            Tf = T.xyzrpy_to_matrix(t, np.radians(rpy))
+            Tc = Tf @ T_flange_conn
+            f_b = Tc[:3, :3] @ np.array([4.0, 1.0, -2.0])          # fixed in CONNECTOR axes
+            tau_fl = (Tc[:3, :3] @ tau_true) + np.cross(Tc[:3, 3] - Tf[:3, 3], f_b)
+            ww = _FakeArm(Tf, np.concatenate([f_b, tau_fl])).wrench_in(Tc)
+            seen.append(ww)
+    for ww in seen[1:]:
+        assert np.allclose(ww, seen[0], atol=1e-12), (
+            'the SAME physical contact must read identically from every arm pose; a '
+            'pose-dependent answer is the lever-arm artefact returning')
+    lever = np.linalg.norm(seen[0][3:]) / np.linalg.norm(seen[0][:3]) * 1000.0
+    assert lever < 100.0, (
+        f'lever {lever:.0f} mm -- a connector-scale contact should be tens of mm, not the '
+        'hundreds that a base-origin reference produces')
+
+    # ---- the callers hand over the flange pose they already read ----
+    for app in ('estimator_eval', 'uncertain_sampling', 'cable_pick_estimate_assemble'):
+        src = open(os.path.join(ROOT, 'urlab', 'apps', f'{app}.py'), encoding='utf-8').read()
+        assert 'wrench_in(' in src, f'{app} logs a connector-frame wrench'
+        for call in [ln for ln in src.splitlines() if 'wrench_in(' in ln and 'def ' not in ln]:
+            assert 'T_base_tool0' in call or 'T_base_tool0' in src[
+                max(0, src.index(call) - 400):src.index(call)], (
+                f'{app}: pass the flange pose already read into wrench_in, so the pose and the '
+                'wrench come from the same sample rather than two reads a cycle apart')
+
+
+def test_payload_and_joint_acceleration_are_fleet_wide_constants():
+    """One payload and one joint acceleration across every app -- both silently divergent before.
+
+    PAYLOAD is not bookkeeping: getActualTCPForce subtracts the tool weight using it, so a config
+    that declares the wrong mass reports a wrench offset by the difference. uncertain_sampling
+    (the app that BUILDS the contact map) carried 1.0 kg / [0,0,0] against everyone else's
+    1.3 kg / [-0.026, 0.028, 0.030], so the map was gravity-compensated differently from every
+    run matched against it.
+
+    JOINT ACCELERATION had four values in play (30 / 57.3 / 68.8 / 286.5 deg/s^2) and only the
+    30 was ever chosen -- the rest came from the legacy `joint_acceleration_rad_s2` spelling or
+    from falling through to the arm's built-in default. Both routes are checked here, because
+    either one re-diverges the fleet without touching a number anybody reads.
+    """
+    import glob
+
+    import yaml
+
+    from urlab import config as urconfig
+    from urlab.robot.arm import _DEFAULT_LIMITS, parse_limits
+
+    names = []
+    for f in sorted(glob.glob(os.path.join(ROOT, 'configs', '*.yaml'))):
+        n = os.path.basename(f)[:-5]
+        if n.startswith('_') or n in ('frames', 'cables'):
+            continue
+        names.append(n)
+    assert len(names) > 10, 'the fleet should be more than a handful of configs'
+
+    payloads, accels = {}, {}
+    for n in names:
+        cfg = urconfig.load(n)
+        p = (cfg.get('robot') or {}).get('payload') or {}
+        payloads[n] = (float(p.get('mass_kg', -1)), tuple(float(v) for v in p.get('cog_m') or ()))
+        accels[n] = round(float(np.degrees(
+            parse_limits(cfg.get('speed') or {}, _DEFAULT_LIMITS)[1])), 3)
+
+    distinct_p = sorted(set(payloads.values()))
+    assert len(distinct_p) == 1, (
+        'every config must declare the SAME tool payload -- the wrench is only as good as the '
+        f'weight compensation. Got {len(distinct_p)}: '
+        + '; '.join(f'{v} in ' + ', '.join(k for k in payloads if payloads[k] == v)
+                    for v in distinct_p))
+
+    distinct_a = sorted(set(accels.values()))
+    assert len(distinct_a) == 1, (
+        'every config must resolve to the SAME joint acceleration. Got '
+        f'{len(distinct_a)}: '
+        + '; '.join(f'{v} deg/s2 in ' + ', '.join(k for k in accels if accels[k] == v)
+                    for v in distinct_a))
+
+    # ...and it must be the value the shared file declares, not merely a value they agree on
+    common = yaml.safe_load(open(os.path.join(ROOT, 'configs', '_common.yaml')))
+    assert distinct_a[0] == float(common['speed']['max_joint_acceleration_deg_s2']), (
+        f'the fleet agrees on {distinct_a[0]} deg/s2 but _common.yaml declares '
+        f"{common['speed']['max_joint_acceleration_deg_s2']} -- the shared file must be the "
+        'source of truth, not a stale fourth opinion')
+    cp = common['robot']['payload']
+    assert distinct_p[0] == (float(cp['mass_kg']), tuple(float(v) for v in cp['cog_m'])), \
+        'the fleet payload must match the one _common.yaml declares'
+
+    # The LEGACY spelling silently wins over nothing but loses to the modern key, so a config
+    # carrying both is a trap: delete the modern one and the fleet re-diverges invisibly.
+    for n in names:
+        raw = yaml.safe_load(open(os.path.join(ROOT, 'configs', f'{n}.yaml'))) or {}
+        spd = raw.get('speed') or {}
+        assert 'joint_acceleration_rad_s2' not in spd, (
+            f'{n}.yaml still carries the legacy joint_acceleration_rad_s2 -- it is shadowed by '
+            'the modern key today and would silently govern the moment that key is removed')
+        if spd:
+            assert 'max_joint_acceleration_deg_s2' in spd, (
+                f'{n}.yaml defines a speed: block without max_joint_acceleration_deg_s2. Blocks '
+                'are owned WHOLESALE (no per-key merge with _common.yaml), so this one falls '
+                "through to the arm's built-in default instead of the fleet value")
+
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]
     failed = 0

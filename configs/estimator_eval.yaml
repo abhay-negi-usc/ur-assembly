@@ -679,7 +679,10 @@ compliance:
   enabled: true
   tare_before: true
   mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
-  stiffness:     [250.0, 250.0, 250.0, 10.0, 10.0, 10.0]
+  # 2026-08-18: unified across the map/eval/assembly chain. Stiffness decides what force
+  # a given pose produces, so the app that BUILDS the map and every app matched against
+  # it must agree or the observations sit off the map by construction.
+  stiffness:     [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
   # DAMPING RATIO (zeta), the multiplier in D = zeta * 2*sqrt(M*S). 1 = critically damped.
   #
   # 2026-08-17: 10.0 -> 1.0. At zeta 10 the free-air relaxation time constant D/S is 6.3 s
@@ -733,7 +736,16 @@ compliance:
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0
   warmup_s: 0.1
-  settle_s: 0.5
+  # LOGGED dwell at the stop, under admittance (contrast hold_after_insertion_s, which is
+  # un-guarded and NOT logged). These rows go into the map and into the estimator input.
+  #
+  # 5.0 s because that is what makes them MEAN something. At damping_ratio 10 the spring is
+  # loaded to ~15 N at the stop and relaxes to a ~0.94 N equilibrium with a ~0.5 s contact
+  # time constant. Measured fraction of settle rows sitting ON that equilibrium: 0% at 0.5 s,
+  # 0% at 2.0 s, 60% at 5.0 s. A row still in the transient is a pose whose force depends on
+  # HOW THE APPROACH ENDED rather than on the pose, which the estimator cannot explain and
+  # therefore reads as noise. Costs ~5 s per pass -- see the app docs before trimming.
+  settle_s: 5.0
   # DWELL after every insertion, on top of settle_s. Unlike settle_s this hold is UN-GUARDED
   # (it will not be cut short by the force limit it is pressing against) and is NOT logged as
   # observations, so changing it cannot change the estimate. 0 = off.
@@ -756,7 +768,11 @@ force_guard:
 speed:
   # Free-space moves (the approach to each attempt's start and the between-trial stand-off).
   max_joint_velocity_deg_s: 30.0
-  joint_acceleration_rad_s2: 1.0
+  # 2026-08-18: unified on the _common.yaml value. Four different accelerations were in
+  # use across the fleet (30 / 57.3 / 68.8 / 286.5 deg/s^2) because the legacy
+  # `joint_acceleration_rad_s2` spelling and the arm's built-in default were shadowing
+  # the modern key; 30.0 is the one every deliberately-maintained config already used.
+  max_joint_acceleration_deg_s2: 30.0
   max_cartesian_velocity_m_s: 0.25
   # INSERT reference pacing -- matches the pick app's effective assemble speed
   # (global 25 mm/s / 30 deg/s x phase_scale.assemble 0.2).
@@ -764,7 +780,7 @@ speed:
   max_cartesian_rotation_deg_s: 30.0
   # RETRACT -- free-space escape back along a path just proven clear.
   retract_translation_mm_s: 100.0
-  retract_rotation_deg_s: 10.0
+  retract_rotation_deg_s: 50.0
 
 move_timeout_s: 120.0
 settle_s: 0.2

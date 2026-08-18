@@ -67,10 +67,13 @@ def _corr_to_m(T_corr_mm):
 def _observe(robot, T_tool0_conn, T_base_tconn):
     """One observation row: believed connector-wrt-target [mm, deg 6-vec] + raw wrench in the
     believed connector frame [N, Nm]."""
-    T_base_conn = robot.tool0() @ T_tool0_conn
+    T_base_tool0 = robot.tool0()
+    T_base_conn = T_base_tool0 @ T_tool0_conn
     rel = inverse(T_base_tconn) @ T_base_conn
     xyz, rpy = matrix_to_xyzrpy(rel)
-    w = robot.arm.wrench_in(T_base_conn)
+    # Flange pose handed over: wrench_in moves the moment's reference point off the
+    # flange, and re-reading the pose there would pair the wrench with a different cycle.
+    w = robot.arm.wrench_in(T_base_conn, T_base_tool0)
     return list(xyz * 1000.0) + list(np.degrees(rpy)) + list(w)
 
 

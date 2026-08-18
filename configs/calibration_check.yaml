@@ -34,14 +34,31 @@ speed:
   approach_translation_mm_s: 2.0 # SLOW on purpose: gentle first contact, crisp trip point
   retract_translation_mm_s: 20.0
   max_joint_velocity_deg_s: 30.0 # free-space joint moves between cycles
+  # 2026-08-18: unified on the _common.yaml value. Four different accelerations were in
+  # use across the fleet (30 / 57.3 / 68.8 / 286.5 deg/s^2) because the legacy
+  # `joint_acceleration_rad_s2` spelling and the arm's built-in default were shadowing
+  # the modern key; 30.0 is the one every deliberately-maintained config already used.
+  max_joint_acceleration_deg_s2: 30.0
 
 compliance:
   enabled: true
   tare_before: true
   mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
-  stiffness:     [3000.0, 3000.0, 3000.0, 10.0, 10.0, 10.0]
+  # 2026-08-18: unified across the map/eval/assembly chain. Stiffness decides what force
+  # a given pose produces, so the app that BUILDS the map and every app matched against
+  # it must agree or the observations sit off the map by construction.
+  stiffness:     [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
   damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
-  settle_s: 1.0                  # hold at the stop before reading the contact pose
+  # LOGGED dwell at the stop, under admittance (contrast hold_after_insertion_s, which is
+  # un-guarded and NOT logged). These rows go into the map and into the estimator input.
+  #
+  # 5.0 s because that is what makes them MEAN something. At damping_ratio 10 the spring is
+  # loaded to ~15 N at the stop and relaxes to a ~0.94 N equilibrium with a ~0.5 s contact
+  # time constant. Measured fraction of settle rows sitting ON that equilibrium: 0% at 0.5 s,
+  # 0% at 2.0 s, 60% at 5.0 s. A row still in the transient is a pose whose force depends on
+  # HOW THE APPROACH ENDED rather than on the pose, which the estimator cannot explain and
+  # therefore reads as noise. Costs ~5 s per pass -- see the app docs before trimming.
+  settle_s: 5.0
 
 force_guard:
   enabled: true

@@ -126,9 +126,6 @@ lift_axis: [0.0, 0.0, 1.0]
 
 pickup:
   mode: compliance
-  # SPEED-based pacing (no time-based motion in this app): the ramp duration is derived from the
-  # ACTUAL distance, paced by the GLOBAL cartesian limits (speed: block below) like every other
-  # pre-assembly motion.
   settle_s: 0.5
   # PICKUP HEIGHT from the gripper kinematic model. Assumes the connector RESTS ON THE GROUND
   # PLANE (ground_plane.z_m): the grasp target = plane + connector d_max/2 (centerline) + the
@@ -204,7 +201,8 @@ speed:
   max_joint_velocity_deg_s: 90.0
   max_joint_acceleration_deg_s2: 30.0
   max_cartesian_translation_mm_s: 25.0
-  max_cartesian_rotation_deg_s: 90.0
+  max_cartesian_rotation_deg_s: 30.0
+  retract_rotation_deg_s: 50.0
   # Per-PHASE scaling of ALL FOUR limits above (1.0 = the global limit itself), one entry per
   # phase of cable_pick_estimate_assemble. An absent phase runs at 1.0.
   phase_scale:
@@ -924,12 +922,24 @@ compliance:
   enabled: true
   tare_before: true
   mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
-  stiffness:     [250.0, 250.0, 250.0, 10.0, 10.0, 10.0]
+  # 2026-08-18: unified across the map/eval/assembly chain. Stiffness decides what force
+  # a given pose produces, so the app that BUILDS the map and every app matched against
+  # it must agree or the observations sit off the map by construction.
+  stiffness:     [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
   damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0
   warmup_s: 0.1
-  settle_s: 0.5
+  # LOGGED dwell at the stop, under admittance (contrast hold_after_insertion_s, which is
+  # un-guarded and NOT logged). These rows go into the map and into the estimator input.
+  #
+  # 5.0 s because that is what makes them MEAN something. At damping_ratio 10 the spring is
+  # loaded to ~15 N at the stop and relaxes to a ~0.94 N equilibrium with a ~0.5 s contact
+  # time constant. Measured fraction of settle rows sitting ON that equilibrium: 0% at 0.5 s,
+  # 0% at 2.0 s, 60% at 5.0 s. A row still in the transient is a pose whose force depends on
+  # HOW THE APPROACH ENDED rather than on the pose, which the estimator cannot explain and
+  # therefore reads as noise. Costs ~5 s per pass -- see the app docs before trimming.
+  settle_s: 5.0
   # DWELL after every insertion, on top of settle_s. Unlike settle_s this hold is UN-GUARDED
   # (it will not be cut short by the force limit it is pressing against) and is NOT logged as
   # observations, so changing it cannot change the estimate. 0 = off.

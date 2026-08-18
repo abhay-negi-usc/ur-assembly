@@ -351,7 +351,10 @@ def _log_row(writer, robot, trial, T_base_connector_target, T_tool0_connector):
     T_base_connector = T_base_tool0 @ T_tool0_connector
     connector_wrt_target = inverse(T_base_connector_target) @ T_base_connector   # identity at the mate
     w_base = np.asarray(robot.arm.wrench(), dtype=float)          # tared, bridged into base_link
-    w_connector = np.asarray(robot.arm.wrench_in(T_base_connector), dtype=float)
+    # T_base_tool0 is the flange pose already read above -- wrench_in needs it to move the
+    # moment off the flange, and passing it keeps pose and wrench on the SAME sample.
+    w_connector = np.asarray(robot.arm.wrench_in(T_base_connector, T_base_tool0),
+                             dtype=float)
     writer.writerow([trial, time.time()]
                     + _pose_fields_mm(T_base_tool0)
                     + _pose_fields_mm(connector_wrt_target)

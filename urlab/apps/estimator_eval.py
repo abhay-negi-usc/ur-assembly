@@ -124,10 +124,14 @@ def _rebase_rows(rows12, T_corr_mm):
 def _observe(robot, T_tool0_conn, T_base_tconn):
     """One observation row: BELIEVED connector-wrt-target [mm, deg 6-vec] + raw wrench in the
     believed connector frame [N, Nm] -- same convention as cable_pick_estimate_assemble."""
-    T_base_conn = robot.tool0() @ T_tool0_conn
+    T_base_tool0 = robot.tool0()
+    T_base_conn = T_base_tool0 @ T_tool0_conn
     rel = inverse(T_base_tconn) @ T_base_conn
     xyz, rpy = matrix_to_xyzrpy(rel)
-    w = robot.arm.wrench_in(T_base_conn)
+    # Hand over the flange pose already read above: wrench_in needs it to move the moment's
+    # reference point, and re-reading it there would pair the wrench with a pose from a
+    # different servo cycle.
+    w = robot.arm.wrench_in(T_base_conn, T_base_tool0)
     return list(xyz * 1000.0) + list(np.degrees(rpy)) + list(w)
 
 

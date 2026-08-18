@@ -13,7 +13,11 @@ tip_frame: tool0
 speed:
   max_joint_velocity_rad_s: 0.5
   max_cartesian_velocity_m_s: 4.0
-  joint_acceleration_rad_s2: 1.2
+  # 2026-08-18: unified on the _common.yaml value. Four different accelerations were in
+  # use across the fleet (30 / 57.3 / 68.8 / 286.5 deg/s^2) because the legacy
+  # `joint_acceleration_rad_s2` spelling and the arm's built-in default were shadowing
+  # the modern key; 30.0 is the one every deliberately-maintained config already used.
+  max_joint_acceleration_deg_s2: 30.0
 
 linear_step_m: 0.030
 angular_step_deg: 30.0

@@ -15,8 +15,8 @@ robot:
   # Tool payload (gripper + coupler + camera): mass + CoG in the tool0 frame (m). REQUIRED so
   # getActualTCPForce() subtracts the tool weight and reports true EXTERNAL force.
   payload:
-    mass_kg: 1.0
-    cog_m: [0.0, 0.0, 0.0]
+    mass_kg: 1.3
+    cog_m: [-0.026, 0.028, 0.030]
 base_frame: base_link
 tip_frame: tool0
 
@@ -54,7 +54,10 @@ retract_distance_m: 0.005
 # so changing the path length or the resample resolution does not change the speed.
 compliance:
   mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]              # virtual inertia [kg / kg*m^2]
-  stiffness:     [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]     # restoring spring [N/m, Nm/rad] (10 N -> 20 mm)
+  # 2026-08-18: unified across the map/eval/assembly chain. Stiffness decides what force
+  # a given pose produces, so the app that BUILDS the map and every app matched against
+  # it must agree or the observations sit off the map by construction.
+  stiffness:     [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
   # DAMPING RATIO (zeta), the multiplier in D = zeta * 2*sqrt(M*S). 1 = critically damped.
   #
   # 2026-08-17: 10.0 -> 1.0. At zeta 10 the free-air relaxation time constant D/S is 6.3 s
@@ -109,7 +112,16 @@ compliance:
   reference_rate_hz: 125.0
   warmup_s: 0.1        # hold the start pose this long (servo-engage transient decays) before the guard arms
   tare_before: true    # zero the F/T mid-warmup (servo-active) so the guard baseline is right
-  settle_s: 5.0        # hold at the reached pose after each insert (records the steady contact wrench)
+  # LOGGED dwell at the stop, under admittance (contrast hold_after_insertion_s, which is
+  # un-guarded and NOT logged). These rows go into the map and into the estimator input.
+  #
+  # 5.0 s because that is what makes them MEAN something. At damping_ratio 10 the spring is
+  # loaded to ~15 N at the stop and relaxes to a ~0.94 N equilibrium with a ~0.5 s contact
+  # time constant. Measured fraction of settle rows sitting ON that equilibrium: 0% at 0.5 s,
+  # 0% at 2.0 s, 60% at 5.0 s. A row still in the transient is a pose whose force depends on
+  # HOW THE APPROACH ENDED rather than on the pose, which the estimator cannot explain and
+  # therefore reads as noise. Costs ~5 s per pass -- see the app docs before trimming.
+  settle_s: 5.0
 
 # Contact watchdog: a trip during insertion = the connector SEATED (stop advancing). NOT armed during
 # retract (a seated part is already over the limit; a guarded retract would block itself).
@@ -193,7 +205,11 @@ speed:
   # deg of travel, so hops smaller than that never reach top speed. To speed those up raise the
   # ACCEL, not the cap.
   max_joint_velocity_deg_s: 100.0       # the _rad_s spelling is still accepted
-  joint_acceleration_rad_s2: 5.0
+  # 2026-08-18: unified on the _common.yaml value. Four different accelerations were in
+  # use across the fleet (30 / 57.3 / 68.8 / 286.5 deg/s^2) because the legacy
+  # `joint_acceleration_rad_s2` spelling and the arm's built-in default were shadowing
+  # the modern key; 30.0 is the one every deliberately-maintained config already used.
+  max_joint_acceleration_deg_s2: 30.0
   max_cartesian_velocity_m_s: 0.25
 
   # CARTESIAN limits for the COMPLIANT reference. Each ramp segment gets the time its own geometry
@@ -220,7 +236,7 @@ speed:
   # contact regime for the same pose, which is the mismatch the whole parity effort is
   # about. Both apps now insert at the same speed.
   max_cartesian_translation_mm_s: 30.0
-  max_cartesian_rotation_deg_s: 50.0
+  max_cartesian_rotation_deg_s: 30.0
   # RETRACT -- free-space escape back along a path just proven clear, so it need NOT crawl at the
   # insertion speed. Still compliant, so it yields if it does catch. Omit to reuse the insert limits.
   retract_translation_mm_s: 100.0       # 50 mm in ~0.5 s

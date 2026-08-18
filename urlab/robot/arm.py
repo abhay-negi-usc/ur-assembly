@@ -39,8 +39,7 @@ import numpy as np
 
 from .. import log as urlog
 from ..transforms import (
-    BASE_LINK_FROM_UR_BASE, UR_JOINTS, inverse, matrix_to_rtde, pose_error, rtde_to_matrix,
-    transform_wrench)
+    BASE_LINK_FROM_UR_BASE, UR_JOINTS, inverse, matrix_to_rtde, pose_error, rtde_to_matrix)
 
 log = urlog.get('arm')
 
@@ -126,6 +125,7 @@ class URArm:
             self.rtde_r = RTDEReceiveInterface(self.ip)
             log.info('Connected.')
             self._set_payload(r.get('payload', {}) or {})
+            self._report_tcp_offset()
 
         if frames is not None:
             self.publish_frames(frames, cfg)
@@ -402,6 +402,43 @@ class URArm:
             self.rtde_c.stopJ(2.0)
 
     # ------------------------------------------------------------------ force / torque
+    def _report_tcp_offset(self):
+        """Read and report the controller's configured TCP offset -- it decides where the logged
+        MOMENT is referenced, and nothing else in this stack can tell.
+
+        wrench() returns a force plus a moment about a point the controller chooses, and the two
+        candidate readings of the documentation disagree about which point that is: the SW5.19
+        URScript page for get_tcp_force() says the tool flange, while the RTDE field ur_rtde
+        actually reads (actual_TCP_force) is described as being at the TCP. They are the same
+        point only when this offset is zero.
+
+        wrench_in() references the moment at tcp_pose(), i.e. the controller's TCP -- correct
+        under the RTDE reading unconditionally, and under the URScript reading when the offset is
+        zero. A NON-ZERO offset therefore means the two readings differ by exactly that vector,
+        and it also means `tip_frame: tool0` ("the pendant all-zeros TCP") is no longer true, so
+        every pose in this stack inherits the same shift. Worth a loud line either way."""
+        try:
+            off = np.asarray(self.rtde_c.getTCPOffset(), dtype=float)
+        except Exception as exc:                       # noqa: BLE001 -- never fatal at connect
+            log.warning('Could not read the controller TCP offset (%s). Poses assume it is zero '
+                        '(tip_frame: tool0) and wrench_in references the moment at tcp_pose().',
+                        exc)
+            return
+        d_mm = float(np.linalg.norm(off[:3])) * 1000.0
+        if d_mm < 0.05:
+            log.info('Controller TCP offset is zero -- tool flange == TCP == tool0, so the logged '
+                     'moment is referenced there and every frame in this repo means what it says.')
+        else:
+            log.warning(
+                'Controller TCP offset is NON-ZERO: %s mm. Two consequences, both silent '
+                'otherwise. (1) tip_frame: tool0 is documented as "the pendant all-zeros TCP", '
+                'which is no longer true -- every pose read from RTDE is the TCP, shifted by this '
+                'from the flange. (2) The logged wrench MOMENT is referenced at whichever point '
+                'the firmware uses, and the URScript and RTDE docs disagree by exactly this '
+                'vector; wrench_in() references it at tcp_pose(). Zero the TCP on the pendant, or '
+                'confirm which end the moment comes from before trusting the torque columns.',
+                np.round(off[:3] * 1000.0, 2).tolist())
+
     def _set_payload(self, payload):
         """Tell the controller the tool's mass + CoG so getActualTCPForce() subtracts the tool's
         own weight and reports true EXTERNAL force. Without this, the wrench reads the tool weight
@@ -441,7 +478,14 @@ class URArm:
         return ok
 
     def wrench(self):
-        """TCP wrench [fx, fy, fz, tx, ty, tz] in ROS base_link, tared.
+        """Contact wrench [fx, fy, fz, tx, ty, tz]: force and the moment ABOUT THE TOOL FLANGE,
+        both expressed in ROS base_link axes, tared.
+
+        THE REFERENCE POINT IS THE FLANGE, NOT THE BASE ORIGIN. The UR script manual for
+        get_tcp_force says the components are "all measured at the tool flange with the
+        orientation of the robot base coordinate system" -- so this is a moment about a point
+        roughly a metre from the base origin, and anything that re-expresses it has to move that
+        reference point before rotating. wrench_in() does; a bare rotation would not.
 
         getActualTCPForce() reports in the UR `base` frame, which differs from ROS `base_link` by
         Rz(pi) -- the SAME bridge every pose crosses via rtde_to_matrix. It must be applied here
@@ -460,11 +504,38 @@ class URArm:
         R = BASE_LINK_FROM_UR_BASE[:3, :3]                   # UR base -> ROS base_link
         return np.concatenate([R @ w[:3], R @ w[3:]])
 
-    def wrench_in(self, T_base_frame):
-        """The TCP wrench re-expressed in an arbitrary frame (given as its pose in base_link)."""
+    def wrench_in(self, T_base_frame, T_base_flange=None):
+        """The contact wrench moved TO another frame's origin and expressed IN its axes.
+
+        Two separate operations, and the first one is the easy one to skip:
+
+          1. MOVE THE REFERENCE POINT. wrench() reports the moment about the TOOL FLANGE (the UR
+             script manual for get_tcp_force is explicit: "all measured at the tool flange with
+             the orientation of the robot base coordinate system"). A moment is only meaningful
+             about a stated point, so re-referencing it to the target frame's origin is a
+             physical change, not a rotation: tau_new = tau + (p_flange - p_target) x f.
+          2. ROTATE into the target frame's axes: R^T applied to both halves.
+
+        SKIPPING STEP 1 IS A SILENT, LARGE ERROR. Composing only the rotation implicitly claims
+        the moment was about the BASE ORIGIN, which adds a phantom lever of |base -> flange| --
+        about a metre on this arm. Measured on the 2026-08 BNC logs before this fix: the logged
+        connector torque was 90% explained (R^2 0.90) by a single cross product p x f with
+        |p| = 1024 mm, against a predicted |base -> flange| of 1050 mm, and tau came out
+        perpendicular to f in 98.8% of rows -- the signature of a pure lever-arm artefact rather
+        than a contact moment. A BNC contact moment should show a lever of a few millimetres.
+
+        `T_base_flange` lets a caller that already read the arm pose pass it in: it saves a
+        second RTDE round trip and, more importantly, guarantees the pose and the wrench come
+        from the SAME sample rather than two reads a cycle apart.
+        """
         w = self.wrench()
-        f, tau = transform_wrench(w[:3], w[3:], inverse(T_base_frame))
-        return np.concatenate([f, tau])
+        f_b, tau_b = np.asarray(w[:3], dtype=float), np.asarray(w[3:], dtype=float)
+        T = np.asarray(T_base_frame, dtype=float)
+        p_flange = (np.asarray(T_base_flange, dtype=float)[:3, 3] if T_base_flange is not None
+                    else self.tcp_pose()[:3, 3])
+        tau_b = tau_b + np.cross(p_flange - T[:3, 3], f_b)     # (1) re-reference the moment
+        R = T[:3, :3]
+        return np.concatenate([R.T @ f_b, R.T @ tau_b])        # (2) rotate into the frame
 
     def force(self):
         return float(np.linalg.norm(self.wrench()[:3]))

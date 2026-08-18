@@ -183,7 +183,7 @@ grasp_check:
   capture_rate_hz: 1.0
   recovery:
     enabled: true
-    max_tries: 5
+    max_tries: 3
     finger_width_m: 0.02278
     cable_shift_fraction: 0.8
     empty_drop_m: 0.003
@@ -565,12 +565,12 @@ assembly:
   # moved -- a large shift there is a useful read on how wrong the estimate had been.
   cable_clocking:
     enabled: true             # OPTIONAL -- false ends the run ENGAGED
-    rotation_deg: 90.0            # + about the CONNECTOR's +X
+    rotation_deg: 120.0            # + about the CONNECTOR's +X
     # PUSH: how far past the engaged pose the virtual target aims, along the connector +X. This is
     # a target, not a prediction -- the connector advances as far as the cams allow and the
     # compliant deflection absorbs the rest. TUNE: too small and the cams never engage; too large
     # and the spring loads the mate harder than needed (deflection = push x stiffness).
-    push_mm: 5.0
+    push_mm: 25.0
     # SUCCESS: measured advance of the connector along the ENGAGED frame's +X, read from the
     # MEASURED arm pose (never the commanded reference -- under admittance the difference between
     # them IS the signal here). Checked every servo cycle, so reaching it ENDS the rotation early.

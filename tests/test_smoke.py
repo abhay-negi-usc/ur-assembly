@@ -4152,26 +4152,69 @@ def test_collar_prewind_makes_room_without_moving_the_grip():
     src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8').read()
     body = src[src.index('def collar_clocking('):]
     body = body[:body.index('return True')]
-    # FIVE STEPS, IN THIS ORDER: approach BEHIND the ring, unwind there, advance onto it, close,
-    # turn. Each rotation is anchored on the call that performs it.
-    i_move = body.index("label='collar approach (nominal angle)'")
-    i_unwind = body.index('rotate_about_axis(T_nom_back, axis, point, -cl_prewind * f)')
+    # FOUR STEPS, IN THIS ORDER: ONE orbit about the connector axis from wherever the cable screw
+    # left the arm to the pre-wound pose, then a pure axial advance onto the ring, then close,
+    # then turn. Each rotation is anchored on the call that performs it.
+    i_centre = body.index("label='collar centre on the axis'")
+    i_orbit = body.index('rotate_about_axis(T_centred, axis, point, theta * f)')
     i_adv = body.index("label='collar advance onto the ring'")
     i_close = body.index("gripper.close('grasp collar')")
     i_turn = body.index('rotate_about_axis(start, axis, point, cl_rot * f)')
-    assert i_move < i_unwind < i_adv < i_close < i_turn, (
-        'the order must be approach -> unwind -> advance -> close -> turn. The unwind precedes '
-        'the close because unwinding on a GRIPPED collar turns it backwards, undoing the lock; '
-        'and it precedes the ADVANCE because the roll wants the fingers clear of the ring')
-    # THE UNWIND MUST ORBIT, NOT TRAVEL. tool0 sits ~183 mm off the connector axis, so a straight
-    # move between two pre-wind poses cuts inside the arc and sweeps the fingertip -- which is ON
-    # that axis -- right through the part.
-    assert 'screw_ramp(' in body[i_unwind - 400:i_adv], (
+    assert i_centre < i_orbit < i_adv < i_close < i_turn, (
+        'the order must be centre -> orbit -> advance -> close -> turn. The centring is a pure '
+        'translation onto the axis, which is what leaves the rest of the approach a pure orbit. '
+        'The unwind precedes the close '
+        'because unwinding on a GRIPPED collar turns it backwards, undoing the lock; and it '
+        'precedes the ADVANCE because the roll wants the fingers clear of the ring')
+    # NOTHING MAY SWING STRAIGHT TO A COLLAR POSE. tool0 sits ~183 mm off the connector axis, so
+    # any move_l between two poses that differ by a rotation about that axis cuts inside the arc
+    # and sweeps the fingertip -- which is ON the axis -- right through the part.
+    assert 'screw_ramp(' in body[i_orbit - 400:i_adv], (
         'the unwind must be taken through screw_ramp so it follows the axis')
-    # THE ADVANCE MUST BE A PURE TRANSLATION. It carries the open fingers over the collar, so it
-    # has to arrive along the connector +X rather than swinging in.
+    for banned in ('move_l(T_start', 'move_l(T_nom_back', 'move_l(T_nominal'):
+        assert banned not in body, (
+            f'{banned}...) swings straight to a collar pose; every approach rotation has to be an '
+            f'orbit about the connector axis')
+    # THE ADVANCE MUST BE A PURE TRANSLATION along the connector +X, arriving on the ring rather
+    # than swinging onto it.
     assert 'T_start_back' in body[:i_adv] and 'adv_m' in body[:i_adv], (
         'the advance must run from the backed-off pre-wound pose along the connector +X')
+
+    # ---- THE GRASP ROLL MUST BE CHOSEN, NOT INHERITED ----------------------------------------
+    # A parallel jaw is symmetric under a 180 deg roll about its approach axis (fingertip Z): the
+    # pads swap and the grasp is identical. The nominal alignment inherits the CONNECTOR's
+    # orientation, which sits 180 deg rolled from the fingertip's own whenever
+    # initial_connector_in_fingertip carries a 180 deg yaw -- as this cable's does. Taking that
+    # literally demands a 180 deg wrist roll on the way in, about an axis 90 deg OFF the connector
+    # axis, so the approach stops being an orbit and becomes a wide swing through the part.
+    #
+    # This is the arithmetic behind that, on the same oblique pose: the two rolls are the same
+    # grasp, and only one of them keeps the approach on the axis.
+    from scipy.spatial.transform import Rotation as _R
+    flip = T.xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, 0.0, np.pi])
+    # where the cable screw leaves the arm: the connector held, clocked by the screw
+    T_ftip_conn = T.xyzrpy_to_matrix([-0.0457, 0.0, 0.0075], [0.0, 0.0, np.pi])
+    arm_now = T_base_conn @ T.inverse(T_tool0_ftip @ T_ftip_conn)
+    axn = axis / np.linalg.norm(axis)
+    seen = {}
+    for name, G in (('as defined', T.inverse(T_tool0_ftip)),
+                    ('jaws swapped', flip @ T.inverse(T_tool0_ftip))):
+        goal = rotate_about_axis(T_collar @ G, axis, point, -rot)
+        rel = goal @ T.inverse(arm_now)
+        rv = _R.from_matrix(rel[:3, :3]).as_rotvec()
+        n = float(np.linalg.norm(rv))
+        seen[name] = np.degrees(np.arccos(np.clip(abs(float(np.dot(rv / max(n, 1e-9), axn))),
+                                                  0.0, 1.0)))
+    assert seen['as defined'] > 45.0, (
+        'this test has lost its subject: the literal roll is supposed to put the approach '
+        f'rotation well off the connector axis, got {seen["as defined"]:.1f} deg')
+    assert seen['jaws swapped'] < 1e-6, (
+        'swapping the jaws must make the approach a PURE rotation about the connector axis, got '
+        f'{seen["jaws swapped"]:.3f} deg off it')
+    # and the app must actually pick between them rather than hard-coding one
+    assert 'grip = min(' in body and 'np.pi' in body[:i_orbit], (
+        'collar_clocking must CHOOSE the grasp roll that keeps the approach on the connector '
+        'axis, not inherit the connector orientation blindly')
     # and both ends are IK-checked before anything grips
     assert body.index('unreachable') < i_close, (
         'reachability must be checked before the close, or an impossible turn leaves the collar '

@@ -77,6 +77,7 @@ from datetime import datetime
 import time as _t
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from .. import config as urconfig
 from .. import log as urlog
@@ -1240,8 +1241,29 @@ def build_and_run(cfg, robot, camera, args):
         currently turns an empty gripper."""
         T_base_collar = T_base_conn @ translation_matrix([cl_off_m, 0.0, 0.0])
         axis, point = T_base_conn[:3, 0], T_base_conn[:3, 3]
+        axn = axis / float(np.linalg.norm(axis))
+        here = robot.tool0()
+        # THE GRASP ROLL IS FREE FOR THE GRIPPER AND NOT FREE FOR THE ARM.
+        #
+        # A parallel jaw is symmetric under a 180 deg roll about its APPROACH axis (fingertip Z):
+        # it swaps which pad is which and the grasp is identical. So the collar can be taken at the
+        # nominal alignment or at that alignment rolled 180 deg -- same grasp, either way.
+        #
+        # But the nominal alignment is defined by making the fingertip frame coincide with the
+        # COLLAR frame, and the collar frame inherits the CONNECTOR's orientation, which sits
+        # 180 deg rolled from the fingertip's own (estimation.initial_connector_in_fingertip
+        # carries rpy [0, 0, 180]). Taking that literally demands a 180 deg wrist roll on the way
+        # in -- and that roll is about an axis 90 deg OFF the connector axis, so the approach stops
+        # being an orbit and becomes a wide swing through the part. Measured, arm -> pre-wound:
+        #     as defined    180.0 deg about an axis 90.0 deg off the connector axis
+        #     jaws swapped   90.0 deg about an axis  0.0 deg off it  -- a PURE ORBIT
+        # So pick the roll that keeps the approach on the axis. Nothing about the grasp changes.
+        grip = min((inverse(robot.T_tool0_fingertip),
+                    xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, 0.0, np.pi])
+                    @ inverse(robot.T_tool0_fingertip)),
+                   key=lambda G: pose_error(here, T_base_collar @ G)[1])
         # The NOMINAL alignment: the closed fingertip frame coincides with the collar frame.
-        T_nominal = T_base_collar @ inverse(robot.T_tool0_fingertip)
+        T_nominal = T_base_collar @ grip
         # PRE-WIND. The turn is a rigid orbit about the connector's +X, so starting it from the
         # nominal alignment spends `rotation_deg` of wrist range on whichever side the arm happens
         # to be on -- and there may not be that much left. Unwinding by the same amount FIRST puts
@@ -1263,22 +1285,21 @@ def build_and_run(cfg, robot, camera, args):
         # from the ring the moment the cable is released. The gripper unwinds at that near station
         # -- clear of the collar, which is what makes the roll safe -- and only then ADVANCES along
         # the connector +X onto the ring.
-        app_x = (float((inverse(T_base_conn) @ robot.tool0()
-                        @ robot.T_tool0_fingertip)[0, 3])
+        app_x = (float((inverse(T_base_conn) @ here @ robot.T_tool0_fingertip)[0, 3])
                  if cl_app_mm is None else float(cl_app_mm) / 1000.0)
         adv_m = cl_off_m - app_x
-        T_nom_back = (T_base_conn @ translation_matrix([app_x, 0.0, 0.0])
-                      @ inverse(robot.T_tool0_fingertip))
+        T_nom_back = T_base_conn @ translation_matrix([app_x, 0.0, 0.0]) @ grip
         T_start_back = rotate_about_axis(T_nom_back, axis, point, -cl_prewind)
         if adv_m < 0.0:
             log.warning('COLLAR CLOCKING: the approach station (%+.1f mm) is AHEAD of the collar '
                         '(%+.1f mm), so the advance runs backwards along the connector +X. Check '
                         'collar_clocking.approach_mm.', app_x * 1000.0, cl_off_m * 1000.0)
         log.info('--- COLLAR CLOCKING --- collar is %.1f mm along the connector +X. '
-                 'Align back at %+.1f mm, unwind %+.1f deg by ORBITING the connector +X '
-                 '(gripper OPEN and clear of the ring, so the collar stays put), advance %+.1f mm '
-                 'onto it, grasp, then turn %+.1f deg about the same axis.',
-                 cl_off_m * 1000.0, app_x * 1000.0, np.degrees(-cl_prewind), adv_m * 1000.0,
+                 'Centre on the axis, unwind to %+.1f deg of pre-wind by ORBITING the '
+                 'connector +X at the %+.1f mm station (gripper OPEN and clear of the ring, so '
+                 'the collar stays put), advance %+.1f mm onto it, grasp, then turn %+.1f deg '
+                 'about the same axis.',
+                 cl_off_m * 1000.0, np.degrees(-cl_prewind), app_x * 1000.0, adv_m * 1000.0,
                  np.degrees(cl_rot))
         # REACHABILITY of BOTH ends, before anything grips. Discovering mid-turn that the far end
         # is unreachable leaves the collar clamped in a stalled gripper, which is the one failure
@@ -1294,11 +1315,48 @@ def build_and_run(cfg, robot, camera, args):
                           np.degrees(cl_prewind))
                 return False
         phase('standoff')
-        # 1. ALIGN at the approach station, nominal angle. A straight move is right here: the
-        #    fingers are open and clear of the ring, with nothing to stay concentric with yet.
-        if not _guarded(robot, guard_shared, lambda: robot.arm.move_l(
-                T_nom_back, label='collar approach (nominal angle)')):
-            log.error('Could not reach the collar approach station.')
+        # 1+2. ALIGN AND UNWIND ARE ONE ORBIT about the connector axis.
+        #
+        # The arm is standing where the cable screw left it: same station along the axis, a
+        # different clock angle about it. With the roll chosen above, that pose and the pre-wound
+        # pose differ by a rotation about the connector axis AND NOTHING ELSE -- so a single orbit
+        # lands on it exactly, and no part of the approach is a straight-line swing.
+        #
+        # The angle is SOLVED rather than assumed (the arm's clock angle depends on what the screw
+        # actually achieved, not on what it commanded), and the solution is checked: if the two
+        # poses do not in fact differ by a pure rotation about the axis, orbiting would miss, so
+        # that is reported instead of quietly driving somewhere wrong.
+        # A. CENTRE ON THE AXIS -- a PURE TRANSLATION at the current clock angle.
+        #
+        # While the cable was gripped the pads sat 7.5 mm to one side of the connector axis
+        # (T_ftip_conn carries a Z offset), and a collar grasp needs the fingertip ON the axis.
+        # That much travel is real geometry, not error, and it is NOT a rotation -- so a straight
+        # move is exactly the right path for it and there is no chord to cut. Doing it first is
+        # what leaves the rest of the approach a pure orbit.
+        rel = here @ inverse(T_nom_back)
+        th_now = float(np.dot(Rotation.from_matrix(rel[:3, :3]).as_rotvec(), axn))
+        T_centred = rotate_about_axis(T_nom_back, axis, point, th_now)
+        c_lin, c_ang = pose_error(here, T_centred)
+        if np.degrees(c_ang) > 0.5:
+            log.error('COLLAR CLOCKING: the arm is %.1f deg away from the connector axis frame in '
+                      'a way no rotation about that axis explains. The pose the cable screw left, '
+                      'the connector belief and the collar geometry disagree -- refusing to swing '
+                      'blindly.', np.degrees(c_ang))
+            return False
+        if c_lin * 1000.0 > 1e-3:
+            if not _guarded(robot, guard_shared, lambda: robot.arm.move_l(
+                    T_centred, label='collar centre on the axis')):
+                log.error('Could not centre on the connector axis (%.1f mm).', c_lin * 1000.0)
+                return False
+        # B. ORBIT to the pre-wound pose -- about the connector axis and nothing else. The angle
+        #    is SOLVED, not assumed: the arm's clock angle depends on what the cable screw actually
+        #    achieved, not on what it commanded.
+        theta = -cl_prewind - th_now
+        r_lin, r_ang = pose_error(rotate_about_axis(T_centred, axis, point, theta), T_start_back)
+        if r_lin * 1000.0 > 1e-6 or np.degrees(r_ang) > 1e-6:
+            log.error('COLLAR CLOCKING: orbiting from the centred pose would miss the pre-wound '
+                      'pose by %.3f mm / %.3f deg. Refusing to swing blindly.',
+                      r_lin * 1000.0, np.degrees(r_ang))
             return False
         # THE UNWIND IS AN ORBIT, NOT A STRAIGHT MOVE TO THE PRE-WOUND POSE.
         #
@@ -1318,14 +1376,14 @@ def build_and_run(cfg, robot, camera, args):
         # Compliant rather than kinematic, and guarded, because this threads open fingers around a
         # part -- a graze should yield and stop, not push through. Paced by the standoff scale,
         # matching the move it replaces.
-        if abs(cl_prewind) > 1e-9:
+        if abs(theta) > 1e-9:
             adm_cl.reset()
-            adm_cl.warmup(T_nom_back)
+            adm_cl.warmup(T_centred)
             guard_shared.reset()
             res_uw = screw_ramp(
                 adm_cl,
-                lambda f: rotate_about_axis(T_nom_back, axis, point, -cl_prewind * f),
-                guard_shared, g_v * s_std, g_w * s_std, abs(np.degrees(cl_prewind)),
+                lambda f: rotate_about_axis(T_centred, axis, point, theta * f),
+                guard_shared, g_v * s_std, g_w * s_std, abs(np.degrees(theta)),
                 label='unwind ')
             adm_cl.stop()
             robot.arm.servo_stop()

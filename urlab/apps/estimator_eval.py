@@ -78,7 +78,7 @@ from ..skills.solution_check import CheckedManifoldEstimator
 from ..skills.success_basin import SuccessBasin
 from ..transforms import inverse, matrix_to_xyzrpy, pose_error, translation_matrix
 from ._runner import run_app
-from .uncertain_sampling import _clock, _fmt_dur, _retract_ref
+from .uncertain_sampling import _axial_ref, _clock, _fmt_dur, _retract_ref
 
 log = urlog.get('estimator-eval')
 
@@ -1260,6 +1260,14 @@ def build_and_run(cfg, robot, camera, args):
     # time, so the two cannot drift apart silently; setting one here is an explicit divergence.
     sw_frame, sw_chunk, sweep_k = 'connector', 1.0, len(dense)
     sw_noise_lo, sw_noise_hi = [0.0] * 6, [0.0] * 6
+    # PRELOAD for the OBSERVATION passes -- uncertain_sampling's sampling.preload_mm. If the map
+    # was collected with a press past the mate, its deepest rows are LOADED contact, and a probing
+    # pass that stops at the mate never visits them: the observations would sit off the map at
+    # exactly the depths that decide the seat. This is the same regime split the preload exists to
+    # close, with the sign flipped, so it has to be inherited rather than left to drift.
+    # Distinct from final_insertion.preload_mm, which presses the COMMIT and does so by a
+    # different mechanism (it shifts the whole reference path); see run_insertion.
+    obs_pre_mm = 0.0
     sweep_rng = np.random.default_rng(seed + 2 if seed > 0 else None)
     sweep_as_sampling = False
     if match_sampling:
@@ -1273,6 +1281,32 @@ def build_and_run(cfg, robot, camera, args):
                  ', sweep passes driven as uncertain_sampling trials'
                  if col_mode == 'offset_sweep' else ', one pass per attempt')
         samp_ref = _sampling_reference(cfg)
+        # The press applies to EVERY observation pass, whatever the collection mode -- they all
+        # feed the same estimator against the same map. eval.collection.sampling.preload_mm
+        # overrides; null inherits uncertain_sampling's.
+        _sw_pre = (col.get('sampling') or {}).get('preload_mm')
+        _src_pre = 'eval.collection.sampling'
+        if _sw_pre is None:
+            _sw_pre = ((samp_ref or {}).get('sampling') or {}).get('preload_mm')
+            _src_pre = 'uncertain_sampling.yaml'
+        if _sw_pre is None:
+            _sw_pre, _src_pre = 0.0, 'default'
+        obs_pre_mm = float(_sw_pre or 0.0)
+        if obs_pre_mm < 0:
+            log.error('collection.sampling.preload_mm must be >= 0 (got %.2f).', obs_pre_mm)
+            return False                           # bad values fail HERE, pre-motion
+        if obs_pre_mm > 0:
+            _u = T_true[:3, :3] @ np.array([1.0, 0.0, 0.0])
+            _K = np.asarray((cfg.get_path('compliance.stiffness') or [0.0] * 3)[:3], dtype=float)
+            _s = float(_u @ (_K * _u))
+            log.info('  observation passes PRELOAD %.1f mm past the mate (%s), matching the '
+                     'map: the deepest map rows are LOADED contact, so a pass that stopped at '
+                     'the mate would never reach them. Holds %.1f N at %.0f N/m along the '
+                     'insertion axis; un-guarded, like the sampler.',
+                     obs_pre_mm, _src_pre, _s * obs_pre_mm / 1000.0, _s)
+        elif (((samp_ref or {}).get('sampling') or {}).get('preload_mm') or 0.0) == 0.0:
+            log.info('  observation passes end ON the mate (no preload), matching '
+                     'uncertain_sampling.')
         _report_sampling_divergence(cfg, samp_ref)
 
     # ---- TRAJECTORY ANCHORING -- where the path's last row actually lands --------------------
@@ -1497,11 +1531,14 @@ def build_and_run(cfg, robot, camera, args):
         _u = T_true[:3, :3] @ np.array([1.0, 0.0, 0.0])
         _K = np.asarray((comp_final.get('stiffness') or [0.0] * 3)[:3], dtype=float)
         s_ins = float(_u @ (_K * _u))
-        log.info('Commit PRELOAD: %.1f mm past the mate along the connector\'s +X -- probing '
-                 'passes do NOT preload. The spring can HOLD %.1f N of that (%.0f N/m along '
-                 'the insertion axis); the peak on contact is a transient several times '
-                 'larger, and the guard cannot bound it at this persistence.',
-                 pre_mm, s_ins * pre_mm / 1000.0, s_ins)
+        log.info('Commit PRELOAD: %.1f mm past the mate along the connector\'s +X (%s). '
+                 'The spring can HOLD %.1f N of that (%.0f N/m along the insertion axis); '
+                 'the peak on contact is a transient several times larger, and the guard '
+                 'cannot bound it at this persistence.',
+                 pre_mm,
+                 f'observation passes preload {obs_pre_mm:.1f} mm separately'
+                 if obs_pre_mm > 0 else 'observation passes do NOT preload',
+                 s_ins * pre_mm / 1000.0, s_ins)
     elif pre_mm > 0:
         log.info('Commit PRELOAD: %.1f mm configured, but final_insertion is DISABLED -- so '
                  'nothing presses this run.', pre_mm)
@@ -1550,7 +1587,7 @@ def build_and_run(cfg, robot, camera, args):
         return max(t_lin, t_ang, min_seg_s)
 
     def run_insertion(adm_ctl, refs, T_bel, peck=False, guard_ctl=None, settle=None,
-                      hold=None, speed=None, pause=None):
+                      hold=None, speed=None, pause=None, preload_mm=0.0):
         """One admittance-followed insertion along refs, collecting observations (same law and
         logging as cable_pick_estimate_assemble), the seated kinematic check, then the compliant
         UN-guarded retract along the believed part's own -X (a seated part is already over the
@@ -1618,7 +1655,21 @@ def build_and_run(cfg, robot, camera, args):
         if peck:
             log.info('PECK: %d contact event(s), stop depths %s mm.', len(stops),
                      [round(s, 1) for s in stops])
-        adm_ctl.hold(last_ref, settle_s, guard, on_step=log_cb)
+        # PRELOAD -- uncertain_sampling's press, and deliberately its MECHANISM too: advance
+        # along the BELIEVED part's own +X from wherever this pass actually stopped, rather than
+        # commanding a deeper path. Those are not the same thing once the guard trips early, and
+        # the map was built with this one. Logged at the same decimation, so the loaded rows
+        # reach the estimator; UN-guarded, because at the seat the guard has already tripped and
+        # would refuse the very motion the press exists to make. Distance is the limit.
+        if preload_mm > 0:
+            T_pre = _axial_ref(last_ref, T_bel, preload_mm / 1000.0)
+            adm_ctl.ramp(last_ref, T_pre, seg_time(last_ref, T_pre, sv, sw), guard=None,
+                         on_step=log_cb)
+            last_ref = T_pre
+        # The settle is un-guarded after a press for the same reason: hold() is a ramp, so an
+        # armed guard would report 'seated' on the first cycle and cut short exactly the loaded
+        # rows the press was made to record.
+        adm_ctl.hold(last_ref, settle_s, None if preload_mm > 0 else guard, on_step=log_cb)
         if hold_s > 0:                             # dwell: un-guarded, unlogged (see above)
             log.info('   holding the stop for %.1f s.', hold_s)
             adm_ctl.hold(last_ref, hold_s, guard=None)
@@ -1754,8 +1805,11 @@ def build_and_run(cfg, robot, camera, args):
                     seed_q = q
 
                     # ASSEMBLE under admittance (same law as the pick app), check, retract.
+                    # obs_pre_mm carries uncertain_sampling's press so these passes reach
+                    # the LOADED rows the map holds past the mate; 0 = the map has none.
                     obs_i, meas_i, seated, lin, ang, seat6, stops_i = run_insertion(
-                        adm, refs, T_believed, peck=(col_mode == 'peck'))
+                        adm, refs, T_believed, peck=(col_mode == 'peck'),
+                        preload_mm=obs_pre_mm)
                     obs.extend(obs_i)
                     meas.extend(meas_i)
                     attempt_stops.extend(stops_i)
@@ -2067,6 +2121,9 @@ def build_and_run(cfg, robot, camera, args):
                     log.warning('IK/approach failed for the final insertion of trial %d.', trial)
                 else:
                     seed_q = q
+                    # NO preload_mm here on purpose: the commit's press is already in
+                    # T_base_commit, which shifts this whole reference path
+                    # final_insertion.preload_mm deeper. Passing it again would press twice.
                     obs, meas, seated, lin, ang, seat6, _ = run_insertion(
                         adm_final, refs, T_believed, guard_ctl=guard_final,
                         settle=fi_settle, hold=fi_hold,

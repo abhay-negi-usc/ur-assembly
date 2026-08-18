@@ -294,6 +294,25 @@ eval:
       # >0 = replayable jitter stream; null = eval.random_seed + 2 (its own stream, so toggling
       # the sweep cannot shift the injected-error draws); 0 = nondeterministic.
       random_seed: null
+      # PRELOAD for the OBSERVATION passes, mm past the mate, matching the sampler's
+      # sampling.preload_mm. null = INHERIT it (the default, and what parity wants).
+      #
+      # This is NOT the same knob as eval.final_insertion.preload_mm. That one presses the
+      # COMMIT -- the attempt meant to seat -- and does it by shifting the whole reference path
+      # deeper. This one presses every OBSERVATION pass, and does it the sampler's way: advance
+      # along the part's own +X from wherever the pass actually stopped. The distinction matters
+      # once a force stop lands short of the mate, and the map was built with the second one.
+      #
+      # WHY IT MUST TRACK THE SAMPLER. If the map was collected with a press, its deepest rows
+      # are LOADED contact -- and those are the rows nearest the seat, the ones that decide the
+      # correction. A probing pass that stops at the mate never visits them, so the observations
+      # would again sit off the map exactly where it matters most. That is the same regime split
+      # the preload was introduced to close, with the sign reversed.
+      #
+      # Un-guarded, like the sampler's: at the seat the guard has already tripped, so arming it
+      # would refuse the press. The distance is the limit; the sustained force is the axial
+      # stiffness x this distance, and the app logs that figure at start-up.
+      preload_mm: 5.0
 
     peck_retract_mm: 10.0         # back-off after each force stop
     peck_timeout_s: 60.0         # time budget for one peck attempt
@@ -383,7 +402,7 @@ eval:
     # trajectory with nothing like that left.
     #
     # 10.0 = exactly what the CSV's extra row was driving, so the commit is unchanged. 0 = off.
-    preload_mm: 10.0
+    preload_mm: 5.0
     # NOISE on the commit trajectory. OFF by default and deliberately so: the jitter exists to
     # gather varied contact while PROBING and has no place in the attempt meant to seat.
     # Enable it only to characterise the seat itself (e.g. how repeatably it mates under
@@ -418,6 +437,30 @@ estimation:
   # connector's own +x -- invisible straight-in, an 8 mm z lever arm at 5 deg of pitch. Anything
   # paired with this file must be in the same frame (see analysis/bnc_tuning/fix_obs_frame.py).
   manifold_csv: ./configs/data/bnc_manifold_v5.csv
+  # WRENCH REPRESENTATION: unit | rawcap | raw.
+  #   unit    direction only -- magnitude discarded entirely.
+  #   rawcap  direction x magnitude, SATURATED (see rawcap_* below).
+  #   raw     the wrench exactly as measured, in N and Nm. No normalisation, no saturation.
+  #
+  # Pick `raw` when the map and the run share contact physics, and you want an out-of-
+  # distribution contact to LOOK out of distribution. Measured 2026-08-17 (v5 map, 17-Aug
+  # observations) as k-th-NN distance over the map's own spacing, where 1.0 = "ordinary map
+  # point": at 60+ N, unit reads 2.4 and rawcap 2.5 -- both close enough to pass for normal --
+  # while raw reads 6.5 and the support gate can actually act on it. Under the normalising
+  # options a 90 N press instead finds a confident neighbour at whatever pose merely shares
+  # its force direction, and that wrong correspondence steers the estimate.
+  #
+  # THE CATCH: magnitude is not regime-invariant. If the map is light touch (median 4.5 N)
+  # and the run presses (median 29.6 N), `raw` puts the same pose in two different places --
+  # honest, but it will match NOTHING until the map is recollected under the run's physics
+  # (uncertain_sampling compliance/speed, plus sampling.preload_mm for the loaded rows).
+  # It converts a silent wrong answer into a visible no-answer; it cannot invent evidence.
+  #
+  # UNITS CHANGE with it: under `raw`, s_force / s_torque are mm PER NEWTON and mm PER
+  # NEWTON-METRE, not mm per unit vector -- a value tuned for unit/rawcap is ~10x too loud.
+  # For the BNC maps, s_force 0.11 / s_torque 0.20 reproduces `unit`'s block loudness. The
+  # "Metric block balance" line logged at startup reports what the metric actually weights,
+  # so this does not have to be guessed.
   # WRENCH REPRESENTATION: unit | rawcap | raw.
   #   unit    direction only -- magnitude discarded entirely.
   #   rawcap  direction x magnitude, SATURATED (see rawcap_* below).
@@ -662,7 +705,7 @@ compliance:
   # argued from the FREE-AIR time constant D/S, which is the wrong one; D/S governs the return
   # to the reference after contact is lost, while the contact settling is 3/(zeta_c*w_c) with
   # w_c = sqrt((S+k_env)/M), and that one was already fast enough).
-  damping_ratio: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+  damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0
   warmup_s: 0.1
@@ -678,7 +721,7 @@ compliance:
 
 force_guard:
   enabled: true
-  max_force_n: 15.0
+  max_force_n: 10.0
   max_torque_nm: 8.0
   # The limit must hold CONTINUOUSLY this long before the guard trips (0 = instant, the
   # original). Raw F/T spikes over the limit for a few samples on every hard contact

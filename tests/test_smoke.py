@@ -3125,8 +3125,13 @@ def test_trajectory_csv_ends_on_the_mate():
     # ...so anchoring is a NO-OP, which is what makes anchored and direct apps agree
     mate = T.xyzrpy_to_matrix([0.4, -0.1, 0.3], [0.1, -0.2, 0.3])     # any mate; arbitrary
     assert approx(mate @ T.inverse(mats[-1]), mate)
-    # the path still approaches from 20 mm out -- the sweep the map was collected over
-    assert abs(T.matrix_to_xyzrpy(mats[0])[0][0] * 1000.0 + 20.0) < 1e-6
+    # The approach LENGTH is a tunable (20 mm originally, 15 later) -- what must hold is
+    # that the path approaches from OUTSIDE the mate and ends on it, so the sweep covers
+    # real approach travel rather than starting already seated.
+    start_mm = T.matrix_to_xyzrpy(mats[0])[0][0] * 1000.0
+    assert start_mm < -1.0, (
+        f'the trajectory must approach from outside the mate, but starts at {start_mm:+.1f} '
+        'mm -- a path beginning at or past the mate collects no approach contact')
     # and it is monotonic in +X: a direct insertion, never backing up mid-path
     xs = [T.matrix_to_xyzrpy(m)[0][0] for m in mats]
     assert all(b > a for a, b in zip(xs, xs[1:])), 'the insertion must advance monotonically'
@@ -3219,21 +3224,30 @@ def test_preload_is_commit_only_and_preserves_the_seat():
     anchored = mate @ T.inverse(mats[-1])
     probe = depths(anchored)
     assert abs(probe[-1]) < 1e-9, 'probing must end exactly ON the mate -- that is where the map is'
-    assert abs(probe[0] + 20.0) < 1e-6, 'and still approach over the 20 mm the map was swept over'
+    # The CSV's LENGTH is a tunable (it was 20 mm, then 15); what must hold is that
+    # anchoring does not move the approach -- only normalises the end onto the mate.
+    raw0 = T.matrix_to_xyzrpy(mats[0])[0][0] * 1000.0
+    raw_end = T.matrix_to_xyzrpy(mats[-1])[0][0] * 1000.0
+    assert abs(probe[0] - (raw0 - raw_end)) < 1e-6, (
+        'anchoring must preserve the approach the CSV describes, only shifting its end onto '
+        'the mate')
+    assert probe[0] < -1.0, 'the pass must actually approach from outside the mate'
 
-    # BOTH apps press by the same named amount, and it reproduces the old CSV path exactly:
-    # the retired last row was +10 mm, so the commit must run -10 -> +10.
+    # BOTH apps press by their named amount, and the commit is the probing path shifted by
+    # exactly that much -- the relationship, not a hardcoded depth.
     for cfg_name, block in (('estimator_eval.yaml', ('eval', 'final_insertion')),
                             ('bnc_assembly.yaml', ('assembly', 'final_insertion'))):
         c = yaml.safe_load(open(os.path.join(ROOT, 'configs', cfg_name)))
         for k in block:
             c = c[k]
         pre = float(c['preload_mm'])
-        assert pre == 10.0, f'{cfg_name}: preload_mm must restore the retired CSV row'
+        assert pre > 0, f'{cfg_name}: the commit is what drives the connector home'
         comm = depths(anchored @ T.translation_matrix([pre / 1000.0, 0.0, 0.0]))
-        assert abs(comm[-1] - 10.0) < 1e-6 and abs(comm[0] + 10.0) < 1e-6, \
-            f'{cfg_name}: the commit must drive -10 -> +10 mm, as the CSV used to'
-        assert comm[-1] > probe[-1], 'the commit presses and the probing passes do not'
+        assert abs(comm[-1] - pre) < 1e-6, \
+            f'{cfg_name}: the commit must end exactly preload_mm past the mate'
+        assert abs((comm[0] - probe[0]) - pre) < 1e-6, \
+            f'{cfg_name}: the commit is the probing path shifted by preload_mm, nothing else'
+        assert comm[-1] > probe[-1], 'the commit presses deeper than a probing pass'
 
     # ...and each app applies it through its OWN commit anchor, exactly once.
     for app, probing, commit in (
@@ -3323,8 +3337,11 @@ def test_sampling_preload_appends_and_does_not_move_the_sweep():
 
     first = traj.tool0_at(anchor, dense[0], T_tool0_held)
     last = traj.tool0_at(anchor, dense[-1], T_tool0_held)
-    assert abs(conn_x(first) + 20.0) < 1e-6, 'the sweep must still start 20 mm out'
-    assert abs(conn_x(last)) < 1e-9, 'and still reach the mate exactly -- the preload APPENDS'
+    span = T.matrix_to_xyzrpy(mats[0])[0][0] - T.matrix_to_xyzrpy(mats[-1])[0][0]
+    assert abs(conn_x(first) - span * 1000.0) < 1e-6, (
+        'the preload must not move the SWEEP -- whatever length the CSV describes, the '
+        'approach is unchanged and the press is appended past the mate')
+    assert abs(conn_x(last)) < 1e-9, 'and it still reaches the mate exactly'
     for p in (5.0, 10.0):                  # the press lands exactly p past the mate
         assert abs(conn_x(us._axial_ref(last, T_tool0_held, p / 1000.0)) - p) < 1e-6
 
@@ -3343,10 +3360,13 @@ def test_sampling_preload_appends_and_does_not_move_the_sweep():
         assert abs(conn_x(us._retract_ref(last, T_tool0_held, d)) + 5.0) < 1e-6, \
             'retract_distance_m is a MAGNITUDE; a negative value must still back out'
 
-    # Default OFF: every map collected before this existed stays reproducible.
+    # The distance is an operator knob; what must hold is that it is DECLARED (so a map's
+    # collection conditions are recoverable) and never negative (which would retract).
     cfg = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'uncertain_sampling.yaml')))
-    assert float(cfg['sampling'].get('preload_mm', 0.0)) == 0.0, \
-        'shipping a non-zero preload_mm silently changes what every new map contains'
+    assert 'preload_mm' in cfg['sampling'], \
+        'preload_mm must stay declared -- it changes what every new map contains'
+    assert float(cfg['sampling']['preload_mm']) >= 0.0, \
+        'a negative preload would drive the retract INTO the socket'
 
 
 
@@ -3510,6 +3530,88 @@ def test_map_collection_and_eval_share_insert_speed_and_damping():
         assert float(np.max(dt * D / M)) < 1.0, (
             f'{name}: dt*D/M = {np.max(dt * D / M):.2f}, too close to the forward-Euler '
             'stability limit of 2')
+
+
+def test_observation_passes_inherit_the_samplers_preload():
+    """If the map is collected with a press, the observation passes must press too.
+
+    The map's DEEPEST rows are the ones nearest the seat -- the rows that decide the correction.
+    Collect them under load (sampling.preload_mm) and a probing pass that stops at the mate never
+    visits them, so the observations sit off the map exactly where it matters most. That is the
+    same map/observation regime split the preload exists to close, with the sign reversed, so the
+    eval has to track the sampler rather than carry its own number."""
+    src = open(os.path.join(ROOT, 'urlab', 'apps', 'estimator_eval.py'), encoding='utf-8').read()
+
+    # ---- 1. it INHERITS rather than duplicating the sampler's value ----
+    import yaml
+    ee = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'estimator_eval.yaml')))
+    samp = (ee['eval']['collection'].get('sampling') or {})
+    assert 'preload_mm' in samp, \
+        'collection.sampling.preload_mm must exist, or the eval cannot follow the map'
+    assert samp['preload_mm'] is None, (
+        'it must default to null = INHERIT uncertain_sampling.yaml; hardcoding a number here is '
+        'exactly the drift the sampling block was created to prevent')
+    assert "((samp_ref or {}).get('sampling') or {}).get('preload_mm')" in src, \
+        'the inherit path must read the sampler config at run time'
+
+    # ---- 2. the OBSERVATION passes get it; the COMMIT does not ----
+    assert src.count('preload_mm=obs_pre_mm') == 1, \
+        'exactly one call site -- the observation pass -- may take the inherited preload'
+    commit = src[src.index('adm_final, refs, T_believed, guard_ctl=guard_final'):]
+    commit = commit[:commit.index(')')]
+    assert 'preload_mm' not in commit, (
+        "the commit must NOT take preload_mm: its press is already in T_base_commit, which "
+        'shifts the whole reference path, so passing it again would press twice')
+
+    # ---- 3. the press uses the SAMPLER's mechanism, from the actual stop point ----
+    assert '_axial_ref(last_ref, T_bel, preload_mm / 1000.0)' in src, (
+        'the observation press must advance from where the pass actually STOPPED (the sampler '
+        'mechanism), not command a deeper path -- the two differ once a force stop lands short '
+        'of the mate, and the map was built with the first')
+    assert 'from .uncertain_sampling import _axial_ref' in src, \
+        'and it must be the sampler\'s own helper, not a reimplementation that can drift'
+
+    # ---- 4. un-guarded press AND un-guarded settle after one ----
+    press = src[src.index('if preload_mm > 0:'):]
+    press = press[:press.index('if hold_s > 0:')]
+    assert 'guard=None' in press, \
+        'the press must be un-guarded -- at the seat the guard has already tripped'
+    assert 'None if preload_mm > 0 else guard' in press, (
+        'the settle after a press must be un-guarded too: hold() is a ramp, so an armed guard '
+        'returns seated on the first cycle and cuts short the loaded rows the press recorded')
+
+    # ---- 5. and the loaded rows must actually reach the estimator ----
+    assert 'on_step=log_cb' in press, \
+        'the press must be LOGGED at the same decimation, or it adds load but no evidence'
+
+
+def test_sampler_and_eval_presses_are_distinct_knobs():
+    """Two presses exist and they are not interchangeable -- keep them legible.
+
+    final_insertion.preload_mm presses the COMMIT by shifting its whole reference path deeper.
+    collection.sampling.preload_mm presses each OBSERVATION pass by advancing from wherever it
+    stopped. Same units, same name-stem, different mechanism and different phase; the failure
+    mode is someone 'unifying' them and silently double-pressing the commit or halving the map."""
+    import yaml
+
+    ee = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'estimator_eval.yaml')))
+    us = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'uncertain_sampling.yaml')))
+
+    assert float(ee['eval']['final_insertion']['preload_mm']) > 0.0, \
+        'the commit press is what drives the connector home'
+    assert float(us['sampling']['preload_mm']) >= 0.0, \
+        'the sampler press is an operator knob, but it can never be negative'
+    # The eval must FOLLOW the sampler rather than carry its own copy of the number.
+    assert (ee['eval']['collection'].get('sampling') or {}).get('preload_mm') is None, (
+        'collection.sampling.preload_mm must stay null so the eval inherits whatever the '
+        'sampler was set to; pinning a number here is how the two silently diverge')
+
+    src = open(os.path.join(ROOT, 'urlab', 'apps', 'estimator_eval.py'), encoding='utf-8').read()
+    # the commit press is a TARGET shift; the observation press is an AXIAL advance
+    assert 'T_base_commit = T_base_targetobj @ translation_matrix(' in src, \
+        'the commit press must remain a shift of the reference path'
+    assert 'T_pre = _axial_ref(last_ref, T_bel,' in src, \
+        'the observation press must remain an advance from the stop point'
 
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]

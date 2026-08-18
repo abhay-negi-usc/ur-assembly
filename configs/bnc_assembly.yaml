@@ -653,6 +653,22 @@ assembly:
     # collar backwards. Both ends of the stroke are IK-checked before the gripper closes,
     # so an impossible turn fails with the collar still free rather than clamped.
     prewind_deg: null
+    # OUT-OF-AXIS TILT GATE, deg. Before the unwind, the arm's orientation is compared against the
+    # collar-frame family and the part that NO rotation about the connector axis can explain is
+    # measured. Above this, the maneuver refuses to orbit rather than swinging blindly.
+    #
+    # WHAT IT CATCHES. A constant offender is an orientation error between the declared frames
+    # (fingertip_grasp, the connector frame's rpy, assembly.target_frame's rpy) -- that shows up
+    # identically on every run. A VARIABLE one is tilt the cable screw left behind: that block is
+    # 5 Nm/rad about tool0 Rx with tare_before false, so 0.1 Nm of out-of-axis moment is already
+    # 1.15 deg, and a bayonet cam pushes sideways by design.
+    #
+    # WHY 5.0 AND NOT TIGHTER. The centring move that follows goes to a pose which HAS the correct
+    # orientation, so a few degrees is corrected on the way in rather than carried into the orbit.
+    # The gate is asking "is this a centring nudge or a blind swing?", not "is the geometry pure?".
+    # Tightening it back toward zero turns normal compliance yield into an aborted run; loosening
+    # it far past this starts hiding real frame errors, which is why the tilt is always logged.
+    max_offaxis_tilt_deg: 5.0
     settle_s: 0.5
     tare_before: false            # see cable_clocking.tare_before -- same reasoning
     # null = the global caps x speed.phase_scale.collar_clock (see cable_clocking for why).

@@ -3447,6 +3447,45 @@ def test_a_null_speed_override_is_resolved_before_it_reaches_the_arithmetic():
                for k in ('speed_translation_mm_s', 'speed_rotation_deg_s')),         'if no clocking block ships a null any more, this guard has lost its subject'
 
 
+def test_the_offaxis_tilt_gate_clears_the_screws_own_compliance():
+    """The gate must survive the tilt the PREVIOUS maneuver routinely leaves behind.
+
+    Collar clocking checks how far the arm's orientation is from the collar-frame family in a way
+    no rotation about the connector axis explains, and refuses to orbit above the gate. The arm
+    arrives there straight off the cable screw, whose block is soft in exactly that direction --
+    5 Nm/rad about tool0 Rx, with tare_before false -- so 0.1 Nm of out-of-axis moment is already
+    1.15 deg, and a bayonet cam pushes sideways by design.
+
+    A gate set below that turns ordinary compliance yield into an aborted run. This pins the
+    RELATIONSHIP rather than the number, so retuning either the gate or the screw's stiffness stays
+    honest: the gate has to clear the tilt a plausible cam moment produces.
+
+    It is deliberately not pinned from above -- the tilt is logged unconditionally, so a genuine
+    frame error still surfaces with its magnitude however the gate is set."""
+    import numpy as np
+    import yaml
+
+    asm = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))['assembly']
+    gate = float(asm['collar_clocking']['max_offaxis_tilt_deg'])
+    # the screw axis is the connector +X; the SOFTEST out-of-axis rotational term is what tilts
+    S_rot = [float(v) for v in asm['cable_clocking']['stiffness'][3:]]
+    tilt_per_nm = np.degrees(1.0 / min(S_rot))
+    assert gate >= 0.25 * tilt_per_nm, (
+        f'the {gate:.1f} deg gate is below the {0.25 * tilt_per_nm:.1f} deg that a modest 0.25 Nm '
+        f'out-of-axis cam moment produces at {min(S_rot):.0f} Nm/rad -- ordinary compliance yield '
+        f'would abort the run. Raise max_offaxis_tilt_deg or stiffen cable_clocking')
+
+    # and the gate must come from the config, not be baked into the app
+    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
+        src = fh.read()
+    assert "_num(cl, 'max_offaxis_tilt_deg'" in src, 'the gate must be a config knob'
+    assert 'np.degrees(c_ang) > cl_tilt_deg' in src, 'the gate must be READ, not hardcoded'
+    assert 'out-of-axis tilt at the end of the screw' in src, (
+        'the measured tilt must be logged unconditionally -- it is the diagnostic that separates '
+        'a constant frame error from variable compliance yield, and raising the gate must not '
+        'hide it')
+
+
 def test_both_clockings_turn_about_the_socket_and_not_about_the_arm():
     """The two clocking strokes must share a frame, not just a function.
 

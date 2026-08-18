@@ -510,6 +510,7 @@ def build_and_run(cfg, robot, camera, args):
     cc_tare = tare if bool(cc.get('tare_before', False)) else None
     cl_tare = tare if bool(cl.get('tare_before', False)) else None
     cl_app_mm = cl.get('approach_mm')     # None = the fingertip's station at that moment
+    cl_tilt_deg = _num(cl, 'max_offaxis_tilt_deg', 5.0)
     if cc_on and cl_on and not cc_open_after:
         log.error('assembly.collar_clocking needs cable_clocking.open_gripper_after true: the '
                   'collar is grasped by the same gripper, which must release the cable first.')
@@ -1364,11 +1365,18 @@ def build_and_run(cfg, robot, camera, args):
         th_now = float(np.dot(Rotation.from_matrix(rel[:3, :3]).as_rotvec(), axn))
         T_centred = rotate_about_axis(T_nom_back, axis, point, th_now)
         c_lin, c_ang = pose_error(here, T_centred)
-        if np.degrees(c_ang) > 0.5:
+        # ALWAYS LOGGED, gated only above max_offaxis_tilt_deg. The number is the diagnostic: a
+        # value that repeats run to run is a declared-frame orientation error; one that varies is
+        # tilt the cable screw's spring left behind. Raising the gate hides neither, because this
+        # line is printed either way.
+        log.info('  out-of-axis tilt at the end of the screw: %.2f deg (gate %.1f deg)',
+                 np.degrees(c_ang), cl_tilt_deg)
+        if np.degrees(c_ang) > cl_tilt_deg:
             log.error('COLLAR CLOCKING: the arm is %.1f deg away from the connector axis frame in '
-                      'a way no rotation about that axis explains. The pose the cable screw left, '
-                      'the connector belief and the collar geometry disagree -- refusing to swing '
-                      'blindly.', np.degrees(c_ang))
+                      'a way no rotation about that axis explains, over the %.1f deg gate '
+                      '(collar_clocking.max_offaxis_tilt_deg). The pose the cable screw left, the '
+                      'connector belief and the collar geometry disagree -- refusing to swing '
+                      'blindly.', np.degrees(c_ang), cl_tilt_deg)
             return False
         if c_lin * 1000.0 > 1e-3:
             if not _guarded(robot, guard_shared, lambda: robot.arm.move_l(

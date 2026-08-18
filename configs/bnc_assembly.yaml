@@ -623,20 +623,22 @@ assembly:
     # OPTIONAL -- false ends the run SEATED. Requires cable_clocking
     # enabled: true with this true is REJECTED before the robot moves (see the table above).
     enabled: true
-    # The collar frame = the connector (cable junction) frame translated this far along its +X.
+    # Ahead of the JUNCTION along the connector +X -- and the junction is where the pads close
+    # (junction_in_fingertip is the identity translation), so this is equally "ahead of the
+    # closed pads". NOT measured from the connector frame origin: that origin is the mating-face
+    # reference ~45.7 mm further forward, and measuring from it overshot the advance by exactly
+    # that much (observed: aimed ~+70 mm for a collar ~+25 mm away).
     collar_offset_mm: 25.0
-    # APPROACH STATION, mm along the connector +X, measured in the CONNECTOR frame -- so 0.0 is
-    # the cable junction and collar_offset_mm is the collar itself. The gripper aligns and UNWINDS
-    # here, then ADVANCES along the connector +X onto the collar before closing.
+    # UNWIND STATION, mm along the connector +X RELATIVE TO THE JUNCTION (= the closed pads, see
+    # collar_offset_mm above). The gripper unwinds here, then ADVANCES onto the collar before
+    # closing -- so with null/0 the advance is exactly collar_offset_mm.
     #
-    # WHY THE ADVANCE EXISTS. The pads close BEHIND the junction (-45.7 mm on this geometry) while
-    # the collar sits AHEAD of it (+25.0 mm), so the fingers are nowhere near the ring when the
-    # cable is released -- 70.7 mm of travel separates them. That travel has to come after the
-    # unwind, not before: unwinding is a 90 deg roll about the connector axis, and it wants to
-    # happen with the fingers clear of the ring rather than wrapped around it.
+    # WHY THE ADVANCE EXISTS. The unwind is a 90 deg roll about the connector axis and wants the
+    # fingers clear of the ring rather than wrapped around it, so the roll happens at the
+    # junction station and the travel onto the collar comes after.
     #
-    # null = wherever the fingertip already is when collar clocking starts, which is the station
-    # the open pads are provably occupying at that instant. Set a number to stand further back.
+    # null (or 0) = the junction station, i.e. wherever the pads already are -- provably clear of
+    # the collar, since they were just gripping there. Negative = stand further back.
     approach_mm: null
     rotation_deg: 90.0
     # PRE-WIND, deg. Before grasping, unwind the OPEN gripper this far about the

@@ -1271,8 +1271,10 @@ def build_and_run(cfg, robot, camera, args):
     def collar_clocking(T_base_conn, screw_deg=None):
         """COLLAR CLOCKING -- grasp the locking collar and turn it.
 
-        The collar sits `collar_offset_mm` along the connector's +X from the cable junction (which
-        is what the connector frame is). The OPEN gripper is positioned so its CLOSED fingertip
+        The collar sits `collar_offset_mm` along the connector's +X from the cable JUNCTION --
+        which is where the pads close (junction_in_fingertip is the identity translation), NOT the
+        connector frame origin (that is the mating-face reference, ~45.7 mm further ahead). The
+        OPEN gripper is positioned so its CLOSED fingertip
         frame coincides with the collar frame, closes on the collar, then turns `rotation_deg`
         about the BELIEVED connector frame's +X -- a rotation about an axis fixed IN SPACE, not
         about the tool, so the fingers orbit the collar instead of scrubbing across it.
@@ -1302,7 +1304,17 @@ def build_and_run(cfg, robot, camera, args):
         point = T_base_tconn[:3, 3] + cammed * axn
         T_base_axis = T_base_tconn.copy()
         T_base_axis[:3, 3] = point
-        T_base_collar = T_base_axis @ translation_matrix([cl_off_m, 0.0, 0.0])
+        here = robot.tool0()
+        # THE COLLAR IS MEASURED FROM THE JUNCTION, AND THE JUNCTION IS AT THE PADS. The pick
+        # closes the pads ON the cable junction (cables.yaml junction_in_fingertip is the identity
+        # translation), so the junction's station along the axis is wherever the FINGERTIP is
+        # right now -- measured, not declared. The connector FRAME origin is a different point:
+        # the mating-face reference the insertion drives, ~45.7 mm ahead of the pads. Measuring
+        # the collar from that origin aimed the advance at pads +70.7 mm and overshot by exactly
+        # that 45.7 mm; from the junction it is pads +collar_offset_mm.
+        pad_x = float((inverse(T_base_axis) @ here @ robot.T_tool0_fingertip)[0, 3])
+        collar_x = pad_x + cl_off_m
+        T_base_collar = T_base_axis @ translation_matrix([collar_x, 0.0, 0.0])
         # Report the drift that was being used as an axis -- it is the direct measure of how far
         # the screw's accumulated error would have thrown this turn.
         _d = T_base_conn[:3, 3] - point
@@ -1313,7 +1325,6 @@ def build_and_run(cfg, robot, camera, args):
         log.info('  axis: SOCKET (assembly.target_frame), advanced %+.2f mm by the screw. The '
                  'measured connector frame sits %.2f mm lateral / %.2f deg tilted from it -- that '
                  'drift is discarded, not turned about.', cammed * 1000.0, _lat * 1000.0, _tilt)
-        here = robot.tool0()
         # THE GRASP ROLL IS FREE FOR THE GRIPPER AND NOT FREE FOR THE ARM.
         #
         # A parallel jaw is symmetric under a 180 deg roll about its APPROACH axis (fingertip Z):
@@ -1335,15 +1346,11 @@ def build_and_run(cfg, robot, camera, args):
                    key=lambda G: pose_error(here, T_base_collar @ G)[1])
         # The stroke poses are defined AFTER the clock-angle solve below -- the unwind lands
         # relative to where the arm actually is, not relative to the nominal alignment.
-        # THE COLLAR IS AHEAD OF THE GRASP, so the gripper cannot close where it stands. The pads
-        # close BEHIND the cable junction (-45.7 mm along the connector +X on this geometry) and
-        # the collar sits AHEAD of it (+collar_offset_mm), so 70.7 mm separates the open fingers
-        # from the ring the moment the cable is released. The gripper unwinds at that near station
-        # -- clear of the collar, which is what makes the roll safe -- and only then ADVANCES along
-        # the connector +X onto the ring.
-        app_x = (float((inverse(T_base_axis) @ here @ robot.T_tool0_fingertip)[0, 3])
-                 if cl_app_mm is None else float(cl_app_mm) / 1000.0)
-        adv_m = cl_off_m - app_x
+        # The gripper unwinds AT the junction station (where the pads already are, clear of the
+        # ring) and only then ADVANCES the collar_offset_mm onto the collar. approach_mm shifts
+        # the unwind station relative to the junction; null = stay where the pads are.
+        app_x = pad_x + (0.0 if cl_app_mm is None else float(cl_app_mm) / 1000.0)
+        adv_m = collar_x - app_x
         T_nom_back = T_base_axis @ translation_matrix([app_x, 0.0, 0.0]) @ grip
         # The arm's CLOCK ANGLE about the axis, solved from the measured pose -- everything
         # downstream hangs off this, so it is solved once, here.

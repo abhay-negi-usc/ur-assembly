@@ -83,5 +83,5 @@ targets:
   # Prefer a FRESH monitor reading when there is bench time -- this is arithmetic, not a
   # measurement.  (was xyz_mm [+108.52, +1013.93, -141.11])
   bnc_connector_finger_holder:
-    xyz_mm:  [98.86, 1106.54, -137.81]
-    rpy_deg: [-50.71, -0.12, +95.32]
+    xyz_mm:  [99.28, 1101.77, -139.29]
+    rpy_deg: [-50.76, 2.12, +95.04]

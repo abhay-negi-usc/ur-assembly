@@ -213,7 +213,7 @@ speed:
     pickup: 1.5      # the compliant grasp descent
     lift: 0.8        # the compliant lift (including the slip-check partial lift)
     standoff: 1.0    # the move to stand-off + the per-attempt realign moveJs
-    assemble: 1.2      # the insertion reference ramp
+    assemble: 0.1      # the insertion reference ramp
     retract: 4.0       # the between-attempt retract + the release escape
     # POST-MATE CLOCKING, one scale per maneuver. These pace the CONTACT ramps; the free-space
     # moves inside a maneuver (the retry realign, the collar align) stay on standoff/retract like
@@ -223,9 +223,9 @@ speed:
     # 0.12 x the global caps = ~3 mm/s and ~11 deg/s: a deliberate screw the cams can follow and
     # the guard can react to. One scale multiplies BOTH caps, which is why 0.12 was picked -- it
     # lands translation and rotation where they are both wanted at once.
-    cable_clock: 0.12    # the bayonet screw stroke
-    collar_clock: 0.12   # the collar turn
-    clock_retract: 2.0   # the shared two-leg escape (free space, gripper already clear)
+    cable_clock: 0.10    # the bayonet screw stroke
+    collar_clock: 0.10   # the collar turn
+    clock_retract: 1.0   # the shared two-leg escape (free space, gripper already clear)
     # POST-MATE CLOCKING, one scale per maneuver. These pace the CONTACT ramps; the free-space
     # moves inside a maneuver (the retry realign, the collar align) stay on standoff/retract like
     # every other positioning move in this app. NOTE a non-null speed_translation_mm_s /
@@ -234,9 +234,9 @@ speed:
     # 0.12 x the global caps = ~3 mm/s and ~11 deg/s: a deliberate screw the cams can follow and
     # the guard can react to. One scale multiplies BOTH caps, which is why 0.12 was picked -- it
     # lands translation and rotation where they are both wanted at once.
-    cable_clock: 0.12    # the bayonet screw stroke
-    collar_clock: 0.12   # the collar turn
-    clock_retract: 2.0   # the shared two-leg escape (free space, gripper already clear)
+    cable_clock: 0.10    # the bayonet screw stroke
+    collar_clock: 0.10   # the collar turn
+    clock_retract: 1.0   # the shared two-leg escape (free space, gripper already clear)
 
 move_timeout_s: 60.0
 settle_s: 0.5
@@ -299,7 +299,7 @@ assembly:
   #           connector's own axes, letting compliance find the mate the way a person jiggles a
   #           plug in. Reads no map, fits nothing, never touches the belief -- so none of the
   #           estimator's failure modes apply. Skips the attempt loop AND final_insertion.
-  insertion_mode: estimate
+  insertion_mode: wiggle
 
   wiggle:
     # TARGET, connector w.r.t. the target connector [x, y, z (mm), roll, pitch, yaw (deg)].
@@ -310,9 +310,9 @@ assembly:
     amplitude:
       x_mm: 0.0                  # x is the push direction -- `target` owns it, not the wiggle
       y_mm: 0.0
-      z_mm: 5.0
+      z_mm: 1.0
       roll_deg: 0.0
-      pitch_deg: 5.0
+      pitch_deg: 1.0
       yaw_deg: 0.0
     # FREQUENCY per axis (Hz), required wherever the amplitude is non-zero.
     # MUTUALLY PRIME ON PURPOSE. Two axes at a rational frequency ratio retrace the same closed
@@ -323,9 +323,9 @@ assembly:
     frequency_hz:
       x_mm: 0.0
       y_mm: 0.0
-      z_mm: 0.7
+      z_mm: 0.07
       roll_deg: 0.0
-      pitch_deg: 1.1
+      pitch_deg: 0.11
       yaw_deg: 0.0
     # OPTIONAL per-axis white noise on the reference, same units. Off by default: the point of the
     # wiggle is a KNOWN sweep, and noise trades coverage for irreproducibility. Turn it on to break
@@ -336,6 +336,30 @@ assembly:
     # How often the reference is rebuilt. Must be >= 4x the highest frequency or the sampled sine
     # is aliased into a slower one -- validated pre-motion. 25 Hz against 1.1 Hz is ~23 samples per
     # cycle.
+    # SPEED CAP for the oscillation. null = uncapped (the historical behaviour).
+    #
+    # WHY THIS EXISTS AS ITS OWN KNOB. The wiggle paces by TIME -- each reference pair is ramped
+    # over exactly one sample period so the frequency it commands is the frequency configured --
+    # which means seg_time() never sees it, and therefore speed.max_cartesian_* and
+    # speed.phase_scale do NOT bound it. It is the only motion in this app with no speed limit of
+    # its own. Peak reference speed is amplitude x 2*pi*frequency.
+    #
+    # HOW IT IS APPLIED. The cap DERIVES a time-dilation factor s = cap / peak, and the waveform
+    # clock is evaluated at t*s. That scales every peak speed by s while leaving
+    #   * amplitude   -- so the search AREA is unchanged; and
+    #   * the frequency RATIO -- so a mutually-prime pair stays mutually prime and the orbit
+    #     still sweeps the rectangle instead of collapsing onto one closed path through it.
+    # The only cost is wall-clock: the orbit takes 1/s times as long to close.
+    #
+    # Stated in physical units rather than as a bare multiplier so it stays correct when an
+    # amplitude or a frequency is edited -- the scale is re-derived every run, not maintained by
+    # hand. Both caps are optional and the binding one wins; the app logs the derived scale, the
+    # resulting peaks, and how much of one orbit max_duration_s now buys.
+    #
+    # RAISE max_duration_s WITH IT. Dilation stretches the orbit but not the timeout, so a cap
+    # silently buys less of the pattern unless the duration follows. The startup line says so.
+    max_speed_mm_s: null
+    max_rotation_deg_s: null
     sample_rate_hz: 25.0
     max_duration_s: 60.0         # give up after this long without engaging
     # ENGAGEMENT: measured advance of the connector along the target's +X, checked every servo
@@ -346,14 +370,14 @@ assembly:
     # --- compliance overrides (else the top-level compliance:) ---
     # Stiff along x to keep pressing home; softer across, so the rocking motion yields to the
     # socket's lead-in instead of grinding on it.
-    stiffness: [2000.0, 400.0, 400.0, 8.0, 8.0, 8.0]
+    stiffness: [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
     mass: null
     damping_ratio: null
     # --- force guard overrides (else the top-level force_guard:) ---
     # A wiggle presses and rocks against the socket, so this wants "genuinely jammed", not "stop on
     # contact". A trip ends the wiggle as a FAILURE -- at that point it is stuck, not wiggling.
     force_guard_enabled: true
-    max_force_n: 30.0
+    max_force_n: 10.0
     max_torque_nm: 8.0
     persistence_s: 1.0
 
@@ -453,7 +477,7 @@ assembly:
   final_insertion:
     enabled: true
     # --- compliance overrides (else compliance:) ---
-    stiffness: [500.0, 3000.0, 500.0, 10.0, 10.0, 10.0]
+    stiffness: [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
     mass: null
     damping_ratio: null
     settle_s: null               # logged settle at the stop; feeds no estimate here
@@ -601,6 +625,21 @@ assembly:
     # The collar frame = the connector (cable junction) frame translated this far along its +X.
     collar_offset_mm: 25.0
     rotation_deg: 90.0
+    # PRE-WIND, deg. Before grasping, unwind the OPEN gripper this far about the
+    # connector's +X, so the turn that follows has the wrist range to complete it.
+    # null = rotation_deg (exactly the range the turn spends -- the usual answer).
+    # 0 = start from the nominal alignment, which is what this did before 2026-08-17.
+    #
+    # WHY. The turn is a rigid orbit about the connector +X. Beginning it at the nominal
+    # alignment asks for 90 deg of range on whichever side the arm is already on, and
+    # there may not be 90 deg left there; unwinding first puts the whole stroke on the
+    # reachable side. The turn then LANDS on the nominal alignment rather than finishing
+    # 90 deg past it, which is also where the collar is expected to end up.
+    #
+    # The unwind runs with the gripper OPEN -- doing it while gripping would turn the
+    # collar backwards. Both ends of the stroke are IK-checked before the gripper closes,
+    # so an impossible turn fails with the collar still free rather than clamped.
+    prewind_deg: null
     settle_s: 0.5
     tare_before: false            # see cable_clocking.tare_before -- same reasoning
     # null = the global caps x speed.phase_scale.collar_clock (see cable_clocking for why).
@@ -698,13 +737,13 @@ estimation:
   # would be placed at the fingertip origin.
   initial_connector_in_fingertip:
     # xyz: [-0.0457, 0.0000, 0.0240]             # m
-    xyz: [-0.0400, 0.0000, 0.0]             # m
+    xyz: [-0.045, 0.0000, 0.010]             # m
     rpy: [0.0, 0.0, 3.14159265358979]       # rad (exactly 180 deg yaw)
   # The AUGMENTED manifold (clean map + 30k truth-corrected production-process rows) and the
   # rawcap wrench representation -- the 2026-08-09 offline winners. Fall back to the classic
   # setup with: manifold_csv ./configs/data/banana_manifold_20260807_clean.csv,
   # wrench_representation unit, s_force 3.0, s_torque 1.0.
-  manifold_csv: ./configs/data/bnc_manifold_v4_fixed.csv
+  manifold_csv: ./configs/data/bnc_manifold_v6.csv
   # WRENCH REPRESENTATION: unit | rawcap | raw.
   #   unit    direction only -- magnitude discarded entirely.
   #   rawcap  direction x magnitude, SATURATED (see rawcap_* below).

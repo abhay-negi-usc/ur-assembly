@@ -348,6 +348,14 @@ def build_and_run(cfg, robot, camera, args):
     wg_rate = float(wg.get('sample_rate_hz', 25.0))
     wg_max_s = float(wg.get('max_duration_s', 60.0))
     wg_engage_mm = float(wg.get('engage_advance_mm', 4.0))
+    # SPEED CAP -> time dilation. See trajectory.wiggle_time_scale: the wiggle paces by
+    # TIME, not distance, so seg_time() and speed.phase_scale never reach it and it is the
+    # one motion in this app with no speed limit of its own. Capping it by dilating the
+    # waveform clock leaves the amplitude (search area) and the frequency ratio (orbit
+    # shape) untouched and costs only wall-clock time.
+    wg_cap_v = wg.get('max_speed_mm_s')
+    wg_cap_w = wg.get('max_rotation_deg_s')
+    wg_scale, _pv, _pw, _orbit = traj.wiggle_time_scale(wg_amp, wg_frq, wg_cap_v, wg_cap_w)
     wg_settle = _num(wg, 'settle_s', settle_shared)
     wg_hold = _num(wg, 'hold_after_s', 0.0)
     if ins_mode == 'wiggle':
@@ -361,9 +369,13 @@ def build_and_run(cfg, robot, camera, args):
         if wg_rate <= 0 or wg_max_s <= 0:
             log.error('assembly.wiggle.sample_rate_hz and max_duration_s must be > 0.')
             return False
-        # NYQUIST: the reference is rebuilt every 1/sample_rate_hz s, so a frequency above half
-        # that rate is aliased -- it would command a slower wiggle than configured, silently.
-        fmax = max(wg_frq)
+        if (wg_cap_v is not None and float(wg_cap_v) <= 0) or (wg_cap_w is not None and float(wg_cap_w) <= 0):
+            log.error('assembly.wiggle.max_speed_mm_s / max_rotation_deg_s must be > 0 when set '
+                      '(use null to leave the wiggle uncapped).')
+            return False
+        # NYQUIST, against the EFFECTIVE frequency: dilation lowers it, so checking the
+        # raw value would reject a configuration that samples perfectly well.
+        fmax = max(wg_frq) * wg_scale
         if fmax > 0 and wg_rate < 4.0 * fmax:
             log.error('assembly.wiggle.sample_rate_hz %.1f Hz is too coarse for a %.2f Hz '
                       'oscillation: use at least 4x the highest frequency (Nyquist would be 2x; '
@@ -385,6 +397,26 @@ def build_and_run(cfg, robot, camera, args):
                  [round(v, 2) for v in wg_target],
                  ', '.join(f'{d} {amp:+.2f}@{frq:.2f}Hz' for d, amp, frq in active),
                  wg_rate, wg_max_s, wg_engage_mm)
+        if wg_scale < 1.0:
+            log.info('  SPEED CAP: peak %.2f mm/s / %.2f deg/s uncapped -> time scale '
+                     '%.3f -> %.2f mm/s / %.2f deg/s. Amplitude and the frequency ratio are '
+                     'unchanged, so the search area and the orbit shape are the same; only '
+                     'wall-clock time is spent.', _pv, _pw, wg_scale,
+                     _pv * wg_scale, _pw * wg_scale)
+        else:
+            log.info('  speed UNCAPPED: peak %.2f mm/s / %.2f deg/s (set wiggle.max_speed_mm_s '
+                     'to bound it -- seg_time and speed.phase_scale do NOT reach this motion).',
+                     _pv, _pw)
+        # COVERAGE: dilation stretches the orbit but not the timeout, so a cap silently
+        # buys less of the pattern unless max_duration_s follows it.
+        if _orbit > 0:
+            orbit_eff = _orbit / wg_scale
+            frac = wg_max_s / orbit_eff
+            (log.info if frac >= 1.0 else log.warning)(
+                '  orbit closes every %.0f s at this scale; max_duration_s %.0f s covers %.0f%%'
+                ' of it%s', orbit_eff, wg_max_s, frac * 100.0,
+                '.' if frac >= 1.0 else ' -- the sweep never completes, so part of the '
+                'rectangle is never probed. Raise max_duration_s to %.0f s.' % orbit_eff)
         if wg_noise_on:
             log.info('  wiggle noise ON, per-axis std %s', wg_noise_std)
 
@@ -414,6 +446,10 @@ def build_and_run(cfg, robot, camera, args):
     cc_open_after = bool(cc.get('open_gripper_after', True))
     cl_off_m = _num(cl, 'collar_offset_mm', 25.0) / 1000.0
     cl_rot = np.radians(_num(cl, 'rotation_deg', 90.0))
+    # PRE-WIND: how far to unwind the OPEN gripper before the turn. null = rotation_deg,
+    # i.e. exactly the range the turn is about to spend. 0 disables.
+    _pw = cl.get('prewind_deg')
+    cl_prewind = cl_rot if _pw is None else np.radians(float(_pw))
     cl_settle = _num(cl, 'settle_s', settle_shared)
     cc_v = None if cc.get('speed_translation_mm_s') is None \
         else float(cc['speed_translation_mm_s'])
@@ -759,6 +795,10 @@ def build_and_run(cfg, robot, camera, args):
         dt, nstep = 1.0 / wg_rate, int(round(wg_max_s * wg_rate))
 
         def ref_at(t):
+            # DILATED waveform clock: t is wall-clock, t*wg_scale is where the sine is
+            # evaluated. Scaling the argument (not the frequencies) is what keeps a
+            # mutually-prime pair mutually prime.
+            t = float(t) * wg_scale
             v = np.array(wg_target, dtype=float)
             for i in range(6):
                 if abs(wg_amp[i]) > 0.0 and wg_frq[i] > 0.0:
@@ -1005,21 +1045,50 @@ def build_and_run(cfg, robot, camera, args):
         TODO: grasp verification and failure recovery on the close, as agreed -- a missed collar
         currently turns an empty gripper."""
         T_base_collar = T_base_conn @ translation_matrix([cl_off_m, 0.0, 0.0])
-        T_ref = T_base_collar @ inverse(robot.T_tool0_fingertip)
-        log.info('--- COLLAR CLOCKING --- collar is %.1f mm along the connector +X; aligning the '
-                 'CLOSED fingertip frame with it, then %+.1f deg about the connector +X',
-                 cl_off_m * 1000.0, np.degrees(cl_rot))
+        axis, point = T_base_conn[:3, 0], T_base_conn[:3, 3]
+        # The NOMINAL alignment: the closed fingertip frame coincides with the collar frame.
+        T_nominal = T_base_collar @ inverse(robot.T_tool0_fingertip)
+        # PRE-WIND. The turn is a rigid orbit about the connector's +X, so starting it from the
+        # nominal alignment spends `rotation_deg` of wrist range on whichever side the arm happens
+        # to be on -- and there may not be that much left. Unwinding by the same amount FIRST puts
+        # the whole stroke on the reachable side, and the turn then LANDS on the nominal alignment
+        # instead of finishing 90 deg past it.
+        #
+        # It has to happen with the gripper OPEN. Unwinding while gripping would turn the collar
+        # backwards -- undoing the lock rather than making room to apply it -- so this move sits
+        # strictly between the align and the close.
+        #
+        # The collar sits ON the rotation axis (it is offset along +X, the axis direction), so
+        # orbiting about that line keeps the fingertip on the collar's own circle; the pre-wind
+        # slides the grip around the ring without moving off it.
+        T_start = rotate_about_axis(T_nominal, axis, point, -cl_prewind)
+        T_end = rotate_about_axis(T_start, axis, point, cl_rot)
+        log.info('--- COLLAR CLOCKING --- collar is %.1f mm along the connector +X. '
+                 'Pre-wind %+.1f deg (gripper OPEN), grasp, then turn %+.1f deg about the '
+                 'connector +X.', cl_off_m * 1000.0, np.degrees(-cl_prewind), np.degrees(cl_rot))
+        # REACHABILITY of BOTH ends, before anything grips. Discovering mid-turn that the far end
+        # is unreachable leaves the collar clamped in a stalled gripper, which is the one failure
+        # this maneuver must not have -- and it is exactly what the pre-wind exists to prevent, so
+        # a failure here should say so rather than surfacing as a generic move error.
+        for lab, T_chk in (('pre-wound start', T_start), ('turn end', T_end)):
+            if robot.arm.ik(T_chk, robot.arm.q()) is None:
+                log.error('COLLAR CLOCKING: the %s pose is unreachable. The turn needs '
+                          '%.0f deg of range about the connector +X from a start unwound '
+                          '%.0f deg; reduce collar_clocking.rotation_deg, adjust prewind_deg, '
+                          'or reposition the fixture.', lab, np.degrees(cl_rot),
+                          np.degrees(cl_prewind))
+                return False
         phase('standoff')
         if not _guarded(robot, guard_shared,
-                        lambda: robot.arm.move_l(T_ref, label='collar align')):
-            log.error('Could not reach the collar frame.')
+                        lambda: robot.arm.move_l(T_start, label='collar align (pre-wound)')):
+            log.error('Could not reach the pre-wound collar pose.')
             return False
         if not robot.gripper.close('grasp collar'):
             log.error('Gripper did not close on the collar.')
             return False
         phase('collar_clock')
         start = robot.tool0()
-        end = rotate_about_axis(start, T_base_conn[:3, 0], T_base_conn[:3, 3], cl_rot)
+        end = rotate_about_axis(start, axis, point, cl_rot)
         adm_cl.reset()
         adm_cl.warmup(start, tare_fn=cl_tare)
         guard_cl.reset()
@@ -1032,6 +1101,7 @@ def build_and_run(cfg, robot, camera, args):
         robot.arm.servo_stop()
         stopped = res == 'seated'            # ramp's word for a guard trip -- not the state
         clock_rows.append({'maneuver': 'collar_clocking', 'try': 1, 'ramp_result': res,
+                           'prewind_deg': round(float(np.degrees(cl_prewind)), 3),
                            'turned_deg': round(float(np.degrees(turned)), 3),
                            'commanded_deg': round(float(np.degrees(cl_rot)), 3),
                            'success': True, 'force_stop': bool(stopped),

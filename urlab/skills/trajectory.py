@@ -254,3 +254,39 @@ def ik_chain(arm, poses, seed):
             return None
         out.append(q)
     return out
+
+
+def wiggle_time_scale(amp, frq, cap_v_mm_s=None, cap_w_deg_s=None):
+    """Time-dilation factor that holds the wiggle's peak reference speed under the caps.
+
+    A sinusoid of amplitude A at frequency f peaks at A*2*pi*f, so dilating the waveform clock by
+    s scales every peak by s. Returns (scale, peak_v, peak_w, orbit_s) where the peaks are the
+    UNDILATED ones and orbit_s is the undilated period after which the Lissajous figure closes.
+
+    Amplitude is untouched (the search area is preserved) and so is the frequency RATIO, which is
+    what keeps mutually-prime frequencies mutually prime -- a scale that rounded one frequency
+    would collapse the orbit onto a closed path through the rectangle, which is exactly what the
+    co-prime choice exists to avoid.
+
+    Both caps are optional; the binding one wins. Pure arithmetic, so the smoke tests can check it
+    without a robot."""
+    import math
+
+    amp = [float(v) for v in amp]
+    frq = [float(v) for v in frq]
+    tw = math.tau
+    peak_v = max([abs(amp[i]) * tw * frq[i] for i in range(3) if frq[i] > 0], default=0.0)
+    peak_w = max([abs(amp[i]) * tw * frq[i] for i in range(3, 6) if frq[i] > 0], default=0.0)
+    s = 1.0
+    if cap_v_mm_s and peak_v > 0:
+        s = min(s, float(cap_v_mm_s) / peak_v)
+    if cap_w_deg_s and peak_w > 0:
+        s = min(s, float(cap_w_deg_s) / peak_w)
+    # ORBIT: the figure closes at 1 / gcd(frequencies). Taken over a milli-Hz integer grid, which
+    # is exact for any frequency written to 3 decimals and is what the co-prime rule is stated on.
+    live = [int(round(f * 1000.0)) for i, f in enumerate(frq) if abs(amp[i]) > 0 and f > 0]
+    g = 0
+    for n in live:
+        g = math.gcd(g, n)
+    orbit_s = (1000.0 / g) if g else 0.0
+    return max(s, 1e-9), peak_v, peak_w, orbit_s

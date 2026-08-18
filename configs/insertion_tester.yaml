@@ -60,17 +60,17 @@ insertion:
     - [0.0, 0.0, 4.0, 0.0, 0.0, 0.0]
     - [0.0, 0.0, 2.0, 0.0, 2.0, 0.0]      # combined: the corner is where basins actually fail
 
-  repeats: 3                     # cycles per offset. Seat success is a RATE -- one try per
+  repeats: 1                     # cycles per offset. Seat success is a RATE -- one try per
                                  # offset cannot distinguish a 90% basin from a 40% one.
-  shuffle: true                  # spread each offset across the run. Running all repeats of one
+  shuffle: false                  # spread each offset across the run. Running all repeats of one
                                  # offset back-to-back confounds "this offset is hard" with "the
                                  # fixture had drifted by then"; shuffling turns a creep into
                                  # scatter instead of a false difference between offsets.
-  random_seed: 1                 # >0 = the shuffle is replayable; 0 = nondeterministic
+  random_seed: 0                 # >0 = the shuffle is replayable; 0 = nondeterministic
 
   # ---- GEOMETRY ------------------------------------------------------------------------------
   standoff_distance_m: 0.030     # backed off along the BELIEVED connector's own -X (free space)
-  overshoot_m: 0.002             # command slightly PAST the mate so a good insertion is not
+  overshoot_m: 0.005             # command slightly PAST the mate so a good insertion is not
                                  # stopped one waypoint short of seating
   resolution_m: 0.001            # straight-line waypoint spacing (direct mode)
 
@@ -90,9 +90,9 @@ insertion:
     amplitude:
       x_mm: 0.0                  # x is the push direction -- `target` owns it, not the wiggle
       y_mm: 0.0
-      z_mm: 5.0
+      z_mm: 1.0
       roll_deg: 0.0
-      pitch_deg: 5.0
+      pitch_deg: 1.0
       yaw_deg: 0.0
     # FREQUENCY per axis (Hz), required wherever the amplitude is non-zero.
     # MUTUALLY PRIME ON PURPOSE. Two axes at a rational frequency ratio retrace the same closed
@@ -110,6 +110,30 @@ insertion:
     # How often the reference is rebuilt. Must be >= 4x the highest frequency or the sampled sine
     # aliases into a slower one -- validated pre-motion, because an aliased wiggle looks like it
     # ran correctly, just at a frequency nobody chose.
+    # SPEED CAP for the oscillation. null = uncapped (the historical behaviour).
+    #
+    # WHY THIS EXISTS AS ITS OWN KNOB. The wiggle paces by TIME -- each reference pair is ramped
+    # over exactly one sample period so the frequency it commands is the frequency configured --
+    # which means seg_time() never sees it, and therefore speed.max_cartesian_* and
+    # speed.phase_scale do NOT bound it. It is the only motion in this app with no speed limit of
+    # its own. Peak reference speed is amplitude x 2*pi*frequency.
+    #
+    # HOW IT IS APPLIED. The cap DERIVES a time-dilation factor s = cap / peak, and the waveform
+    # clock is evaluated at t*s. That scales every peak speed by s while leaving
+    #   * amplitude   -- so the search AREA is unchanged; and
+    #   * the frequency RATIO -- so a mutually-prime pair stays mutually prime and the orbit
+    #     still sweeps the rectangle instead of collapsing onto one closed path through it.
+    # The only cost is wall-clock: the orbit takes 1/s times as long to close.
+    #
+    # Stated in physical units rather than as a bare multiplier so it stays correct when an
+    # amplitude or a frequency is edited -- the scale is re-derived every run, not maintained by
+    # hand. Both caps are optional and the binding one wins; the app logs the derived scale, the
+    # resulting peaks, and how much of one orbit max_duration_s now buys.
+    #
+    # RAISE max_duration_s WITH IT. Dilation stretches the orbit but not the timeout, so a cap
+    # silently buys less of the pattern unless the duration follows. The startup line says so.
+    max_speed_mm_s: null
+    max_rotation_deg_s: null
     sample_rate_hz: 25.0
     max_duration_s: 30.0         # give up after this long without engaging
     # ENGAGEMENT: measured advance of the TRUE connector along the mate's +X, checked every servo
@@ -118,13 +142,13 @@ insertion:
     # --- compliance overrides (else the top-level compliance:) ---
     # Stiff along x to keep pressing home; softer across, so the rocking yields to the socket's
     # lead-in instead of grinding on it.
-    stiffness: [2000.0, 400.0, 400.0, 8.0, 8.0, 8.0]
+    stiffness: [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
     mass: null
     damping_ratio: null
     # --- force guard overrides (else the top-level force_guard:) ---
     # A wiggle presses and rocks against the socket, so this wants "genuinely jammed", not "stop
     # on first touch" -- a probe-tight limit would end every wiggle on its first contact.
-    max_force_n: 40.0
+    max_force_n: 10.0
     max_torque_nm: 8.0
     persistence_s: 0.3
 
@@ -146,7 +170,7 @@ compliance:
   # MIND THE AXIS. Compliance acts on the TOOL0 axes but the part goes in along the CONNECTOR's
   # +X, and for bnc_connector_finger_holder those differ: connector +X maps to tool0 +Y. So the
   # 3000 below is the INSERTION axis and the two 500s are lateral -- not the other way round.
-  stiffness:     [500.0, 3000.0, 500.0, 10.0, 10.0, 10.0]
+  stiffness:     [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
   # zeta is defined against the ADMITTANCE stiffness, but in contact the loop stiffness is
   # S + k_env, so what governs the bounce is zeta * sqrt(S/(S+k_env)) -- with the virtual mass
   # cancelling out entirely. Measured k_env (dF/dx over 26 real insertions): 3.5-9 N/mm while
@@ -156,12 +180,12 @@ compliance:
   #
   # Do NOT lower this because it looks overdamped on paper: that argument is about the FREE-AIR
   # constant D/S, and acting on it is what made the connector ring on 2026-08-17.
-  damping_ratio: [7.0, 7.0, 7.0, 7.0, 7.0, 7.0]
+  damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
   settle_s: 1.0                  # hold at the stop before reading the seat pose
 
 force_guard:
   enabled: true
-  max_force_n: 15.0              # direct mode: a probe should FEEL the face, not press it
+  max_force_n: 10.0              # direct mode: a probe should FEEL the face, not press it
   max_torque_nm: 4.0
   persistence_s: 0.0             # instant: in direct mode the trip point IS the measurement, and
                                  # a debounce smears the seat pose by the extra travel

@@ -45,6 +45,7 @@ import numpy as np
 from .. import log as urlog
 from .. import tool_frames
 from ..robot import AdmittanceController, ForceGuard
+from ..skills import trajectory as traj
 from ..skills.manifold import mats_from_vec6
 from ..transforms import inverse, matrix_to_xyzrpy, pose_error
 from ._runner import run_app
@@ -52,6 +53,7 @@ from ._runner import run_app
 # a second copy of the advance detector or the wiggle geometry would drift from the one the
 # production app actually runs, and then this tester would be measuring the wrong thing.
 from .bnc_assembly import _AnyGuard, _ScrewAdvance
+from .cable_pick_assemble import _guarded
 from .calibration_check import line_rows
 from .estimator_eval import _corr_to_m
 
@@ -169,6 +171,10 @@ def build_and_run(cfg, robot, camera, args):
     wg_rate = float(wg.get('sample_rate_hz', 25.0))
     wg_max_s = float(wg.get('max_duration_s', 60.0))
     wg_engage_mm = float(wg.get('engage_advance_mm', 4.0))
+    # SPEED CAP -> time dilation, the same knob and the same helper bnc_assembly uses, so
+    # a wiggle characterised here runs at the speed the production app would run it at.
+    wg_scale, _pv, _pw, _orbit = traj.wiggle_time_scale(
+        wg_amp, wg_frq, wg.get('max_speed_mm_s'), wg.get('max_rotation_deg_s'))
     if mode == 'wiggle':
         if len(wg_target) != 6:
             log.error('insertion.wiggle.target must be a 6-vector [x, y, z (mm), roll, pitch, '
@@ -188,7 +194,15 @@ def build_and_run(cfg, robot, camera, args):
         # NYQUIST, with margin. A reference rebuilt at sample_rate_hz that is not several times
         # the highest commanded frequency is ALIASED into a slower wiggle -- and it would look
         # like it ran correctly, just with a frequency nobody chose.
-        f_max = max((wg_frq[i] for i in range(6) if abs(wg_amp[i]) > 0.0), default=0.0)
+        for _k in ('max_speed_mm_s', 'max_rotation_deg_s'):
+            if wg.get(_k) is not None and float(wg[_k]) <= 0:
+                log.error('insertion.wiggle.%s must be > 0 when set (null = uncapped).',
+                          _k)
+                return False
+        # EFFECTIVE frequency: dilation lowers it, so checking the raw value would reject
+        # a configuration that samples perfectly well.
+        f_max = max((wg_frq[i] for i in range(6) if abs(wg_amp[i]) > 0.0),
+                    default=0.0) * wg_scale
         if f_max > 0.0 and wg_rate < 4.0 * f_max:
             log.error('insertion.wiggle.sample_rate_hz %.1f Hz is too coarse for a %.2f Hz '
                       'component (need >= 4x = %.1f Hz) -- the sampled sine would alias.',
@@ -233,6 +247,17 @@ def build_and_run(cfg, robot, camera, args):
                  [wg_amp[i] for i in range(6) if abs(wg_amp[i]) > 0],
                  [wg_frq[i] for i in range(6) if abs(wg_amp[i]) > 0], wg_engage_mm,
                  wg_max_s, wg_rate)
+        if wg_scale < 1.0:
+            log.info('  SPEED CAP: peak %.2f mm/s / %.2f deg/s -> time scale %.3f -> '
+                     '%.2f mm/s / %.2f deg/s (amplitude and orbit shape unchanged).',
+                     _pv, _pw, wg_scale, _pv * wg_scale, _pw * wg_scale)
+        if _orbit > 0:
+            _oe = _orbit / wg_scale
+            _fr = wg_max_s / _oe
+            (log.info if _fr >= 1.0 else log.warning)(
+                '  orbit closes every %.0f s; max_duration_s %.0f s covers %.0f%% of it%s',
+                _oe, wg_max_s, _fr * 100.0, '.' if _fr >= 1.0 else
+                ' -- part of the rectangle is never probed.')
 
     out_dir = os.path.join(cfg.get('data_dir', 'data'), 'experiments',
                            f'insertion_tester_{datetime.now():%Y%m%d_%H%M%S}')
@@ -271,7 +296,8 @@ def build_and_run(cfg, robot, camera, args):
             else:
                 seated_by, advance_mm, last_ref, reached = _wiggle(
                     robot, adm_wg, guard_wg, T_base_tconn, T_believed, T_true, wg_target,
-                    wg_amp, wg_frq, wg_rate, wg_max_s, wg_engage_mm, tare, seed_q)
+                    wg_amp, wg_frq, wg_rate, wg_max_s, wg_engage_mm, tare, seed_q,
+                    wg_scale)
             if last_ref is None:                   # IK/approach failed -- reported by the helper
                 ok = False
                 break
@@ -335,8 +361,10 @@ def _direct(robot, adm, guard, T_base_tconn, T_believed, T_true, standoff_m, ove
     refs = [T_base_tconn @ r @ inverse(T_believed)
             for r in line_rows(standoff_m, overshoot_m, res_m)]
     q = robot.arm.ik(refs[0], seed_q)
-    if q is None or not robot.arm.move_j(q, label='insertion standoff'):
-        log.error('IK/approach failed for the standoff.')
+    if q is None or not _guarded(robot, guard,
+                                 lambda: robot.arm.move_j(q, label='insertion standoff')):
+        log.error('Could not reach the standoff (IK failed, or the guard tripped on the '
+                  'way -- a large injected offset can aim the approach into something).')
         return None, 0.0, None, False
     adm.reset()
     adm.warmup(refs[0], tare_fn=tare)
@@ -357,7 +385,7 @@ def _direct(robot, adm, guard, T_base_tconn, T_believed, T_true, standoff_m, ove
 
 
 def _wiggle(robot, adm_wg, guard_wg, T_base_tconn, T_believed, T_true, target, amp, frq,
-            rate, max_s, engage_mm, tare, seed_q):
+            rate, max_s, engage_mm, tare, seed_q, scale=1.0):
     """WIGGLE insertion -- bnc_assembly's maneuver, planned against the BELIEF.
 
     Drives at ONE fixed target PAST the mate and rocks about it in the connector's own axes:
@@ -373,6 +401,10 @@ def _wiggle(robot, adm_wg, guard_wg, T_base_tconn, T_believed, T_true, target, a
     jam. Both outcomes are distinguished through _AnyGuard, because `ramp` only reports 'seated'
     and the two mean opposite things."""
     def ref_at(t):
+        # DILATED waveform clock: t is wall-clock, t*scale is where the sine is evaluated.
+        # Scaling the ARGUMENT rather than the frequencies is what keeps a mutually-prime
+        # pair mutually prime.
+        t = float(t) * scale
         v = np.array(target, dtype=float)
         for i in range(6):
             if abs(amp[i]) > 0.0 and frq[i] > 0.0:
@@ -383,8 +415,14 @@ def _wiggle(robot, adm_wg, guard_wg, T_base_tconn, T_believed, T_true, target, a
 
     first = ref_at(0.0)
     q = robot.arm.ik(first, seed_q)
-    if q is None or not robot.arm.move_j(q, label='wiggle start'):
-        log.error('IK/approach failed for the wiggle start pose.')
+    # GUARDED, and this is the one that matters: ref_at(0) sits `target` x PAST the mate,
+    # so this move_j drives the connector INTO the socket under POSITION control -- stiff,
+    # with no admittance to yield. Without the guard a misaligned part is pushed at full
+    # joint speed against the socket face with nothing to stop it.
+    if q is None or not _guarded(robot, guard_wg,
+                                 lambda: robot.arm.move_j(q, label='wiggle start')):
+        log.error('Could not reach the wiggle start pose (IK failed, or the guard '
+                  'tripped on the way in).')
         return None, 0.0, None, False
 
     # Advance is measured on the TRUE frame: the question is where the part physically got to,

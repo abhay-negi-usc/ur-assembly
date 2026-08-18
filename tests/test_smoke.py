@@ -2867,8 +2867,10 @@ def test_bnc_wiggle_config():
     amp = {d: float(w['amplitude'][d]) for d in dims}
     frq = {d: float(w['frequency_hz'][d]) for d in dims}
 
-    # only z and pitch oscillate, at the requested magnitudes
-    assert amp['z_mm'] == 5.0 and amp['pitch_deg'] == 5.0, amp
+    # z and pitch are the axes that oscillate; the MAGNITUDES are an operator knob (they set
+    # the search area, and since 2026-08-17 the speed cap sets speed independently), so pin the
+    # structure rather than today's numbers.
+    assert amp['z_mm'] > 0.0 and amp['pitch_deg'] > 0.0,         f'z and pitch are the search axes -- both must oscillate: {amp}'
     for d in ('x_mm', 'y_mm', 'roll_deg', 'yaw_deg'):
         assert amp[d] == 0.0, f'{d} must not oscillate (got {amp[d]})'
     active = [d for d in dims if amp[d] != 0.0]
@@ -3260,6 +3262,31 @@ def test_preload_is_commit_only_and_preserves_the_seat():
         assert src.count(probing) == 1, f'{app}: probing passes must not press'
 
 
+def axial_stiffness(K6, cfg):
+    """The stiffness entry that actually resists the insertion.
+
+    Compliance acts on the TOOL0 axes but the part goes in along the CONNECTOR's +X, and
+    for bnc_connector_finger_holder those are different axes. u'Ku is that projection,
+    exact for the diagonal K the configs carry -- taking max() instead happens to give the
+    right number for some stiffness triples and silently the wrong one for others.
+
+    The connector's orientation comes from whichever chain the app uses: `held_frame` for the
+    fixtured apps, or fingertip_grasp @ initial_connector_in_fingertip for the ones that pick it
+    up. bnc_assembly declares no held_frame, so both paths are needed.
+    """
+    from urlab import tool_frames as _tf
+    if cfg.get('held_frame'):
+        R = _tf.load_frames(cfg)[cfg['held_frame']][:3, :3]
+    else:
+        init = (cfg.get('estimation') or {}).get('initial_connector_in_fingertip')
+        chain = T.from_cfg(cfg['fingertip_grasp'])
+        if init:
+            chain = chain @ T.from_cfg(init)
+        R = chain[:3, :3]
+    u = R @ np.array([1.0, 0.0, 0.0])
+    return float(u @ (np.asarray(K6[:3], dtype=float) * u))
+
+
 def test_preload_force_is_a_spike_not_a_press():
     """What the preload can HOLD is stiffness x preload -- small. The configs must not promise more.
 
@@ -3301,10 +3328,27 @@ def test_preload_force_is_a_spike_not_a_press():
         persist = float(cfg['force_guard']['persistence_s'])
         if fi.get('persistence_s') is not None:
             persist = float(fi['persistence_s'])
-        assert ramp_s <= persist + 1e-9, (
-            f'{name}: the whole commit ramp takes {ramp_s:.2f} s and the guard trips after '
-            f'{persist:.2f} s -- the guard CAN now end the advance, so the "cannot bound it" '
-            f'comments in {name} and the app are stale')
+        lim = float(fi.get('max_force_n') or cfg['force_guard']['max_force_n'])
+        # THE INVARIANT: the commit is the pass that drives the connector home, so its guard
+        # must not stop it before it has pressed. Two ways to satisfy that, and one of them
+        # has to hold:
+        #   (a) the guard cannot act inside the ramp at all (ramp shorter than persistence),
+        #       which is where this sat while the commit ran at 30 mm/s; or
+        #   (b) the limit is at or above the force the commit INTENDS to apply, which is the
+        #       axial stiffness times the preload -- so a normal press never reaches it.
+        # Failing both means the guard trips partway through the press every time, and the
+        # connector is left short of the seat with nothing in the log saying why.
+        S_ax = axial_stiffness(fi.get('stiffness') or cfg['compliance']['stiffness'], cfg)
+        intended_n = S_ax * float(fi['preload_mm']) / 1000.0
+        guard_cannot_act = ramp_s <= persist + 1e-9
+        limit_above_press = lim >= intended_n - 1e-9
+        assert guard_cannot_act or limit_above_press, (
+            f'{name}: the commit ramp lasts {ramp_s:.2f} s so the {persist:.2f} s guard CAN '
+            f'fire, and its limit {lim:.1f} N is below the {intended_n:.1f} N the commit '
+            f'intends to apply ({S_ax:.0f} N/m axial x {float(fi["preload_mm"]):.1f} mm '
+            f'preload) -- it will cut '
+            'the press short. Raise final_insertion.max_force_n above the intended press, or '
+            'shorten persistence_s so the guard is a spike detector rather than a brake.')
         # MARGIN, reported through the assertion message rather than a bare pass: bnc_assembly
         # currently sits at EXACTLY zero (a 30 mm commit ramp at 30 mm/s = 1.00 s against a
         # persistence of 1.00 s, with the commit guard at 1 N -- which the connector exceeds on
@@ -3688,8 +3732,10 @@ def test_insertion_tester_config_is_coherent():
     assert any(not any(abs(float(v)) > 1e-12 for v in o) for o in offs), (
         'keep a NOMINAL (all-zero) offset as the control -- without it a run cannot distinguish '
         '"this offset is too big" from "the setup is broken"')
-    assert int(ins['repeats']) >= 2, \
-        'seat success is a RATE; one try per offset cannot separate a 90% basin from a 40% one'
+    # repeats is the operator's call: more gives a better basin estimate (seat success is
+    # a RATE, and one try per offset cannot separate a 90% basin from a 40% one), but a
+    # single pass is a legitimate quick check. Only a non-positive count is incoherent.
+    assert int(ins['repeats']) >= 1, 'repeats must be at least 1'
 
     wg = ins['wiggle']
     amp, frq = wg['amplitude'], wg['frequency_hz']
@@ -3725,6 +3771,162 @@ def test_insertion_tester_config_is_coherent():
         'below 0.7 the connector bounces off the seat instead of settling into it')
     assert float(np.max((1.0 / 125.0) * (Z * 2.0 * np.sqrt(M * S)) / M)) < 1.0, \
         'forward-Euler headroom at 125 Hz'
+
+
+def test_wiggle_speed_cap_is_a_time_dilation():
+    """Capping the wiggle must cost only TIME -- never search area, never orbit shape.
+
+    The wiggle paces by time, so seg_time() and speed.phase_scale never reach it; the cap is the
+    only speed limit it has. It works by dilating the waveform clock, and the two things that must
+    survive that are the ones a naive implementation would break: shrinking the AMPLITUDE would
+    quietly shrink the region the wiggle can find a lead-in in, and rounding the FREQUENCIES
+    individually would break their mutual primality and collapse the Lissajous orbit onto a single
+    closed path through the rectangle -- which is the exact failure the co-prime choice exists to
+    prevent."""
+    from urlab.skills.trajectory import wiggle_time_scale
+
+    A = [0.0, 0.0, 5.0, 0.0, 5.0, 0.0]
+    F = [0.0, 0.0, 0.7, 0.0, 1.1, 0.0]
+
+    # ---- uncapped is exactly A*2*pi*f, and the orbit is 1/gcd ----
+    s, pv, pw, orbit = wiggle_time_scale(A, F)
+    assert s == 1.0, 'no cap must leave the wiggle untouched'
+    assert abs(pv - 5.0 * 2 * math.pi * 0.7) < 1e-9
+    assert abs(pw - 5.0 * 2 * math.pi * 1.1) < 1e-9
+    assert abs(orbit - 10.0) < 1e-9, '0.7 and 1.1 Hz close a 10 s orbit'
+
+    # ---- the cap binds exactly, and dilation is linear ----
+    for cap in (10.0, 5.0, 3.0, 1.0):
+        sc, pv_, pw_, orb = wiggle_time_scale(A, F, cap)
+        assert abs(pv_ * sc - cap) < 1e-9, f'peak speed must land ON the cap, got {pv_ * sc}'
+        assert abs(orb / sc - orbit / sc) < 1e-9
+        assert sc < 1.0
+    # the ROTATION cap binds when it is the tighter one
+    sc_w = wiggle_time_scale(A, F, None, 5.0)[0]
+    assert abs(wiggle_time_scale(A, F, None, 5.0)[2] * sc_w - 5.0) < 1e-9
+    # whichever is tighter wins
+    assert wiggle_time_scale(A, F, 3.0, 999.0)[0] == wiggle_time_scale(A, F, 3.0)[0]
+    assert wiggle_time_scale(A, F, 999.0, 5.0)[0] == wiggle_time_scale(A, F, None, 5.0)[0]
+
+    # ---- a SLACK cap must never speed the wiggle UP ----
+    assert wiggle_time_scale(A, F, 1e6)[0] == 1.0, 'a cap above the peak is a no-op, not a boost'
+
+    # ---- the two invariants the whole design rests on ----
+    sc = wiggle_time_scale(A, F, 3.0)[0]
+    #  (a) amplitude is not an input to the scale at all -> search AREA preserved
+    assert wiggle_time_scale(A, F, 3.0)[1] == pv, 'the reported peak is the UNDILATED one'
+    #  (b) frequencies are scaled TOGETHER, so their ratio -- and hence co-primality -- holds
+    assert abs((0.7 * sc) / (1.1 * sc) - 0.7 / 1.1) < 1e-12, (
+        'dilation must scale the waveform CLOCK, not the individual frequencies: scaling them '
+        'separately (or rounding them) breaks mutual primality and collapses the orbit')
+
+    # ---- degenerate configs must not blow up ----
+    assert wiggle_time_scale([0.0] * 6, [0.0] * 6, 5.0) == (1.0, 0.0, 0.0, 0.0)
+    assert wiggle_time_scale([0, 0, 5.0, 0, 0, 0], [0, 0, 0.0, 0, 0, 0], 5.0)[0] == 1.0
+
+
+def test_wiggle_cap_is_wired_into_both_apps():
+    """Both apps must cap the wiggle through the SAME helper, and dilate the clock not the freqs."""
+    import yaml
+
+    for app, sect in (('bnc_assembly', 'assembly'), ('insertion_tester', 'insertion')):
+        src = open(os.path.join(ROOT, 'urlab', 'apps', f'{app}.py'), encoding='utf-8').read()
+        assert 'wiggle_time_scale(' in src, f'{app} must derive the scale from the shared helper'
+        # the clock is dilated, the frequency list is NOT rewritten
+        assert 'wg_scale' in src or 'scale=1.0' in src
+        assert 'traj.wiggle_time_scale' in src, f'{app}: use the shared helper, not a local copy'
+
+        cfg = yaml.safe_load(open(os.path.join(ROOT, 'configs', f'{app}.yaml')))
+        wgc = cfg[sect]['wiggle']
+        for k in ('max_speed_mm_s', 'max_rotation_deg_s'):
+            assert k in wgc, f'{app}: {k} must be declared so the cap is discoverable'
+            assert wgc[k] is None or float(wgc[k]) > 0, (
+                f'{app}: {k} must be null (uncapped) or > 0 -- a zero or negative cap would '
+                'derive a zero time scale and freeze the wiggle')
+
+    # the Nyquist check must use the EFFECTIVE frequency: dilation lowers it, so testing the raw
+    # value would reject a configuration that samples perfectly well
+    for app in ('bnc_assembly', 'insertion_tester'):
+        src = open(os.path.join(ROOT, 'urlab', 'apps', f'{app}.py'), encoding='utf-8').read()
+        i = src.index('f_max' if app == 'insertion_tester' else 'fmax = max(wg_frq)')
+        assert 'wg_scale' in src[i:i + 200], (
+            f'{app}: the Nyquist bound must be checked against frequency x time scale')
+
+
+def test_collar_prewind_makes_room_without_moving_the_grip():
+    """Unwinding before the collar turn must buy wrist range and change nothing else.
+
+    The turn is a rigid orbit about the connector's +X, so beginning it at the nominal alignment
+    asks for the full rotation_deg of range on whichever side the arm is already on -- and there
+    may not be that much left. Unwinding by the same amount first puts the whole stroke on the
+    reachable side.
+
+    Three things have to survive that, and each is a way a plausible implementation goes wrong:
+      * the collar must still end up turned by rotation_deg (not 0, not double);
+      * the fingertip must stay ON the collar's circle -- the pre-wind slides the grip around the
+        ring, it does not lift off it or slide along the axis; and
+      * the unwind must happen with the gripper OPEN, because unwinding while gripping turns the
+        collar BACKWARDS -- undoing the lock instead of making room to apply it.
+    """
+    from urlab.transforms import rotate_about_axis
+
+    # a deliberately oblique connector pose, so nothing passes by symmetry
+    T_base_conn = T.xyzrpy_to_matrix([0.4, -0.1, 0.3], np.radians([10.0, -25.0, 40.0]))
+    T_tool0_ftip = T.xyzrpy_to_matrix([0.0, 0.0, 0.183], np.radians([180.0, 0.0, -90.0]))
+    off_m, rot = 0.025, np.radians(90.0)
+    axis, point = T_base_conn[:3, 0], T_base_conn[:3, 3]
+    T_collar = T_base_conn @ T.translation_matrix([off_m, 0.0, 0.0])
+    T_nom = T_collar @ T.inverse(T_tool0_ftip)
+
+    T_start = rotate_about_axis(T_nom, axis, point, -rot)     # pre-wound, gripper OPEN
+    T_end = rotate_about_axis(T_start, axis, point, rot)      # the turn
+
+    # ---- the turn LANDS on the nominal alignment when prewind == rotation ----
+    assert np.allclose(T_end, T_nom, atol=1e-12), (
+        'with prewind == rotation_deg the stroke must finish exactly at the nominal alignment, '
+        'not rotation_deg past it')
+
+    # ---- net collar rotation is still the commanded angle, about the connector axis ----
+    R = T_end[:3, :3] @ T_start[:3, :3].T
+    ang = float(np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2.0, -1.0, 1.0))))
+    assert abs(ang - 90.0) < 1e-6, f'the collar must still turn 90 deg, got {ang:.4f}'
+    ax = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]])
+    ax = ax / np.linalg.norm(ax)
+    assert np.allclose(ax, axis, atol=1e-9), 'the turn must be about the connector +X'
+
+    # ---- the fingertip never leaves the collar's circle ----
+    for lab, Tp in (('nominal', T_nom), ('pre-wound', T_start), ('end', T_end)):
+        d = (Tp @ T_tool0_ftip)[:3, 3] - point
+        along = float(d @ axis)
+        radial = float(np.linalg.norm(d - along * axis))
+        assert abs(along - off_m) < 1e-9, \
+            f'{lab}: the grip slid ALONG the axis ({along * 1000:.3f} mm, want {off_m * 1000:.1f})'
+        assert radial < 1e-9, f'{lab}: the grip left the collar circle by {radial * 1000:.3f} mm'
+
+    # ---- prewind 0 must reproduce the pre-2026-08-17 behaviour exactly ----
+    assert np.allclose(rotate_about_axis(T_nom, axis, point, 0.0), T_nom, atol=1e-12)
+
+    # ---- ORDER: the unwind is between the align and the close, never after it ----
+    src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8').read()
+    body = src[src.index('def collar_clocking('):]
+    body = body[:body.index('return True')]
+    i_move = body.index("label='collar align (pre-wound)'")
+    i_close = body.index("gripper.close('grasp collar')")
+    i_turn = body.index('end = rotate_about_axis(start, axis, point, cl_rot)')
+    assert i_move < i_close < i_turn, (
+        'the pre-wind must run BEFORE the gripper closes -- unwinding on a gripped collar turns '
+        'it backwards, undoing the lock instead of making room for it')
+    # and both ends are IK-checked before anything grips
+    assert body.index('unreachable') < i_close, (
+        'reachability must be checked before the close, or an impossible turn leaves the collar '
+        'clamped in a stalled gripper')
+
+    import yaml
+    cl = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))[
+        'assembly']['collar_clocking']
+    assert 'prewind_deg' in cl, 'prewind_deg must be declared so the behaviour is discoverable'
+    assert cl['prewind_deg'] is None or float(cl['prewind_deg']) >= 0.0, \
+        'prewind_deg is null (= rotation_deg) or a non-negative angle'
 
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]

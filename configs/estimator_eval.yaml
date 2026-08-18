@@ -418,6 +418,30 @@ estimation:
   # connector's own +x -- invisible straight-in, an 8 mm z lever arm at 5 deg of pitch. Anything
   # paired with this file must be in the same frame (see analysis/bnc_tuning/fix_obs_frame.py).
   manifold_csv: ./configs/data/bnc_manifold_v5.csv
+  # WRENCH REPRESENTATION: unit | rawcap | raw.
+  #   unit    direction only -- magnitude discarded entirely.
+  #   rawcap  direction x magnitude, SATURATED (see rawcap_* below).
+  #   raw     the wrench exactly as measured, in N and Nm. No normalisation, no saturation.
+  #
+  # Pick `raw` when the map and the run share contact physics, and you want an out-of-
+  # distribution contact to LOOK out of distribution. Measured 2026-08-17 (v5 map, 17-Aug
+  # observations) as k-th-NN distance over the map's own spacing, where 1.0 = "ordinary map
+  # point": at 60+ N, unit reads 2.4 and rawcap 2.5 -- both close enough to pass for normal --
+  # while raw reads 6.5 and the support gate can actually act on it. Under the normalising
+  # options a 90 N press instead finds a confident neighbour at whatever pose merely shares
+  # its force direction, and that wrong correspondence steers the estimate.
+  #
+  # THE CATCH: magnitude is not regime-invariant. If the map is light touch (median 4.5 N)
+  # and the run presses (median 29.6 N), `raw` puts the same pose in two different places --
+  # honest, but it will match NOTHING until the map is recollected under the run's physics
+  # (uncertain_sampling compliance/speed, plus sampling.preload_mm for the loaded rows).
+  # It converts a silent wrong answer into a visible no-answer; it cannot invent evidence.
+  #
+  # UNITS CHANGE with it: under `raw`, s_force / s_torque are mm PER NEWTON and mm PER
+  # NEWTON-METRE, not mm per unit vector -- a value tuned for unit/rawcap is ~10x too loud.
+  # For the BNC maps, s_force 0.11 / s_torque 0.20 reproduces `unit`'s block loudness. The
+  # "Metric block balance" line logged at startup reports what the metric actually weights,
+  # so this does not have to be guessed.
   wrench_representation: rawcap
   # rawcap SATURATION: the wrench feature is unit(f) x min(|f| / rawcap_force_ref_n,
   # rawcap_cap) -- magnitude in units of the reference, CAPPED at rawcap_cap. Saturation
@@ -589,7 +613,29 @@ compliance:
   tare_before: true
   mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
   stiffness:     [250.0, 250.0, 250.0, 10.0, 10.0, 10.0]
-  damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+  # DAMPING RATIO (zeta), the multiplier in D = zeta * 2*sqrt(M*S). 1 = critically damped.
+  #
+  # 2026-08-17: 10.0 -> 1.0. At zeta 10 the free-air relaxation time constant D/S is 6.3 s
+  # while the whole insertion lasts 0.67 s at 30 mm/s -- the spring could not respond inside
+  # the motion at all, so the recorded force was set by the CONTACT stiffness and the approach
+  # speed, not by the compliance being configured. Simulated with admittance.py's own ODE at
+  # 125 Hz against a 5e4 N/m wall: what the spring would hold is S x overtravel = 0.5-6 N, but
+  # the actual result was 47-99 N. At zeta 1, D/S = 0.63 s and the spring responds inside the
+  # insertion, which is what makes `stiffness` mean what it says.
+  #
+  # Two things checked before making the change, both favourable:
+  #   * PEAK force goes DOWN, not up (49 N vs 68 N at k_env 5e4; 99 vs 112 at 2e5).
+  #   * Forward-Euler stability at 125 Hz: the limit is dt*D/M < 2, and zeta 10 sat at 0.506
+  #     while zeta 1 sits at 0.051 -- the OLD value was the one near the edge.
+  #
+  # THE ONE COST -- and it decides settle_s. zeta is defined against the ADMITTANCE stiffness,
+  # but in contact the loop stiffness is S + k_env, so the ratio that governs the SETTLE is
+  # D/(2*sqrt(M*(S+k_env))): 1.00 at the old zeta 10, 0.10 at zeta 1. The part therefore
+  # REBOUNDS off the seat once before settling. It does not chatter (a single rebound, no
+  # sustained ringing) and it converges to the same equilibrium force, but it needs roughly
+  # 2 s to get there against 0.4 s before. A settle shorter than that logs the part mid-air at
+  # 0 N instead of seated -- see settle_s below.
+  damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]              # 1 = critically damped
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0
   warmup_s: 0.1

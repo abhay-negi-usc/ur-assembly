@@ -3400,6 +3400,53 @@ def test_preload_force_is_a_spike_not_a_press():
         assert persist - ramp_s >= 0.0, f'{name}: negative guard margin'
 
 
+def test_a_null_speed_override_is_resolved_before_it_reaches_the_arithmetic():
+    """A `null` speed override must be defaulted by the caller, never compared to a number.
+
+    THE BUG THIS EXISTS TO CATCH. cable_clocking and collar_clocking both ship
+    `speed_translation_mm_s: null` / `speed_rotation_deg_s: null`, which the app turns into a
+    literal None meaning "no override". seg_time defaulted those; a second duration path was added
+    that duplicated seg_time's arithmetic WITHOUT its defaulting, so `v > 0` compared None to an
+    int and raised TypeError partway into the stroke -- after the connector was engaged and the
+    gripper closed on it. The suite never saw it because the arithmetic lived in a closure inside
+    build_and_run, unreachable without a live robot.
+
+    So the arithmetic is module level now, it REFUSES a None rather than limping, and every
+    duration in the app resolves its caps through one helper."""
+    import pytest
+
+    from urlab.apps.bnc_assembly import _path_time
+
+    # Both caps bind; the slower one wins, and a floor applies.
+    assert _path_time(100.0, 90.0, 10.0, 45.0, 0.008) == pytest.approx(10.0)   # translation-bound
+    assert _path_time(10.0, 90.0, 100.0, 9.0, 0.008) == pytest.approx(10.0)    # rotation-bound
+    assert _path_time(0.0, 0.0, 10.0, 10.0, 0.008) == pytest.approx(0.008)     # the floor
+    # A zero cap means "this axis does not constrain", not "divide by zero".
+    assert _path_time(100.0, 90.0, 0.0, 45.0, 0.008) == pytest.approx(2.0)
+
+    # THE REGRESSION: a null must raise with the values named, not TypeError deep in a comparison.
+    for v, w in ((None, 45.0), (10.0, None), (None, None)):
+        with pytest.raises(ValueError, match='resolved speed caps'):
+            _path_time(100.0, 90.0, v, w, 0.008)
+
+    # And every duration path in the app must route its overrides through the one resolver.
+    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
+        src = fh.read()
+    assert src.count('_path_time(') >= 3, 'seg_time and screw_ramp must share the arithmetic'
+    assert 'def caps(' in src, 'the null-override resolver is gone'
+    body = src[src.index('def screw_ramp('):src.index('retract_m =')]
+    assert 'caps(v, w)' in body, (
+        'screw_ramp must resolve its caps before computing a duration -- it ships with null '
+        'overrides from both clocking blocks')
+
+    # The configs that feed it really do carry nulls, so this path is live and not hypothetical.
+    import yaml
+    asm = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))['assembly']
+    assert any(asm[b].get(k) is None
+               for b in ('cable_clocking', 'collar_clocking')
+               for k in ('speed_translation_mm_s', 'speed_rotation_deg_s')),         'if no clocking block ships a null any more, this guard has lost its subject'
+
+
 def test_a_clocking_stroke_follows_the_arc_and_not_the_chord():
     """A one-call ramp across a 90 deg orbit drags the held part 52 mm off its own axis.
 
@@ -3501,8 +3548,15 @@ def test_the_target_frame_and_the_in_hand_belief_name_the_same_point():
     frames = tool_frames.load_frames(cfg)
     tname = cfg['assembly']['target_frame']
     assert tname in frames, f'assembly.target_frame {tname!r} is not a declared frame'
-    belief = (from_cfg(cfg['fingertip_grasp'])
+    # RESOLVED THE WAY THE APP DOES: estimation.initial_connector_frame names a frame in the
+    # shared catalogue and WINS; the inline pose is only an override for when no frame is named.
+    # Comparing against the inline pose instead would fail whenever the frame is re-measured and
+    # the stale duplicate has not caught up -- which is a real problem, but a different one, and
+    # it is checked separately below.
+    iname = cfg.get_path('estimation.initial_connector_frame')
+    inline = (from_cfg(cfg['fingertip_grasp'])
               @ from_cfg(cfg['estimation']['initial_connector_in_fingertip']))
+    belief = frames[iname] if iname else inline
     lin, ang = pose_error(frames[tname], belief)
     # Report the consequence in the units the operator cares about: the arc the connector would be
     # dragged through by the ACTUAL clocking stroke, chord = 2 d sin(theta / 2).
@@ -3516,8 +3570,18 @@ def test_the_target_frame_and_the_in_hand_belief_name_the_same_point():
         f'collar_clocking would inherit the same axis. Point target_frame at the same frame as '
         f'estimation.initial_connector_frame.')
 
+    # THE STALE-DUPLICATE CHECK. The inline override must not drift from the frame it duplicates.
+    # It loses at runtime, so a gap changes no motion -- it just makes the app warn every run and
+    # leaves a wrong number where a reader would trust it. The threshold is the app's own.
+    if iname:
+        d_lin, d_ang = pose_error(inline, frames[iname])
+        assert d_lin * 1000.0 <= 0.5 and np.degrees(d_ang) <= 0.2, (
+            f'estimation.initial_connector_in_fingertip is {d_lin * 1000.0:.2f} mm / '
+            f'{np.degrees(d_ang):.2f} deg from frame {iname!r} that it duplicates. The frame wins, '
+            f'so nothing moves wrong -- but the app warns every run and the stale pose misleads. '
+            f'Set it to inverse(fingertip_grasp) @ frames[{iname!r}], or delete it.')
+
     # And the two config keys should AGREE BY NAME as well, since that is how a reader checks it.
-    iname = cfg.get_path('estimation.initial_connector_frame')
     if iname:
         assert iname == tname, (
             f'estimation.initial_connector_frame {iname!r} and assembly.target_frame {tname!r} '

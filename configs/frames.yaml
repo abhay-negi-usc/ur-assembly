@@ -71,9 +71,11 @@ frames:
   # A picked connector does not sit where a fixtured one does, so the two are different frames for
   # different situations -- see the note under targets: about which one a target belongs to.
   bnc_connector_in_fingerpads:
-    parent: fingertip
-    xyz_mm:  [-45.0, 0.0, 5.0]
-    rpy_deg: [0.0, 0.0, 180.0]
+    # parent: fingertip
+    # xyz_mm:  [-45.0, 0.0, 5.0]
+    # rpy_deg: [0.0, 0.0, 180.0]
+    xyz_mm:  [0.0, +45.7, 175.5]
+    rpy_deg: [180.0, 0.0, +90.0]
 
 # ============================================================================
 # TARGETS -- recorded BASE_LINK poses of the frames above (base_link <- frame), e.g. the assembly
@@ -122,5 +124,5 @@ targets:
   # error the finger_holder reading carried, including that it was itself re-derived arithmetically
   # on 2026-08-15 rather than measured.
   bnc_connector_in_fingerpads:
-    xyz_mm:  [112.99, 1096.10, -152.70]
-    rpy_deg: [-47.76, 1.77, 94.84]
+    xyz_mm:  [+98.24, +1100.70,  -138.42]
+    rpy_deg: [ -47.74,   +2.28,  +94.66]

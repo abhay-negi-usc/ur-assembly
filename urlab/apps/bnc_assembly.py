@@ -118,6 +118,25 @@ def _num(block, key, default):
     return float(default) if v is None else float(v)
 
 
+def _path_time(lin_mm, ang_deg, v_mm_s, w_deg_s, min_s):
+    """Seconds for a segment of `lin_mm` translation and `ang_deg` rotation under both caps.
+
+    THE CAPS MUST ALREADY BE RESOLVED. A None reaching here means a caller skipped its own
+    defaulting -- which is exactly how a `null` speed override in the config once got as far as
+    this arithmetic and raised a TypeError partway into a clocking stroke, with the gripper
+    closed on the part. Raising with the values named beats comparing None to a number.
+
+    Module level, and not a closure inside build_and_run, SO IT CAN BE TESTED. The closure form
+    is why the null path was never exercised by the suite -- nothing outside a live robot run
+    could reach it."""
+    if v_mm_s is None or w_deg_s is None:
+        raise ValueError(
+            f'_path_time needs resolved speed caps, got v={v_mm_s!r} w={w_deg_s!r}. A null '
+            f'override in the config must be defaulted by the caller before it gets here.')
+    return max((lin_mm / v_mm_s) if v_mm_s > 0 else 0.0,
+               (ang_deg / w_deg_s) if w_deg_s > 0 else 0.0, min_s)
+
+
 def _clocking_plan(cable, collar):
     """Which post-mate maneuvers to run, from their `enabled` flags in configs/bnc_assembly.yaml.
 
@@ -623,12 +642,16 @@ def build_and_run(cfg, robot, camera, args):
     s_ret = float(scales.get('retract', 1.0))
     min_seg_s = 1.0 / adm.rate
 
+    def caps(v=None, w=None):
+        """Resolve a maneuver's speed overrides. A null in the config means "no override", which
+        is the GLOBAL cap times the assemble phase scale -- every duration in this app goes
+        through here so a null can never reach the arithmetic unresolved again."""
+        return (g_v * s_asm if v is None else v), (g_w * s_asm if w is None else w)
+
     def seg_time(A, B, v=None, w=None):
-        v = g_v * s_asm if v is None else v
-        w = g_w * s_asm if w is None else w
         lin_m, ang_rad = pose_error(A, B)
-        return max((lin_m * 1000.0 / v) if v > 0 else 0.0,
-                   (np.degrees(ang_rad) / w) if w > 0 else 0.0, min_seg_s)
+        cv, cw = caps(v, w)
+        return _path_time(lin_m * 1000.0, np.degrees(ang_rad), cv, cw, min_seg_s)
 
     def screw_ramp(adm, ref_at, guard, v, w, ang_deg, label=''):
         """Ramp along the EXACT screw path instead of the straight chord between its endpoints.
@@ -662,7 +685,8 @@ def build_and_run(cfg, robot, camera, args):
             u = chord / np.linalg.norm(chord)
             sag_mm = max(float(np.linalg.norm((p - pts[0]) - np.dot(p - pts[0], u) * u))
                          for p in pts) * 1000.0
-        dur = max((arc_mm / v) if v > 0 else 0.0, (ang_deg / w) if w > 0 else 0.0, min_seg_s)
+        cv, cw = caps(v, w)          # a null override must be resolved BEFORE the arithmetic
+        dur = _path_time(arc_mm, ang_deg, cv, cw, min_seg_s)
         n = max(1, int(np.ceil(dur * adm.rate)))
         log.info('  %s%.1f deg about a fixed axis: arc %.1f mm in %d steps over %.2f s '
                  '(a single ramp would cut the chord and pull the axis %.1f mm off true)',

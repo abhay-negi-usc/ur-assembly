@@ -740,7 +740,12 @@ estimation:
   # and as documentation of the value; the app warns if the two disagree.
   initial_connector_frame: bnc_connector_in_fingerpads
   initial_connector_in_fingertip:
-    xyz: [-0.045, 0.0000, 0.005]             # m
+    # SYNCED 2026-08-18 to frames.yaml bnc_connector_in_fingerpads, which was re-measured.
+    # This inline pose is only an OVERRIDE -- initial_connector_frame above wins -- so it changes
+    # nothing at runtime; leaving it stale just made the app log a 2.60 mm disagreement warning
+    # every run and left a wrong number sitting where a reader would trust it.
+    # Value = inverse(fingertip_grasp) @ frames[bnc_connector_in_fingerpads].
+    xyz: [-0.0457, 0.0000, 0.0075]           # m
     rpy: [0.0, 0.0, 3.14159265358979]       # rad (exactly 180 deg yaw)
   # The AUGMENTED manifold (clean map + 30k truth-corrected production-process rows) and the
   # rawcap wrench representation -- the 2026-08-09 offline winners. Fall back to the classic

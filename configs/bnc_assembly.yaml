@@ -385,6 +385,15 @@ assembly:
   #           plug in. Reads no map, fits nothing, never touches the belief -- so none of the
   #           estimator's failure modes apply. Skips the attempt loop AND final_insertion.
   insertion_mode: engage
+  # FRAME FOR THE POST-ENGAGEMENT MANEUVERS -- cable clocking, collar clocking, the escape's
+  # target-frame leg, and tug verification all build their axes and stations from this frame.
+  #   target   = the recorded socket pose (the targets: entry of target_frame). The socket is
+  #              bolted down and hand-measured, so this is the stable choice. DEFAULT.
+  #   believed = the estimator-corrected in-hand belief, frozen in base coordinates at the
+  #              moment clocking starts (tool0 @ T_tool0_conn). Follows what the estimator
+  #              thinks the connector is -- including its errors.
+  # The ENGAGEMENT itself always uses the target frame; this applies only after it.
+  post_engage_frame: target
 
   live_plot: true
 
@@ -722,6 +731,25 @@ assembly:
     # along the insertion axis.
     target_axis: [-1.0, 0.0, 0.0]
     target_distance_m: 0.100
+
+  # ---- TUG VERIFICATION: does the lock actually hold? --------------------------------------
+  # After collar clocking, release and escape, the gripper returns to the engaged pose, closes
+  # on the seated connector, and PULLS along the connector -X. A locked bayonet holds the pull
+  # (displacement stays under the threshold); an unlocked one backs out. The pull is a SPRING
+  # pull -- the admittance reference is offset by pull_force_n / stiffness, so the force can
+  # never exceed the commanded value on a connector that holds, and DROPS as one comes out.
+  #
+  # VERIFIED: release, retract, home -- the run reports ASSEMBLED, TUG-VERIFIED.
+  # FAILED:   the connector (already backing out, still in the fingers) is EXTRACTED by
+  #           extraction_distance_mm along the connector -X, carried home, and released there.
+  #           The run reports failure. If the GLOBAL force guard trips during any pull, the
+  #           script TERMINATES where it stands rather than tearing at the fixture.
+  tug_verify:
+    enabled: true
+    pull_force_n: 3.0
+    pull_time_s: 3.0
+    displacement_threshold_mm: 3.0
+    extraction_distance_mm: 50.0
 
   # ---- MATCH DIAGNOSTICS: why is the argmin not the truth? ---------------------------------
   # Per attempt, a 6-panel figure (trial_XXX_attempt_YY_match.png) comparing the COMMITTED

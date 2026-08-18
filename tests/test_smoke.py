@@ -3448,6 +3448,70 @@ def test_a_null_speed_override_is_resolved_before_it_reaches_the_arithmetic():
                for k in ('speed_translation_mm_s', 'speed_rotation_deg_s')),         'if no clocking block ships a null any more, this guard has lost its subject'
 
 
+def test_tug_verification_defaults_on_and_its_spring_can_exceed_the_threshold():
+    """The tug is a SPRING pull: reference offset = force / stiffness, so the force can never
+    exceed pull_force_n on a connector that holds. For the test to be able to FAIL, that offset
+    must exceed displacement_threshold_mm -- otherwise an unlocked connector could never move
+    past the threshold and every tug would report verified."""
+    import yaml
+
+    y = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))
+    tv = y['assembly']['tug_verify']
+    assert tv['enabled'] is True, 'tug verification must default ON'
+    for k in ('pull_force_n', 'pull_time_s', 'displacement_threshold_mm',
+              'extraction_distance_mm'):
+        assert float(tv[k]) > 0.0, f'{k} must be positive'
+    S_max = max(float(v) for v in y['compliance']['stiffness'][:3])
+    offset_mm = float(tv['pull_force_n']) / S_max * 1000.0
+    assert offset_mm > float(tv['displacement_threshold_mm']), (
+        f'the spring offset ({offset_mm:.1f} mm at the stiffest axis) must exceed the '
+        f'{tv["displacement_threshold_mm"]} mm threshold, or an unlocked connector can never '
+        f'show -- raise pull_force_n or lower the threshold/stiffness')
+
+    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
+        src = fh.read()
+    body = src[src.index('def tug_verify('):src.index('def engage_insertion(')]
+    order = ["gripper.close('tug grasp')", "verify_cable_held(robot, check, 'tug regrasp')",
+             'tare_fn=tare', 'adm.hold(T_pull', "'release (tug verified)'"]
+    idx = [body.index(t) for t in order]
+    assert idx == sorted(idx), (
+        'the tug must close, verify the grasp, tare while gripping, pull, and only release '
+        'after a verified hold -- in that order')
+    assert "'terminated'" in body and 'tv_extract_m' in body and 'guard_shared' in body, (
+        'the failure path must extract by extraction_distance_mm under the GLOBAL guard, and a '
+        'guard trip must terminate the script')
+
+
+def test_post_engage_frame_is_a_config_choice_defaulting_to_target():
+    """cable clocking, collar clocking, the escape leg and the tug all read ONE frame, T_clk --
+    'target' (default) binds it to the recorded socket pose, 'believed' to the estimator's
+    in-hand belief frozen at clocking time. The engagement itself always uses the target."""
+    import yaml
+
+    y = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))
+    assert y['assembly'].get('post_engage_frame', 'target') == 'target', (
+        'the default post-engage frame is the recorded target -- the socket is bolted down; '
+        'the belief carries estimator error')
+
+    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
+        src = fh.read()
+    assert "a.get('post_engage_frame')" in src and "'believed'" in src, (
+        'the choice must be read from the config and validated')
+    # every post-engage maneuver goes through the shared frame
+    checks = (('def cable_clocking(', 'inverse(T_clk)) @ ref_start'),
+              ('def collar_clocking(', 'axis = T_clk[:3, 0]'),
+              ('def tug_verify(', 'axn_t = T_clk[:3, 0]'),
+              ('def clocking_retract(', 'T_clk[:3, :3] @ step'))
+    for fn, frag in checks:
+        body = src[src.index(fn):]
+        body = body[:body.index('\n    def ')] if '\n    def ' in body else body
+        assert frag in body, f'{fn} must build its geometry from T_clk, found no {frag!r}'
+    # the engagement keeps the target frame regardless of the choice
+    assert 'T_base_targetobj = T_base_tconn @ inverse' in src, (
+        'the engagement must stay anchored to the TARGET frame; post_engage_frame applies only '
+        'after it')
+
+
 def test_the_collar_axis_offset_is_read_from_config_in_the_connector_frame():
     """The collar's rotation line is tunable without touching the frame declaration.
 
@@ -3480,7 +3544,7 @@ def test_the_collar_axis_offset_is_read_from_config_in_the_connector_frame():
         src = fh.read()
     assert "cl.get('axis_offset_mm'" in src, 'the offset must come from the config'
     body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
-    assert 'T_base_tconn[:3, :3] @ off_conn' in body, (
+    assert 'T_clk[:3, :3] @ off_conn' in body, (
         'the offset must be rotated from the CONNECTOR frame into base before shifting the point')
     cable = src[src.index('def cable_clocking('):src.index('def collar_clocking(')]
     assert 'off_conn' not in cable and 'axis_offset_mm' not in cable, (
@@ -3594,9 +3658,10 @@ def test_both_clockings_turn_about_the_socket_and_not_about_the_arm():
         src = fh.read()
     body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
     code = '\n'.join(ln for ln in body.splitlines() if not ln.lstrip().startswith('#'))
-    assert 'axis = T_base_tconn[:3, 0]' in code, (
-        'collar clocking must take its axis DIRECTION from assembly.target_frame -- the socket '
-        'pose -- exactly as cable clocking does')
+    assert 'axis = T_clk[:3, 0]' in code, (
+        'collar clocking must take its axis DIRECTION from the shared post-engage frame T_clk '
+        '(assembly.post_engage_frame; the recorded socket pose by default) -- exactly as cable '
+        'clocking does')
     assert 'T_base_axis' in code, 'the socket-axis frame is gone'
     # T_base_conn may still be READ (for the cam-in and the drift report) but must not be the frame
     for banned in ('axis, point = T_base_conn', 'T_base_collar = T_base_conn',

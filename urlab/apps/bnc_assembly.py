@@ -517,6 +517,12 @@ def build_and_run(cfg, robot, camera, args):
         log.error('assembly.collar_clocking.axis_offset_mm must have 3 entries (connector-frame '
                   'xyz, mm), got %r.', cl.get('axis_offset_mm'))
         return False
+    tv = a.get('tug_verify', {}) or {}
+    tv_on = bool(tv.get('enabled', True))
+    tv_force = _num(tv, 'pull_force_n', 3.0)
+    tv_time = _num(tv, 'pull_time_s', 3.0)
+    tv_thresh_m = _num(tv, 'displacement_threshold_mm', 3.0) / 1000.0
+    tv_extract_m = _num(tv, 'extraction_distance_mm', 50.0) / 1000.0
     if cc_on and cl_on and not cc_open_after:
         log.error('assembly.collar_clocking needs cable_clocking.open_gripper_after true: the '
                   'collar is grasped by the same gripper, which must release the cable first.')
@@ -575,6 +581,17 @@ def build_and_run(cfg, robot, camera, args):
                   tname, tool_frames.frames_path(cfg))
         return False
     T_base_tconn = targets[tname]
+    # FRAME FOR THE POST-ENGAGEMENT MANEUVERS. Everything after the engagement that works on the
+    # connector (cable clocking, collar clocking, the escape's target-frame leg, tug
+    # verification) builds its axes and stations from T_clk. 'target' binds it to the recorded
+    # socket pose; 'believed' rebinds it, at the moment clocking starts, to the
+    # estimator-corrected in-hand belief. The ENGAGEMENT itself always uses the target frame.
+    pe_frame = str(a.get('post_engage_frame') or 'target').lower()
+    if pe_frame not in ('target', 'believed'):
+        log.error("assembly.post_engage_frame must be 'target' or 'believed', got %r.",
+                  a.get('post_engage_frame'))
+        return False
+    T_clk = T_base_tconn
     csv_in = urconfig.resolve(cfg, a.get('trajectory_csv', 'assembly_trajectory.csv'))
     mats = traj.load_csv(csv_in, angles_deg=bool(a.get('trajectory_angles_deg', False)))
     dense = traj.resample(mats, float(a.get('translational_resolution_m', 0.001)),
@@ -902,7 +919,7 @@ def build_and_run(cfg, robot, camera, args):
             step = v / n * abs(float(dist))
             if in_target:
                 # a direction in the TARGET frame -> rotate it into base and left-multiply
-                T = translation_matrix(T_base_tconn[:3, :3] @ step) @ robot.tool0()
+                T = translation_matrix(T_clk[:3, :3] @ step) @ robot.tool0()
                 what = f'target {np.round(v / n, 3).tolist()}'
             else:
                 # a direction in the GRIPPER's own (tool0) frame -> right-multiply
@@ -916,6 +933,111 @@ def build_and_run(cfg, robot, camera, args):
                     r.get('gripper_distance_m', 0.100), False)
                 and leg(r.get('target_axis', [-1.0, 0.0, 0.0]),
                         r.get('target_distance_m', 0.100), True))
+
+    def tug_verify(T_grasp):
+        """TUG VERIFICATION -- re-grip the seated connector and pull along its -X.
+
+        A LOCKED bayonet holds the pull: the arm barely moves. An unlocked one backs out, and the
+        displacement says so. The pull is a SPRING pull, not a position ramp: the admittance
+        reference is offset along -X by exactly pull_force / stiffness, so the spring applies the
+        commanded force at zero displacement and the force DROPS as the connector comes out -- it
+        can never exceed pull_force_n on a connector that holds.
+
+        T_grasp is the arm pose captured at the END of cable clocking, pads still closed on the
+        SEATED junction -- so re-gripping there closes on the connector exactly where it was last
+        held. Collar clocking turns only the collar, not the body, so the junction has not moved.
+
+        Returns 'verified' (held; released and retracted), 'failed' (backed out; the cable has
+        been EXTRACTED, carried home, and released), 'terminated' (the GLOBAL force guard tripped
+        mid-pull -- stop where we are, move nothing further), or 'error' (could not run the test;
+        nothing was pulled)."""
+        axn_t = T_clk[:3, 0] / float(np.linalg.norm(T_clk[:3, 0]))
+        phase('standoff')
+        # Approach by retracing the escape: stand off along the gripper -Z (where the retract
+        # went), then straight in. Both guarded; the fingers are open.
+        r = a.get('clocking_retract', {}) or {}
+        staging = T_grasp @ translation_matrix([0.0, 0.0,
+                                                -abs(float(r.get('gripper_distance_m', 0.100)))])
+        if not (_guarded(robot, guard_shared, lambda: robot.arm.move_l(
+                    staging, label='tug approach (standoff)'))
+                and _guarded(robot, guard_shared, lambda: robot.arm.move_l(
+                    T_grasp, label='tug approach (engaged pose)'))):
+            log.error('TUG VERIFY: could not re-align to the engaged pose -- the tug did not run.')
+            return 'error'
+        if not robot.gripper.close('tug grasp'):
+            log.error('TUG VERIFY: gripper did not close -- the tug did not run.')
+            return 'error'
+        if not verify_cable_held(robot, check, 'tug regrasp'):
+            log.error('TUG VERIFY: the regrasp missed the connector -- the tug did not run.')
+            robot.gripper.open('release (tug missed)')
+            return 'error'
+        # THE PULL. Effective axial stiffness of the (diagonal, tool0-frame) spring along the
+        # base-frame pull direction: compliances add, 1/S_eff = sum(u_i^2 / S_i).
+        u = T_grasp[:3, :3].T @ axn_t
+        S_eff = 1.0 / float(np.sum((u ** 2) / adm.S[:3]))
+        T_pull = translation_matrix(-(tv_force / S_eff) * axn_t) @ T_grasp
+        log.info('TUG VERIFY: pulling %.1f N along the connector -X for %.1f s '
+                 '(spring %.0f N/m -> %.1f mm reference offset); verified if the connector '
+                 'moves <= %.1f mm.', tv_force, tv_time, S_eff, tv_force / S_eff * 1000.0,
+                 tv_thresh_m * 1000.0)
+        adm.reset()
+        adm.warmup(T_grasp, tare_fn=tare)       # tare while gripping and static
+        guard_shared.reset()
+        phase('assemble')
+        res = adm.ramp(T_grasp, T_pull, seg_time(T_grasp, T_pull), guard_shared)
+        if res != 'seated':
+            res = adm.hold(T_pull, tv_time, guard_shared)
+        disp = float(np.dot(T_grasp[:3, 3] - robot.tool0()[:3, 3], axn_t))
+        adm.reset()
+        adm.stop()
+        robot.arm.servo_stop()
+        if res == 'seated':
+            log.error('TUG VERIFY: the GLOBAL force guard tripped during the pull (%s) -- '
+                      'terminating the script where it stands.', guard_shared.tripped_by)
+            return 'terminated'
+        held = disp <= tv_thresh_m
+        clock_rows.append({'maneuver': 'tug_verify', 'try': 1, 'ramp_result': res,
+                           'advance_mm': round(-disp * 1000.0, 3),
+                           'need_mm': round(tv_thresh_m * 1000.0, 3),
+                           'success': bool(held), 'force_stop': False,
+                           'state_after': 'locked' if held else 'extracted',
+                           'stopped_by': ''})
+        if held:
+            log.info('TUG VERIFIED -- %.1f N for %.1f s moved the connector %.2f mm '
+                     '(<= %.1f mm): the lock holds.', tv_force, tv_time, disp * 1000.0,
+                     tv_thresh_m * 1000.0)
+            if not robot.gripper.open('release (tug verified)'):
+                log.error('TUG VERIFY: gripper did not release after the tug.')
+                return 'error'
+            return 'verified' if clocking_retract('tug retract') else 'error'
+        # FAILED: the connector backed out under the pull -- it was never locked. It is already
+        # part-way out and still in the fingers, so EXTRACT it fully along the connector -X,
+        # carry it home, and release it there. The global guard stays armed: an extraction that
+        # snags terminates the script rather than tearing at the fixture.
+        log.error('TUG VERIFY FAILED -- the connector backed out %.2f mm (> %.1f mm) under a '
+                  '%.1f N pull: NOT locked. Extracting the cable.',
+                  disp * 1000.0, tv_thresh_m * 1000.0, tv_force)
+        phase('retract')
+        T_now = robot.tool0()
+        T_out = translation_matrix(-tv_extract_m * axn_t) @ T_now
+        adm.reset()
+        adm.warmup(T_now)
+        guard_shared.reset()
+        res2 = adm.ramp(T_now, T_out, seg_time(T_now, T_out), guard_shared)
+        adm.reset()
+        adm.stop()
+        robot.arm.servo_stop()
+        if res2 == 'seated':
+            log.error('TUG: the GLOBAL force guard tripped during the extraction (%s) -- '
+                      'terminating the script with the cable still held.',
+                      guard_shared.tripped_by)
+            return 'terminated'
+        phase('reset')
+        if not reset.reset_robot(robot, cfg, 'tug failure (carry the cable home)'):
+            log.error('TUG: could not go home with the extracted cable -- terminating.')
+            return 'terminated'
+        robot.gripper.open('release (failed cable, at home)')
+        return 'failed'
 
     def engage_insertion():
         """ENGAGE -- drive the assembly trajectory home, optionally rocking, stop on axial force.
@@ -1109,10 +1231,10 @@ def build_and_run(cfg, robot, camera, args):
         regrasps) and where it actually ended up -- read from the MEASURED arm pose, so it is the
         ACHIEVED screw and not the commanded one."""
         T_tool0_engaged = robot.tool0()
-        T_tool0_conn = inverse(T_tool0_engaged) @ T_base_tconn
+        T_tool0_conn = inverse(T_tool0_engaged) @ T_clk
         moved = matrix_to_xyzrpy(inverse(robot.T_tool0_fingertip @ T_ftip_conn) @ T_tool0_conn)
-        log.info('--- CABLE CLOCKING --- belief reset: connector assumed AT the target '
-                 '(shifts the in-hand belief by %s mm, %s deg)',
+        log.info('--- CABLE CLOCKING --- belief reset: connector assumed AT the %s frame '
+                 '(shifts the in-hand belief by %s mm, %s deg)', pe_frame,
                  np.round(moved[0] * 1000.0, 2).tolist(),
                  np.round(np.degrees(moved[1]), 2).tolist())
         log.info('  screw: %+.1f deg about the connector +X while pushing %+.1f mm along it; '
@@ -1128,7 +1250,7 @@ def build_and_run(cfg, robot, camera, args):
         # screw_ramp for why a single ramp across 90 deg does not.
         ref_start = T_tool0_engaged
 
-        det = _ScrewAdvance(robot, T_tool0_conn, T_base_tconn, cc_need_m)
+        det = _ScrewAdvance(robot, T_tool0_conn, T_clk, cc_need_m)
         combo = _AnyGuard(det, guard_cc)
         ok = False
         for k in range(1, cc_tries + 1):
@@ -1141,9 +1263,9 @@ def build_and_run(cfg, robot, camera, args):
             # 178 mm away drags the connector 52 mm sideways off its own axis at mid-stroke.
             res = screw_ramp(
                 adm_cc,
-                lambda f: (T_base_tconn
+                lambda f: (T_clk
                            @ xyzrpy_to_matrix([cc_push_m * f, 0.0, 0.0], [cc_rot * f, 0.0, 0.0])
-                           @ inverse(T_base_tconn)) @ ref_start,
+                           @ inverse(T_clk)) @ ref_start,
                 combo, cc_v, cc_w, abs(np.degrees(cc_rot)), label='screw ')
             adv = det.advance_m()
             # `stopped`, not `seated`: ramp's 'seated' means "a guard tripped", which is the robot
@@ -1198,17 +1320,17 @@ def build_and_run(cfg, robot, camera, args):
             # drift the solve discards is exactly what the socket forbids, so discarding it is
             # the correction, not an approximation.
             here_r = robot.tool0()
-            axn_cc = T_base_tconn[:3, 0] / float(np.linalg.norm(T_base_tconn[:3, 0]))
-            pt_cc = T_base_tconn[:3, 3]
+            axn_cc = T_clk[:3, 0] / float(np.linalg.norm(T_clk[:3, 0]))
+            pt_cc = T_clk[:3, 3]
             rel_r = here_r @ inverse(ref_start)
             phi = float(np.dot(Rotation.from_matrix(rel_r[:3, :3]).as_rotvec(), axn_cc))
-            T_rot = rotate_about_axis(ref_start, T_base_tconn[:3, 0], pt_cc, phi)
+            T_rot = rotate_about_axis(ref_start, T_clk[:3, 0], pt_cc, phi)
             s_adv = float(np.dot(here_r[:3, 3] - T_rot[:3, 3], axn_cc))
 
             def back_at(f, _phi=phi, _s=s_adv):
                 g = 1.0 - f          # g=1 is the solved achieved screw, g=0 is the engaged pose
                 return (translation_matrix(_s * g * axn_cc)
-                        @ rotate_about_axis(ref_start, T_base_tconn[:3, 0], pt_cc, _phi * g))
+                        @ rotate_about_axis(ref_start, T_clk[:3, 0], pt_cc, _phi * g))
 
             u_lin, u_ang = pose_error(back_at(0.0), here_r)
             log.info('  retry unwind: %+.1f deg / %+.2f mm of achieved screw run in reverse '
@@ -1255,7 +1377,7 @@ def build_and_run(cfg, robot, camera, args):
         # progress the ratchet made -- placing the collar grasp that far off.
         T_tool0_conn_now = det.T_tool0_conn
         T_base_conn = robot.tool0() @ T_tool0_conn_now
-        got = matrix_to_xyzrpy(inverse(T_base_tconn) @ T_base_conn)
+        got = matrix_to_xyzrpy(inverse(T_clk) @ T_base_conn)
         log.info('  achieved screw: %+.2f mm along +X, %+.2f deg about +X '
                  '(commanded %+.2f mm x %d tr%s, %+.1f deg); peak advance %.2f mm',
                  got[0][0] * 1000.0, np.degrees(got[1][0]), cc_push_m * 1000.0, cc_tries,
@@ -1303,10 +1425,10 @@ def build_and_run(cfg, robot, camera, args):
         # What the runtime measurement DOES legitimately know is how far the bayonet cammed the
         # connector IN along its own axis. Keep exactly that -- project the measured origin onto
         # the true axis -- and discard the lateral and angular drift, which the socket forbids.
-        axis = T_base_tconn[:3, 0]
+        axis = T_clk[:3, 0]
         axn = axis / float(np.linalg.norm(axis))
-        cammed = float(np.dot(T_base_conn[:3, 3] - T_base_tconn[:3, 3], axn))
-        point = T_base_tconn[:3, 3] + cammed * axn
+        cammed = float(np.dot(T_base_conn[:3, 3] - T_clk[:3, 3], axn))
+        point = T_clk[:3, 3] + cammed * axn
         # COLLAR AXIS OFFSET (config: collar_clocking.axis_offset_mm, CONNECTOR-frame xyz). The
         # declared frame origin is the mating-face reference, placed for insertion -- not
         # necessarily on the barrel centreline the collar physically turns about. This shifts the
@@ -1316,12 +1438,12 @@ def build_and_run(cfg, robot, camera, args):
         # clocking -- cable clocking still turns about the unoffset target axis.
         off_conn = np.asarray(cl_axis_off, dtype=float) / 1000.0
         if float(np.linalg.norm(off_conn)) > 0.0:
-            point = point + T_base_tconn[:3, :3] @ off_conn
+            point = point + T_clk[:3, :3] @ off_conn
             log.info('  collar axis OFFSET by %s mm (connector frame) -> the line moves %.2f mm '
                      'laterally.', np.round(cl_axis_off, 2).tolist(),
                      float(np.linalg.norm(off_conn - np.dot(off_conn, [1.0, 0.0, 0.0])
                                           * np.array([1.0, 0.0, 0.0]))) * 1000.0)
-        T_base_axis = T_base_tconn.copy()
+        T_base_axis = T_clk.copy()
         T_base_axis[:3, 3] = point
         here = robot.tool0()
         # THE COLLAR IS MEASURED FROM THE JUNCTION, AND THE JUNCTION IS AT THE PADS. The pick
@@ -1341,9 +1463,11 @@ def build_and_run(cfg, robot, camera, args):
         _tilt = float(np.degrees(np.arccos(np.clip(
             abs(float(np.dot(T_base_conn[:3, 0] / np.linalg.norm(T_base_conn[:3, 0]), axn))),
             0.0, 1.0))))
-        log.info('  axis: SOCKET (assembly.target_frame), advanced %+.2f mm by the screw. The '
+        log.info('  axis: %s, advanced %+.2f mm by the screw. The '
                  'measured connector frame sits %.2f mm lateral / %.2f deg tilted from it -- that '
-                 'drift is discarded, not turned about.', cammed * 1000.0, _lat * 1000.0, _tilt)
+                 'drift is discarded, not turned about.',
+                 'SOCKET (target frame)' if pe_frame == 'target' else 'BELIEVED connector',
+                 cammed * 1000.0, _lat * 1000.0, _tilt)
         # THE GRASP ROLL IS FREE FOR THE GRIPPER AND NOT FREE FOR THE ARM.
         #
         # A parallel jaw is symmetric under a 180 deg roll about its APPROACH axis (fingertip Z):
@@ -1833,7 +1957,19 @@ def build_and_run(cfg, robot, camera, args):
     # sequence did not complete, and the log says which part of it did.
     if cc_on:
         cc_ok = ret_ok = False
+        tug_res = None
         state = 'engaged'                    # the initial assembly mated it; that is where we are
+        if pe_frame == 'believed':
+            # The believed connector, frozen in base coordinates NOW -- the arm still grips it,
+            # so tool0 @ belief is exactly where the estimator thinks the connector is. Frozen
+            # rather than re-derived later, because the maneuvers need one consistent frame.
+            T_clk = robot.tool0() @ T_tool0_conn
+            _pl, _pa = pose_error(T_clk, T_base_tconn)
+            log.info('Post-engage frame: BELIEVED connector -- %.2f mm / %.2f deg from the '
+                     'recorded target frame.', _pl * 1000.0, np.degrees(_pa))
+        else:
+            T_clk = T_base_tconn
+            log.info('Post-engage frame: TARGET connector (recorded socket pose).')
         if not phase_gate('CABLE CLOCKING (insert)',
                           'The connector is ENGAGED. Next is the bayonet screw, which cams it '
                           'HOME -- check the engagement looks right first.'):
@@ -1874,6 +2010,20 @@ def build_and_run(cfg, robot, camera, args):
             else:
                 log.warning('Escape skipped by the user -- the arm is still at the connector '
                             'with the gripper in whatever state clocking left it.')
+            # ---- TUG VERIFICATION: only after a LOCKED collar and a completed escape --------
+            if tv_on and state == 'locked' and ret_ok:
+                if phase_gate('TUG VERIFY',
+                              'The collar is LOCKED and the arm has retracted. Next: re-grip the '
+                              'connector at the engaged pose and pull %.1f N along its -X for '
+                              '%.1f s -- a locked bayonet holds, an unlocked one backs out.'
+                              % (tv_force, tv_time)):
+                    tug_res = tug_verify(T_base_conn @ inverse(_T_tool0_conn))
+                    if tug_res == 'terminated':
+                        return False              # the finally still writes clocking.csv
+                else:
+                    tug_res = 'skipped'
+                    log.warning('Tug verification skipped by the user -- the assembly is '
+                                'UNVERIFIED.')
         finally:
             robot.arm.servo_stop()
             if clock_rows:
@@ -1886,8 +2036,14 @@ def build_and_run(cfg, robot, camera, args):
         # Report the state actually REACHED. 'assembled' is claimed only at 'locked': a seated but
         # unlocked BNC can still back out, so a run with collar clocking disabled succeeds (its
         # configured sequence finished) without being called assembled.
-        if state == 'locked':
-            log.info('ASSEMBLED -- connector ENGAGED -> SEATED -> LOCKED.')
+        if state == 'locked' and tug_res == 'failed':
+            log.error('Collar clocking reported LOCKED but the TUG pulled the connector back '
+                      'out -- NOT assembled. The cable has been extracted and released at home.')
+        elif state == 'locked':
+            log.info('ASSEMBLED -- connector ENGAGED -> SEATED -> LOCKED%s.',
+                     ', TUG-VERIFIED' if tug_res == 'verified' else
+                     ' (tug verification %s)' % ('skipped' if tug_res == 'skipped' else
+                                                 'disabled' if tug_res is None else 'ERRORED'))
         elif state == 'seated':
             log.warning('Connector SEATED but NOT LOCKED (collar clocking %s) -- not assembled.',
                         'disabled' if not cl_on else 'FAILED')
@@ -1895,7 +2051,7 @@ def build_and_run(cfg, robot, camera, args):
             log.error('Connector ENGAGED only -- neither seated nor locked.')
         phase('reset')
         rst = reset.reset_robot(robot, cfg, 'end reset')      # always, even after a failed screw
-        return bool(cc_ok and ret_ok and rst)
+        return bool(cc_ok and ret_ok and rst and tug_res in (None, 'skipped', 'verified'))
 
     d_out = float(a.get('release_retract_distance_m', 0.08))
     back = -(robot.tool0() @ (robot.T_tool0_fingertip @ T_ftip_conn))[:3, 0] * d_out

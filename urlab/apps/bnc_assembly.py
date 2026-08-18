@@ -523,6 +523,16 @@ def build_and_run(cfg, robot, camera, args):
     tv_time = _num(tv, 'pull_time_s', 3.0)
     tv_thresh_m = _num(tv, 'displacement_threshold_mm', 3.0) / 1000.0
     tv_extract_m = _num(tv, 'extraction_distance_mm', 50.0) / 1000.0
+    sp = cl.get('seat_push', {}) or {}
+    sp_on = bool(sp.get('enabled', True))
+    sp_force = _num(sp, 'force_n', 5.0)
+    sp_persist = _num(sp, 'persistence_s', 1.0)
+    sp_travel_m = _num(sp, 'max_travel_mm', 15.0) / 1000.0
+    # A dedicated guard: the push SUCCEEDS by tripping it (force held for the persistence), so
+    # its limits are the push spec, not the global safety limits -- those stay on guard_shared.
+    guard_push = ForceGuard(robot.arm, dict(cfg.section('force_guard'),
+                                            max_force_n=sp_force,
+                                            persistence_s=sp_persist)) if sp_on else None
     if cc_on and cl_on and not cc_open_after:
         log.error('assembly.collar_clocking needs cable_clocking.open_gripper_after true: the '
                   'collar is grasped by the same gripper, which must release the cable first.')
@@ -1615,6 +1625,72 @@ def build_and_run(cfg, robot, camera, args):
                           'is still free, so nothing is clamped.',
                           guard_shared.tripped_by or 'unknown')
                 return False
+        # SEAT PUSH -- between the unwind and the collar. Re-grip the junction and PRESS the
+        # connector deeper along +X until force_n is SUSTAINED for persistence_s: the guard TRIP
+        # is the SUCCESS (pressed home and holding). Completing the whole travel without ever
+        # building the force means the connector slid in freely, which also ends deeper.
+        #
+        # The close happens at the CENTRED, unwound pose -- the pads sit on the declared axis,
+        # which can be a few mm from where the grasp originally held the connector; the grasp
+        # check below is what validates the bite. The press moves the CONNECTOR by however far
+        # the arm actually travels (the pads are closed on it), so the collar poses are shifted
+        # by that measured amount afterwards -- the ring rides the connector.
+        d_push = 0.0
+        if sp_on:
+            grabbed = robot.gripper.close('seat-push grasp')
+            if grabbed and not verify_cable_held(robot, check, 'seat-push grasp'):
+                log.warning('SEAT PUSH: the grasp missed the connector -- skipping the push.')
+                grabbed = False
+            if not grabbed:
+                # Whatever happened, the advance NEEDS open fingers -- refuse to slide a closed
+                # (or unknown) gripper up the barrel and into the ring.
+                if not robot.gripper.open('release (seat push skipped)'):
+                    log.error('SEAT PUSH: gripper state unknown after a failed grasp -- not '
+                              'advancing onto the collar with possibly-closed fingers.')
+                    return False
+            else:
+                T_a = robot.tool0()
+                # The spring must STRETCH force/S to apply force_n, so the reference travel has
+                # to cover that stretch on top of any real seating motion.
+                u_p = T_a[:3, :3].T @ axn
+                S_p = 1.0 / float(np.sum((u_p ** 2) / adm_cl.S[:3]))
+                if sp_travel_m < sp_force / S_p:
+                    log.warning('SEAT PUSH: max_travel_mm (%.1f) cannot stretch the %.0f N/m '
+                                'spring to %.1f N (needs %.1f mm) -- the push cannot reach its '
+                                'force.', sp_travel_m * 1000.0, S_p, sp_force,
+                                sp_force / S_p * 1000.0)
+                T_b = translation_matrix(sp_travel_m * axn) @ T_a
+                adm_cl.reset()
+                adm_cl.warmup(T_a, tare_fn=tare)      # tare while gripping and static
+                guard_push.reset()
+                res_p = adm_cl.ramp(T_a, T_b, seg_time(T_a, T_b), guard_push)
+                if res_p != 'seated':
+                    # the reference has stopped; give the guard its full persistence window
+                    res_p = adm_cl.hold(T_b, sp_persist + 0.5, guard_push)
+                d_push = float(np.dot(robot.tool0()[:3, 3] - T_a[:3, 3], axn))
+                adm_cl.reset()
+                adm_cl.stop()
+                robot.arm.servo_stop()
+                pressed = res_p == 'seated'
+                clock_rows.append({'maneuver': 'seat_push', 'try': 1, 'ramp_result': res_p,
+                                   'advance_mm': round(d_push * 1000.0, 3),
+                                   'success': True, 'force_stop': bool(pressed),
+                                   'state_after': 'seated',
+                                   'stopped_by': guard_push.tripped_by or ''})
+                (log.info if pressed else log.warning)(
+                    'SEAT PUSH: %s -- connector moved %+.2f mm.',
+                    'held %.1f N for %.1f s (pressed home)' % (sp_force, sp_persist) if pressed
+                    else 'never built %.1f N over %.1f mm of reference travel'
+                         % (sp_force, sp_travel_m * 1000.0),
+                    d_push * 1000.0)
+                if not robot.gripper.open('release (seat push)'):
+                    log.error('SEAT PUSH: gripper did not release -- cannot advance onto the '
+                              'collar with the junction clamped.')
+                    return False
+                if abs(d_push) > 1e-6:
+                    # the connector (and its collar) moved deeper -- keep the ring in the sights
+                    T_start = translation_matrix(d_push * axn) @ T_start
+                    T_end = translation_matrix(d_push * axn) @ T_end
         # 3. ADVANCE onto the ring along the connector +X. A PURE TRANSLATION -- no rotation, so
         #    a straight move IS the right path here and there is no chord to cut. Guarded, because
         #    this slides open fingers over a part: a mis-estimated collar should stop the move

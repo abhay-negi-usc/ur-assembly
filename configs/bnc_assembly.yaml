@@ -661,6 +661,19 @@ assembly:
     # the collar, since they were just gripping there. Negative = stand further back.
     approach_mm: null
     rotation_deg: 90.0
+    # SEAT PUSH -- runs between the unwind and the advance onto the collar: re-grip the
+    # connector at the junction and PRESS it deeper along the connector +X until force_n is
+    # SUSTAINED for persistence_s. The guard trip IS the success (pressed home and holding); the
+    # bayonet cams pull the connector in, but the screw's compliance can leave it short, and the
+    # collar should be locked on a SEATED connector. max_travel_mm bounds the reference travel
+    # and must cover force_n / stiffness (the spring stretch needed to even apply the force:
+    # 5 N at 500 N/m = 10 mm) plus real seating motion. The gripper re-opens before the
+    # advance; a failed grasp skips the push rather than failing the run.
+    seat_push:
+      enabled: true
+      force_n: 5.0
+      persistence_s: 1.0
+      max_travel_mm: 15.0
     # PRE-WIND, deg. Before grasping, unwind the OPEN gripper this far about the
     # connector's +X, so the turn that follows has the wrist range to complete it.
     # null (default) = unwind exactly the ACHIEVED cable screw, landing the gripper back at the

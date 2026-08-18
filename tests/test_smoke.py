@@ -3482,6 +3482,53 @@ def test_tug_verification_defaults_on_and_its_spring_can_exceed_the_threshold():
         'guard trip must terminate the script')
 
 
+def test_the_seat_push_can_reach_its_force_and_keeps_the_gripper_logic_straight():
+    """The seat push sits between the collar unwind and the advance, and it grips.
+
+    Two things must hold. FORCE REACHABILITY: the push is a spring press, so the reference must
+    be able to stretch the spring by force_n / stiffness before the travel budget runs out --
+    otherwise the guard can never trip and every push 'never builds the force'. GRIPPER LOGIC:
+    the push closes on the junction mid-way through a sequence that otherwise needs OPEN fingers
+    (unwind before it, advance onto the ring after it), so the close must be verified, the
+    release must PRECEDE the advance, and a failed release must abort rather than slide a
+    clamped gripper into the ring."""
+    import yaml
+
+    y = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))
+    cl = y['assembly']['collar_clocking']
+    sp = cl['seat_push']
+    assert sp['enabled'] is True, 'the seat push defaults ON'
+    S_max = max(float(v) for v in (cl.get('stiffness') or y['compliance']['stiffness'])[:3])
+    need_mm = float(sp['force_n']) / S_max * 1000.0
+    assert float(sp['max_travel_mm']) > need_mm, (
+        f'max_travel_mm ({sp["max_travel_mm"]}) must exceed the {need_mm:.1f} mm spring stretch '
+        f'that {sp["force_n"]} N needs at {S_max:.0f} N/m, or the push can never reach its force')
+
+    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
+        src = fh.read()
+    body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
+    order = ["rotate_about_axis(T_centred, axis, point, theta * f)",   # unwind (open)
+             "gripper.close('seat-push grasp')",                       # close on the junction
+             "verify_cable_held(robot, check, 'seat-push grasp')",     # ...and verify the bite
+             "guard_push.reset()",                                     # the push guard, not global
+             "'release (seat push)'",                                  # reopen...
+             "label='collar advance onto the ring'",                   # ...BEFORE the advance
+             "gripper.close('grasp collar')"]                          # then the collar bite
+    idx = [body.index(t) for t in order]
+    assert idx == sorted(idx), (
+        'the seat push must run unwind -> close -> verify -> press -> RELEASE -> advance -> '
+        'collar close; a release after the advance would slide clamped fingers into the ring')
+    assert "cannot advance onto the '\n                              'collar" in body or \
+           'not \'\n                              \'advancing' in body or \
+           'return False' in body[body.index("'release (seat push)'"):
+                                  body.index("label='collar advance onto the ring'")], (
+        'a failed release must abort before the advance')
+    # the connector moves with the press, so the collar poses must ride it
+    assert 'T_start = translation_matrix(d_push * axn) @ T_start' in body, (
+        'the advance target must shift by the measured press travel, or it stops short of '
+        'the ring by exactly that much')
+
+
 def test_post_engage_frame_is_a_config_choice_defaulting_to_target():
     """cable clocking, collar clocking, the escape leg and the tug all read ONE frame, T_clk --
     'target' (default) binds it to the recorded socket pose, 'believed' to the estimator's
@@ -3741,9 +3788,16 @@ def test_a_clocking_stroke_follows_the_arc_and_not_the_chord():
         'axis and must travel the screw in reverse (screw_ramp), not cut the chord to ref_start')
     assert 'retry-unwind' in body, 'the retry must unwind along the achieved screw'
     body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
-    assert 'screw_ramp(' in body and 'adm_cl.ramp(' not in body, (
+    assert 'screw_ramp(' in body, (
         'collar_clocking must take its turn through screw_ramp too -- the fingers are CLOSED on '
         'the collar there, so the chord excursion goes straight into the ring')
+    # adm_cl.ramp is allowed for exactly one thing: the SEAT PUSH, whose endpoints differ by a
+    # pure translation along the axis (identical orientation) -- a straight ramp draws that path
+    # exactly, so there is no chord to cut. Any OTHER direct ramp risks spanning a rotation.
+    direct = [ln for ln in body.splitlines() if 'adm_cl.ramp(' in ln]
+    assert all('adm_cl.ramp(T_a, T_b' in ln for ln in direct) and len(direct) == 1, (
+        f'collar_clocking may direct-ramp only the seat push (a pure translation); found '
+        f'{direct!r} -- any ramp spanning a rotation cuts the chord')
 
 
 def test_the_target_frame_and_the_in_hand_belief_name_the_same_point():

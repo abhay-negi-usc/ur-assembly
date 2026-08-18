@@ -630,6 +630,52 @@ def build_and_run(cfg, robot, camera, args):
         return max((lin_m * 1000.0 / v) if v > 0 else 0.0,
                    (np.degrees(ang_rad) / w) if w > 0 else 0.0, min_seg_s)
 
+    def screw_ramp(adm, ref_at, guard, v, w, ang_deg, label=''):
+        """Ramp along the EXACT screw path instead of the straight chord between its endpoints.
+
+        WHY THIS EXISTS. admittance.ramp interpolates with slerp_matrix, which SLERPs the rotation
+        but LERPs the translation -- so one ramp draws a STRAIGHT LINE between the two tool0
+        positions. Harmless for the servo-rate steps engage takes (a fraction of a degree each),
+        badly wrong for a clocking stroke taken in a single call: a `theta` turn about an axis `r`
+        away from tool0 has a true path that bows out into an arc, and the chord cuts inside it by
+        r(1 - cos(theta / 2)). At the 90 deg strokes used here, r = 178 mm, so the chord passes
+        52 mm inside the arc and DRAGS whatever sits on the axis through that excursion. Both
+        endpoints are still exactly right, which is why this hides in every logged pose -- but
+        mid-stroke the turn behaves as though its axis were ~18 mm CLOSER to the tool
+        (r sin(theta/2) / (theta/2) instead of r), which is the symptom it presents as.
+
+        The fix is the shape engage already uses: subdivide at the servo rate with every waypoint
+        placed on the true screw by `ref_at(s)`, so each lerp spans a fraction of a degree and its
+        chord error is microns.
+
+        The speed cap is applied to the ARC rather than the chord, which seg_time cannot do -- it
+        measures the straight line between endpoints and so under-counts a 90 deg turn's real path
+        by about 11%, quietly running the stroke that much fast."""
+        SAMPLES = 64
+        coarse = [ref_at(k / SAMPLES) for k in range(SAMPLES + 1)]
+        pts = [T[:3, 3] for T in coarse]
+        arc_mm = sum(float(np.linalg.norm(pts[k + 1] - pts[k])) for k in range(SAMPLES)) * 1000.0
+        chord = pts[-1] - pts[0]
+        chord_mm = float(np.linalg.norm(chord)) * 1000.0
+        sag_mm = 0.0
+        if chord_mm > 1e-6:
+            u = chord / np.linalg.norm(chord)
+            sag_mm = max(float(np.linalg.norm((p - pts[0]) - np.dot(p - pts[0], u) * u))
+                         for p in pts) * 1000.0
+        dur = max((arc_mm / v) if v > 0 else 0.0, (ang_deg / w) if w > 0 else 0.0, min_seg_s)
+        n = max(1, int(np.ceil(dur * adm.rate)))
+        log.info('  %s%.1f deg about a fixed axis: arc %.1f mm in %d steps over %.2f s '
+                 '(a single ramp would cut the chord and pull the axis %.1f mm off true)',
+                 label, ang_deg, arc_mm, n, dur, sag_mm)
+        dt, prev = dur / n, coarse[0]
+        for k in range(1, n + 1):
+            cur = ref_at(k / n)
+            out = adm.ramp(prev, cur, dt, guard)
+            prev = cur
+            if out == 'seated':
+                return 'seated'
+        return 'done'
+
     retract_m = float(a.get('retract_distance_m', 0.05))
     decim = max(1, int(a.get('log_decimation', 5)))
     tol = a.get('success_tolerance', {}) or {}
@@ -1038,11 +1084,12 @@ def build_and_run(cfg, robot, camera, args):
                  np.degrees(cc_rot), cc_push_m * 1000.0, cc_need_m * 1000.0, cc_tries,
                  'y' if cc_tries == 1 else 'ies')
 
-        screw = xyzrpy_to_matrix([cc_push_m, 0.0, 0.0], [cc_rot, 0.0, 0.0])
         # The stroke as a BASE-frame motion about the fixed axis line L (engaged connector origin,
         # along its +X). Independent of the connector-in-gripper belief, and the SAME every try.
+        # Built at each FRACTION of the stroke rather than only at its end, so the commanded path
+        # stays on that axis line instead of cutting the chord between the endpoints -- see
+        # screw_ramp for why a single ramp across 90 deg does not.
         ref_start = T_tool0_engaged
-        ref_goal = (T_base_tconn @ screw @ inverse(T_base_tconn)) @ T_tool0_engaged
 
         det = _ScrewAdvance(robot, T_tool0_conn, T_base_tconn, cc_need_m)
         combo = _AnyGuard(det, guard_cc)
@@ -1052,8 +1099,15 @@ def build_and_run(cfg, robot, camera, args):
             adm_cc.reset()
             adm_cc.warmup(ref_start, tare_fn=cc_tare)
             combo.reset()
-            res = adm_cc.ramp(ref_start, ref_goal, seg_time(ref_start, ref_goal, cc_v, cc_w),
-                              combo)
+            # SUBDIVIDED ON THE TRUE SCREW -- see screw_ramp. A single ramp here interpolates
+            # the tool0 POSITION in a straight line, which for this 90 deg orbit about an axis
+            # 178 mm away drags the connector 52 mm sideways off its own axis at mid-stroke.
+            res = screw_ramp(
+                adm_cc,
+                lambda f: (T_base_tconn
+                           @ xyzrpy_to_matrix([cc_push_m * f, 0.0, 0.0], [cc_rot * f, 0.0, 0.0])
+                           @ inverse(T_base_tconn)) @ ref_start,
+                combo, cc_v, cc_w, abs(np.degrees(cc_rot)), label='screw ')
             adv = det.advance_m()
             # `stopped`, not `seated`: ramp's 'seated' means "a guard tripped", which is the robot
             # layer's word and unrelated to the assembly state. WHICH guard fired is what decides
@@ -1202,11 +1256,14 @@ def build_and_run(cfg, robot, camera, args):
             return False
         phase('collar_clock')
         start = robot.tool0()
-        end = rotate_about_axis(start, axis, point, cl_rot)
         adm_cl.reset()
         adm_cl.warmup(start, tare_fn=cl_tare)
         guard_cl.reset()
-        res = adm_cl.ramp(start, end, seg_time(start, end, cl_v, cl_w), guard_cl)
+        # SUBDIVIDED ON THE TRUE ARC -- see screw_ramp. Same 90 deg orbit about the same axis
+        # as the cable screw, but here the fingers are CLOSED on the collar, so the chord's 52 mm
+        # excursion would be applied straight into the ring.
+        res = screw_ramp(adm_cl, lambda f: rotate_about_axis(start, axis, point, cl_rot * f),
+                         guard_cl, cl_v, cl_w, abs(np.degrees(cl_rot)), label='turn ')
         _lin, turned = pose_error(start, robot.tool0())
         adm_cl.reset()
         if cl_settle > 0:

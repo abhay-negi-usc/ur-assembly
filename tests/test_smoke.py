@@ -3400,6 +3400,74 @@ def test_preload_force_is_a_spike_not_a_press():
         assert persist - ramp_s >= 0.0, f'{name}: negative guard margin'
 
 
+def test_a_clocking_stroke_follows_the_arc_and_not_the_chord():
+    """A one-call ramp across a 90 deg orbit drags the held part 52 mm off its own axis.
+
+    THE HAZARD. transforms.slerp_matrix SLERPs the rotation but LERPs the TRANSLATION, so
+    admittance.ramp draws a STRAIGHT LINE between the two tool0 positions it is given. Over the
+    servo-rate steps engage takes that is exact to microns. Over a whole clocking stroke it is not:
+    a `theta` turn about an axis `r` from tool0 has a true path that bows into an arc, and the
+    chord cuts inside it by r(1 - cos(theta/2)). Both ENDPOINTS stay exactly right, which is why
+    this never shows up in a logged pose -- but mid-stroke the motion behaves as though the axis
+    were r sin(theta/2)/(theta/2) away instead of r, i.e. ~10% CLOSER TO THE TOOL, and whatever is
+    sitting on the axis gets scrubbed sideways through the sagitta.
+
+    Pinned numerically rather than by eye, and structurally at both call sites, because the
+    endpoints being correct makes every other check pass."""
+    import numpy as np
+
+    from urlab import config as urconfig, tool_frames
+    from urlab.transforms import inverse, slerp_matrix, xyzrpy_to_matrix
+
+    cfg = urconfig.load('bnc_assembly')
+    frames, targets = tool_frames.load_frames(cfg), tool_frames.load_targets(cfg)
+    cc = cfg['assembly']['cable_clocking']
+    rot = np.radians(float(cc['rotation_deg']))
+    push = float(cc['push_mm']) / 1000.0
+    T_base_tconn = targets[cfg['assembly']['target_frame']]
+    T_tool0_conn = frames[cfg['estimation']['initial_connector_frame']]
+    ref_start = T_base_tconn @ inverse(T_tool0_conn)
+
+    def ref_at(f):
+        return (T_base_tconn @ xyzrpy_to_matrix([push * f, 0.0, 0.0], [rot * f, 0.0, 0.0])
+                @ inverse(T_base_tconn)) @ ref_start
+
+    axis = T_base_tconn[:3, 0] / np.linalg.norm(T_base_tconn[:3, 0])
+    org = T_base_tconn[:3, 3]
+
+    def worst_scrub(waypoints):
+        """How far the connector origin is pulled OFF its own axis anywhere along the path."""
+        out = 0.0
+        for a, b in zip(waypoints, waypoints[1:]):
+            for t in np.linspace(0.0, 1.0, 9):
+                d = (slerp_matrix(a, b, t) @ T_tool0_conn)[:3, 3] - org
+                out = max(out, float(np.linalg.norm(d - np.dot(d, axis) * axis)))
+        return out * 1000.0
+
+    # THE HAZARD IS REAL: one ramp across the whole stroke, endpoints exact, middle far off.
+    assert worst_scrub([ref_start, ref_at(1.0)]) > 25.0, (
+        'a single ramp across the clocking stroke should visibly cut the chord; if this no longer '
+        'holds, slerp_matrix changed and screw_ramp may have become unnecessary')
+
+    # SUBDIVIDING ON THE TRUE SCREW FIXES IT. n as screw_ramp picks it: ceil(duration * rate).
+    n = 375
+    assert worst_scrub([ref_at(k / n) for k in range(n + 1)]) < 0.05, (
+        'subdividing on the true screw must keep the connector on its own axis')
+
+    # AND BOTH STROKES MUST ACTUALLY GO THROUGH IT.
+    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
+        src = fh.read()
+    assert 'def screw_ramp(' in src, 'the arc-following ramp helper is gone'
+    body = src[src.index('def cable_clocking('):src.index('def collar_clocking(')]
+    assert 'screw_ramp(' in body and 'adm_cc.ramp(' not in body, (
+        'cable_clocking must take its stroke through screw_ramp, not a single adm_cc.ramp -- a '
+        'one-call ramp cuts the chord and drags the connector off its axis')
+    body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
+    assert 'screw_ramp(' in body and 'adm_cl.ramp(' not in body, (
+        'collar_clocking must take its turn through screw_ramp too -- the fingers are CLOSED on '
+        'the collar there, so the chord excursion goes straight into the ring')
+
+
 def test_the_target_frame_and_the_in_hand_belief_name_the_same_point():
     """The clocking screw axis IS the target frame, so it must be the connector, not a neighbour.
 
@@ -4022,7 +4090,9 @@ def test_collar_prewind_makes_room_without_moving_the_grip():
     body = body[:body.index('return True')]
     i_move = body.index("label='collar align (pre-wound)'")
     i_close = body.index("gripper.close('grasp collar')")
-    i_turn = body.index('end = rotate_about_axis(start, axis, point, cl_rot)')
+    # The turn is now taken through screw_ramp (it follows the true arc rather than the
+    # chord between its endpoints); this anchors on the call that performs it.
+    i_turn = body.index('rotate_about_axis(start, axis, point, cl_rot * f)')
     assert i_move < i_close < i_turn, (
         'the pre-wind must run BEFORE the gripper closes -- unwinding on a gripped collar turns '
         'it backwards, undoing the lock instead of making room for it')
@@ -4311,6 +4381,95 @@ def test_engage_is_the_trajectory_plus_an_optional_oscillation():
     assert 'class _AxialForce' in src and 'wrench_in(T_base_conn, T_base_tool0)' in src, (
         'the engage limit must project onto the connector +X; a |f| limit tight enough to catch '
         'real resistance also stops on every lateral graze')
+
+def test_wiggle_sampling_excitation_is_a_real_multisine():
+    """The commanded wiggle must be full-rank by construction, or nothing downstream is evidence.
+
+    analysis/engagement_modes/wiggle_mode_detection.md 3.3 calls incommensurate frequencies the
+    single most important design choice in the experiment, and the reason is sharp: the headline
+    result is "this direction did not move". That is only evidence of a CONSTRAINT if the
+    direction was actually driven. Three ways the excitation silently stops driving it:
+
+      * A SIMPLE FREQUENCY RATIO. Two axes at a rational ratio retrace one closed Lissajous curve
+        forever, so the probe sweeps a ONE-dimensional path through the box and a rank estimate
+        cannot tell that apart from a real constraint.
+      * ALIASING. A tone above a quarter of the reference rate is reconstructed as a slower one.
+        The run looks correct; it just excited a frequency nobody chose.
+      * AMPLITUDE WITHOUT FREQUENCY. That is a constant offset, which belongs in the station's
+        `offset` -- as an excitation it contributes nothing and quietly reduces the live rank.
+
+    The app checks all three before it moves; this checks the shipped config still passes them,
+    which is the part a tuning edit can break.
+    """
+    import math
+
+    import yaml
+    with open(os.path.join(ROOT, 'configs', 'wiggle_sampling.yaml')) as fh:
+        cfg = yaml.safe_load(fh)
+    w = cfg['wiggle']
+    dims = ('x_mm', 'y_mm', 'z_mm', 'roll_deg', 'pitch_deg', 'yaw_deg')
+    amp = {d: float(w['amplitude'][d]) for d in dims}
+    frq = {d: float(w['frequency_hz'][d]) for d in dims}
+
+    live = [d for d in dims if amp[d] != 0.0]
+    assert live, 'every amplitude is 0 -- there is no excitation to analyse'
+    for d in live:
+        assert frq[d] > 0, f'{d} has amplitude but no frequency -- a constant offset, not a probe'
+
+    rate = float(cfg['compliance']['reference_rate_hz'])
+    fmax = max(frq[d] for d in live)
+    assert rate >= 4.0 * fmax, \
+        f'reference rate {rate} Hz aliases a {fmax} Hz tone'
+
+    # THE ORBIT closes at 1/gcd(frequencies). Requiring gcd == 1 on an arbitrary grid would be
+    # the wrong test -- 0.7 and 1.1 Hz are the intended co-prime pair (7:11) yet share a factor
+    # of 10 at 0.01 Hz resolution. What matters is that the figure takes much longer to close
+    # than any single axis takes to go round once.
+    if len(live) >= 2:
+        g = 0
+        for d in live:
+            g = math.gcd(g, int(round(frq[d] * 1000)))
+        orbit_s = 1000.0 / g
+        slowest_s = 1.0 / min(frq[d] for d in live)
+        assert orbit_s >= 3.0 * slowest_s, (
+            f'frequencies {[frq[d] for d in live]} Hz close their orbit every {orbit_s:.1f} s '
+            f'against a slowest single-axis period of {slowest_s:.1f} s -- too simple a ratio, '
+            'so the probe traces a line instead of filling the box')
+        # and one full pattern has to fit inside a burst, or windows from different bursts saw
+        # different parts of it and are not comparable
+        assert float(w['wiggle_s']) >= orbit_s, (
+            f"wiggle_s {w['wiggle_s']} s is shorter than the {orbit_s:.1f} s orbit")
+
+
+def test_wiggle_sampling_beside_control_is_depth_matched():
+    """Every `beside` station must share a depth with a contact station.
+
+    This is the experiment's one indispensable control (3.1). Depth correlates with engagement
+    trivially, so a statistic that separates deep from shallow proves nothing -- it may have
+    learned to read x. The claim only survives if in-socket and beside-socket separate AT THE
+    SAME DEPTH, which requires the pair to exist. A `beside` station at a depth no contact
+    station visits is not a control; it is just another free-space anchor wearing the label.
+    """
+    import yaml
+    with open(os.path.join(ROOT, 'configs', 'wiggle_sampling.yaml')) as fh:
+        stations = yaml.safe_load(fh)['wiggle']['stations']
+
+    depths = {round(float(s['depth_mm']), 6)
+              for s in stations if s.get('contact', True)}
+    beside = [s for s in stations if s.get('label') == 'beside']
+    assert beside, ('no `beside` station -- 3.1 calls the same-depth control the most important '
+                    'one in the design, and without it a depth reader cannot be told from a '
+                    'mode detector')
+    for s in beside:
+        d = round(float(s['depth_mm']), 6)
+        assert d in depths, (
+            f"beside station {s['name']!r} sits at depth {d} mm, which no contact station "
+            f'visits (contact depths: {sorted(depths)}) -- so there is nothing to compare it '
+            'against at matched depth')
+        assert any(abs(float(v)) > 1e-9 for v in (s.get('lateral_mm') or [0, 0])), (
+            f"beside station {s['name']!r} has no lateral offset, so it is IN the socket, not "
+            'beside it')
+
 
 if __name__ == '__main__':
     fns = [v for k, v in sorted(globals().items()) if k.startswith('test_')]

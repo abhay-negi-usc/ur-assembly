@@ -213,6 +213,13 @@ speed:
   # contact regime for the same pose, which is the mismatch the whole parity effort is
   # about. Both apps now insert at the same speed.
   max_cartesian_translation_mm_s: 30.0
+  # 2026-08-17: 50 -> 30 mm/s, matching configs/estimator_eval.yaml. Approach speed is a
+  # PRIMARY driver of recorded contact force, not a cycle-time detail: simulated on the
+  # same spring and wall, peak force runs 7 N at 2 mm/s, 37 N at 10, 93 N at 25 and 187 N
+  # at 50 -- so a map collected at 50 while the eval probes at 30 records a different
+  # contact regime for the same pose, which is the mismatch the whole parity effort is
+  # about. Both apps now insert at the same speed.
+  max_cartesian_translation_mm_s: 30.0
   max_cartesian_rotation_deg_s: 50.0
   # RETRACT -- free-space escape back along a path just proven clear, so it need NOT crawl at the
   # insertion speed. Still compliant, so it yields if it does catch. Omit to reuse the insert limits.

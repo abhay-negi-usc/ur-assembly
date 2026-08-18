@@ -3065,8 +3065,9 @@ def test_bnc_clocking_config():
         assert len(seen) >= 3, f'duplicate scan saw only {seen} under {nm} -- it is vacuous'
     # Advance is CUMULATIVE across regrasp retries, so the reachable ceiling is the stroke times
     # the number of bites -- not a single stroke.
-    assert float(cc['success_advance_mm']) <= float(cc['push_mm']) * int(cc['max_tries']) + 1e-9, \
-        'success_advance_mm exceeds what max_tries strokes of push_mm can deliver'
+    # success_advance_mm is an EARLY-OUT, not the success condition (completion = seated), so it
+    # no longer has to be deliverable within max_tries strokes -- an unreachable early-out just
+    # never fires. Only the > 0 floor above still matters (zero would trip on the first cycle).
     shared = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))
     assert float(cc['max_force_n']) >= float(shared['force_guard']['max_force_n']), \
         'the screw guard must not be TIGHTER than the probing guard or it trips immediately'

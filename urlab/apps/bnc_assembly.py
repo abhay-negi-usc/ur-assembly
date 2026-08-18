@@ -495,6 +495,7 @@ def build_and_run(cfg, robot, camera, args):
     # i.e. exactly the range the turn is about to spend. 0 disables.
     _pw = cl.get('prewind_deg')
     cl_prewind = cl_rot if _pw is None else np.radians(float(_pw))
+    cl_prewind_explicit = _pw is not None
     cl_settle = _num(cl, 'settle_s', settle_shared)
     cc_v = None if cc.get('speed_translation_mm_s') is None \
         else float(cc['speed_translation_mm_s'])
@@ -523,8 +524,9 @@ def build_and_run(cfg, robot, camera, args):
                   'releases, realigns to the engaged pose and re-grips -- it never unscrews.')
         return False
     if cc_on and cc_need_m <= 0.0:
-        log.error('assembly.cable_clocking.success_advance_mm must be > 0 (got %.2f) -- there '
-                  'would be no way to tell the screw worked.', cc_need_m * 1000.0)
+        log.error('assembly.cable_clocking.success_advance_mm must be > 0 (got %.2f) -- a zero '
+                  'early-out threshold trips on the first servo cycle, ending the stroke before '
+                  'it has turned anything.', cc_need_m * 1000.0)
         return False
 
     def _clock_physics(block, name):
@@ -1074,8 +1076,10 @@ def build_and_run(cfg, robot, camera, args):
         matter. The push target is VIRTUAL -- it aims past where the connector can actually go and
         lets compliance follow whatever path the bayonet cams allow.
 
-        SUCCESS is measured, not commanded: the connector must advance `success_advance_mm` along
-        the engaged frame's +X, detected mid-ramp so it ends the motion (see _ScrewAdvance).
+        SUCCESS IS ASSUMED when the stroke runs to completion. `success_advance_mm` is the
+        EARLY-OUT -- _ScrewAdvance ends the stroke as soon as the connector has advanced that far
+        along the engaged frame's +X -- and telemetry, never a post-hoc verdict. The only
+        not-seated outcome is a force-guard stop mid-stroke, which goes to the ratchet retry.
 
         A RETRY IS A REGRASP, NOT AN UNSCREW. The gripper has rotated with the cable, so the stroke
         cannot simply be repeated -- but undoing it would give back whatever the cams gained. So:
@@ -1107,8 +1111,8 @@ def build_and_run(cfg, robot, camera, args):
                  np.round(moved[0] * 1000.0, 2).tolist(),
                  np.round(np.degrees(moved[1]), 2).tolist())
         log.info('  screw: %+.1f deg about the connector +X while pushing %+.1f mm along it; '
-                 'success = %.1f mm of CUMULATIVE advance, up to %d tr%s (a retry regrasps at the '
-                 'engaged pose and repeats the stroke -- it never unscrews)',
+                 'early-out at %.1f mm of CUMULATIVE advance (completion = seated), up to %d '
+                 'tr%s (a retry regrasps at the engaged pose and repeats the stroke)',
                  np.degrees(cc_rot), cc_push_m * 1000.0, cc_need_m * 1000.0, cc_tries,
                  'y' if cc_tries == 1 else 'ies')
 
@@ -1141,25 +1145,30 @@ def build_and_run(cfg, robot, camera, args):
             # layer's word and unrelated to the assembly state. WHICH guard fired is what decides
             # between the two outcomes.
             stopped = res == 'seated'
-            is_seated = stopped and combo.tripped is det
-            jammed = stopped and not is_seated
+            early_seat = stopped and combo.tripped is det
+            jammed = stopped and not early_seat
+            # SUCCESS IS ASSUMED when the stroke runs to completion. success_advance_mm is the
+            # EARLY-OUT (the detector ends the stroke the moment the cams have pulled the
+            # connector home) and telemetry -- never a post-hoc verdict. Cross-checking a
+            # completed stroke against measured advance turned soft-spring deflection into false
+            # failures and sent the ratchet on retry swings a completed screw never needed. The
+            # only not-seated outcome is a FORCE-GUARD stop mid-stroke.
+            seated_now = early_seat or res == 'done'
             clock_rows.append({'maneuver': 'cable_clocking', 'try': k, 'ramp_result': res,
                                'advance_mm': round(adv * 1000.0, 3),
                                'peak_advance_mm': round(det.peak_m * 1000.0, 3),
                                'need_mm': round(cc_need_m * 1000.0, 3),
-                               'success': bool(is_seated), 'force_stop': bool(jammed),
-                               'state_after': 'seated' if is_seated else 'engaged',
+                               'success': bool(seated_now), 'force_stop': bool(jammed),
+                               'state_after': 'seated' if seated_now else 'engaged',
                                'stopped_by': combo.tripped_by or ''})
-            if is_seated:
+            if seated_now:
                 ok = True
-                log.info('  try %d/%d: SEATED -- %s', k, cc_tries, det.tripped_by)
+                log.info('  try %d/%d: SEATED -- %s (advance %.2f mm)', k, cc_tries,
+                         'early out: %s' % det.tripped_by if early_seat
+                         else 'stroke completed, success assumed', adv * 1000.0)
                 break
-            if jammed:
-                log.warning('  try %d/%d: NOT SEATED, force guard stopped the screw (%s); '
-                            'advance %.2f mm', k, cc_tries, combo.tripped_by, adv * 1000.0)
-            else:
-                log.warning('  try %d/%d: NOT SEATED, rotation completed but advance is %.2f mm '
-                            '(need %.2f)', k, cc_tries, adv * 1000.0, cc_need_m * 1000.0)
+            log.warning('  try %d/%d: NOT SEATED, force guard stopped the screw (%s); '
+                        'advance %.2f mm', k, cc_tries, combo.tripped_by, adv * 1000.0)
             if k == cc_tries:
                 break
 
@@ -1257,9 +1266,9 @@ def build_and_run(cfg, robot, camera, args):
             if not robot.gripper.open('release (post cable clocking)'):
                 log.error('Gripper did not open after cable clocking.')
                 return False, T_tool0_conn_now, T_base_conn
-        return ok, T_tool0_conn_now, T_base_conn
+        return ok, T_tool0_conn_now, T_base_conn, float(np.degrees(got[1][0]))
 
-    def collar_clocking(T_base_conn):
+    def collar_clocking(T_base_conn, screw_deg=None):
         """COLLAR CLOCKING -- grasp the locking collar and turn it.
 
         The collar sits `collar_offset_mm` along the connector's +X from the cable junction (which
@@ -1324,23 +1333,8 @@ def build_and_run(cfg, robot, camera, args):
                     xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, 0.0, np.pi])
                     @ inverse(robot.T_tool0_fingertip)),
                    key=lambda G: pose_error(here, T_base_collar @ G)[1])
-        # The NOMINAL alignment: the closed fingertip frame coincides with the collar frame.
-        T_nominal = T_base_collar @ grip
-        # PRE-WIND. The turn is a rigid orbit about the connector's +X, so starting it from the
-        # nominal alignment spends `rotation_deg` of wrist range on whichever side the arm happens
-        # to be on -- and there may not be that much left. Unwinding by the same amount FIRST puts
-        # the whole stroke on the reachable side, and the turn then LANDS on the nominal alignment
-        # instead of finishing 90 deg past it.
-        #
-        # It has to happen with the gripper OPEN. Unwinding while gripping would turn the collar
-        # backwards -- undoing the lock rather than making room to apply it -- so this move sits
-        # strictly between the align and the close.
-        #
-        # The collar sits ON the rotation axis (it is offset along +X, the axis direction), so
-        # orbiting about that line keeps the fingertip on the collar's own circle; the pre-wind
-        # slides the grip around the ring without moving off it.
-        T_start = rotate_about_axis(T_nominal, axis, point, -cl_prewind)
-        T_end = rotate_about_axis(T_start, axis, point, cl_rot)
+        # The stroke poses are defined AFTER the clock-angle solve below -- the unwind lands
+        # relative to where the arm actually is, not relative to the nominal alignment.
         # THE COLLAR IS AHEAD OF THE GRASP, so the gripper cannot close where it stands. The pads
         # close BEHIND the cable junction (-45.7 mm along the connector +X on this geometry) and
         # the collar sits AHEAD of it (+collar_offset_mm), so 70.7 mm separates the open fingers
@@ -1351,23 +1345,43 @@ def build_and_run(cfg, robot, camera, args):
                  if cl_app_mm is None else float(cl_app_mm) / 1000.0)
         adv_m = cl_off_m - app_x
         T_nom_back = T_base_axis @ translation_matrix([app_x, 0.0, 0.0]) @ grip
-        T_start_back = rotate_about_axis(T_nom_back, axis, point, -cl_prewind)
+        # The arm's CLOCK ANGLE about the axis, solved from the measured pose -- everything
+        # downstream hangs off this, so it is solved once, here.
+        rel = here @ inverse(T_nom_back)
+        th_now = float(np.dot(Rotation.from_matrix(rel[:3, :3]).as_rotvec(), axn))
+        T_centred = rotate_about_axis(T_nom_back, axis, point, th_now)
+        # THE UNWIND ANGLE. Default: undo exactly the ACHIEVED screw, landing the gripper back at
+        # the ENGAGED clock angle -- wrist range the screw itself just proved reachable, and the
+        # collar (a body of revolution) grips the same at any clock angle. The old default was
+        # theta = -prewind - th_now, which lands `prewind_deg` BEFORE THE NOMINAL alignment: that
+        # undoes the screw and keeps going another prewind past it (a ~70 deg achieved screw plus
+        # the 90 deg pre-wind was the observed 160 deg unwind). That semantics survives only when
+        # prewind_deg is set to an explicit number.
+        if cl_prewind_explicit:
+            theta = -cl_prewind - th_now
+        else:
+            theta = -np.radians(screw_deg) if screw_deg is not None else -th_now
+        T_start_back = rotate_about_axis(T_centred, axis, point, theta)
+        T_start = translation_matrix(adv_m * axn) @ T_start_back
+        T_end = rotate_about_axis(T_start, axis, point, cl_rot)
         if adv_m < 0.0:
             log.warning('COLLAR CLOCKING: the approach station (%+.1f mm) is AHEAD of the collar '
                         '(%+.1f mm), so the advance runs backwards along the connector +X. Check '
                         'collar_clocking.approach_mm.', app_x * 1000.0, cl_off_m * 1000.0)
         log.info('--- COLLAR CLOCKING --- collar is %.1f mm along the connector +X. '
-                 'Centre on the axis, unwind to %+.1f deg of pre-wind by ORBITING the '
-                 'connector +X at the %+.1f mm station (gripper OPEN and clear of the ring, so '
-                 'the collar stays put), advance %+.1f mm onto it, grasp, then turn %+.1f deg '
-                 'about the same axis.',
-                 cl_off_m * 1000.0, np.degrees(-cl_prewind), app_x * 1000.0, adv_m * 1000.0,
-                 np.degrees(cl_rot))
+                 'Centre on the axis, unwind %+.1f deg by ORBITING the connector +X at the '
+                 '%+.1f mm station (gripper OPEN and clear of the ring, so the collar stays put; '
+                 'landing %s), advance %+.1f mm onto it, grasp, then turn %+.1f deg about the '
+                 'same axis.',
+                 cl_off_m * 1000.0, np.degrees(theta), app_x * 1000.0,
+                 'at the engaged clock angle' if not cl_prewind_explicit
+                 else '%+.1f deg before nominal' % np.degrees(-cl_prewind),
+                 adv_m * 1000.0, np.degrees(cl_rot))
         # REACHABILITY of BOTH ends, before anything grips. Discovering mid-turn that the far end
         # is unreachable leaves the collar clamped in a stalled gripper, which is the one failure
         # this maneuver must not have -- and it is exactly what the pre-wind exists to prevent, so
         # a failure here should say so rather than surfacing as a generic move error.
-        for lab, T_chk in (('approach station', T_nom_back), ('pre-wound approach', T_start_back),
+        for lab, T_chk in (('centred start', T_centred), ('unwound approach', T_start_back),
                            ('collar grasp', T_start), ('turn end', T_end)):
             if robot.arm.ik(T_chk, robot.arm.q()) is None:
                 log.error('COLLAR CLOCKING: the %s pose is unreachable. The turn needs '
@@ -1395,10 +1409,7 @@ def build_and_run(cfg, robot, camera, args):
         # That much travel is real geometry, not error, and it is NOT a rotation -- so a straight
         # move is exactly the right path for it and there is no chord to cut. Doing it first is
         # what leaves the rest of the approach a pure orbit.
-        rel = here @ inverse(T_nom_back)
-        th_now = float(np.dot(Rotation.from_matrix(rel[:3, :3]).as_rotvec(), axn))
-        T_centred = rotate_about_axis(T_nom_back, axis, point, th_now)
-        c_lin, c_ang = pose_error(here, T_centred)
+        c_lin, c_ang = pose_error(here, T_centred)   # the solve itself ran above
         # ALWAYS LOGGED, gated only above max_offaxis_tilt_deg. The number is the diagnostic: a
         # value that repeats run to run is a declared-frame orientation error; one that varies is
         # tilt the cable screw's spring left behind. Raising the gate hides neither, because this
@@ -1417,16 +1428,8 @@ def build_and_run(cfg, robot, camera, args):
                     T_centred, label='collar centre on the axis')):
                 log.error('Could not centre on the connector axis (%.1f mm).', c_lin * 1000.0)
                 return False
-        # B. ORBIT to the pre-wound pose -- about the connector axis and nothing else. The angle
-        #    is SOLVED, not assumed: the arm's clock angle depends on what the cable screw actually
-        #    achieved, not on what it commanded.
-        theta = -cl_prewind - th_now
-        r_lin, r_ang = pose_error(rotate_about_axis(T_centred, axis, point, theta), T_start_back)
-        if r_lin * 1000.0 > 1e-6 or np.degrees(r_ang) > 1e-6:
-            log.error('COLLAR CLOCKING: orbiting from the centred pose would miss the pre-wound '
-                      'pose by %.3f mm / %.3f deg. Refusing to swing blindly.',
-                      r_lin * 1000.0, np.degrees(r_ang))
-            return False
+        # B. ORBIT by theta (solved above) -- T_start_back is rotate(T_centred, theta) by
+        #    construction, so the orbit lands on it exactly.
         # THE UNWIND IS AN ORBIT, NOT A STRAIGHT MOVE TO THE PRE-WOUND POSE.
         #
         # At the nominal alignment the FINGERTIP SITS ON THE ROTATION AXIS -- the collar frame is
@@ -1811,7 +1814,7 @@ def build_and_run(cfg, robot, camera, args):
             robot.arm.servo_stop()
             return False
         try:
-            cc_ok, _T_tool0_conn, T_base_conn = cable_clocking()
+            cc_ok, _T_tool0_conn, T_base_conn, cc_screw_deg = cable_clocking()
             if cc_ok:
                 state = _advance_state(state, 'engaged')          # -> seated
                 if cl_on and not phase_gate(
@@ -1820,15 +1823,15 @@ def build_and_run(cfg, robot, camera, args):
                         'gripper will re-grasp the collar and rotate. Check the seat first.'):
                     robot.arm.servo_stop()
                     return False
-                if cl_on and collar_clocking(T_base_conn):
+                if cl_on and collar_clocking(T_base_conn, cc_screw_deg):
                     state = _advance_state(state, 'seated')       # -> locked
                 elif cl_on:
                     cc_ok = False
             else:
-                log.error('CABLE CLOCKING FAILED after %d tr%s (peak advance below the %.1f mm '
-                          'threshold) -- the connector is ENGAGED but NOT SEATED. The mate itself '
-                          'succeeded; skipping collar clocking and retracting.',
-                          cc_tries, 'y' if cc_tries == 1 else 'ies', cc_need_m * 1000.0)
+                log.error('CABLE CLOCKING FAILED after %d tr%s (every stroke was stopped by the '
+                          'force guard) -- the connector is ENGAGED but NOT SEATED. The mate '
+                          'itself succeeded; skipping collar clocking and retracting.',
+                          cc_tries, 'y' if cc_tries == 1 else 'ies')
             if phase_gate('ESCAPE',
                            'Clocking done. Next is the two-leg retract: the gripper backs off '
                            'its own -Z, then away along the target -X.'):

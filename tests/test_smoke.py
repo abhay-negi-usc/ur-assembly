@@ -3447,6 +3447,67 @@ def test_a_null_speed_override_is_resolved_before_it_reaches_the_arithmetic():
                for k in ('speed_translation_mm_s', 'speed_rotation_deg_s')),         'if no clocking block ships a null any more, this guard has lost its subject'
 
 
+def test_both_clockings_turn_about_the_socket_and_not_about_the_arm():
+    """The two clocking strokes must share a frame, not just a function.
+
+    They already share the motion: cable clocking builds its stroke as the conjugation
+    (T_f @ screw @ inverse(T_f)) @ T_arm, collar clocking calls rotate_about_axis(T_arm, T_f.X,
+    T_f.origin, angle), and those are the SAME operation to 1e-12. Both then run through
+    screw_ramp. So a difference in behaviour between them cannot come from the maths.
+
+    It came from the FRAME. Cable clocking turns about T_base_tconn -- the fixed, hand-measured
+    socket pose. Collar clocking turned about T_base_conn, which is rebuilt at runtime as
+    robot.tool0() @ T_tool0_conn_now and therefore carries every deviation the screw accumulated:
+    spring yield under load, an advance that stopped short, a regrasp rebase. The socket does not
+    move while any of that happens, so all of it is error in an axis.
+
+    The runtime measurement is still worth one thing -- how far the bayonet cammed the connector IN
+    -- and that is a translation ALONG the axis, which cannot move the line. Keep it, drop the
+    rest."""
+    import numpy as np
+
+    from urlab.transforms import inverse, rotate_about_axis, xyzrpy_to_matrix, pose_error
+
+    # ---- the two constructions are one construction -------------------------------------------
+    rng = np.random.default_rng(0)
+    T_f = xyzrpy_to_matrix(rng.normal(size=3), rng.normal(size=3))
+    T_arm = xyzrpy_to_matrix(rng.normal(size=3), rng.normal(size=3))
+    th = 0.7
+    conj = (T_f @ xyzrpy_to_matrix([0.0, 0.0, 0.0], [th, 0.0, 0.0]) @ inverse(T_f)) @ T_arm
+    lin, ang = pose_error(conj, rotate_about_axis(T_arm, T_f[:3, 0], T_f[:3, 3], th))
+    assert lin * 1000.0 < 1e-6 and np.degrees(ang) < 1e-9, (
+        'the conjugation and rotate_about_axis must be the same operation; if they diverge, one '
+        'of the two clockings is turning about something else entirely')
+
+    # ---- a drifted runtime frame is a drifted AXIS ---------------------------------------------
+    axn = T_f[:3, 0] / np.linalg.norm(T_f[:3, 0])
+    drift = np.array([0.0, 0.012, 0.004])                      # 12 mm lateral-ish runtime error
+    lat = float(np.linalg.norm(drift - np.dot(drift, axn) * axn))
+    assert lat > 0.001, 'the fixture drift must have a lateral component to be worth testing'
+    # projecting onto the true axis keeps the cam-in and discards exactly that lateral part
+    kept = T_f[:3, 3] + float(np.dot(drift, axn)) * axn
+    resid = (T_f[:3, 3] + drift) - kept
+    assert abs(float(np.linalg.norm(resid)) - lat) < 1e-12, (
+        'projecting the measured origin onto the socket axis must discard the lateral drift and '
+        'keep only the advance along it')
+
+    # ---- and the app must do exactly that ------------------------------------------------------
+    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
+        src = fh.read()
+    body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
+    code = '\n'.join(ln for ln in body.splitlines() if not ln.lstrip().startswith('#'))
+    assert 'axis = T_base_tconn[:3, 0]' in code, (
+        'collar clocking must take its axis DIRECTION from assembly.target_frame -- the socket '
+        'pose -- exactly as cable clocking does')
+    assert 'T_base_axis' in code, 'the socket-axis frame is gone'
+    # T_base_conn may still be READ (for the cam-in and the drift report) but must not be the frame
+    for banned in ('axis, point = T_base_conn', 'T_base_collar = T_base_conn',
+                   'T_base_conn @ translation_matrix'):
+        assert banned not in code, (
+            f'{banned!r} turns about the RUNTIME connector pose, which carries the screw\'s '
+            f'accumulated deviation; the socket it is captive in has not moved')
+
+
 def test_a_clocking_stroke_follows_the_arc_and_not_the_chord():
     """A one-call ramp across a 90 deg orbit drags the held part 52 mm off its own axis.
 

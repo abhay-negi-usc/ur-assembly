@@ -1239,9 +1239,36 @@ def build_and_run(cfg, robot, camera, args):
 
         TODO: grasp verification and failure recovery on the close, as agreed -- a missed collar
         currently turns an empty gripper."""
-        T_base_collar = T_base_conn @ translation_matrix([cl_off_m, 0.0, 0.0])
-        axis, point = T_base_conn[:3, 0], T_base_conn[:3, 3]
+        # THE AXIS IS THE SOCKET'S, NOT THE ARM'S.
+        #
+        # Cable clocking turns about T_base_tconn -- the fixed, hand-measured socket pose -- and
+        # that is the right frame here too: the connector is captive in a socket that does not
+        # move. T_base_conn is a different animal. It is rebuilt at RUNTIME as
+        # robot.tool0() @ T_tool0_conn_now, so it carries every deviation the screw accumulated:
+        # the spring's yield under load, an advance that stopped short, a regrasp rebase. Turning
+        # about it means turning about where the ARM ended up rather than about the part, and no
+        # amount of following the commanded arc fixes an arc drawn round the wrong line.
+        #
+        # What the runtime measurement DOES legitimately know is how far the bayonet cammed the
+        # connector IN along its own axis. Keep exactly that -- project the measured origin onto
+        # the true axis -- and discard the lateral and angular drift, which the socket forbids.
+        axis = T_base_tconn[:3, 0]
         axn = axis / float(np.linalg.norm(axis))
+        cammed = float(np.dot(T_base_conn[:3, 3] - T_base_tconn[:3, 3], axn))
+        point = T_base_tconn[:3, 3] + cammed * axn
+        T_base_axis = T_base_tconn.copy()
+        T_base_axis[:3, 3] = point
+        T_base_collar = T_base_axis @ translation_matrix([cl_off_m, 0.0, 0.0])
+        # Report the drift that was being used as an axis -- it is the direct measure of how far
+        # the screw's accumulated error would have thrown this turn.
+        _d = T_base_conn[:3, 3] - point
+        _lat = float(np.linalg.norm(_d - np.dot(_d, axn) * axn))
+        _tilt = float(np.degrees(np.arccos(np.clip(
+            abs(float(np.dot(T_base_conn[:3, 0] / np.linalg.norm(T_base_conn[:3, 0]), axn))),
+            0.0, 1.0))))
+        log.info('  axis: SOCKET (assembly.target_frame), advanced %+.2f mm by the screw. The '
+                 'measured connector frame sits %.2f mm lateral / %.2f deg tilted from it -- that '
+                 'drift is discarded, not turned about.', cammed * 1000.0, _lat * 1000.0, _tilt)
         here = robot.tool0()
         # THE GRASP ROLL IS FREE FOR THE GRIPPER AND NOT FREE FOR THE ARM.
         #
@@ -1285,10 +1312,10 @@ def build_and_run(cfg, robot, camera, args):
         # from the ring the moment the cable is released. The gripper unwinds at that near station
         # -- clear of the collar, which is what makes the roll safe -- and only then ADVANCES along
         # the connector +X onto the ring.
-        app_x = (float((inverse(T_base_conn) @ here @ robot.T_tool0_fingertip)[0, 3])
+        app_x = (float((inverse(T_base_axis) @ here @ robot.T_tool0_fingertip)[0, 3])
                  if cl_app_mm is None else float(cl_app_mm) / 1000.0)
         adv_m = cl_off_m - app_x
-        T_nom_back = T_base_conn @ translation_matrix([app_x, 0.0, 0.0]) @ grip
+        T_nom_back = T_base_axis @ translation_matrix([app_x, 0.0, 0.0]) @ grip
         T_start_back = rotate_about_axis(T_nom_back, axis, point, -cl_prewind)
         if adv_m < 0.0:
             log.warning('COLLAR CLOCKING: the approach station (%+.1f mm) is AHEAD of the collar '

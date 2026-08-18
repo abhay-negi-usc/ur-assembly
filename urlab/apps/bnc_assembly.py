@@ -74,6 +74,8 @@ import csv as _csv
 import os
 from datetime import datetime
 
+import time as _t
+
 import numpy as np
 
 from .. import config as urconfig
@@ -208,6 +210,63 @@ class _ScrewAdvance:
         self.tripped_by = None
 
 
+class _AxialForce:
+    """Trips on the contact force ALONG THE CONNECTOR'S OWN +X -- the insertion reaction.
+
+    ForceGuard watches |f|, which is the right question for "did we hit something unexpected"
+    and the wrong one for "is the insertion being resisted": a lateral graze against the socket
+    rim raises |f| without opposing the push at all, so a magnitude limit tight enough to catch
+    real resistance also stops on every glancing touch. Projecting onto the insertion axis
+    separates the two, which is what lets the ENGAGE limit be set low without becoming a
+    hair-trigger.
+
+    Shaped like ForceGuard (check/reset/tripped_by) so _AnyGuard can OR it with the others.
+    Persistence has the same meaning: the limit must hold CONTINUOUSLY for that long, so a
+    single-sample spike on first contact does not end the phase."""
+
+    def __init__(self, robot, T_tool0_conn, max_force_n, persistence_s=0.0):
+        self.robot = robot
+        self.T_tool0_conn = np.asarray(T_tool0_conn, dtype=float)
+        self.max_force_n = float(max_force_n)
+        self.persistence_s = float(persistence_s)
+        self.peak_n = 0.0                  # best axial force seen; never reset, for the log
+        self.tripped_by = None
+        self._over_since = None
+
+    def axial_n(self):
+        """|force along the connector +X|, in newtons.
+
+        Magnitude, not signed: compression is what an insertion produces, but a sign convention
+        that silently inverted would turn this guard off rather than make it noisy, and there is
+        no legitimate large TENSION during an engage either."""
+        T_base_tool0 = self.robot.tool0()
+        T_base_conn = T_base_tool0 @ self.T_tool0_conn
+        w = self.robot.arm.wrench_in(T_base_conn, T_base_tool0)
+        return abs(float(w[0]))
+
+    def check(self):
+        f = self.axial_n()
+        self.peak_n = max(self.peak_n, f)
+        if self.max_force_n <= 0.0 or f < self.max_force_n:
+            self._over_since = None
+            return False
+        now = _t.time()
+        if self.persistence_s > 0.0:
+            if self._over_since is None:
+                self._over_since = now
+                return False
+            if now - self._over_since < self.persistence_s:
+                return False
+        self.tripped_by = (f'axial force {f:.1f} N >= {self.max_force_n:.1f} N'
+                           + (f' for {now - self._over_since:.2f} s'
+                              if self.persistence_s > 0.0 and self._over_since else ''))
+        return True
+
+    def reset(self):
+        self.tripped_by = None
+        self._over_since = None
+
+
 class _AnyGuard:
     """ORs several ForceGuard-shaped watchdogs onto one ramp, remembering WHICH one tripped.
 
@@ -325,7 +384,7 @@ def build_and_run(cfg, robot, camera, args):
                      'transient several times larger.',
                      fi_preload_mm, s_ins * fi_preload_mm / 1000.0, s_ins)
 
-    # ---- INSERTION MODE: estimate | wiggle ----------------------------------------------------
+    # ---- INSERTION MODE: estimate | engage ----------------------------------------------------
     # ESTIMATE  the original: insert, observe, fit the contact manifold, correct the in-hand
     #           belief, repeat. Needs a map that covers the contact states production actually
     #           visits, which is exactly what the 2026-08-17 diagnosis found it did not.
@@ -335,90 +394,56 @@ def build_and_run(cfg, robot, camera, args):
     #           immune to every failure mode of the estimator -- and it is the honest fallback while
     #           the map and the collection are being reconciled.
     ins_mode = str(a.get('insertion_mode') or 'estimate').strip().lower()
-    if ins_mode not in ('estimate', 'wiggle'):
-        log.error("assembly.insertion_mode %r must be 'estimate' or 'wiggle'.", ins_mode)
+    if ins_mode not in ('estimate', 'engage'):
+        log.error("assembly.insertion_mode %r must be 'estimate' or 'engage'. The old\n"
+                  "standalone 'wiggle' is retired: engage does the same oscillation, but\n"
+                  "superimposed on the trajectory rather than replacing it -- set\n"
+                  "assembly.engage.amplitude instead.", ins_mode)
         return False
-    wg = a.get('wiggle', {}) or {}
-    wg_target = [float(v) for v in (wg.get('target') or [5.0, 0.0, 0.0, 0.0, 0.0, 0.0])]
-    wg_amp = [float((wg.get('amplitude') or {}).get(d, 0.0)) for d in DIM_KEYS]
-    wg_frq = [float((wg.get('frequency_hz') or {}).get(d, 0.0)) for d in DIM_KEYS]
-    wgn = wg.get('noise', {}) or {}
-    wg_noise_on = bool(wgn.get('enabled', False))
-    wg_noise_std = [float(v) for v in (wgn.get('std') or [0.0] * 6)]
-    wg_rate = float(wg.get('sample_rate_hz', 25.0))
-    wg_max_s = float(wg.get('max_duration_s', 60.0))
-    wg_engage_mm = float(wg.get('engage_advance_mm', 4.0))
-    # SPEED CAP -> time dilation. See trajectory.wiggle_time_scale: the wiggle paces by
-    # TIME, not distance, so seg_time() and speed.phase_scale never reach it and it is the
-    # one motion in this app with no speed limit of its own. Capping it by dilating the
-    # waveform clock leaves the amplitude (search area) and the frequency ratio (orbit
-    # shape) untouched and costs only wall-clock time.
-    wg_cap_v = wg.get('max_speed_mm_s')
-    wg_cap_w = wg.get('max_rotation_deg_s')
-    wg_scale, _pv, _pw, _orbit = traj.wiggle_time_scale(wg_amp, wg_frq, wg_cap_v, wg_cap_w)
-    wg_settle = _num(wg, 'settle_s', settle_shared)
-    wg_hold = _num(wg, 'hold_after_s', 0.0)
-    if ins_mode == 'wiggle':
-        if len(wg_target) != 6:
-            log.error('assembly.wiggle.target must be a 6-vector [x, y, z (mm), roll, pitch, '
-                      'yaw (deg)] of the CONNECTOR w.r.t. the target connector.')
+    # ---- ENGAGE: the trajectory-following insertion ------------------------------------------
+    en = a.get('engage', {}) or {}
+    en_amp = [float((en.get('amplitude') or {}).get(d, 0.0)) for d in DIM_KEYS]
+    en_frq = [float((en.get('frequency_hz') or {}).get(d, 0.0)) for d in DIM_KEYS]
+    en_rate = float(en.get('sample_rate_hz', 25.0))
+    en_pre_mm = float(en.get('preload_mm', 0.0) or 0.0)
+    en_speed = en.get('speed_mm_s')
+    en_fmax = float(en.get('max_axial_force_n', 0.0) or 0.0)
+    en_fpers = float(en.get('persistence_s', 0.0) or 0.0)
+    # OSCILLATION SPEED CAP. speed_mm_s paces the PATH; the oscillation adds its own velocity on
+    # top (amplitude x 2*pi*f) that the path speed does not bound. The cap derives a time dilation
+    # of the oscillation clock only -- amplitude (the search area) and the frequency RATIO (the
+    # orbit shape) are untouched, so it costs wall-clock and nothing else. null = uncapped.
+    en_scale, en_pv, en_pw, en_orbit = traj.wiggle_time_scale(
+        en_amp, en_frq, en.get('max_oscillation_speed_mm_s'),
+        en.get('max_oscillation_rotation_deg_s'))
+    if ins_mode == 'engage':
+        if en_rate <= 0:
+            log.error('assembly.engage.sample_rate_hz must be > 0.')
             return False
-        if len(wg_noise_std) != 6:
-            log.error('assembly.wiggle.noise.std must have 6 entries.')
+        if en_pre_mm < 0:
+            log.error('assembly.engage.preload_mm must be >= 0.')
             return False
-        if wg_rate <= 0 or wg_max_s <= 0:
-            log.error('assembly.wiggle.sample_rate_hz and max_duration_s must be > 0.')
+        if en_speed is not None and float(en_speed) <= 0:
+            log.error('assembly.engage.speed_mm_s must be > 0 when set (null = the assemble '
+                      'phase scale).')
             return False
-        if (wg_cap_v is not None and float(wg_cap_v) <= 0) or (wg_cap_w is not None and float(wg_cap_w) <= 0):
-            log.error('assembly.wiggle.max_speed_mm_s / max_rotation_deg_s must be > 0 when set '
-                      '(use null to leave the wiggle uncapped).')
-            return False
-        # NYQUIST, against the EFFECTIVE frequency: dilation lowers it, so checking the
-        # raw value would reject a configuration that samples perfectly well.
-        fmax = max(wg_frq) * wg_scale
-        if fmax > 0 and wg_rate < 4.0 * fmax:
-            log.error('assembly.wiggle.sample_rate_hz %.1f Hz is too coarse for a %.2f Hz '
-                      'oscillation: use at least 4x the highest frequency (Nyquist would be 2x; '
-                      '4x keeps the sampled sine recognisable).', wg_rate, fmax)
-            return False
-        active = [(d, wg_amp[i], wg_frq[i]) for i, d in enumerate(DIM_KEYS)
-                  if abs(wg_amp[i]) > 0]
-        if not active:
-            log.error('assembly.wiggle: every amplitude is 0 -- nothing would oscillate.')
-            return False
-        for d, amp, frq in active:
-            if frq <= 0:
-                log.error('assembly.wiggle.frequency_hz.%s must be > 0 when its amplitude is '
+        for i, d in enumerate(DIM_KEYS):
+            if abs(en_amp[i]) > 0.0 and en_frq[i] <= 0.0:
+                log.error('assembly.engage.frequency_hz.%s must be > 0 when its amplitude is '
                           '%.3f (an amplitude with no frequency is a constant offset, which '
-                          'belongs in `target`).', d, amp)
+                          'belongs in the trajectory).', d, en_amp[i])
                 return False
-        log.info('INSERTION MODE: WIGGLE. Target %s (connector wrt target, mm/deg); oscillating '
-                 '%s; %.0f Hz reference, up to %.0f s, engagement at x >= %.1f mm.',
-                 [round(v, 2) for v in wg_target],
-                 ', '.join(f'{d} {amp:+.2f}@{frq:.2f}Hz' for d, amp, frq in active),
-                 wg_rate, wg_max_s, wg_engage_mm)
-        if wg_scale < 1.0:
-            log.info('  SPEED CAP: peak %.2f mm/s / %.2f deg/s uncapped -> time scale '
-                     '%.3f -> %.2f mm/s / %.2f deg/s. Amplitude and the frequency ratio are '
-                     'unchanged, so the search area and the orbit shape are the same; only '
-                     'wall-clock time is spent.', _pv, _pw, wg_scale,
-                     _pv * wg_scale, _pw * wg_scale)
-        else:
-            log.info('  speed UNCAPPED: peak %.2f mm/s / %.2f deg/s (set wiggle.max_speed_mm_s '
-                     'to bound it -- seg_time and speed.phase_scale do NOT reach this motion).',
-                     _pv, _pw)
-        # COVERAGE: dilation stretches the orbit but not the timeout, so a cap silently
-        # buys less of the pattern unless max_duration_s follows it.
-        if _orbit > 0:
-            orbit_eff = _orbit / wg_scale
-            frac = wg_max_s / orbit_eff
-            (log.info if frac >= 1.0 else log.warning)(
-                '  orbit closes every %.0f s at this scale; max_duration_s %.0f s covers %.0f%%'
-                ' of it%s', orbit_eff, wg_max_s, frac * 100.0,
-                '.' if frac >= 1.0 else ' -- the sweep never completes, so part of the '
-                'rectangle is never probed. Raise max_duration_s to %.0f s.' % orbit_eff)
-        if wg_noise_on:
-            log.info('  wiggle noise ON, per-axis std %s', wg_noise_std)
+        # EFFECTIVE frequency: the speed cap dilates the oscillation clock, so checking the raw
+        # value would reject a configuration that samples perfectly well.
+        f_live = [en_frq[i] * en_scale for i in range(6) if abs(en_amp[i]) > 0.0]
+        if f_live and en_rate < 4.0 * max(f_live):
+            log.error('assembly.engage.sample_rate_hz %.1f Hz is too coarse for a %.2f Hz '
+                      'component (need >= 4x) -- the sampled sine would alias.',
+                      en_rate, max(f_live))
+            return False
+        if en_fmax <= 0:
+            log.warning('assembly.engage.max_axial_force_n is 0 -- the engage will run the whole '
+                        'trajectory no matter how hard it presses.')
 
     # ---- CLOCKING (post-mate): CABLE clocking, then COLLAR clocking --------------------------
     # Two maneuvers that run only after a mate the operator called successful. Each gets its OWN
@@ -501,17 +526,17 @@ def build_and_run(cfg, robot, camera, args):
                  g.max_force, g.max_torque)
         return AdmittanceController(robot.arm, comp), g
 
-    adm_cc = guard_cc = adm_cl = guard_cl = adm_wg = guard_wg = None
+    adm_cc = guard_cc = adm_cl = guard_cl = None
     if cc_on:
         adm_cc, guard_cc = _clock_physics(cc, 'Cable clocking')
     if cl_on:
         adm_cl, guard_cl = _clock_physics(cl, 'Collar clocking')
-    if ins_mode == 'wiggle':
-        # Same override schema as the clocking blocks: stiffness/mass/damping_ratio inherit
-        # compliance:, the guard keys inherit force_guard:. A wiggle presses and rocks against the
-        # socket, so like the clocking maneuvers it needs a limit set for "genuinely jammed" rather
-        # than the probing block's "stop on contact".
-        adm_wg, guard_wg = _clock_physics(wg, 'Wiggle insertion')
+    adm_en = guard_en = None
+    if ins_mode == 'engage':
+        # Its OWN compliance and guard, same override schema as the clocking blocks. The engage
+        # presses along one axis while (optionally) rocking across it, so it wants neither the
+        # probing block's stop-on-contact nor a clocking block's jam limit.
+        adm_en, guard_en = _clock_physics(en, 'Engage insertion')
 
     # ---- Target from the SHARED catalogue (the same record estimator_eval assembles to) ----
     tname = a.get('target_frame')
@@ -618,8 +643,38 @@ def build_and_run(cfg, robot, camera, args):
     dbg_live = (os.path.join(cfg.get('data_dir', 'data'), 'experiments')
                 if dbg_live is True else (dbg_live or None))
 
+    # The shared frame catalogue -- this app previously loaded only targets:, but the believed
+    # in-hand pose is now declared there too (see estimation.initial_connector_frame).
+    frames = tool_frames.load_frames(cfg)
+    tool_frames.check_drift(frames, cfg)      # warns if frames.yaml and the config sections drift
+
+    # THE BELIEVED IN-HAND POSE, fingertip-relative (the estimator updates this pose, so it has
+    # to be the local one, not the flattened tool0 chain).
+    #
+    # Preference order, and the first one exists so the value lives in ONE place:
+    #   1. estimation.initial_connector_frame -- a name in the shared frames catalogue. Parented
+    #      to `fingertip` there, so inverse(T_tool0_fingertip) @ frames[name] recovers exactly the
+    #      local pose that was declared.
+    #   2. estimation.initial_connector_in_fingertip -- the raw pose, kept as an override.
+    #   3. cables.yaml junction_in_fingertip -- the grasp geometry, i.e. "wherever the pick put it".
     init = cfg.get_path('estimation.initial_connector_in_fingertip')
-    T_ftip_conn = from_cfg(init) if init else from_cfg(cfg.section('junction_in_fingertip'))
+    init_name = cfg.get_path('estimation.initial_connector_frame')
+    if init_name:
+        if init_name not in frames:
+            log.error('estimation.initial_connector_frame %r is not in %s.', init_name,
+                      tool_frames.frames_path(cfg))
+            return False
+        T_ftip_conn = inverse(robot.T_tool0_fingertip) @ frames[init_name]
+        log.info('Believed in-hand pose from the shared catalogue: %r.', init_name)
+        if init:
+            # Both given: the catalogue wins, but a silent disagreement is how the two drift.
+            d_lin, d_ang = pose_error(from_cfg(init), T_ftip_conn)
+            if d_lin * 1000.0 > 0.5 or np.degrees(d_ang) > 0.2:
+                log.warning('estimation.initial_connector_in_fingertip disagrees with frame %r by '
+                            '%.2f mm / %.2f deg. The FRAME is being used; delete the inline pose '
+                            'or align it.', init_name, d_lin * 1000.0, np.degrees(d_ang))
+    else:
+        T_ftip_conn = from_cfg(init) if init else from_cfg(cfg.section('junction_in_fingertip'))
 
     live = a.get('live_plot', True)
     live_path = None
@@ -631,6 +686,32 @@ def build_and_run(cfg, robot, camera, args):
                            f'bnc_assembly_{datetime.now():%Y%m%d_%H%M%S}')
     os.makedirs(out_dir, exist_ok=True)
     log.info('Experiment folder: %s', out_dir)
+
+    gates_on = cfg.get('confirm_each_step', True) is not False
+
+    def phase_gate(name, ahead):
+        """Continue/abort between two phases. True = go on.
+
+        Placed at the IRREVERSIBLE boundaries: the screw cams the connector home and the collar
+        locks it, so each is a point of no easy return and worth a look first.
+
+        Aborting leaves the arm exactly where it is rather than escaping automatically. After the
+        engage the connector is in the socket with the gripper still on it; the right recovery
+        depends on how far it went and whether the mate will release, which is a judgement this
+        function cannot make. EOF continues, so a headless run never hangs on a prompt nobody can
+        answer, and dry runs skip the prompt entirely."""
+        if robot.arm.dry_run or not gates_on:
+            return True
+        try:
+            ans = input(f'\n[{name}] {ahead}\n    Enter to continue (q to abort): ')
+        except EOFError:
+            return True
+        if ans.strip().lower() in ('q', 'quit', 'n', 'no'):
+            log.warning('ABORTED before %s by the user. The arm is LEFT WHERE IT IS -- the '
+                        'connector may still be engaged and held. Free it by hand (release the '
+                        'gripper / press the unlock button) before commanding any motion.', name)
+            return False
+        return True
 
     def retract_from(last_ref, T_tool0_conn, adm_ctl=None):
         """The compliant UN-GUARDED escape along the believed connector's own -X.
@@ -755,68 +836,110 @@ def build_and_run(cfg, robot, camera, args):
                 and leg(r.get('target_axis', [-1.0, 0.0, 0.0]),
                         r.get('target_distance_m', 0.100), True))
 
-    def wiggle_insertion():
-        """WIGGLE INSERTION -- reach engagement by oscillating, with no estimation at all.
+    def engage_insertion():
+        """ENGAGE -- drive the assembly trajectory home, optionally rocking, stop on axial force.
 
-        Instead of inferring where the connector is and correcting the belief, this drives at ONE
-        fixed target pose and rocks about it in the connector's own axes, letting compliance find
-        the mate the way a person jiggles a plug in. It reads no map, fits nothing and never touches
-        the in-hand belief, so none of the estimator's failure modes apply to it.
+        Unlike wiggle_insertion (which ignores the trajectory and drives at ONE fixed target),
+        this follows configs/assembly_trajectory.csv, extends it by `preload_mm` past the mate,
+        and superimposes an oscillation on the way. With every amplitude at 0 it is a plain
+        direct insertion, so `direct` and `wiggle` are the same behaviour at two settings rather
+        than two code paths that can drift apart.
 
         THE REFERENCE, in the connector-w.r.t.-target frame:
 
-            v(t) = target + SUM over axes of  amplitude_i * sin(2*pi*frequency_i*t)   [+ noise]
+            v(t) = path(distance = speed * t)  +  SUM amplitude_i * sin(2*pi*frequency_i*t)
 
-        with `target` at x = +5 mm by default -- PAST the mate plane, so the spring is always
-        pushing home rather than merely arriving. The oscillation is superimposed on that push, not
-        substituted for it.
+        TWO CLOCKS, deliberately. The PATH advances by DISTANCE (speed_mm_s), so the insertion
+        takes the time its length says regardless of how the oscillation is tuned; the
+        OSCILLATION advances by TIME, so its frequency is the frequency configured regardless of
+        how fast the path is driven. Pacing both by distance -- the way seg_time paces every
+        other ramp in this app -- would make the oscillation frequency a function of the insert
+        speed.
 
-        WHY THE FREQUENCIES MUST BE MUTUALLY PRIME. Two axes at a rational frequency ratio retrace
-        the same closed Lissajous curve forever, so the wiggle would explore a ONE-dimensional
-        path through the (z, pitch) rectangle and keep re-probing it. Co-prime integers (shipped:
-        0.7 and 1.1 Hz, i.e. 7 and 11 in units of 0.1 Hz) give the longest closed orbit those
-        frequencies admit -- one full pattern every 10 s -- so the pair sweeps the rectangle
-        instead of a line through it.
+        MIND THE DURATION. The insertion lasts path_length / speed_mm_s, so a frequency chosen
+        without reference to that can complete less than one cycle and act as a constant offset.
+        The start-up line reports cycles-per-insertion for exactly this reason.
 
-        The reference is rebuilt at `sample_rate_hz` and each consecutive pair is ramped over
-        exactly one sample period, so the commanded motion follows the intended TIME law rather
-        than the distance-paced seg_time() used everywhere else in this app -- pacing a wiggle by
-        distance would change its frequency.
+        TERMINATION, and this is the point of the phase: reaching the end of the path (mate plus
+        preload) is SUCCESS, and hitting the axial force limit is a NORMAL, EXPECTED end -- not a
+        failure of the run. The connector meeting resistance partway is exactly what the bayonet
+        screw is for, so the phase reports where it stopped and the sequence carries on. That is
+        why the limit is AXIAL (see _AxialForce) and can be set low: a magnitude limit tight
+        enough to catch real resistance would also stop on every lateral graze.
 
-        ENGAGEMENT is measured, not assumed: the connector must actually advance to
-        `engage_advance_mm` along the target's +X, checked every servo cycle (the same detector the
-        cable-clocking screw uses), so success ends the motion the moment it happens. A force-guard
-        trip ends it as a FAILURE -- at that point it is jammed, not wiggling.
-
-        Returns (ok, last_ref, T_tool0_conn); the arm is LEFT AT the pose it reached, so a success
-        hands the clocking maneuvers a genuine engaged pose."""
+        Returns (status, last_ref, depth_mm) with status 'complete' or 'force'."""
         T_tool0_conn = robot.T_tool0_fingertip @ T_ftip_conn
-        rng = np.random.default_rng()
-        dt, nstep = 1.0 / wg_rate, int(round(wg_max_s * wg_rate))
+
+        # ---- the path: trajectory rows, then the preload, all as connector-wrt-target 6-vecs ----
+        rows6 = [np.asarray(vec6_from_mats(r), dtype=float) for r in dense]
+        rows6 = [np.concatenate([v[:3] * 1000.0, v[3:]]) for v in rows6]   # -> mm / deg
+        if en_pre_mm > 0.0:
+            step = float(a.get('translational_resolution_m', 0.001)) * 1000.0
+            n_pre = max(1, int(round(en_pre_mm / max(step, 1e-6))))
+            base = rows6[-1].copy()
+            for k in range(1, n_pre + 1):
+                v = base.copy()
+                v[0] += en_pre_mm * k / n_pre        # extend along the connector's own +X
+                rows6.append(v)
+        seg = [float(np.linalg.norm(rows6[i + 1][:3] - rows6[i][:3]))
+               for i in range(len(rows6) - 1)]
+        cum = np.concatenate([[0.0], np.cumsum(seg)])
+        total_mm = float(cum[-1])
+
+        v_mm_s = float(en_speed) if en_speed is not None else (g_v * s_asm)
+        dt = 1.0 / en_rate
+
+        def path_at(d_mm):
+            """The trajectory 6-vec `d_mm` along the path, linearly between rows."""
+            d = float(np.clip(d_mm, 0.0, total_mm))
+            j = int(np.searchsorted(cum, d, side='right') - 1)
+            j = max(0, min(j, len(rows6) - 2))
+            span = cum[j + 1] - cum[j]
+            f = 0.0 if span <= 1e-12 else (d - cum[j]) / span
+            return rows6[j] + f * (rows6[j + 1] - rows6[j])
 
         def ref_at(t):
-            # DILATED waveform clock: t is wall-clock, t*wg_scale is where the sine is
-            # evaluated. Scaling the argument (not the frequencies) is what keeps a
-            # mutually-prime pair mutually prime.
-            t = float(t) * wg_scale
-            v = np.array(wg_target, dtype=float)
+            v = path_at(v_mm_s * t).copy()
             for i in range(6):
-                if abs(wg_amp[i]) > 0.0 and wg_frq[i] > 0.0:
-                    v[i] += wg_amp[i] * np.sin(2.0 * np.pi * wg_frq[i] * float(t))
-            if wg_noise_on:
-                v = v + rng.normal(0.0, wg_noise_std)
-            return tool0_ref(_corr_to_m(mats_from_vec6(v)), T_tool0_conn)
+                if abs(en_amp[i]) > 0.0 and en_frq[i] > 0.0:
+                    # t * en_scale: the oscillation clock is dilated by the speed cap, the PATH
+                    # clock above is not. Scaling the argument keeps a co-prime frequency pair
+                    # co-prime.
+                    v[i] += en_amp[i] * np.sin(2.0 * np.pi * en_frq[i] * float(t) * en_scale)
+            return traj_ref(_corr_to_m(mats_from_vec6(v)), T_tool0_conn)
+
+        live = [f'{d} {en_amp[i]:+.2f}@{en_frq[i]:.2f}Hz'
+                for i, d in enumerate(DIM_KEYS) if abs(en_amp[i]) > 0.0]
+        log.info('--- ENGAGE --- %s over %.1f mm (%.1f mm trajectory + %.1f mm preload) at '
+                 '%.2f mm/s -> %.1f s; %s.',
+                 'oscillating ' + ', '.join(live) if live else 'DIRECT (no oscillation)',
+                 total_mm, total_mm - en_pre_mm, en_pre_mm, v_mm_s, total_mm / max(v_mm_s, 1e-9),
+                 f'axial force limit {en_fmax:.1f} N' if en_fmax > 0 else 'NO force limit')
+        if live:
+            dur = total_mm / max(v_mm_s, 1e-9)
+            log.info('  oscillation peak %.2f mm/s / %.2f deg/s%s; the PATH runs at %.2f mm/s, so '
+                     'the two add.', en_pv * en_scale, en_pw * en_scale,
+                     f' (capped, time scale {en_scale:.3f})' if en_scale < 1.0 else ' (uncapped)',
+                     v_mm_s)
+            cyc = {d: en_frq[i] * en_scale * dur
+                   for i, d in enumerate(DIM_KEYS) if abs(en_amp[i]) > 0.0}
+            worst = min(cyc.values()) if cyc else 0.0
+            (log.info if worst >= 1.0 else log.warning)(
+                '  cycles completed during the %.1f s insertion: %s%s', dur,
+                {k: round(v, 2) for k, v in cyc.items()},
+                '.' if worst >= 1.0 else ' -- under one full cycle acts as a constant OFFSET, not '
+                'a wiggle. Raise the frequency or slow speed_mm_s.')
 
         first = ref_at(0.0)
         phase('standoff')
         q = robot.arm.ik(first, seed_q)
         if q is None or not _guarded(robot, guard_shared,
-                                    lambda: robot.arm.move_j(q, label='wiggle start')):
-            log.error('Could not reach the wiggle start pose.')
-            return False, first, T_tool0_conn
+                                     lambda: robot.arm.move_j(q, label='engage start')):
+            log.error('Could not reach the engage start pose.')
+            return 'unreachable', first, float('nan')
 
-        det = _ScrewAdvance(robot, T_tool0_conn, T_base_tconn, wg_engage_mm / 1000.0)
-        combo = _AnyGuard(det, guard_wg)
+        det = _AxialForce(robot, T_tool0_conn, en_fmax, en_fpers)
+        combo = _AnyGuard(det, guard_en)
         obs, cnt = [], [0]
 
         def log_cb():
@@ -825,51 +948,42 @@ def build_and_run(cfg, robot, camera, args):
                 obs.append(_observe(robot, T_tool0_conn, T_base_tconn))
 
         phase('assemble')
-        adm_wg.reset()
-        adm_wg.warmup(first, tare_fn=tare)
+        adm_en.reset()
+        adm_en.warmup(first, tare_fn=tare)
         combo.reset()
-        ok, prev, last_ref = False, first, first
+        nstep = int(np.ceil((total_mm / max(v_mm_s, 1e-9)) * en_rate))
+        status, prev, last_ref = 'complete', first, first
         for i in range(1, nstep + 1):
             cur = ref_at(i * dt)
-            res = adm_wg.ramp(prev, cur, dt, combo, on_step=log_cb)
+            res = adm_en.ramp(prev, cur, dt, combo, on_step=log_cb)
             prev = last_ref = cur
             if res != 'seated':
                 continue
-            if combo.tripped is det:
-                ok = True
-                log.info('  ENGAGED after %.1f s of wiggle -- %s', i * dt, det.tripped_by)
-            else:
-                log.warning('  wiggle stopped on the force guard after %.1f s (%s); peak advance '
-                            '%.2f mm -- jammed, not engaged.', i * dt, combo.tripped_by,
-                            det.peak_m * 1000.0)
+            status = 'force' if combo.tripped is det else 'guard'
             break
-        else:
-            log.warning('  wiggle ran the full %.0f s without reaching %.1f mm; peak advance '
-                        '%.2f mm.', wg_max_s, wg_engage_mm, det.peak_m * 1000.0)
 
-        # Settle at whatever was reached. The integrator is zeroed first so the hold commands the
-        # pose the arm is AT, not that pose plus the deflection already in it.
         stay = robot.tool0()
-        adm_wg.reset()
-        if wg_settle > 0:
-            adm_wg.hold(stay, wg_settle, guard=None)
-        if wg_hold > 0:
-            adm_wg.hold(stay, wg_hold, guard=None)
-        adm_wg.stop()
+        adm_en.reset()
+        if settle_shared > 0:
+            adm_en.hold(stay, settle_shared, guard=None, on_step=log_cb)
+        adm_en.stop()
         robot.arm.servo_stop()
 
+        depth = float(matrix_to_xyzrpy(
+            inverse(T_base_tconn) @ (robot.tool0() @ T_tool0_conn))[0][0] * 1000.0)
+        if status == 'complete':
+            log.info('  ENGAGE COMPLETE -- drove the full %.1f mm; depth %.2f mm past the mate, '
+                     'peak axial force %.1f N.', total_mm, depth, det.peak_n)
+        elif status == 'force':
+            log.info('  ENGAGE stopped on the AXIAL FORCE LIMIT (%s) at depth %.2f mm. This is a '
+                     'normal end, not a failure: the clocking screw is what drives the rest.',
+                     det.tripped_by, depth)
+        else:
+            log.warning('  ENGAGE stopped on the general force guard (%s) at depth %.2f mm -- '
+                        'that is a JAM, not the axial limit.', combo.tripped_by, depth)
         if obs:
-            _save_observations(os.path.join(out_dir, 'wiggle_observations.csv'), obs)
-        got = matrix_to_xyzrpy(inverse(T_base_tconn) @ (robot.tool0() @ T_tool0_conn))
-        log.info('  wiggle end pose (connector wrt target): xyz %s mm, rpy %s deg; '
-                 'peak advance %.2f mm, %d observations logged',
-                 np.round(got[0] * 1000.0, 2).tolist(), np.round(np.degrees(got[1]), 2).tolist(),
-                 det.peak_m * 1000.0, len(obs))
-        if robot.arm.dry_run and not ok:
-            log.info('  dry run: advance is unmeasurable (tcp_pose is a fixed stand-in); '
-                     'treating the wiggle as engaged to exercise the rest of the sequence.')
-            ok = True
-        return ok, last_ref, T_tool0_conn
+            _save_observations(os.path.join(out_dir, 'engage_observations.csv'), obs)
+        return status, last_ref, depth
 
     def cable_clocking():
         """CABLE CLOCKING -- the bayonet screw, and the belief reset that makes it well posed.
@@ -1168,16 +1282,14 @@ def build_and_run(cfg, robot, camera, args):
         np.asarray(st.get('axis', [-1, 0, 0]), dtype=float)
         * float(st.get('distance_m', 0.01))) @ mats[0]
 
-    def tool0_ref(row, T_tool0_conn):
-        """A pose given DIRECTLY in the target-connector frame -> a tool0 reference.
-
-        For poses that mean what they say wrt the mate -- the wiggle's target, for one, whose
-        +5 mm along +X is its own press. NOT for trajectory rows: those go through traj_ref,
-        which anchors them (see T_base_targetobj)."""
-        return T_base_tconn @ row @ inverse(T_tool0_conn)
-
     def traj_ref(row, T_tool0_conn, commit=False):
         """A TRAJECTORY row -> a tool0 reference, anchored so the path ends on the mate.
+
+        ANCHORED (T_base_targetobj = the mate with the CSV's last row normalised away), which is
+        why a preload must never be written as a trajectory row: it would be normalised out here
+        and driven everywhere else. There used to be a second helper for poses stated DIRECTLY
+        wrt the recorded mate; the standalone wiggle was its only caller and both are gone, so
+        every reference in this app is now an anchored trajectory row.
 
         `commit=True` adds the final insertion's preload, so the press applies to the attempt
         meant to SEAT and to nothing that collects observations."""
@@ -1193,9 +1305,11 @@ def build_and_run(cfg, robot, camera, args):
     seed_q = q
     if not verify_cable_held(robot, check, 'stand-off'):
         return False
+    # UNCONDITIONAL, unlike the gates below: this is the boundary between free space and
+    # contact, so it is asked even with --yes.
     if not robot.arm.dry_run:
         try:
-            ans = input('\n[stand-off] Ready to ASSEMBLE (contact ahead). '
+            ans = input('\n[stand-off] Ready to ENGAGE (contact ahead). '
                         'Enter to continue (q to abort): ')
         except EOFError:
             ans = ''
@@ -1209,12 +1323,14 @@ def build_and_run(cfg, robot, camera, args):
     T_cum = np.eye(4)
     trackc, trackr, trackg = [np.zeros(len(estimator.estimate_dims))], [], []
     try:
-        if ins_mode == 'wiggle':
-            # WIGGLE replaces the whole estimate/insert loop AND the final insertion: there
-            # is no belief to correct and nothing to commit, just one oscillating approach
-            # that either engages or does not. It leaves the arm AT the pose it reached.
-            success, _last_ref_w, _T_tool0_conn_w = wiggle_insertion()
-            est_rows.append({'attempt': 'wiggle', 'success': bool(success)})
+        if ins_mode == 'engage':
+            # ENGAGE replaces the estimate loop and the commit. A force stop is
+            # an ordinary outcome, so both endings continue to the clocking sequence; the gate
+            # before cable clocking is where a person decides whether the depth reached is good.
+            en_status, _last_ref_e, en_depth = engage_insertion()
+            success = en_status in ('complete', 'force')
+            est_rows.append({'attempt': 'engage', 'status': en_status,
+                             'depth_mm': en_depth, 'success': bool(success)})
         for it in (range(1, max_attempts + 1) if ins_mode == 'estimate' else ()):
             T_tool0_conn = robot.T_tool0_fingertip @ T_ftip_conn
             e_xyz, e_rpy = matrix_to_xyzrpy(T_ftip_conn)
@@ -1410,10 +1526,21 @@ def build_and_run(cfg, robot, camera, args):
     if cc_on:
         cc_ok = ret_ok = False
         state = 'engaged'                    # the initial assembly mated it; that is where we are
+        if not phase_gate('CABLE CLOCKING (insert)',
+                          'The connector is ENGAGED. Next is the bayonet screw, which cams it '
+                          'HOME -- check the engagement looks right first.'):
+            robot.arm.servo_stop()
+            return False
         try:
             cc_ok, _T_tool0_conn, T_base_conn = cable_clocking()
             if cc_ok:
                 state = _advance_state(state, 'engaged')          # -> seated
+                if cl_on and not phase_gate(
+                        'COLLAR CLOCKING (lock)',
+                        'The connector is SEATED. Next is the collar turn, which LOCKS it -- the '
+                        'gripper will re-grasp the collar and rotate. Check the seat first.'):
+                    robot.arm.servo_stop()
+                    return False
                 if cl_on and collar_clocking(T_base_conn):
                     state = _advance_state(state, 'seated')       # -> locked
                 elif cl_on:
@@ -1423,7 +1550,12 @@ def build_and_run(cfg, robot, camera, args):
                           'threshold) -- the connector is ENGAGED but NOT SEATED. The mate itself '
                           'succeeded; skipping collar clocking and retracting.',
                           cc_tries, 'y' if cc_tries == 1 else 'ies', cc_need_m * 1000.0)
-            ret_ok = clocking_retract()
+            if phase_gate('ESCAPE',
+                           'Clocking done. Next is the two-leg retract: the gripper backs off '
+                           'its own -Z, then away along the target -X.'):
+                ret_ok = clocking_retract()
+            else:
+                log.warning('Escape skipped by the user -- the arm is still at the connector.')
         finally:
             robot.arm.servo_stop()
             if clock_rows:

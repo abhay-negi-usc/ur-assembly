@@ -58,6 +58,23 @@ frames:
     xyz_mm:  [0.0, +45.7, 159.0]
     rpy_deg: [180.0, 0.0, +90.0]
 
+  # The BNC connector as HELD BETWEEN THE FINGER PADS -- the believed in-hand pose that
+  # bnc_assembly plans from and the estimator corrects.
+  #
+  # PARENTED TO THE FINGERTIP, not tool0, because that is what the pose means: where the
+  # connector sits relative to where the pads close. The loader flattens the chain, so consumers
+  # that want it wrt tool0 get that for free while bnc_assembly can recover the fingertip-relative
+  # value the estimator updates.
+  #
+  # DISTINCT FROM bnc_connector_finger_holder, which is the FIXTURED pose the map-building and
+  # eval apps treat as ground truth (the part clamped between closed fingers, no pick involved).
+  # A picked connector does not sit where a fixtured one does, so the two are different frames for
+  # different situations -- see the note under targets: about which one a target belongs to.
+  bnc_connector_in_fingerpads:
+    parent: fingertip
+    xyz_mm:  [-45.0, 0.0, 5.0]
+    rpy_deg: [0.0, 0.0, 180.0]
+
 # ============================================================================
 # TARGETS -- recorded BASE_LINK poses of the frames above (base_link <- frame), e.g. the assembly
 # mate. MEASURE: hand-guide to a good mate, read the `base_link <- <frame>` line off
@@ -83,5 +100,5 @@ targets:
   # Prefer a FRESH monitor reading when there is bench time -- this is arithmetic, not a
   # measurement.  (was xyz_mm [+108.52, +1013.93, -141.11])
   bnc_connector_finger_holder:
-    xyz_mm:  [99.28, 1101.77, -139.29]
-    rpy_deg: [-50.76, 2.12, +95.04]
+    xyz_mm:  [98.88, 1096.00, -139.96]
+    rpy_deg: [-47.76, 1.77, 94.84]

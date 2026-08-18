@@ -23,7 +23,7 @@ tip_frame: tool0
 held_frame: bnc_connector_finger_holder
 
 cycles: 10                       # how many probe -> contact -> retract repetitions
-retract: true                    # false = leave the arm AT the contact and end after ONE probe.
+retract: false                    # false = leave the arm AT the contact and end after ONE probe.
                                  # For irreversible mates (a fully assembled hose): the robot
                                  # cannot back out until a human presses the unlock button.
 standoff_distance_m: 0.030       # backed off along the connector's own -X (free space)
@@ -64,5 +64,5 @@ force_guard:
   enabled: true
   max_force_n: 15.0              # a probe should FEEL the face, not press it
   max_torque_nm: 4.0
-  persistence_s: 0.0             # instant: the trip point IS the measurement here -- a
+  persistence_s: 1.0             # instant: the trip point IS the measurement here -- a
                                  # debounce would smear the contact pose by the extra travel

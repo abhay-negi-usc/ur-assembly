@@ -648,7 +648,7 @@ assembly:
     # from the declared one. Y and Z move the line; X only slides the reference point along it
     # (no geometric effect). If this settles to a stable value it belongs in the frame
     # declaration itself (frames.yaml) rather than here -- this knob is the fast bench tune.
-    axis_offset_mm: [0.0, 0.0, -5.0]
+    axis_offset_mm: [0.0, 0.0, -10.0]
     # UNWIND STATION, mm along the connector +X RELATIVE TO THE JUNCTION (= the closed pads, see
     # collar_offset_mm above). The gripper unwinds here, then ADVANCES onto the collar before
     # closing -- so with null/0 the advance is exactly collar_offset_mm.
@@ -661,6 +661,13 @@ assembly:
     # the collar, since they were just gripping there. Negative = stand further back.
     approach_mm: null
     rotation_deg: 90.0
+    # PUSH while turning, mm along the connector +X -- the collar turn becomes a SCREW, like the
+    # cable stroke: the axial press keeps the collar's lugs engaged with their ramps through the
+    # turn instead of letting them cam back and skip. The reference leads the ring by at most
+    # this much, so under this block's 500 N/m axial spring the press tops out at ~5 N, and the
+    # force guard still ends the turn if the lock bottoms out hard (that trip is treated as
+    # reaching the lock, not as failure). 0.0 = the pure rotation this was before 2026-08-18.
+    push_mm: 10.0
     # SEAT PUSH -- runs between the unwind and the advance onto the collar: re-grip the
     # connector at the junction and PRESS it deeper along the connector +X until force_n is
     # SUSTAINED for persistence_s. The guard trip IS the success (pressed home and holding); the
@@ -671,7 +678,7 @@ assembly:
     # advance; a failed grasp skips the push rather than failing the run.
     seat_push:
       enabled: true
-      force_n: 5.0
+      force_n: 2.0
       persistence_s: 1.0
       max_travel_mm: 15.0
     # PRE-WIND, deg. Before grasping, unwind the OPEN gripper this far about the
@@ -718,7 +725,7 @@ assembly:
     # --- compliance overrides ---
     # Softer than the screw: this turns a ring that is already captive, so it should yield rather
     # than force a mis-estimated axis.
-    stiffness: [500.0, 500.0, 500.0, 5.0, 10.0, 10.0]
+    stiffness: [1500.0, 1500.0, 1500.0, 10.0, 10.0, 10.0]
     mass: null
     damping_ratio: null
     # --- force guard overrides ---
@@ -1024,7 +1031,7 @@ compliance:
   # 2026-08-18: unified across the map/eval/assembly chain. Stiffness decides what force
   # a given pose produces, so the app that BUILDS the map and every app matched against
   # it must agree or the observations sit off the map by construction.
-  stiffness:     [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
+  stiffness:     [1500.0, 1500.0, 1500.0, 10.0, 10.0, 10.0]
   damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0

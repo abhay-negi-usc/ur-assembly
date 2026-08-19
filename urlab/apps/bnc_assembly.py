@@ -491,6 +491,7 @@ def build_and_run(cfg, robot, camera, args):
     cc_open_after = bool(cc.get('open_gripper_after', True))
     cl_off_m = _num(cl, 'collar_offset_mm', 25.0) / 1000.0
     cl_rot = np.radians(_num(cl, 'rotation_deg', 90.0))
+    cl_push_m = _num(cl, 'push_mm', 0.0) / 1000.0
     # PRE-WIND: how far to unwind the OPEN gripper before the turn. null = rotation_deg,
     # i.e. exactly the range the turn is about to spend. 0 disables.
     _pw = cl.get('prewind_deg')
@@ -1523,7 +1524,8 @@ def build_and_run(cfg, robot, camera, args):
             theta = -np.radians(screw_deg) if screw_deg is not None else -th_now
         T_start_back = rotate_about_axis(T_centred, axis, point, theta)
         T_start = translation_matrix(adv_m * axn) @ T_start_back
-        T_end = rotate_about_axis(T_start, axis, point, cl_rot)
+        T_end = translation_matrix(cl_push_m * axn) @ rotate_about_axis(
+            T_start, axis, point, cl_rot)
         if adv_m < 0.0:
             log.warning('COLLAR CLOCKING: the approach station (%+.1f mm) is AHEAD of the collar '
                         '(%+.1f mm), so the advance runs backwards along the connector +X. Check '
@@ -1532,11 +1534,11 @@ def build_and_run(cfg, robot, camera, args):
                  'Centre on the axis, unwind %+.1f deg by ORBITING the connector +X at the '
                  '%+.1f mm station (gripper OPEN and clear of the ring, so the collar stays put; '
                  'landing %s), advance %+.1f mm onto it, grasp, then turn %+.1f deg about the '
-                 'same axis.',
+                 'same axis while pushing %+.1f mm along it.',
                  cl_off_m * 1000.0, np.degrees(theta), app_x * 1000.0,
                  'at the engaged clock angle' if not cl_prewind_explicit
                  else '%+.1f deg before nominal' % np.degrees(-cl_prewind),
-                 adv_m * 1000.0, np.degrees(cl_rot))
+                 adv_m * 1000.0, np.degrees(cl_rot), cl_push_m * 1000.0)
         # REACHABILITY of BOTH ends, before anything grips. Discovering mid-turn that the far end
         # is unreachable leaves the collar clamped in a stalled gripper, which is the one failure
         # this maneuver must not have -- and it is exactly what the pre-wind exists to prevent, so
@@ -1713,8 +1715,16 @@ def build_and_run(cfg, robot, camera, args):
         # SUBDIVIDED ON THE TRUE ARC -- see screw_ramp. Same 90 deg orbit about the same axis
         # as the cable screw, but here the fingers are CLOSED on the collar, so the chord's 52 mm
         # excursion would be applied straight into the ring.
-        res = screw_ramp(adm_cl, lambda f: rotate_about_axis(start, axis, point, cl_rot * f),
-                         guard_cl, cl_v, cl_w, abs(np.degrees(cl_rot)), label='turn ')
+        # The turn is a SCREW when push_mm is set: the rotation about the axis composed with a
+        # translation ALONG it, exactly the cable stroke's shape -- the axial press keeps the
+        # collar's lugs engaged with their ramps while it turns. A translation along the
+        # rotation axis commutes with the rotation, so the composed path is still an exact screw
+        # and screw_ramp subdivides it the same way.
+        res = screw_ramp(
+            adm_cl,
+            lambda f: (translation_matrix(cl_push_m * f * axn)
+                       @ rotate_about_axis(start, axis, point, cl_rot * f)),
+            guard_cl, cl_v, cl_w, abs(np.degrees(cl_rot)), label='turn ')
         _lin, turned = pose_error(start, robot.tool0())
         adm_cl.reset()
         if cl_settle > 0:

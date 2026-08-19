@@ -1,0 +1,389 @@
+# ===================================================================================================
+# WIGGLE SAMPLING -- sustained-contact excitation for CONTACT-MODE discovery.
+# urlab/apps/wiggle_sampling.py, for analysis/engagement_modes/wiggle_mode_detection.md.
+#
+# uncertain_sampling collects POSE -> WRENCH: one approach per trial, contact only at the very end,
+# roughly along the socket normal, over in a settle. That is the right shape for a manifold map and
+# the wrong shape for mode detection, which needs contact that LASTS (a tangent-cone estimate is a
+# covariance over a window) and excitation in the LATERAL and ROTATIONAL directions (the ones that
+# tell a one-point graze from a seated bayonet, and the ones a straight axial advance never loads).
+#
+# This app parks the part at labelled stations, presses, and holds while a multisine rocks it.
+#
+# ---------------------------------------------------------------------------------------------
+# RUN THE PILOT FIRST. wiggle_mode_detection.md 5.2 is explicit that grasp compliance is likely
+# the term that decides whether the whole experiment lands above or below the resolution limit,
+# and says to measure it BEFORE committing to a collection campaign. The full plan below is 108
+# bursts and about 50 minutes (the app prints its own estimate before it moves); this is 13
+# bursts and about 6, and it answers the question:
+#
+#   python -m urlab.apps.wiggle_sampling --config configs/wiggle_sampling.yaml \
+#       --set wiggle.passes=[in] --set wiggle.amplitude_scales=[1.0] \
+#       --set wiggle.preloads_mm=[0.0,4.0] --set wiggle.wiggle_s=12
+#
+# What to look at in the result, before running anything longer:
+#   * bursts.csv quiet_fmag_std_n   -- the noise floor. Every eigengap threshold is a ratio
+#                                      against it, so if it is not well under the wiggle's own
+#                                      force variation there is nothing to detect.
+#   * bursts.csv tug_lat_resist_n   -- must separate the `beside` stations from the `mate`
+#                                      station. If it does not, the part is not where you think
+#                                      it is and no amount of analysis will fix that.
+#   * bursts.csv ref_drift_mm       -- grasp slip. Anything growing here invalidates 4.1 and 4.3
+#                                      (6: slip forges every diagnostic in section 4).
+# ---------------------------------------------------------------------------------------------
+#
+# Full run:  python -m urlab.apps.wiggle_sampling --config configs/wiggle_sampling.yaml
+# ===================================================================================================
+
+robot:
+  ip: 192.168.125.2
+  dry_run: false
+  # Tool payload (gripper + coupler + camera). REQUIRED so getActualTCPForce() subtracts the tool
+  # weight and reports TRUE EXTERNAL force -- this experiment is entirely a wrench measurement.
+  payload:
+    mass_kg: 1.3
+    cog_m: [-0.026, 0.028, 0.030]
+base_frame: base_link
+tip_frame: tool0
+
+cable: bnc
+
+# The connector under test: its pose wrt tool0 (frames:) and its recorded mate (targets:) both
+# come from configs/frames.yaml.
+#
+# USE THE FIXTURED FRAME, not the picked one. bnc_connector_finger_holder is the part clamped
+# between closed fingers, so its pose wrt tool0 is KNOWN rather than believed. That matters more
+# here than anywhere else: wiggle_mode_detection.md 5.3 asks whether the connector pose is measured
+# externally or derived from forward kinematics, and the answer changes how severe the grasp
+# compliance problem is. Clamping does not make it external, but it does remove the pick's pose
+# error and most of the slip, which is the confound section 6 calls the most likely to ruin the run.
+held_frame: bnc_connector_finger_holder
+
+wiggle:
+  # ---- STATIONS ------------------------------------------------------------------------------
+  # Each station is a pose to hold and excite. `depth_mm` is measured along the TARGET (socket)
+  # axis from the mate: 0 = the recorded mate, negative = short of it. `lateral_mm` is [y, z] in
+  # the TARGET frame. `offset` is [x, y, z (mm), roll, pitch, yaw (deg)] applied in the
+  # CONNECTOR's own frame -- a deliberate misalignment, which is how you reach a different contact
+  # MODE at the same depth (one-point vs two-point vs line contact).
+  #
+  # `contact: false` marks a station the part is not expected to touch. Its preload sweep
+  # collapses to {0}, since pressing 4 mm into thin air records the same free-space rows three
+  # times and costs a minute each.
+  #
+  # THE THREE KINDS, and why each is here (3.1):
+  #   free    held well clear of everything. k = 0 BY CONSTRUCTION -- this is the labelled
+  #           anchor the whole unsupervised half of the analysis is calibrated against.
+  #   beside  the SAME DEPTH as a contact station, displaced laterally into free space.
+  #           *** DO NOT DELETE THESE. *** Depth correlates with engagement trivially, so
+  #           without them a "mode detector" that has merely learned to read x cannot be
+  #           distinguished from one that has learned the constraint geometry. 3.1 calls this
+  #           the most important control in the experiment, and it is.
+  #   insert  in the socket. The states actually under study; label unknown by design.
+  #
+  # >>> CHECK THE LATERAL CLEARANCE BY HAND BEFORE THE FIRST RUN. <<< The `beside` stations put
+  # the connector 30 mm off-axis at socket depth. Whether that is free space or the fixture
+  # depends on your mount, and this file cannot know. Jog there once with the teach pendant. The
+  # free-space move to each station is force-guarded, so a mistake stops rather than crashes, but
+  # a guard trip is a wasted run, not a plan.
+  stations:
+    - {name: free,     label: free,   depth_mm: -40.0, lateral_mm: [0.0, 40.0], contact: false}
+    - {name: beside3,  label: beside, depth_mm:  -3.0, lateral_mm: [0.0, 30.0], contact: false}
+    - {name: beside0,  label: beside, depth_mm:   0.0, lateral_mm: [0.0, 30.0], contact: false}
+    - {name: d10,      label: insert, depth_mm: -10.0}
+    - {name: d6,       label: insert, depth_mm:  -6.0}
+    - {name: d3,       label: insert, depth_mm:  -3.0}    # matched to beside3
+    - {name: d1_5,     label: insert, depth_mm:  -1.5}
+    - {name: mate,     label: insert, depth_mm:   0.0}    # matched to beside0
+
+  # ---- PASSES: the hysteresis test (4.1) -----------------------------------------------------
+  # `in` visits the contact stations shallow -> deep, `out` deep -> shallow, and the arm does NOT
+  # return to the standoff between stations within a pass -- it slides along the axis, so the
+  # contact history is continuous and the two passes reach the same depth having been through
+  # different histories.
+  #
+  # THAT DIFFERENCE IS THE STRONGEST EVIDENCE IN THE DOCUMENT. A continuous function of pose
+  # cannot produce a difference at matched depth; only a discrete state variable can. Dropping
+  # `out` halves the run time and removes the confirmatory test the whole thing is built around.
+  # (It does not prove modes on its own -- friction produces hysteresis too -- which is what the
+  # amplitude sweep below is for: frictional hysteresis collapses past breakaway, geometric
+  # hysteresis does not. 4.6.)
+  passes: [in, out]
+
+  # ---- THE EXCITATION ------------------------------------------------------------------------
+  # BASE amplitude, in the CONNECTOR's own axes (mm / deg). x is the insertion axis.
+  #
+  # x IS DELIBERATELY EXCITED HERE, unlike in bnc_assembly's engage where the trajectory owns it.
+  # The axial direction is the one the constraint is strongest in, so leaving it out would throw
+  # away the highest-SNR channel; what makes it safe is the preload, which keeps the contact
+  # bilateral so the oscillation never separates. See preloads_mm.
+  #
+  # These are SMALL on purpose. This is a local probe of the tangent cone, not a search: the
+  # excitation has to stay inside the stratum it is measuring, or it measures the neighbourhood
+  # instead. That is also exactly what makes the amplitude sweep informative (below).
+  amplitude:
+    x_mm:      0.30
+    y_mm:      0.0
+    z_mm:      0.30
+    roll_deg:  0.0
+    pitch_deg: 0.50
+    yaw_deg:   0.0
+
+  # FREQUENCY per axis (Hz). Three separate constraints bind here, and they pull against each
+  # other -- read all three before retuning.
+  #
+  # 1. MUTUALLY PRIME, and the app refuses to run if they are not. 0.5 / 0.9 / 1.3 Hz are 5 / 9 /
+  #    13 in units of 0.1 Hz, pairwise co-prime. Two axes at a simple ratio retrace one closed
+  #    Lissajous curve forever, so the excitation would sweep a ONE-dimensional path through the
+  #    (x, z, pitch) box -- and a rank estimate cannot tell that apart from a genuine constraint,
+  #    which would make the headline result an artefact of the excitation. Co-prime tones close
+  #    the orbit only every 10 s and fill the box instead. 3.3 calls this the single most
+  #    important design choice in the wiggle: it is what makes the COMMANDED motion provably
+  #    full-rank, and therefore what turns an observed rank deficit into evidence.
+  #
+  # 2. SPECTRAL SEPARATION. To attribute the RESPONSE at each tone to the axis that drove it, the
+  #    peaks have to be resolvable in a single burst. Separation in FFT bins is (frequency gap) x
+  #    (record length), and a windowed peak is about 4 bins wide, so the gap must satisfy
+  #        gap >= 3 / wiggle_s
+  #    Here the minimum gap is 0.4 Hz against a ~13 s untapered record = 5.2 bins. Comfortable.
+  #    THIS IS WHY THE TONES ARE SPACED 0.4 Hz APART rather than the 0.2 Hz of an all-odd ladder:
+  #    at 0.2 Hz the 13 s burst gives 2.6 bins and the two upper tones sit inside each other's
+  #    main lobe, so no amount of analysis separates their responses. Narrowing the spacing means
+  #    lengthening wiggle_s to match.
+  #
+  # 3. CEILING (3.3 / 7). Stay well below the resonance of grasp compliance against connector
+  #    inertia, or the quasi-static regression of 2.1 picks up phase lag and Sigma_vw stops
+  #    meaning anything. The closed-loop contact frequency here is sqrt((S + k_env)/M) ~= 4.6 Hz
+  #    at the stiffness set below against a measured 39 N/mm seat. At 1.3 Hz that is r = 0.28,
+  #    and the second-order phase lag arctan(2*zeta_c*r / (1 - r^2)) at zeta_c = 1.1 is already
+  #    ~34 deg -- NOT negligible. If the pilot's compliance estimate looks rotated, this is the
+  #    first thing to suspect, and the fix is to drop every tone (e.g. 0.3 / 0.5 / 0.7) AND raise
+  #    wiggle_s to keep constraint 2 satisfied, because that ladder has a 0.2 Hz minimum gap.
+  frequency_hz:
+    x_mm:      0.5
+    y_mm:      0.0
+    z_mm:      0.9
+    roll_deg:  0.0
+    pitch_deg: 1.3
+    yaw_deg:   0.0
+
+  # PHASE per axis (deg). Spread so the three axes do not all peak at the same instant, which
+  # would make the excitation effectively one-dimensional at the corners of the box and put an
+  # avoidable spike into the contact. Any spread will do; these are 0 / 120 / 240.
+  phase_deg:
+    x_mm:      0.0
+    y_mm:      0.0
+    z_mm:      120.0
+    roll_deg:  0.0
+    pitch_deg: 240.0
+    yaw_deg:   0.0
+
+  # ---- AMPLITUDE SWEEP (3.3, 4.6) ------------------------------------------------------------
+  # Multipliers on the base amplitude. Log-spaced, and the DELIVERABLE IS THE CURVE, not a number:
+  # local dimension is only defined at a scale for a stratified set, so what the analysis produces
+  # is dimension-vs-radius. An engaged state should sit low and then rise as the wiggle escapes
+  # its stratum; free space should sit at 6 throughout. The shape of that curve is itself the
+  # evidence for stratification.
+  #
+  # It also settles the friction question (4.6): stiction kills tangential motion and mimics a
+  # constraint, but a frictional constraint vanishes past breakaway while a geometric one does
+  # not. Only a sweep separates them.
+  #
+  # 3 points over an 4x range is the minimum that draws a curve. Widen to
+  # [0.125, 0.25, 0.5, 1.0, 2.0, 4.0] once the pilot shows the small end is above the noise floor
+  # -- that is 32x and the run is 2x longer.
+  amplitude_scales: [0.5, 1.0, 2.0]
+
+  # ---- PRELOAD SWEEP (3.3, 6) ----------------------------------------------------------------
+  # mm past the station along the connector's own +X, pressed before the hold.
+  #
+  # THIS IS THE PARAMETER THE EXPERIMENT LIVES OR DIES ON. Without preload the contact constraint
+  # is UNILATERAL: the locally reachable set is a half-space, not a subspace, and PCA on a
+  # half-disc reports near-full rank however constrained the part actually is. Preload is what
+  # makes it bilateral and the rank estimate meaningful.
+  #
+  # FORCE, NOT DISTANCE, is what you are choosing. The reference stops preload_mm past wherever
+  # the part stopped, so the sustained press is (axial stiffness) x preload. At the 2000 N/m set
+  # below: 0 / 3.0 / 8.0 N.
+  #
+  # THE WINDOW IS NARROW AT BOTH ENDS.
+  #   lower  the preload must EXCEED the largest x amplitude (0.30 x 2.0 = 0.6 mm here) or the
+  #          spring goes into tension at the bottom of every cycle and the contact breaks anyway
+  #          -- the exact failure it exists to prevent. The app warns if it does not.
+  #   upper  set by GRASP SLIP (6). A slip is discrete, hysteretic and sharply transitioning, so
+  #          it forges bimodality, matched-depth hysteresis AND window-length-independent sharp
+  #          transitions -- it fakes every diagnostic in section 4 at once. FIND THE SLIP
+  #          THRESHOLD EXPLICITLY (press with increasing force and watch reference_check drift)
+  #          and keep the top preload well under it.
+  #
+  # 0.0 IS IN THE LIST ON PURPOSE. It is the unilateral control, and it is what shows the preload
+  # is doing anything at all. 3.3 asks for a preload sweep "including zero"; the app warns if you
+  # drop it.
+  preloads_mm: [0.0, 1.5, 4.0]
+
+  # ---- TIMING --------------------------------------------------------------------------------
+  # HOLD-STILL, before each wiggle. This is the SENSOR NOISE FLOOR (3.3), and it is measured per
+  # burst rather than once per run because that is the only way it is comparable: the eigengap
+  # threshold is a ratio against it, and the floor depends on the pose, the preload and the grasp,
+  # all of which change from burst to burst.
+  quiet_s: 2.0
+  # The wiggle itself. The orbit closes every 10 s at the frequencies above, so 15 s is 1.5 full
+  # patterns -- windows from different bursts see the same excitation and are comparable. Shorter
+  # than one orbit and they are not; the app warns.
+  wiggle_s: 15.0
+  # Raised-cosine ramp at each end of the wiggle. Without it the multisine steps to full amplitude
+  # at t=0 (the phases above are not all zero, so sin(phi) != 0) and a step on the reference is an
+  # impulse into the contact -- a transient that has nothing to do with the constraint geometry.
+  # Tapered samples are FLAGGED (`taper` column), not dropped, so a covariance window can exclude
+  # them while the raw record stays complete.
+  taper_s: 1.0
+
+  # ---- GEOMETRY / SPEEDS ---------------------------------------------------------------------
+  # How far short of a station the free-space approach starts, along the same axis.
+  standoff_mm: 20.0
+  # Speed of the axial approach into a station, and of the station-to-station slides within a
+  # pass. Slow: these moves make and break the contacts whose history the hysteresis test reads.
+  approach_speed_mm_s: 5.0
+
+  # SPEED CEILING on the excitation itself. Peak reference speed is amplitude x 2*pi*frequency,
+  # here 3.4 mm/s and 8.2 deg/s at the largest scale.
+  #
+  # EXCEEDING THIS IS AN ERROR, NOT A DILATION -- and that is a deliberate difference from
+  # bnc_assembly's engage, which stretches the waveform clock to fit under its cap. Dilating here
+  # would make the effective frequency a function of the amplitude scale, so the amplitude sweep
+  # -- whose entire purpose is to vary the radius at a FIXED excitation spectrum -- would confound
+  # radius with frequency and the dimension-vs-radius curve would mean nothing.
+  max_speed_mm_s: 20.0
+  max_rotation_deg_s: 30.0
+
+  log_decimation: 1              # 1 = every servo cycle (125 Hz). The covariance windows in 2.1
+                                 # want the full rate; decimating throws away the bandwidth the
+                                 # multisine was designed to occupy.
+  out_dir: data/wiggle_sampling
+
+# ---- THE TUG ORACLE (3.2) --------------------------------------------------------------------
+# A few seconds per burst buys a near-definitive label, which converts an unsupervised problem
+# into a weakly-supervised one. 3.2: "Prioritize this over analysis cleverness."
+#
+# TWO PROBES, because "engaged" is not one question, and for a BNC they are expected to disagree:
+#
+#   axial    the reference is placed `axial_release_mm` SHORT of the station -- not "preload minus
+#            distance", which would still be a press whenever the preload is the larger number.
+#            Short of the station means the spring is in TENSION by k x axial_release_mm whatever
+#            the burst's preload, so the number is comparable across the sweep. A retained part
+#            resists and f_x goes POSITIVE; a part merely sitting in a hole cannot.
+#
+#            EXPECT `free` HERE AT EVERY DEPTH FOR A BNC BEFORE THE COLLAR IS CLOCKED. That is
+#            correct, not a bug: nothing retains the connector axially until the bayonet is
+#            twisted. It is still worth recording -- it is the negative control that shows the
+#            lateral probe is measuring something the axial one is not.
+#
+#   lateral  at the burst's own preload, the part stays pressed home and is pushed sideways.
+#            THIS is the probe that separates in-socket from beside-socket, and it is the label
+#            the analysis should actually be validated against for this connector.
+tug:
+  enabled: true
+  axial_release_mm: 1.0          # -> 2.0 N of tension at 2000 N/m on a retained part
+  lateral_mm: 0.5                # -> 1.0 N against a blocked lateral direction
+  lateral_axis: z                # the connector's own y or z
+  duration_s: 1.5                # each way; 4 ramps per burst with both probes on
+  resist_n: 1.0                  # above this counts as held. Must sit above quiet_fmag_std_n --
+                                 # check the pilot and raise it if the floor is close.
+
+# ---- SLIP DEFENCE (6) ------------------------------------------------------------------------
+# Return-to-reference: every N bursts, go to a fixed free-space pose and re-read pose and wrench.
+# Drift there is accumulated GRASP SLIP, directly measured, and it is what lets affected bursts be
+# bracketed or discarded instead of quietly poisoning the result.
+#
+# The F/T is NOT re-tared at this pose -- the reading IS the check. A non-zero force at a pose that
+# should be in free space means either a tare that has walked or a part that has moved in the jaws,
+# and both are things you need to know before trusting the bursts around it.
+reference_check:
+  enabled: true
+  every_n_bursts: 8
+  depth_mm: -60.0
+  lateral_mm: [0.0, 60.0]
+  hold_s: 1.0
+
+# ---- COMPLIANCE ------------------------------------------------------------------------------
+# NOTE: THIS BLOCK DELIBERATELY DIFFERS FROM THE REST OF THE FLEET (which runs 500 N/m, zeta 10).
+# Two reasons, both specific to what this app is for:
+#
+#   1. PRELOAD FORCE = STIFFNESS x DISTANCE. At 500 N/m a 4 mm press holds 2 N, which is not
+#      enough to keep the contact bilateral against a real socket -- and bilateral contact is the
+#      one thing 3.3 says the experiment cannot do without. At 2000 N/m the same 4 mm holds 8 N.
+#   2. CONTRAST RATIO (5.2). The discriminant between a free and a constrained direction is
+#      roughly C_free / (C_robot + C_grasp). The admittance spring IS part of C_robot, so a
+#      stiffer one directly widens the gap the analysis is trying to resolve. Softening this
+#      block does not make the experiment gentler, it makes it blind.
+#
+# The other apps are NOT wrong to run 500 -- they are matched to each other because a map and the
+# observations tested against it must share a contact regime. This app builds no map and is
+# matched against nothing, so it is free to pick the stiffness the measurement needs. If you later
+# want these bursts comparable with the uncertain_sampling map, set 500/10 here and accept that
+# the preloads must grow 4x to hold the same force.
+#
+# ISOTROPIC ON PURPOSE, and that is not laziness. The admittance law runs in the TOOL0 frame while
+# every axis in this file names the CONNECTOR's frame, and for this held part those differ by a
+# signed permutation (connector +X -> tool0 +Y). An anisotropic block would therefore have to be
+# written in permuted order, which is exactly the mistake that has bitten the clocking blocks.
+# Equal entries are frame-agnostic and cannot be got wrong.
+compliance:
+  mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
+  stiffness:     [2000.0, 2000.0, 2000.0, 20.0, 20.0, 20.0]
+  # zeta = 5, not the fleet's 10, because zeta scales D = zeta*2*sqrt(M*S) and S has gone up 4x.
+  # The forward-Euler stability limit at 125 Hz is dt*D/M < 2: zeta 10 at this stiffness sits at
+  # 1.01, which is half the limit and too close for an hour-long unattended run; zeta 5 sits at
+  # 0.51, the same margin the fleet has at 500 N/m.
+  #
+  # It is still firmly overdamped where it matters. zeta_contact = zeta*sqrt(S/(S+k_env)) -- the
+  # virtual mass cancels -- so against the measured 39 N/mm seat this is 5*sqrt(2000/41000) = 1.1,
+  # against a 3.5 N/mm graze it is 3.5. No bounce at contact, which matters more here than
+  # anywhere: a rebound off the seat is a loss of contact, and a lost contact makes the whole
+  # burst's rank estimate a measurement of free space.
+  damping_ratio: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+  selected_axes: [1, 1, 1, 1, 1, 1]
+  reference_rate_hz: 125.0
+  warmup_s: 0.5
+  tare_before: true
+  settle_s: 0.5                  # unused by this app (its dwells are quiet_s / wiggle_s)
+
+# FREE-SPACE guard. Armed ONLY on the joint hops between stations and to the reference pose --
+# the one part of a burst where contact is a surprise rather than the objective, so a tight limit
+# is right. It is NOT armed on any compliant motion; see below.
+force_guard:
+  max_force_n: 5.0
+  max_torque_nm: 8.0
+  persistence_s: 0.05
+
+# CONTACT-PHASE guard -- the safety backstop for everything compliant: the approach, the press,
+# the hold, the excitation and the tugs.
+#
+# WHY THE 5 N LIMIT ABOVE IS NOT USED HERE, and this is the difference from uncertain_sampling.
+# There, a guard trip MEANS something -- "the connector seated" -- and stopping the advance at
+# first contact is the measurement. Here, reaching the commanded depth IS the measurement: a 5 N
+# limit would stop every contact station at 5 N instead of at its configured preload, silently,
+# because the logged reference would still read as the station. So the compliant phases get a
+# limit set well above the intended press (8 N at the top preload, plus its transient), and what
+# it watches for is a jam or a fixture collision -- not contact.
+#
+# It is disarmed on WITHDRAWALS. A part that is genuinely over the limit would otherwise have its
+# escape blocked by the guard meant to protect it (see ForceGuard.disable).
+wiggle_guard:
+  max_force_n: 40.0
+  max_torque_nm: 6.0
+  persistence_s: 0.2
+
+speed:
+  max_joint_velocity_deg_s: 60.0
+  max_joint_acceleration_deg_s2: 30.0
+  max_cartesian_velocity_m_s: 0.25
+  max_cartesian_translation_mm_s: 5.0
+  max_cartesian_rotation_deg_s: 10.0
+  retract_translation_mm_s: 50.0
+  retract_rotation_deg_s: 50.0
+
+move_timeout_s: 120.0
+settle_s: 0.2
+confirm_each_step: true          # one prompt before the first motion, showing the plan and the ETA
+debug: false

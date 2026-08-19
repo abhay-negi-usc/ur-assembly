@@ -679,8 +679,8 @@ assembly:
     # advance; a failed grasp skips the push rather than failing the run.
     seat_push:
       enabled: true
-      force_n: 2.0
-      persistence_s: 1.0
+      force_n: 1.0
+      persistence_s: 0.1
       max_travel_mm: 15.0
     # PRE-WIND, deg. Before grasping, unwind the OPEN gripper this far about the
     # connector's +X, so the turn that follows has the wrist range to complete it.

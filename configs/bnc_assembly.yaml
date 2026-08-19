@@ -661,6 +661,13 @@ assembly:
     # the collar, since they were just gripping there. Negative = stand further back.
     approach_mm: null
     rotation_deg: 90.0
+    # PUSH while turning, mm along the connector +X -- the collar turn becomes a SCREW, like the
+    # cable stroke: the axial press keeps the collar's lugs engaged with their ramps through the
+    # turn instead of letting them cam back and skip. The reference leads the ring by at most
+    # this much, so under this block's 500 N/m axial spring the press tops out at ~5 N, and the
+    # force guard still ends the turn if the lock bottoms out hard (that trip is treated as
+    # reaching the lock, not as failure). 0.0 = the pure rotation this was before 2026-08-18.
+    push_mm: 10.0
     # SEAT PUSH -- runs between the unwind and the advance onto the collar: re-grip the
     # connector at the junction and PRESS it deeper along the connector +X until force_n is
     # SUSTAINED for persistence_s. The guard trip IS the success (pressed home and holding); the

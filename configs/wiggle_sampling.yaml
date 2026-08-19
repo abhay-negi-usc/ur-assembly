@@ -96,6 +96,33 @@ wiggle:
     - {name: d1_5,     label: insert, depth_mm:  -1.5}
     - {name: mate,     label: insert, depth_mm:   0.0}    # matched to beside0
 
+  # ---- STATION GRID: ranges + resolutions instead of a hand-written list ---------------------
+  # The uncertain_sampling contract: give lower/upper/resolution and the app samples ALL of it
+  # (mode: grid = full Cartesian product, count derived; a degenerate axis with lower == upper
+  # contributes one value and costs nothing. mode: random = num_stations uniform draws).
+  # depth/lateral are TARGET-frame; offset is a 6-vector range in the CONNECTOR frame.
+  # Generated stations merge ALONGSIDE the list above -- keep the free/beside anchors there,
+  # the analysis is calibrated against them.
+  #
+  # THE ACTIVE GRID: a CONNECTOR-frame offset sweep over the three excited axes, at the mate
+  # (depth/lateral degenerate). +/-3 at 1 -> 7 values each: 7 x 7 x 7 = 343 stations. NOTE THE
+  # MULTIPLIER: bursts = stations x preloads x amplitude_scales x passes -- with the sweeps
+  # above that is (343 + 5 contact) x 3 x 3 x 2 + anchors = ~6.3k bursts, DAYS of runtime. The
+  # app prints its own estimate before moving; trim preloads_mm / amplitude_scales / passes
+  # (e.g. [1.5] / [1.0] / [in] -> ~350 bursts, ~2.5 h) for a grid this size.
+  station_grid:
+    mode: grid
+    depth_mm:     {lower: 0.0, upper: 0.0, resolution: 0.0}
+    lateral_y_mm: {lower: 0.0, upper: 0.0, resolution: 0.0}
+    lateral_z_mm: {lower: 0.0, upper: 0.0, resolution: 0.0}
+    offset:
+      lower:      [-3.0, 0.0, -3.0, 0.0, -3.0, 0.0]
+      upper:      [ 3.0, 0.0,  3.0, 0.0,  3.0, 0.0]
+      resolution: [ 1.0, 0.0,  1.0, 0.0,  1.0, 0.0]
+    label: insert
+    contact: true
+    name_prefix: g
+
   # ---- PASSES: the hysteresis test (4.1) -----------------------------------------------------
   # `in` visits the contact stations shallow -> deep, `out` deep -> shallow, and the arm does NOT
   # return to the standoff between stations within a pass -- it slides along the axis, so the
@@ -122,12 +149,12 @@ wiggle:
   # excitation has to stay inside the stratum it is measuring, or it measures the neighbourhood
   # instead. That is also exactly what makes the amplitude sweep informative (below).
   amplitude:
-    x_mm:      0.30
-    y_mm:      0.0
-    z_mm:      0.30
-    roll_deg:  0.0
-    pitch_deg: 0.50
-    yaw_deg:   0.0
+    x_mm:      2.5
+    y_mm:      2.5
+    z_mm:      2.5
+    roll_deg:  2.5
+    pitch_deg: 2.5
+    yaw_deg:   2.5
 
   # FREQUENCY per axis (Hz). Three separate constraints bind here, and they pull against each
   # other -- read all three before retuning.
@@ -159,24 +186,28 @@ wiggle:
   #    ~34 deg -- NOT negligible. If the pilot's compliance estimate looks rotated, this is the
   #    first thing to suspect, and the fix is to drop every tone (e.g. 0.3 / 0.5 / 0.7) AND raise
   #    wiggle_s to keep constraint 2 satisfied, because that ladder has a 0.2 Hz minimum gap.
+  # SIX active axes -> six tones: {3,5,7,11,13,17} in 0.1 Hz units -- all prime, so pairwise
+  # co-prime (constraint 1; orbit closes at 1/gcd = 10 s = 3x the slowest period, the app's
+  # floor). Minimum gap 0.2 Hz x wiggle_s 15 s = 3.0 bins, exactly constraint 2's bound.
+  # Translations take the LOW tones so the linear peak speeds stay tame (see the caps below).
   frequency_hz:
-    x_mm:      0.5
-    y_mm:      0.0
-    z_mm:      0.9
-    roll_deg:  0.0
+    x_mm:      0.3
+    y_mm:      0.5
+    z_mm:      0.7
+    roll_deg:  1.1
     pitch_deg: 1.3
-    yaw_deg:   0.0
+    yaw_deg:   1.7
 
   # PHASE per axis (deg). Spread so the three axes do not all peak at the same instant, which
   # would make the excitation effectively one-dimensional at the corners of the box and put an
   # avoidable spike into the contact. Any spread will do; these are 0 / 120 / 240.
   phase_deg:
     x_mm:      0.0
-    y_mm:      0.0
+    y_mm:      60.0
     z_mm:      120.0
-    roll_deg:  0.0
+    roll_deg:  180.0
     pitch_deg: 240.0
-    yaw_deg:   0.0
+    yaw_deg:   300.0
 
   # ---- AMPLITUDE SWEEP (3.3, 4.6) ------------------------------------------------------------
   # Multipliers on the base amplitude. Log-spaced, and the DELIVERABLE IS THE CURVE, not a number:
@@ -253,8 +284,13 @@ wiggle:
   # would make the effective frequency a function of the amplitude scale, so the amplitude sweep
   # -- whose entire purpose is to vary the radius at a FIXED excitation spectrum -- would confound
   # radius with frequency and the dimension-vs-radius curve would mean nothing.
-  max_speed_mm_s: 20.0
-  max_rotation_deg_s: 30.0
+  # Re-derived for the 2.5 mm / 2.5 deg amplitudes at the largest scale (x2 -> 5 mm / 5 deg):
+  #   peak_v = 5 mm x 2*pi x 0.7 Hz = 22.0 mm/s   (z, the fastest translation tone)
+  #   peak_w = 5 deg x 2*pi x 1.7 Hz = 53.4 deg/s (yaw, the fastest rotation tone)
+  # The app refuses to run over these rather than dilating the clock (that would tie the
+  # spectrum to the amplitude and confound the amplitude sweep).
+  max_speed_mm_s: 25.0
+  max_rotation_deg_s: 60.0
 
   log_decimation: 1              # 1 = every servo cycle (125 Hz). The covariance windows in 2.1
                                  # want the full rate; decimating throws away the bandwidth the
@@ -330,18 +366,17 @@ reference_check:
 # Equal entries are frame-agnostic and cannot be got wrong.
 compliance:
   mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
-  stiffness:     [2000.0, 2000.0, 2000.0, 20.0, 20.0, 20.0]
-  # zeta = 5, not the fleet's 10, because zeta scales D = zeta*2*sqrt(M*S) and S has gone up 4x.
-  # The forward-Euler stability limit at 125 Hz is dt*D/M < 2: zeta 10 at this stiffness sits at
-  # 1.01, which is half the limit and too close for an hour-long unattended run; zeta 5 sits at
-  # 0.51, the same margin the fleet has at 500 N/m.
+  stiffness:     [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
+  # zeta = 10, the fleet value, and at 500 N/m it has to be: zeta_contact =
+  # zeta*sqrt(S/(S+k_env)) -- the virtual mass cancels -- and against the measured 39 N/mm seat
+  # that is 10*sqrt(500/39500) = 1.13. The zeta 5 this file carried at 2000 N/m would give 0.56
+  # here: UNDERDAMPED at contact, and a rebound off the seat is a lost contact, which makes the
+  # whole burst's rank estimate a measurement of free space. Stability is comfortable: the
+  # forward-Euler limit at 125 Hz is dt*D/M < 2, and zeta 10 at 500 N/m sits at 0.51.
   #
-  # It is still firmly overdamped where it matters. zeta_contact = zeta*sqrt(S/(S+k_env)) -- the
-  # virtual mass cancels -- so against the measured 39 N/mm seat this is 5*sqrt(2000/41000) = 1.1,
-  # against a 3.5 N/mm graze it is 3.5. No bounce at contact, which matters more here than
-  # anywhere: a rebound off the seat is a loss of contact, and a lost contact makes the whole
-  # burst's rank estimate a measurement of free space.
-  damping_ratio: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+  # NOTE the preload presses scale with this: sustained force = stiffness x preload, so the
+  # preloads_mm sweep now presses a quarter of what it did at 2000 N/m.
+  damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0
   warmup_s: 0.5

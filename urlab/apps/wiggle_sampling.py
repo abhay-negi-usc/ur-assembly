@@ -88,6 +88,7 @@ Run:  python -m urlab.apps.wiggle_sampling --config configs/wiggle_sampling.yaml
 """
 
 import csv as _csv
+import itertools
 import math
 import os
 import time
@@ -208,9 +209,12 @@ def _wig_at(t, amp, frq, pha, env):
 # config parsing (everything that can be wrong is caught HERE, before the arm moves)
 # ===================================================================================================
 
-def _parse_stations(raw):
-    """`stations:` -> a list of dicts, or None on a bad entry."""
+def _parse_stations(raw, required=True):
+    """`stations:` -> a list of dicts, or None on a bad entry. `required=False` (used when a
+    station_grid will generate more) turns an empty list into [] instead of an error."""
     if not raw:
+        if not required:
+            return []
         log.error('wiggle.stations is empty -- there is nothing to sample.')
         return None
     out = []
@@ -256,6 +260,104 @@ def _parse_stations(raw):
     return out
 
 
+def _grid_stations(g):
+    """`wiggle.station_grid:` -> generated stations, uncertain_sampling-style.
+
+    Instead of hand-listing stations, the user gives RANGES and RESOLUTIONS and the app samples
+    all of them -- the same contract as uncertain_sampling's `uncertainty` + `grid_resolution`:
+
+        depth_mm / lateral_y_mm / lateral_z_mm:  {lower, upper, resolution}   (TARGET frame)
+        offset: {lower: [6], upper: [6], resolution: [6]}                     (CONNECTOR frame)
+        mode: grid | random     grid = the full Cartesian product, count DERIVED (a degenerate
+                                axis, lower == upper, contributes one value and costs nothing);
+                                random = `num_stations` uniform draws inside the box.
+
+    Endpoints are hit exactly (traj._axis_values nudges the step), matching the grid the map
+    collector sweeps. Generated stations are named `<name_prefix><i>` and carry one shared
+    label/contact flag; hand-written stations: entries (the free/beside anchors the analysis
+    NEEDS -- see the module docstring) merge alongside them untouched."""
+    def axis1(key):
+        blk = g.get(key) or {}
+        try:
+            lo = float(blk.get('lower', 0.0))
+            hi = float(blk.get('upper', 0.0))
+            res = float(blk.get('resolution', 0.0))
+        except (TypeError, ValueError):
+            log.error('station_grid.%s: lower/upper/resolution must be numbers, got %r.', key, blk)
+            return None
+        if hi < lo:
+            log.error('station_grid.%s: upper %.3f < lower %.3f.', key, hi, lo)
+            return None
+        try:
+            return traj._axis_values(lo, hi, res)
+        except ValueError as exc:
+            log.error('station_grid.%s: %s', key, exc)
+            return None
+
+    axes = [axis1(k) for k in ('depth_mm', 'lateral_y_mm', 'lateral_z_mm')]
+    if any(a is None for a in axes):
+        return None
+    off = g.get('offset') or {}
+    try:
+        off_lo = [float(v) for v in (off.get('lower') or [0.0] * 6)]
+        off_hi = [float(v) for v in (off.get('upper') or [0.0] * 6)]
+        off_res = [float(v) for v in (off.get('resolution') or [0.0] * 6)]
+    except (TypeError, ValueError):
+        log.error('station_grid.offset: lower/upper/resolution must be numeric lists.')
+        return None
+    if not (len(off_lo) == len(off_hi) == len(off_res) == 6):
+        log.error('station_grid.offset: lower/upper/resolution are 6-vectors '
+                  '[x, y, z (mm), roll, pitch, yaw (deg)] in the CONNECTOR frame.')
+        return None
+    if any(h < l for l, h in zip(off_lo, off_hi)):
+        log.error('station_grid.offset: upper < lower on DOF %s.',
+                  [i for i, (l, h) in enumerate(zip(off_lo, off_hi)) if h < l])
+        return None
+    try:
+        off_axes = [traj._axis_values(off_lo[i], off_hi[i], off_res[i]) for i in range(6)]
+    except ValueError as exc:
+        log.error('station_grid.offset: %s', exc)
+        return None
+
+    mode = str(g.get('mode', 'grid')).lower()
+    if mode not in ('grid', 'random'):
+        log.error("station_grid.mode %r must be 'grid' or 'random'.", g.get('mode'))
+        return None
+    if mode == 'grid':
+        combos = list(itertools.product(*axes, *off_axes))
+    else:
+        n = int(g.get('num_stations', 20))
+        if n <= 0:
+            log.error('station_grid.num_stations must be > 0 in random mode (got %d).', n)
+            return None
+        seed = int(g.get('random_seed', 0))
+        rng = np.random.default_rng(seed if seed > 0 else None)
+        lows = [a[0] for a in axes] + off_lo
+        highs = [a[-1] for a in axes] + off_hi
+        combos = [tuple(rng.uniform(lo, hi) if hi > lo else lo
+                        for lo, hi in zip(lows, highs)) for _ in range(n)]
+
+    label = str(g.get('label', 'insert'))
+    contact = bool(g.get('contact', True))
+    prefix = str(g.get('name_prefix', 'g'))
+    out = []
+    for i, c in enumerate(combos, start=1):
+        depth_mm, lat_y, lat_z = float(c[0]), float(c[1]), float(c[2])
+        off6 = [float(v) for v in c[3:9]]
+        out.append({
+            'name': f'{prefix}{i:03d}',
+            'label': label,
+            'depth_mm': depth_mm,
+            'depth_m': depth_mm / 1000.0,
+            'lat_mm': [lat_y, lat_z],
+            'lat_m': [lat_y / 1000.0, lat_z / 1000.0],
+            'offset': off6,
+            'bias': xyzrpy_to_matrix(np.asarray(off6[:3]) / 1000.0, np.radians(off6[3:])),
+            'contact': contact,
+        })
+    return out
+
+
 def _parse_wave(w, key, default=0.0):
     """A per-DIM block (`amplitude:` / `frequency_hz:` / `phase_deg:`) -> a 6-vector."""
     blk = w.get(key) or {}
@@ -293,9 +395,25 @@ def build_and_run(cfg, robot, camera, args):
     T_base_targetobj = T_base_tconn
     log.info('Held frame %r + its recorded mate, from %s.', held_name, tool_frames.frames_path(cfg))
 
-    # ---- stations --------------------------------------------------------------------------
-    stations = _parse_stations(w.get('stations'))
+    # ---- stations: hand-written anchors + (optionally) a generated grid ---------------------
+    gridcfg = w.get('station_grid') or {}
+    stations = _parse_stations(w.get('stations'), required=not gridcfg)
     if stations is None:
+        return False
+    if gridcfg:
+        gen = _grid_stations(gridcfg)
+        if gen is None:
+            return False
+        clash = {st['name'] for st in stations} & {st['name'] for st in gen}
+        if clash:
+            log.error('station_grid names collide with stations: %s -- set '
+                      'station_grid.name_prefix.', sorted(clash))
+            return False
+        log.info('station_grid (%s): %d generated station(s) joined with %d hand-written.',
+                 str(gridcfg.get('mode', 'grid')), len(gen), len(stations))
+        stations = stations + gen
+    if not stations:
+        log.error('no stations at all -- give wiggle.stations and/or wiggle.station_grid.')
         return False
 
     # ---- the excitation --------------------------------------------------------------------

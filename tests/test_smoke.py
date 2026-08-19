@@ -3880,6 +3880,60 @@ def test_the_target_frame_and_the_in_hand_belief_name_the_same_point():
             f'keeps them that way')
 
 
+def test_wiggle_station_grid_and_the_retuned_excitation_stay_runnable():
+    """wiggle_sampling generates stations from RANGES + RESOLUTIONS (uncertain_sampling's
+    contract), and the config's excitation must keep passing the app's own pre-motion refusals --
+    which otherwise only fire at the bench: every active axis needs a tone, tones pairwise
+    co-prime with a long-enough orbit, spectral gap x wiggle_s >= 3 bins, peak speeds under the
+    caps (the app refuses rather than dilating), and contact damping >= critical at 500 N/m."""
+    import math
+
+    import numpy as np
+    import yaml
+
+    from urlab.apps.wiggle_sampling import _grid_stations
+
+    g = {'mode': 'grid', 'depth_mm': {'lower': -10.0, 'upper': 0.0, 'resolution': 2.0},
+         'offset': {'lower': [0, 0, 0, 0, -2, 0], 'upper': [0, 0, 0, 0, 2, 0],
+                    'resolution': [0, 0, 0, 0, 2, 0]}}
+    st = _grid_stations(g)
+    assert len(st) == 18, 'count is DERIVED: 6 depths x 3 pitches; degenerate axes cost nothing'
+    assert sorted({x['depth_mm'] for x in st}) == [-10.0, -8.0, -6.0, -4.0, -2.0, 0.0], (
+        'both endpoints must be hit exactly, like traj.grid_deltas')
+    assert len({x['name'] for x in st}) == len(st), 'names key the CSV -- must be unique'
+    rnd = _grid_stations(dict(g, mode='random', num_stations=7, random_seed=3))
+    assert len(rnd) == 7 and all(-10.0 <= x['depth_mm'] <= 0.0 for x in rnd)
+    assert _grid_stations(dict(g, mode='sideways')) is None, 'a bad mode must refuse, not guess'
+
+    y = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'wiggle_sampling.yaml')))
+    w = y['wiggle']
+    ordering = ('x_mm', 'y_mm', 'z_mm', 'roll_deg', 'pitch_deg', 'yaw_deg')
+    amp = [float(w['amplitude'][k]) for k in ordering]
+    frq = [float(w['frequency_hz'][k]) for k in ordering]
+    active = [i for i in range(6) if amp[i] > 0]
+    assert all(frq[i] > 0 for i in active), 'an active axis with no tone is a constant offset'
+    gcd = 0
+    for i in active:
+        gcd = math.gcd(gcd, int(round(frq[i] * 1000)))
+    orbit = 1000.0 / gcd
+    assert orbit >= 3.0 * (1.0 / min(frq[i] for i in active)) - 1e-9, (
+        'the tone ratios are too simple -- the orbit closes before it fills the box')
+    live = sorted(frq[i] for i in active)
+    gap = min(b - a for a, b in zip(live, live[1:]))
+    assert gap * float(w['wiggle_s']) >= 3.0 - 1e-9, (
+        f'{gap:.2f} Hz gap x {w["wiggle_s"]} s < 3 FFT bins -- adjacent tones cannot be resolved')
+    big = [a * max(float(v) for v in w['amplitude_scales']) for a in amp]
+    pv = max(big[i] * 2 * math.pi * frq[i] for i in range(3) if frq[i] > 0)
+    pw = max(big[i] * 2 * math.pi * frq[i] for i in range(3, 6) if frq[i] > 0)
+    assert pv <= float(w['max_speed_mm_s']) and pw <= float(w['max_rotation_deg_s']), (
+        f'peaks {pv:.1f} mm/s / {pw:.1f} deg/s exceed the caps -- the app will refuse to run')
+    S = [float(v) for v in y['compliance']['stiffness']]
+    zeta = float(y['compliance']['damping_ratio'][0])
+    assert zeta * math.sqrt(S[0] / (S[0] + 39000.0)) >= 1.0, (
+        'underdamped at the measured 39 N/mm seat -- a rebound is a lost contact, and a lost '
+        'contact makes the burst a measurement of free space')
+
+
 def test_sampling_preload_appends_and_does_not_move_the_sweep():
     """The map collector's preload must EXTEND the map, never shift it.
 

@@ -640,7 +640,8 @@ assembly:
     collar_offset_mm: 25.0
     # COLLAR AXIS OFFSET, mm, expressed in the CONNECTOR (target) frame's own axes. Shifts the
     # LINE the whole collar maneuver works about -- centring, unwind, advance and turn all move
-    # with it. Cable clocking is NOT affected; it still turns about the unoffset target axis.
+    # with it -- and the TUG VERIFICATION centres its re-grip on the same offset axis before
+    # pulling. Cable clocking is NOT affected; it still turns about the unoffset target axis.
     #
     # WHY IT EXISTS. The declared connector frame origin is the mating-face reference, placed so
     # the INSERTION works; nothing forces it onto the barrel centreline the collar physically
@@ -766,6 +767,11 @@ assembly:
   #           script TERMINATES where it stands rather than tearing at the fixture.
   tug_verify:
     enabled: true
+    # COMPLIANCE FOR THE PULL (null keys inherit compliance:). The spec only discriminates if
+    # the spring offset pull_force_n / stiffness EXCEEDS displacement_threshold_mm -- at the
+    # shared 1500 N/m the offset is 2 mm < 3 mm and the tug could never fail; at 500 N/m it is
+    # 6 mm. Tune force/threshold/stiffness together.
+    stiffness: [500.0, 500.0, 500.0, 15.0, 15.0, 15.0]
     pull_force_n: 3.0
     pull_time_s: 3.0
     displacement_threshold_mm: 3.0

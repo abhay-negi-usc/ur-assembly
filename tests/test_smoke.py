@@ -3461,7 +3461,7 @@ def test_tug_verification_defaults_on_and_its_spring_can_exceed_the_threshold():
     for k in ('pull_force_n', 'pull_time_s', 'displacement_threshold_mm',
               'extraction_distance_mm'):
         assert float(tv[k]) > 0.0, f'{k} must be positive'
-    S_max = max(float(v) for v in y['compliance']['stiffness'][:3])
+    S_max = max(float(v) for v in (tv.get('stiffness') or y['compliance']['stiffness'])[:3])
     offset_mm = float(tv['pull_force_n']) / S_max * 1000.0
     assert offset_mm > float(tv['displacement_threshold_mm']), (
         f'the spring offset ({offset_mm:.1f} mm at the stiffest axis) must exceed the '
@@ -3472,7 +3472,7 @@ def test_tug_verification_defaults_on_and_its_spring_can_exceed_the_threshold():
         src = fh.read()
     body = src[src.index('def tug_verify('):src.index('def engage_insertion(')]
     order = ["gripper.close('tug grasp')", "verify_cable_held(robot, check, 'tug regrasp')",
-             'tare_fn=tare', 'adm.hold(T_pull', "'release (tug verified)'"]
+             'tare_fn=tare', 'adm_tug.hold(T_pull', "'release (tug verified)'"]
     idx = [body.index(t) for t in order]
     assert idx == sorted(idx), (
         'the tug must close, verify the grasp, tare while gripping, pull, and only release '
@@ -3595,7 +3595,13 @@ def test_the_collar_axis_offset_is_read_from_config_in_the_connector_frame():
         'the offset must be rotated from the CONNECTOR frame into base before shifting the point')
     cable = src[src.index('def cable_clocking('):src.index('def collar_clocking(')]
     assert 'off_conn' not in cable and 'axis_offset_mm' not in cable, (
-        'the offset is scoped to the collar maneuver; cable clocking keeps the unoffset axis')
+        'the offset is scoped to the collar maneuver and the tug; cable clocking keeps the '
+        'unoffset axis')
+    # the tug centres its RE-GRIP on the same offset axis -- the pull direction cannot carry a
+    # line offset, so the grasp position is where the correction lands
+    tug = src[src.index('def tug_verify('):src.index('def engage_insertion(')]
+    assert 'cl_axis_off' in tug and 'T_grasp = translation_matrix(-d_r) @ T_grasp' in tug, (
+        'tug verification must centre its re-grip on the offset connector axis')
 
 
 def test_the_escape_releases_the_collar_before_retracting():

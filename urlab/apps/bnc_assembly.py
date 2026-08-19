@@ -524,6 +524,15 @@ def build_and_run(cfg, robot, camera, args):
     tv_time = _num(tv, 'pull_time_s', 3.0)
     tv_thresh_m = _num(tv, 'displacement_threshold_mm', 3.0) / 1000.0
     tv_extract_m = _num(tv, 'extraction_distance_mm', 50.0) / 1000.0
+    # The tug gets its OWN spring: the pull spec only works if the spring offset
+    # (pull_force_n / stiffness) EXCEEDS displacement_threshold_mm -- at the shared compliance
+    # the offset can fall under the threshold and the verification goes vacuous (an unlocked
+    # connector could never move far enough to show). Null keys inherit compliance:.
+    _tv_phys = dict(cfg.section('compliance'))
+    for _k in ('stiffness', 'mass', 'damping_ratio'):
+        if tv.get(_k):
+            _tv_phys[_k] = tv[_k]
+    adm_tug = AdmittanceController(robot.arm, _tv_phys) if tv_on else None
     sp = cl.get('seat_push', {}) or {}
     sp_on = bool(sp.get('enabled', True))
     sp_force = _num(sp, 'force_n', 5.0)
@@ -963,6 +972,21 @@ def build_and_run(cfg, robot, camera, args):
         mid-pull -- stop where we are, move nothing further), or 'error' (could not run the test;
         nothing was pulled)."""
         axn_t = T_clk[:3, 0] / float(np.linalg.norm(T_clk[:3, 0]))
+        # THE SAME AXIS CORRECTION AS THE COLLAR MANEUVERS (collar_clocking.axis_offset_mm).
+        # The pull DIRECTION is a direction, so the offset (a shift of the line's position)
+        # cannot change it -- where the line's position does enter is the RE-GRIP: T_grasp is the
+        # historical arm pose, which rides whatever eccentricity the original pick closed with.
+        # Centring the fingertip onto the OFFSET axis (radial shift only; the axial station and
+        # the orientation are kept) loads the connector along its bench-measured centreline
+        # instead of off it.
+        p_axis = T_clk[:3, 3] + T_clk[:3, :3] @ (np.asarray(cl_axis_off, dtype=float) / 1000.0)
+        d_r = (T_grasp @ robot.T_tool0_fingertip)[:3, 3] - p_axis
+        d_r = d_r - np.dot(d_r, axn_t) * axn_t              # radial part only
+        if float(np.linalg.norm(d_r)) > 1e-6:
+            log.info('TUG VERIFY: centring the re-grip %.2f mm onto the offset connector axis '
+                     '(collar_clocking.axis_offset_mm = %s).',
+                     float(np.linalg.norm(d_r)) * 1000.0, np.round(cl_axis_off, 2).tolist())
+            T_grasp = translation_matrix(-d_r) @ T_grasp
         phase('standoff')
         # Approach by retracing the escape: stand off along the gripper -Z (where the retract
         # went), then straight in. Both guarded; the fingers are open.
@@ -985,22 +1009,27 @@ def build_and_run(cfg, robot, camera, args):
         # THE PULL. Effective axial stiffness of the (diagonal, tool0-frame) spring along the
         # base-frame pull direction: compliances add, 1/S_eff = sum(u_i^2 / S_i).
         u = T_grasp[:3, :3].T @ axn_t
-        S_eff = 1.0 / float(np.sum((u ** 2) / adm.S[:3]))
+        S_eff = 1.0 / float(np.sum((u ** 2) / adm_tug.S[:3]))
+        if tv_force / S_eff <= tv_thresh_m:
+            log.warning('TUG VERIFY: the spring offset (%.1f mm at %.0f N/m) does not exceed '
+                        'the %.1f mm threshold -- an unlocked connector cannot move past it, so '
+                        'this verification cannot fail. Soften tug_verify.stiffness or raise '
+                        'pull_force_n.', tv_force / S_eff * 1000.0, S_eff, tv_thresh_m * 1000.0)
         T_pull = translation_matrix(-(tv_force / S_eff) * axn_t) @ T_grasp
         log.info('TUG VERIFY: pulling %.1f N along the connector -X for %.1f s '
                  '(spring %.0f N/m -> %.1f mm reference offset); verified if the connector '
                  'moves <= %.1f mm.', tv_force, tv_time, S_eff, tv_force / S_eff * 1000.0,
                  tv_thresh_m * 1000.0)
-        adm.reset()
-        adm.warmup(T_grasp, tare_fn=tare)       # tare while gripping and static
+        adm_tug.reset()
+        adm_tug.warmup(T_grasp, tare_fn=tare)       # tare while gripping and static
         guard_shared.reset()
         phase('assemble')
-        res = adm.ramp(T_grasp, T_pull, seg_time(T_grasp, T_pull), guard_shared)
+        res = adm_tug.ramp(T_grasp, T_pull, seg_time(T_grasp, T_pull), guard_shared)
         if res != 'seated':
-            res = adm.hold(T_pull, tv_time, guard_shared)
+            res = adm_tug.hold(T_pull, tv_time, guard_shared)
         disp = float(np.dot(T_grasp[:3, 3] - robot.tool0()[:3, 3], axn_t))
-        adm.reset()
-        adm.stop()
+        adm_tug.reset()
+        adm_tug.stop()
         robot.arm.servo_stop()
         if res == 'seated':
             log.error('TUG VERIFY: the GLOBAL force guard tripped during the pull (%s) -- '
@@ -1031,12 +1060,12 @@ def build_and_run(cfg, robot, camera, args):
         phase('retract')
         T_now = robot.tool0()
         T_out = translation_matrix(-tv_extract_m * axn_t) @ T_now
-        adm.reset()
-        adm.warmup(T_now)
+        adm_tug.reset()
+        adm_tug.warmup(T_now)
         guard_shared.reset()
-        res2 = adm.ramp(T_now, T_out, seg_time(T_now, T_out), guard_shared)
-        adm.reset()
-        adm.stop()
+        res2 = adm_tug.ramp(T_now, T_out, seg_time(T_now, T_out), guard_shared)
+        adm_tug.reset()
+        adm_tug.stop()
         robot.arm.servo_stop()
         if res2 == 'seated':
             log.error('TUG: the GLOBAL force guard tripped during the extraction (%s) -- '

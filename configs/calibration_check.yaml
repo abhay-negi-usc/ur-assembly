@@ -19,8 +19,14 @@ robot:
 base_frame: base_link
 tip_frame: tool0
 
-# The held connector + its recorded mate (configs/frames.yaml: frames: AND targets: entries).
+# WHAT IS HELD, and WHAT IT IS PROBED AGAINST -- both names from configs/frames.yaml.
+#   held_frame    a frames: entry -- tool0 -> the part fixtured between the closed fingers.
+#   target_frame  a targets: entry -- base_link <- the recorded mate to probe. null = held_frame.
+# Set target_frame to probe this held part against a DIFFERENT recorded target (a second socket,
+# a re-measured one) without adding a catalogue entry. The contact pose reported is the held frame
+# w.r.t. the target frame, so the two should describe the same point on the part.
 held_frame: bnc_connector_finger_holder
+target_frame: null
 
 cycles: 10                       # how many probe -> contact -> retract repetitions
 retract: false                    # false = leave the arm AT the contact and end after ONE probe.

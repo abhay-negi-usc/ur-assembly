@@ -23,8 +23,15 @@ robot:
 base_frame: base_link
 tip_frame: tool0
 
-# The held connector + its recorded mate (configs/frames.yaml: frames: AND targets: entries).
+# WHAT IS HELD, and WHAT IT IS INSERTED INTO -- both names from configs/frames.yaml.
+#   held_frame    a frames: entry -- tool0 -> the part fixtured between the closed fingers. This
+#                 is the GROUND TRUTH every seated/not-seated verdict is measured against.
+#   target_frame  a targets: entry -- base_link <- the recorded mate to insert into.
+#                 null = held_frame.
+# Set target_frame to test this held part against a DIFFERENT recorded target. Seat poses are the
+# held frame w.r.t. the target frame, so the two should describe the same point on the part.
 held_frame: bnc_connector_finger_holder
+target_frame: null
 
 insertion:
   # ---- STRATEGY UNDER TEST -------------------------------------------------------------------

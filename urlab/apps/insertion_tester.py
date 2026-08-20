@@ -27,6 +27,12 @@ Per cycle:
     retract    compliant, un-guarded, back to the standoff -- a seated part is already over the
                guard limit, so a guarded retract would block the motion that frees it.
 
+TWO FRAMES, both from configs/frames.yaml: `held_frame` is the fixtured part (a frames: entry,
+tool0 -> part, and the ground truth every verdict is measured against) and `target_frame` is the
+recorded mate it is driven at (a targets: entry). `target_frame` defaults to `held_frame`; set it
+to test one held part against a different recorded target. Seat poses are the held frame w.r.t.
+the target frame, so the two should describe the same point on the part.
+
 Output: data/experiments/insertion_tester_<stamp>/insertions.csv + a per-offset success table.
 The CSV is one row per cycle: the injected offset, the physical offset it produced, the seat pose,
 the wrench, how the motion ended, and the duration.
@@ -112,17 +118,17 @@ def _parse_offsets(raw, repeats, rng, shuffle):
 
 def build_and_run(cfg, robot, camera, args):
     held_name = cfg.get('held_frame')
-    if not held_name:
-        log.error('held_frame is required.')
-        return False
     frames = tool_frames.load_frames(cfg)
     targets = tool_frames.load_targets(cfg)
-    if held_name not in frames or held_name not in targets:
-        log.error('held_frame %r needs BOTH a frames: and a targets: entry in %s.',
-                  held_name, tool_frames.frames_path(cfg))
+    try:
+        # held_frame = tool0 -> the part in the fingers, EXACT (it is fixtured, so this is the
+        # ground truth every verdict is measured against); target_frame = base_link <- the
+        # recorded mate it is driven at. target_frame null = held_frame.
+        T_true, T_base_tconn, target_name = tool_frames.resolve_held_and_target(
+            frames, targets, held_name, cfg.get('target_frame'), tool_frames.frames_path(cfg))
+    except ValueError as exc:
+        log.error('%s', exc)
         return False
-    T_true = frames[held_name]                     # tool0 -> held connector, EXACT (it is fixtured)
-    T_base_tconn = targets[held_name]              # base_link <- target connector (the mate)
 
     a = cfg.section('insertion')
     mode = str(a.get('insertion_mode', 'direct')).strip().lower()
@@ -246,8 +252,10 @@ def build_and_run(cfg, robot, camera, args):
         xyz, rpy = matrix_to_xyzrpy(inverse(T_base_tconn) @ robot.tool0() @ T_true)
         return list(xyz * 1000.0) + list(np.degrees(rpy))
 
-    log.info('Insertion tester: mode %s, %d cycles (%d offset(s) x %d repeat(s)%s), '
-             '%.0f mm standoff, guard %.0f N (persistence %.2f s).', mode.upper(), len(cycles),
+    log.info('Insertion tester: holding %r, inserting into the recorded target %r%s.', held_name,
+             target_name, '' if target_name == held_name else ' (NOT the held frame)')
+    log.info('  mode %s, %d cycles (%d offset(s) x %d repeat(s)%s), %.0f mm standoff, '
+             'guard %.0f N (persistence %.2f s).', mode.upper(), len(cycles),
              len(cycles) // max(repeats, 1), repeats, ', shuffled' if shuffle else '',
              standoff_m * 1000.0, guard.max_force, guard.persistence_s)
     log.info('Seated means the TRUE connector lands within %.2f mm / %.2f deg of the recorded '

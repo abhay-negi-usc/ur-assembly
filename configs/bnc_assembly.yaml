@@ -249,7 +249,7 @@ assembly:
   # uncertain_sampling and estimator_eval assemble to, one per socket. MEASURE: hand-guide to a
   # good mate, read `base_link <- <frame>` off the monitor, paste it under targets: (mm/deg).
   # (The old assembly.target_connector / connector_holder_target keys are IGNORED with a warning.)
-  target_frame: bnc_connector_in_fingerpads   # must name the SAME point as
+  target_frame: bnc_connector_finger_holder   # must name the SAME point as
   # estimation.initial_connector_frame -- the target is one side of
   # `T_base_targetobj @ row @ inverse(T_tool0_conn)` and the belief is the other, so
   # naming different points there puts the connector off by exactly their difference.
@@ -618,10 +618,24 @@ assembly:
     max_torque_nm: 8.0
     persistence_s: 1.0
 
-  # COLLAR CLOCKING: grasp the locking collar and turn it. Runs ONLY if cable clocking succeeded
-  # (it needs the connector pose that maneuver establishes). The opened gripper aligns its CLOSED
-  # fingertip frame with the collar frame, closes, and turns about the BELIEVED connector frame's
-  # +X -- an axis fixed IN SPACE, so the fingers orbit the collar instead of scrubbing across it.
+  # COLLAR CLOCKING: grasp the locking collar AXIALLY and TWIST THE WRIST. Runs ONLY if cable
+  # clocking succeeded (it needs the connector pose that maneuver establishes).
+  #
+  # The gripper comes onto the connector axis POINTING ALONG IT -- fingers parallel to the cable,
+  # jaws still closing across the ring's diameter -- so tool0 sits ON the axis 183 mm back with
+  # its Z collinear. Turning the collar about that axis is then a rotation about tool0's own Z:
+  # the flange does not move.
+  #
+  # WHY, for a WALL-MOUNTED socket. The old radial grasp (fingertip frame on the collar frame,
+  # approaching from the side) put tool0 183 mm off the axis at +25 mm PAST the mating face, and
+  # a 90 deg turn swept it through a 258 mm arc at that depth -- across the wall. Axially tool0
+  # sits at -158 mm and travels 0 mm for the same turn: 183 mm more clearance, no lateral sweep.
+  #
+  # THE COST: the approach is no longer a pure orbit from where the sweep left the arm. Radial
+  # and axial differ by a 90 deg pitch, which cannot happen with the open fingers still around
+  # the cable -- so the sequence lifts off, retreats along the connector -X, reorients in clear
+  # space, and only then advances back down the axis. That advance THREADS THE CABLE between the
+  # open fingers; it is guarded, but jog it once with the phase gate before trusting it.
   collar_clocking:
     # OPTIONAL -- false ends the run SEATED. Requires cable_clocking
     # enabled: true with this true is REJECTED before the robot moves (see the table above).
@@ -644,22 +658,36 @@ assembly:
     # NOT ROLLED BY assembly.engage_clock_deg -- measured against the FIXTURE, so the app resolves
     # it in the roll-FREE basis. Re-measure only if the FIXTURE moves.
     axis_offset_mm: [0.0, 0.0, -10.0]
-    # UNWIND STATION, mm along the connector +X RELATIVE TO THE JUNCTION (= the closed pads).
-    # The gripper unwinds here, then ADVANCES onto the collar before closing, so with null/0 the
-    # advance is exactly collar_offset_mm. The two are separate because the unwind wants the
-    # fingers clear of the ring rather than wrapped around it.
-    #
-    # null (or 0) = the junction station, provably clear of the collar since the pads were just
-    # gripping there. Negative = stand further back.
+    # APPROACH STATION, mm along the connector +X RELATIVE TO THE JUNCTION (= the closed pads).
+    # Where the fingertip sits when the axial advance onto the ring begins, so with null/0 the
+    # advance is exactly collar_offset_mm. Negative = start further back along the cable.
     approach_mm: null
+    # LIFT-OFF, mm along the GRIPPER's own -Z, before anything reorients. The cable sweep leaves
+    # the open fingers wrapped around the cable at the junction; the radial -> axial change is a
+    # 90 deg pitch that would sweep them straight through it. This is the move that frees them.
+    liftoff_mm: 100.0
+    # RETREAT, mm BEHIND approach_mm along the connector -X. Where the arm reorients to axial --
+    # AWAY from the wall, and the furthest-from-it station in the whole maneuver. The advance
+    # then runs retreat -> collar in one guarded compliant leg.
+    retreat_mm: 100.0
+    # WALL STANDOFF, mm: the largest tool0 station along the connector +X that any planned pose
+    # may take, measured in the TARGET frame (+X points INTO the wall, 0 = the mating face). Every
+    # station is on the axis and known before the arm moves, so the whole maneuver's closest
+    # approach to the wall is checked up front rather than discovered by driving into it.
+    #
+    # -50.0 keeps the flange 50 mm clear of the mating face. The axial grasp sits at about
+    # -158 mm, so this has ~108 mm of margin; the old radial grasp sat at +25 mm and would be
+    # REFUSED by it, which is the point. null = no check.
+    wall_standoff_mm: -50.0
     rotation_deg: 90.0
     # PUSH while turning, mm along the connector +X, making the turn a SCREW: the axial press
     # keeps the collar's lugs engaged with their ramps instead of letting them cam back and skip.
     # The reference leads the ring by at most this much, so under this block's spring the press
     # tops out at a few N. 0.0 = a pure rotation.
     push_mm: 10.0
-    # SEAT PUSH -- between the unwind and the advance onto the collar: re-grip the connector at
-    # the junction and PRESS it deeper along +X until force_n is SUSTAINED for persistence_s. The
+    # SEAT PUSH -- FIRST, before the lift-off: re-grip the connector at the junction and PRESS it
+    # deeper along +X until force_n is SUSTAINED for persistence_s. It runs there because the pads
+    # are already around the cable at the junction, exactly where the push wants them. The
     # guard trip IS the success. It exists because the screw's compliance can leave the connector
     # short, and the collar should be locked on a SEATED one. max_travel_mm must cover
     # force_n / stiffness (the spring stretch needed to apply the force at all) plus real seating
@@ -669,29 +697,17 @@ assembly:
       force_n: 1.0
       persistence_s: 0.1
       max_travel_mm: 15.0
-    # PRE-WIND, deg. Before grasping, unwind the OPEN gripper this far about the connector's +X
-    # so the turn that follows has the wrist range to complete it -- beginning the turn where the
-    # arm already is asks for the full rotation_deg on whichever side it happens to be on.
+    # GRASP CLOCK ANGLE, deg: the ABSOLUTE roll about the socket +X to take the collar at, wrt
+    # the TARGET frame -- the same convention cable_clocking.sweep_deg uses. The turn then runs
+    # from here to here + rotation_deg. null = the engaged roll (assembly.engage_clock_deg), so
+    # as shipped the collar is taken at 0 and the turn ends at +90.
     #
-    # "NOMINAL" HERE IS assembly.engage_clock_deg, not the socket's declared roll: every frame
-    # this maneuver works in carries the engage clock angle.
-    #
-    # null (default) = unwind exactly the ACHIEVED cable screw, landing back at the ENGAGED clock
-    #   angle -- wrist range the screw just proved reachable. The turn then ends rotation_deg past
-    #   the engaged angle, not on the nominal alignment.
-    # a number = unwind to that many deg BEFORE the nominal alignment, so the turn lands on
-    #   nominal. Note it undoes the screw AND keeps going.
-    # 0 = start the turn from the nominal alignment itself.
-    #
-    # KEEP THIS null. It is what holds the run inside the band the sweep works in: at
-    # engage_clock_deg 0 with sweep_deg [-75, +75] the arm goes 0 -> -75 -> +75 -> -75 (sweep)
-    # -> 0 (this unwind) -> +90 (the collar turn), so the collar turn is the only excursion past
-    # the band. An explicit number steps that far beyond the engaged roll as well.
-    #
-    # The unwind runs with the gripper OPEN -- doing it while gripping would turn the collar
-    # backwards. Both ends are IK-checked before the gripper closes, so an impossible turn fails
-    # with the collar still free rather than clamped.
-    prewind_deg: null
+    # The collar is a body of revolution, so any angle grips the same ring; what this decides is
+    # how much WRIST range the turn needs and where it ends up. It replaces prewind_deg, which
+    # existed only because the old radial approach could reach the ring only by orbiting from
+    # wherever the sweep left the arm. An axial approach is placed in free space, so the start
+    # angle is simply stated rather than derived from the sweep.
+    grasp_clock_deg: null
     # OUT-OF-AXIS TILT GATE, deg. Before the unwind, the arm's orientation is compared against the
     # collar-frame family and the part that NO rotation about the connector axis can explain is
     # measured. Above this, the maneuver refuses to orbit rather than swinging blindly.

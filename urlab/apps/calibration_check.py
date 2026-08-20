@@ -24,6 +24,13 @@ After `cycles` repetitions: per-axis mean / std / min / max of the contact pose,
 (linear slope of contact x vs cycle). Contact x should sit near the physical face-to-face
 offset and stay put; a trend means something is moving (fixture, grasp, or calibration).
 
+TWO FRAMES, both from configs/frames.yaml: `held_frame` is the part in the fingers (a frames:
+entry, tool0 -> part) and `target_frame` is the recorded mate it is probed against (a targets:
+entry, base_link <- mate). `target_frame` defaults to `held_frame`; set it to probe one held part
+against a different recorded target without adding a catalogue entry. The reported contact pose is
+always the held frame w.r.t. the target frame, so the two should describe the same point on the
+part.
+
 Output: data/experiments/calibration_check_<stamp>/contacts.csv + a printed summary.
 Run:  python -m urlab.apps.calibration_check --config configs/calibration_check.yaml
 """
@@ -55,17 +62,16 @@ def line_rows(standoff_m, overshoot_m, resolution_m):
 
 def build_and_run(cfg, robot, camera, args):
     held_name = cfg.get('held_frame')
-    if not held_name:
-        log.error('held_frame is required.')
-        return False
     frames = tool_frames.load_frames(cfg)
     targets = tool_frames.load_targets(cfg)
-    if held_name not in frames or held_name not in targets:
-        log.error('held_frame %r needs BOTH a frames: and a targets: entry in %s.',
-                  held_name, tool_frames.frames_path(cfg))
+    try:
+        # held_frame = tool0 -> the part in the fingers; target_frame = base_link <- the recorded
+        # mate it is probed against. target_frame null = held_frame.
+        T_held, T_base_tconn, target_name = tool_frames.resolve_held_and_target(
+            frames, targets, held_name, cfg.get('target_frame'), tool_frames.frames_path(cfg))
+    except ValueError as exc:
+        log.error('%s', exc)
         return False
-    T_held = frames[held_name]                     # tool0 -> held connector
-    T_base_tconn = targets[held_name]              # base_link <- target connector (the mate)
 
     cycles = int(cfg.get('cycles', 10))
     standoff_m = float(cfg.get('standoff_distance_m', 0.03))
@@ -96,8 +102,10 @@ def build_and_run(cfg, robot, camera, args):
 
     rows_line = line_rows(standoff_m, overshoot_m, res_m)
     refs = [T_base_tconn @ r @ inverse(T_held) for r in rows_line]
-    log.info('Calibration check: %d cycles, %.0f mm standoff -> %.1f mm past the recorded '
-             'target at %.1f mm/s, guard %.0f N (persistence %.2f s), retract %s.', cycles,
+    log.info('Calibration check: holding %r, probing the recorded target %r%s.', held_name,
+             target_name, '' if target_name == held_name else ' (NOT the held frame)')
+    log.info('  %d cycles, %.0f mm standoff -> %.1f mm past the recorded target at %.1f mm/s, '
+             'guard %.0f N (persistence %.2f s), retract %s.', cycles,
              standoff_m * 1000.0, overshoot_m * 1000.0, v_mm_s, guard.max_force,
              guard.persistence_s, retract)
 

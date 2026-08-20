@@ -3024,9 +3024,6 @@ def test_bnc_engage_config():
     _r = _resolved_wiggle('bnc_assembly', 'assembly', 'engage')
     amp = {d: float((_r.get('amplitude') or {}).get(d, 0.0)) for d in dims}
     frq = {d: float((_r.get('frequency_hz') or {}).get(d, 0.0)) for d in dims}
-    _r = _resolved_wiggle('bnc_assembly', 'assembly', 'engage')
-    amp = {d: float((_r.get('amplitude') or {}).get(d, 0.0)) for d in dims}
-    frq = {d: float((_r.get('frequency_hz') or {}).get(d, 0.0)) for d in dims}
 
     assert amp['x_mm'] == 0.0, \
         'x is the push direction -- the trajectory owns it, not the oscillation'
@@ -4348,9 +4345,14 @@ def test_observation_passes_inherit_the_samplers_preload():
         'the settle after a press must be un-guarded too: hold() is a ramp, so an armed guard '
         'returns seated on the first cycle and cuts short the loaded rows the press recorded')
 
-    # ---- 5. and the loaded rows must actually reach the estimator ----
-    assert 'on_step=log_cb' in press, \
-        'the press must be LOGGED at the same decimation, or it adds load but no evidence'
+    # ---- 5. and the loaded rows must actually reach the estimator when the press IS the
+    # evidence mechanism. advance_cb is log_cb under observe_during: insertion (the mode this
+    # parity story belongs to) and None under observe_during: wiggle, where the evidence is the
+    # wiggle's and the press only loads the station it oscillates about.
+    assert 'on_step=advance_cb' in press, \
+        'the press must log through advance_cb -- log_cb when the pass is the evidence source'
+    assert 'advance_cb = None if observe_wiggle else log_cb' in src, \
+        'and advance_cb must resolve to log_cb whenever observe_during is insertion'
 
 
 def test_observation_passes_do_not_attempt_to_seat():
@@ -4394,6 +4396,59 @@ def test_observation_passes_do_not_attempt_to_seat():
     assert 'approach_only' not in commit, (
         'eval.final_insertion must NOT be approach-only: it runs after the observations have '
         'corrected the belief, and seating is exactly what it is for')
+
+
+def test_observations_come_from_the_wiggle():
+    """Under observe_during: wiggle, the WIGGLE is the only observation source.
+
+    The approach, press and settle still run -- they are how the wiggle reaches loaded contact --
+    but their rows are a drive-in that a wiggle_sampling map does not contain, so logging them
+    would put every pass partly off-map by construction (the same class of failure as the v5
+    depth gap, from the other direction). The estimate then corrects the belief and
+    eval.final_insertion makes the one direct insertion from the corrected pose.
+    """
+    import yaml
+
+    src = open(os.path.join(ROOT, 'urlab', 'apps', 'estimator_eval.py')).read()
+    cfg = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'estimator_eval.yaml')))
+    col = cfg['eval']['collection']
+
+    # the config ships the mode, and with a duration that can actually collect something
+    assert col.get('observe_during', 'wiggle') == 'wiggle'
+    assert float(col.get('wiggle_s', 0.0)) > 0.0, (
+        "observe_during: wiggle with wiggle_s 0 collects ZERO observations per pass -- the app "
+        'refuses it pre-motion, so the shipped config must not be that config')
+
+    # one callback split decides who logs: the advance/press/settle go quiet, the wiggle keeps
+    # logging in BOTH modes (it was an observation source before this mode existed)
+    assert 'advance_cb = None if observe_wiggle else log_cb' in src
+    body = src[src.index('def run_insertion('):src.index('def run_insertion(') + 8000]
+    assert body.count('on_step=advance_cb') >= 3, (
+        'approach, peck back-off, press and settle must all log through advance_cb -- any one of '
+        'them still holding log_cb leaks drive-in rows into a wiggle-only collection')
+    wig = body[body.index('wigmod.run('):]
+    assert 'on_step=log_cb' in wig[:200], 'the wiggle itself must still log'
+
+    # the stop depth cannot come from obs[-1] when the advance is not logging
+    assert '_depth_now()' in body, (
+        'the guard-trip stop depth must have a direct read -- obs[-1] is empty by design when '
+        'the advance does not log, and the stop-signature fusion still needs the depth')
+
+    # a zero-row attempt (possible now: no contact -> no wiggle -> nothing) is SKIPPED, not fitted
+    assert 'if not len(full):' in src, (
+        'an attempt with zero observations must skip the estimate -- an update from zero rows '
+        "is the estimator's prior wearing an estimate's name")
+
+    # the mode is validated pre-motion, and the commit is exempt from it
+    assert "obs_during == 'wiggle' and (obs_wig is None or obs_wig_s <= 0)" in src, \
+        'a config that would collect nothing must fail before the arm moves'
+    assert src.count('observe_wiggle=(obs_during ==') == 1, \
+        'exactly one call site -- the observation pass -- may narrow its logging to the wiggle'
+    commit = src[src.index('adm_final, refs, T_believed, guard_ctl=guard_final'):]
+    commit = commit[:commit.index(')')]
+    assert 'observe_wiggle' not in commit, (
+        "the commit logs its whole motion: its observations are the RECORD of the seating, not "
+        'estimator evidence, and a wiggle-only record of a direct insertion would be empty')
 
 
 def test_sampler_and_eval_presses_are_distinct_knobs():
@@ -4498,8 +4553,6 @@ def test_insertion_tester_config_is_coherent():
     assert int(ins['repeats']) >= 1, 'repeats must be at least 1'
 
     wg = ins['wiggle']
-    _r = _resolved_wiggle('insertion_tester', 'insertion', 'wiggle')
-    amp, frq = _r['amplitude'], _r['frequency_hz']
     _r = _resolved_wiggle('insertion_tester', 'insertion', 'wiggle')
     amp, frq = _r['amplitude'], _r['frequency_hz']
     live = [d for d in amp if abs(float(amp[d])) > 0.0]
@@ -4619,37 +4672,6 @@ def test_every_app_resolves_to_the_tuned_wiggle():
     the source string -- but it has to be deliberate, and this test makes an accidental one
     visible.
     """
-def _resolved_wiggle(app, *keys):
-    """The wiggle an app actually ends up driving, after inheriting from the tuned file.
-
-    Tests must ask this rather than reading `amplitude` out of the app's own config: the
-    parameters deliberately are not there any more, and a test that reads the raw block is
-    asserting an arrangement that was removed on purpose."""
-    from urlab import config as urconfig
-    from urlab.skills import wiggle as wigmod
-    cfg = urconfig.load(app)
-    node = cfg
-    for k in keys:
-        node = (node or {}).get(k) if isinstance(node, dict) else None
-    node = node or {}
-    blk, _ = wigmod.from_shared(cfg, node if 'amplitude' in node else node.get('wiggle'),
-                                node.get('wiggle_from', 'wiggle_sampling.yaml'), app)
-    return blk
-
-
-def test_every_app_resolves_to_the_tuned_wiggle():
-    """Each app that wiggles must end up with the parameters from configs/wiggle_sampling.yaml.
-
-    That file is where the axes, amplitudes, frequencies and phases were tuned against hardware.
-    An app carrying its own copy is an app whose observations stop being comparable the moment the
-    tuned values change -- which is the whole reason the waveform itself is shared. So this does
-    not check that each config DECLARES a wiggle; it checks that each app RESOLVES to the same
-    one, which is the property that actually matters.
-
-    A deliberate local override is still allowed -- `from_shared` layers it on top and names it in
-    the source string -- but it has to be deliberate, and this test makes an accidental one
-    visible.
-    """
     import yaml
 
     from urlab import config as urconfig
@@ -4665,30 +4687,7 @@ def test_every_app_resolves_to_the_tuned_wiggle():
     for app, keys in cases:
         cfg = urconfig.load(app)
         node = cfg
-    from urlab import config as urconfig
-    from urlab.skills import wiggle as wigmod
-
-    with open(os.path.join(ROOT, 'configs', 'wiggle_sampling.yaml')) as fh:
-        tuned = (yaml.safe_load(fh) or {}).get('wiggle') or {}
-    assert tuned.get('amplitude'), 'configs/wiggle_sampling.yaml must carry the tuned block'
-
-    cases = [('estimator_eval', ('eval', 'collection')),
-             ('bnc_assembly', ('assembly', 'engage')),
-             ('insertion_tester', ('insertion', 'wiggle'))]
-    for app, keys in cases:
-        cfg = urconfig.load(app)
-        node = cfg
         for k in keys:
-            node = (node or {}).get(k) if isinstance(node, dict) else None
-        node = node or {}
-        blk, src = wigmod.from_shared(
-            cfg, node if 'amplitude' in node else node.get('wiggle'),
-            node.get('wiggle_from', 'wiggle_sampling.yaml'), app)
-        for key in ('amplitude', 'frequency_hz'):
-            assert blk.get(key) == tuned.get(key), (
-                f'{app} resolves {key} to {blk.get(key)}, not the tuned {tuned.get(key)} '
-                f'(source: {src}). Remove the local copy, or make the override deliberate.')
-        wigmod.Wiggle.from_cfg(blk, app)          # and it must still validate
             node = (node or {}).get(k) if isinstance(node, dict) else None
         node = node or {}
         blk, src = wigmod.from_shared(
@@ -5086,23 +5085,15 @@ def test_engage_is_the_trajectory_plus_an_optional_oscillation():
     # amplitude/frequency are NOT declared here any more -- they come from the tuned file, and
     # test_every_app_resolves_to_the_tuned_wiggle checks that resolution.
     for k in ('speed_mm_s', 'preload_mm', 'sample_rate_hz',
-    # amplitude/frequency are NOT declared here any more -- they come from the tuned file, and
-    # test_every_app_resolves_to_the_tuned_wiggle checks that resolution.
-    for k in ('speed_mm_s', 'preload_mm', 'sample_rate_hz',
               'max_axial_force_n', 'persistence_s', 'stiffness'):
         assert k in en, f'assembly.engage.{k} must be declared'
     assert float(en['preload_mm']) >= 0.0
     _r = _resolved_wiggle('bnc_assembly', 'assembly', 'engage')
     _amp, _frq = _r.get('amplitude') or {}, _r.get('frequency_hz') or {}
     live = [k for k, v in _amp.items() if abs(float(v)) > 0.0]
-    _r = _resolved_wiggle('bnc_assembly', 'assembly', 'engage')
-    _amp, _frq = _r.get('amplitude') or {}, _r.get('frequency_hz') or {}
-    live = [k for k, v in _amp.items() if abs(float(v)) > 0.0]
     for d_ in live:
         assert float(_frq.get(d_, 0)) > 0.0, f'engage axis {d_} has amplitude but no freq'
-        assert float(_frq.get(d_, 0)) > 0.0, f'engage axis {d_} has amplitude but no freq'
     if live:
-        assert float(en['sample_rate_hz']) >= 4.0 * max(float(_frq[d_])
         assert float(en['sample_rate_hz']) >= 4.0 * max(float(_frq[d_])
                                                         for d_ in live), 'engage would alias'
 
@@ -5119,19 +5110,6 @@ def test_engage_is_the_trajectory_plus_an_optional_oscillation():
         'the engage limit must project onto the connector +X; a |f| limit tight enough to catch '
         'real resistance also stops on every lateral graze')
 
-def test_shipped_wiggle_configs_are_accepted_by_the_shared_implementation():
-    """Every app that superimposes a wiggle must build one the shared module accepts.
-
-    urlab/skills/wiggle.py owns the waveform and its correctness checks -- amplitude without a
-    frequency, aliasing above a quarter of the reference rate, and a frequency ratio so simple the
-    probe traces a line instead of filling the box. Those are the things that make a wiggle
-    something other than what its config says, and they are refused before the arm moves.
-
-    This asserts the SHIPPED configs pass that gate. It deliberately does NOT re-implement the
-    checks, and it does NOT pin tuning: burst length against orbit period, which stations exist,
-    how many amplitude scales are swept, are all judgement calls the experiment is free to change
-    -- an earlier version of this test pinned them and broke the moment the station grid was
-    retuned, which is a test failing at its own author rather than at a defect.
 def test_shipped_wiggle_configs_are_accepted_by_the_shared_implementation():
     """Every app that superimposes a wiggle must build one the shared module accepts.
 
@@ -5195,74 +5173,7 @@ def test_every_wiggle_goes_through_the_shared_implementation():
     diverged in the first place, and observations collected under one are then not comparable
     with a map built under another -- which is the whole point of the map/eval parity work. If a
     new hand-rolled oscillation appears in an app, this fails.
-
-    from urlab.skills import wiggle as wigmod
-
-    def block_of(path, *keys):
-        with open(os.path.join(ROOT, 'configs', path)) as fh:
-            node = yaml.safe_load(fh)
-        for k in keys:
-            node = (node or {}).get(k)
-            if node is None:
-                return None
-        return node
-
-    cases = [
-        ('wiggle_sampling.yaml', ('wiggle',), 'compliance'),
-        ('bnc_assembly.yaml', ('assembly', 'engage'), 'compliance'),
-        ('estimator_eval.yaml', ('eval', 'collection', 'wiggle'), 'compliance'),
-    ]
-    checked = 0
-    for path, keys, _ in cases:
-        blk = block_of(path, *keys)
-        if not blk:
-            continue
-        amps = blk.get('amplitude') or {}
-        if not any(abs(float(v)) > 0 for v in amps.values()):
-            continue                       # no oscillation configured: nothing to validate
-        with open(os.path.join(ROOT, 'configs', path)) as fh:
-            rate = float(((yaml.safe_load(fh) or {}).get('compliance') or {})
-                         .get('reference_rate_hz', 125.0))
-        dims = ('x_mm', 'y_mm', 'z_mm', 'roll_deg', 'pitch_deg', 'yaw_deg')
-        w = wigmod.Wiggle([float(amps.get(d, 0)) for d in dims],
-                          [float((blk.get('frequency_hz') or {}).get(d, 0)) for d in dims],
-                          [float((blk.get('phase_deg') or {}).get(d, 0)) for d in dims],
-                          float(blk.get('taper_s', 0) or 0), path)
-        w.validate(rate_hz=rate,
-                   cap_v=blk.get('max_speed_mm_s') or blk.get('max_oscillation_speed_mm_s'),
-                   cap_w=blk.get('max_rotation_deg_s')
-                   or blk.get('max_oscillation_rotation_deg_s'))
-        checked += 1
-    assert checked, 'no shipped config carries a live wiggle -- expected at least one'
-
-
-def test_every_wiggle_goes_through_the_shared_implementation():
-    """No app may carry its own copy of the waveform.
-
-    Three copies of a sine is how the frame convention, the taper and the speed-cap policy
-    diverged in the first place, and observations collected under one are then not comparable
-    with a map built under another -- which is the whole point of the map/eval parity work. If a
-    new hand-rolled oscillation appears in an app, this fails.
     """
-    apps = os.path.join(ROOT, 'urlab', 'apps')
-    offenders = []
-    for name in os.listdir(apps):
-        if not name.endswith('.py'):
-            continue
-        src = open(os.path.join(apps, name), encoding='utf-8').read()
-        # a sine driven by 2*pi*frequency is a waveform; anything else (a rotation, a
-        # Lissajous drawn in a diagnostic) is not what this looks for. Scanned line by
-        # line so the pattern stays readable.
-        hits = [ln.strip() for ln in src.splitlines()
-                if not ln.lstrip().startswith('#')
-                and ('np.sin(2.0 * np.pi *' in ln or 'np.sin(2 * np.pi *' in ln
-                     or 'math.sin(2.0 * math.pi *' in ln
-                     or 'math.sin(2 * math.pi *' in ln)]
-        if hits:
-            offenders.append(f'{name}: {len(hits)} hand-rolled sine(s)')
-    assert not offenders, (
-        'these apps build a waveform themselves instead of using urlab/skills/wiggle.py:\n  '
-        + '\n  '.join(offenders))
     apps = os.path.join(ROOT, 'urlab', 'apps')
     offenders = []
     for name in os.listdir(apps):

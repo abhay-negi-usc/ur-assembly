@@ -71,7 +71,6 @@ from .. import tool_frames
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import trajectory as traj
 from ..skills import wiggle as wigmod
-from ..skills import wiggle as wigmod
 from ..skills.manifold import (DIMS, FORCE_COLS, POSE_COLS, TORQUE_COLS,
                                mats_from_vec6, scaled12, vec6_from_mats)
 from ..skills.mixture import from_energy
@@ -1139,33 +1138,34 @@ def build_and_run(cfg, robot, camera, args):
                  'same excitation the map was built with.',
                  obs_wig.describe(), obs_wig_s, _wsrc)
 
-    # THE OBSERVATION WIGGLE (urlab/skills/wiggle.py) -- the same excitation wiggle_sampling
-    # collects its map under. Absent or all-zero amplitudes means no oscillation and this app
-    # behaves exactly as before.
-    _col = ev.get('collection') or {}
-    obs_wig_s = float(_col.get('wiggle_s', 0.0) or 0.0)
-    _wblk, _wsrc = wigmod.from_shared(cfg, _col.get('wiggle'),
-                                      _col.get('wiggle_from', 'wiggle_sampling.yaml'),
-                                      'observation')
-    try:
-        obs_wig = wigmod.Wiggle.from_cfg(_wblk, 'observation')
-        if obs_wig is not None:
-            obs_wig.validate(rate_hz=float(cfg.get_path('compliance.reference_rate_hz', 125.0)),
-                             cap_v=_wblk.get('max_speed_mm_s'),
-                             cap_w=_wblk.get('max_rotation_deg_s'),
-                             duration_s=obs_wig_s or None)
-    except wigmod.WiggleError as exc:
-        log.error('%s', exc)
+    # WHAT COUNTS AS AN OBSERVATION (eval.collection.observe_during).
+    #
+    #   'wiggle'     rows are logged ONLY while the observation wiggle is driving. The approach,
+    #                the press and the settle still RUN -- they are how the wiggle reaches loaded
+    #                contact -- but they are motion, not evidence: the estimator sees the part
+    #                being EXCITED about a station, which is what the wiggle_sampling map holds,
+    #                and nothing from the drive-in that reached it.
+    #   'insertion'  the original: every servo cycle of the pass is logged, approach and press
+    #                included. The right choice when the map is uncertain_sampling's (that map IS
+    #                insertion sweeps), and the wrong one against a wiggle map, whose rows the
+    #                approach does not resemble.
+    #
+    # 'wiggle' requires a configured wiggle, checked HERE so a config that would collect zero
+    # observations per pass fails before the arm moves rather than after a full trial of it.
+    obs_during = str(_col.get('observe_during', 'wiggle')).strip().lower()
+    if obs_during not in ('wiggle', 'insertion'):
+        log.error("eval.collection.observe_during %r must be 'wiggle' or 'insertion'.",
+                  obs_during)
         return False
-    if obs_wig is not None and obs_wig_s <= 0:
-        log.error('eval.collection.wiggle has amplitudes but collection.wiggle_s is 0 -- nothing '
-                  'would be driven. Set a duration or clear the amplitudes.')
+    if obs_during == 'wiggle' and (obs_wig is None or obs_wig_s <= 0):
+        log.error("eval.collection.observe_during is 'wiggle' but no wiggle is configured "
+                  '(amplitudes all zero, or collection.wiggle_s is 0) -- every pass would '
+                  "collect ZERO observations and the estimator would have nothing to fit. "
+                  "Set collection.wiggle_s, or switch observe_during to 'insertion'.")
         return False
-    if obs_wig is not None:
-        log.info('OBSERVATION WIGGLE at the seat: %s, for %.1f s per pass, logged at the same '
-                 'decimation. Parameters from %s, so these observations are collected under the '
-                 'same excitation the map was built with.',
-                 obs_wig.describe(), obs_wig_s, _wsrc)
+    log.info('Observations come from the %s.',
+             'WIGGLE ONLY -- the approach/press/settle move the arm but log nothing'
+             if obs_during == 'wiggle' else 'whole pass (approach, press, wiggle, settle)')
 
     save_obs = bool(ev.get('save_observations', True))
     log.info('%d trials x max %d attempts (%s perturbations, bounds lower=%s upper=%s).',
@@ -1665,11 +1665,16 @@ def build_and_run(cfg, robot, camera, args):
         return max(t_lin, t_ang, min_seg_s)
 
     def run_insertion(adm_ctl, refs, T_bel, peck=False, guard_ctl=None, settle=None,
-                      hold=None, speed=None, pause=None, preload_mm=0.0, approach_only=False):
+                      hold=None, speed=None, pause=None, preload_mm=0.0, approach_only=False,
+                      observe_wiggle=False):
         """One admittance-followed insertion along refs, collecting observations (same law and
         logging as cable_pick_estimate_assemble), the seated kinematic check, then the compliant
         UN-guarded retract along the believed part's own -X (a seated part is already over the
         guard limit; a guarded retract would block itself).
+
+        observe_wiggle=True (eval.collection.observe_during: wiggle) narrows the observation
+        source to the wiggle: the approach, press and settle still run -- they are how the wiggle
+        reaches loaded contact -- but only the wiggle's rows are logged as evidence.
 
         peck=True (eval.collection.mode: peck): a force stop does NOT end the advance -- back
         off peck_retract_mm along the believed -X, reset the guard, and continue along the
@@ -1695,6 +1700,16 @@ def build_and_run(cfg, robot, camera, args):
                 obs.append(_observe(robot, T_bel, T_base_tconn))
                 meas.append(_measured(robot, T_true, T_base_tconn))
 
+        # The callback the NON-wiggle motion gets. None under observe_wiggle: the approach is
+        # still driven, guarded and force-stopped exactly as before -- it just stops being an
+        # observation source, because its rows are a drive-in the wiggle map does not contain.
+        advance_cb = None if observe_wiggle else log_cb
+
+        def _depth_now():
+            """The believed stop depth, read directly -- obs[-1] does the job only while the
+            advance is logging, and under observe_wiggle it is not."""
+            return float(_observe(robot, T_bel, T_base_tconn)[0])
+
         adm_ctl.reset()
         adm_ctl.warmup(refs[0], tare_fn=tare)
         guard.reset()
@@ -1703,12 +1718,11 @@ def build_and_run(cfg, robot, camera, args):
         prev, i = refs[0], 1
         while i < len(refs):
             res = adm_ctl.ramp(prev, refs[i], seg_time(prev, refs[i], sv, sw), guard,
-                               on_step=log_cb)
+                               on_step=advance_cb)
             last_ref = refs[i]
             if res == 'seated':
                 seated = True
-                if obs:
-                    stops.append(float(obs[-1][0]))
+                stops.append(float(obs[-1][0]) if obs else _depth_now())
                 if not peck:
                     log.info('Contact limit at waypoint %d/%d -- stopped advancing.',
                              i, len(refs) - 1)
@@ -1721,15 +1735,18 @@ def build_and_run(cfg, robot, camera, args):
                 # then continue with the NEXT waypoint -- 'continue on the trajectory'
                 T_out = _retract_ref(refs[i], T_bel, peck_mm / 1000.0)
                 adm_ctl.ramp(refs[i], T_out, seg_time(refs[i], T_out, rv_mm_s, rw_deg_s),
-                             guard=None, on_step=log_cb)
+                             guard=None, on_step=advance_cb)
                 guard.reset()
                 prev = T_out
                 i += 1
                 continue
             prev = refs[i]
             i += 1
-        if not stops and obs:                      # ran to the end: deepest point IS the stop
-            stops = [float(np.max(np.asarray(obs, dtype=float).reshape(-1, 12)[:, 0]))]
+        if not stops:                              # ran to the end: deepest point IS the stop
+            # ... and with nothing logged on the way, the arm standing at the last waypoint IS
+            # the deepest point of a monotonic path, so a direct read records the same thing.
+            stops = ([float(np.max(np.asarray(obs, dtype=float).reshape(-1, 12)[:, 0]))]
+                     if obs else [_depth_now()])
         if peck:
             log.info('PECK: %d contact event(s), stop depths %s mm.', len(stops),
                      [round(s, 1) for s in stops])
@@ -1752,8 +1769,11 @@ def build_and_run(cfg, robot, camera, args):
                         'so it observes nothing and seats nothing.')
         if press:
             T_pre = _axial_ref(last_ref, T_bel, preload_mm / 1000.0)
+            # advance_cb, not log_cb: under observe_wiggle the press still LOADS the contact (the
+            # wiggle then oscillates about a pressed station, like the sampler's bursts) but its
+            # rows are not evidence -- the wiggle map holds excitation, not the press ramp.
             adm_ctl.ramp(last_ref, T_pre, seg_time(last_ref, T_pre, sv, sw), guard=None,
-                         on_step=log_cb)
+                         on_step=advance_cb)
             last_ref = T_pre
         # WIGGLE at the seat, if configured -- the same multisine wiggle_sampling drives, applied
         # by right-multiplication in the BELIEVED part's own frame so a misaligned connector rocks
@@ -1768,7 +1788,7 @@ def build_and_run(cfg, robot, camera, args):
         # armed guard would report 'seated' on the first cycle and cut short exactly the loaded
         # rows the press was made to record. `press`, not preload_mm: when approach_only withheld
         # the press there is no standing load to protect, so the guard goes back on.
-        adm_ctl.hold(last_ref, settle_s, None if press else guard, on_step=log_cb)
+        adm_ctl.hold(last_ref, settle_s, None if press else guard, on_step=advance_cb)
         if hold_s > 0:                             # dwell: un-guarded, unlogged (see above)
             log.info('   holding the stop for %.1f s.', hold_s)
             adm_ctl.hold(last_ref, hold_s, guard=None)
@@ -1906,12 +1926,14 @@ def build_and_run(cfg, robot, camera, args):
                     # ASSEMBLE under admittance (same law as the pick app), check, retract.
                     # obs_pre_mm carries uncertain_sampling's press so these passes reach
                     # the LOADED rows the map holds past the mate; 0 = the map has none.
-                    # approach_only is passed HERE and not to the final insertion below: the
-                    # commit is the pass that is supposed to seat, and it runs after the
-                    # observations have corrected the belief it drives from.
+                    # approach_only and observe_wiggle are passed HERE and not to the final
+                    # insertion below: the commit is the pass that is supposed to seat, it runs
+                    # after the observations have corrected the belief it drives from, and its
+                    # log is a record of the seating, not estimator evidence.
                     obs_i, meas_i, seated, lin, ang, seat6, stops_i = run_insertion(
                         adm, refs, T_believed, peck=(col_mode == 'peck'),
-                        preload_mm=obs_pre_mm, approach_only=approach_only)
+                        preload_mm=obs_pre_mm, approach_only=approach_only,
+                        observe_wiggle=(obs_during == 'wiggle'))
                     obs.extend(obs_i)
                     meas.extend(meas_i)
                     attempt_stops.extend(stops_i)
@@ -1939,6 +1961,15 @@ def build_and_run(cfg, robot, camera, args):
                 # oldest first, so recency weighting decays the carried rows.
                 obs_arr = np.asarray(obs, dtype=float).reshape(-1, 12)
                 full = np.vstack([acc, obs_arr]) if accumulate else obs_arr
+                if not len(full):
+                    # Possible under observe_during: wiggle -- a pass with no contact stop makes
+                    # no wiggle (approach_only), so an attempt whose every pass missed the part
+                    # has nothing to estimate FROM. Skipping is the only honest move: any update
+                    # from zero rows would be the estimator's prior wearing an estimate's name.
+                    log.warning('Attempt %d collected ZERO observations (no pass reached '
+                                'contact) and none are carried -- skipping the estimate, the '
+                                'belief is unchanged.', attempt)
+                    continue
                 if accumulate and len(acc):
                     log.info('Estimating on %d observations (%d carried from prior attempts).',
                              len(full), len(acc))

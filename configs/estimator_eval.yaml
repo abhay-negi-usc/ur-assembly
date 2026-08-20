@@ -239,15 +239,32 @@ eval:
     # AMPLITUDES, FREQUENCIES AND PHASES are read from configs/wiggle_sampling.yaml at run time
     # rather than copied here. Tune them once, there, and every app that wiggles follows.
     #
-    # Driven AT THE SEAT, after the preload, logged at the same decimation, un-guarded (at the
-    # seat the guard has already tripped, so arming it would cut the wiggle to nothing).
+    # Driven AT THE CONTACT STOP, after the preload, logged at the same decimation, un-guarded
+    # (at the stop the guard has already tripped, so arming it would cut the wiggle to nothing).
     #
-    # OFF BY DEFAULT: wiggle_s 0 and this app settles still, exactly as before.
-    wiggle_s: 0.0                  # seconds of oscillation per pass. 0 = off. THE ONLY KNOB
-                                   # this app owns -- everything else comes from the file below.
+    # 15 s to match wiggle_sampling's wiggle_s -- the map's bursts are 15 s windows of this
+    # exact excitation, so a matching duration sees the same fraction of the Lissajous orbit
+    # (shared frequencies close their pattern on a fixed period; a shorter window samples a
+    # different, partial figure and its rows cluster differently than the map's).
+    wiggle_s: 15.0                 # seconds of oscillation per pass. THE ONLY KNOB this app
+                                   # owns -- everything else comes from the file below.
     wiggle_from: wiggle_sampling.yaml
     # wiggle:                      # uncomment to override a single key for a one-off; it is
     #   taper_s: 0.5               # layered over the shared block and logged as a diff.
+
+    # ---- WHAT COUNTS AS AN OBSERVATION ----------------------------------------------------
+    # wiggle     (default) rows are logged ONLY while the wiggle is driving. The pass still
+    #            approaches under the guard, stops at first contact and presses -- that is how
+    #            the wiggle reaches loaded contact -- but those motions log nothing: the
+    #            estimator sees the part being excited about a station, which is what a
+    #            wiggle_sampling map holds, and none of the drive-in that reached it. The
+    #            estimate then corrects the belief, and eval.final_insertion makes the one
+    #            direct insertion from the corrected pose.
+    # insertion  the pre-2026-08-20 behaviour: every servo cycle of the pass is evidence,
+    #            approach and press included. Right against an uncertain_sampling map (which IS
+    #            insertion sweeps), wrong against a wiggle map, whose rows the approach does
+    #            not resemble.
+    observe_during: wiggle
 
 
     # SAMPLING PARITY. The map is built by apps/uncertain_sampling; observations collected under
@@ -270,7 +287,7 @@ eval:
     # NOTE PECK is REJECTED under match_sampling: it re-advances from a partially-inserted state,
     # which uncertain_sampling never records (that app always retracts fully and re-approaches
     # through free space). OFFSET_SWEEP is allowed -- see collection.sampling below.
-    mode: offset_sweep           # attempts | offset_sweep | peck
+    mode: attempts           # attempts | offset_sweep | peck
     # offset_sweep: commanded offsets [x, y, z (m), roll, pitch, yaw (deg)] in the held part's
     # own frame. null = the default pitch sweep -4..+4 deg in 2 deg steps, other dims zero.
     #
@@ -470,7 +487,7 @@ estimation:
   # bnc_connector_finger_holder with the wrong y sign, which is a +91.4 mm offset along the
   # connector's own +x -- invisible straight-in, an 8 mm z lever arm at 5 deg of pitch. Anything
   # paired with this file must be in the same frame (see analysis/bnc_tuning/fix_obs_frame.py).
-  manifold_csv: ./configs/data/bnc_manifold_v5.csv
+  manifold_csv: ./configs/data/bnc_manifold_wiggle_250k.csv
   # WRENCH REPRESENTATION: unit | rawcap | raw.
   #   unit    direction only -- magnitude discarded entirely.
   #   rawcap  direction x magnitude, SATURATED (see rawcap_* below).

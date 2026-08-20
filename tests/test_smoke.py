@@ -26,6 +26,23 @@ def approx(a, b, tol=1e-9):
     return np.allclose(a, b, atol=tol)
 
 
+def widest_cable_leg(asm):
+    """The largest single rotation bnc_assembly's cable sweep commands, in radians.
+
+    cable_clocking.sweep_deg is a list of ABSOLUTE roll positions wrt the target frame, and the
+    arm starts at assembly.engage_clock_deg -- so the legs are the gaps along that walk, and the
+    widest of them is the biggest arc any one servoed stroke has to cover. Tests that care about
+    the geometry of a stroke (chord error, axis drag) want that worst case, not a config key.
+    Falls back to the legacy single relative rotation_deg when no sweep is declared."""
+    cc = asm['cable_clocking']
+    sw = cc.get('sweep_deg')
+    if sw is None:
+        return abs(np.radians(float(cc['rotation_deg'])))
+    stops = [np.radians(float(asm.get('engage_clock_deg', 0.0) or 0.0))]
+    stops += [np.radians(float(v)) for v in sw]
+    return max(abs(b - a) for a, b in zip(stops, stops[1:]))
+
+
 def test_sources_parse_and_have_no_duplicated_blocks():
     """Every source PARSES, and no block of lines is immediately repeated.
 
@@ -2891,10 +2908,14 @@ def test_bnc_clocking_geometry():
     assert abs(det.advance_m() - push_m) < 1e-12 and det.check()
     assert 'advance' in det.tripped_by and abs(det.peak_m - push_m) < 1e-12
 
-    # THE REGRASP RATCHET. A retry releases, returns the GRIPPER to the engaged pose and re-grips;
-    # the connector is captive and stays where it screwed to. So advance must stay CUMULATIVE from
-    # the ORIGINAL engaged pose across that regrasp -- if the detector were not rebased it would
-    # read zero again at every retry and a cumulative threshold could never be reached.
+    # REBASING ACROSS A CHANGE OF GRIP. The cable sweep no longer regrasps -- a retry is the
+    # REVERSAL onto the next sweep_deg position and the gripper stays closed -- so nothing in
+    # bnc_assembly calls rebase today. What is tested here is the detector's CONTRACT, which is
+    # what makes "cumulative advance" mean anything at all: release the connector and it stays
+    # where it screwed to while the gripper travels, so the two afterwards differ by exactly the
+    # progress made. Without the rebase the detector reads zero again after any release and a
+    # cumulative threshold could never be reached. Any future caller that lets go (the collar
+    # maneuver's seat push already does) needs this arithmetic to be right.
     partial = xyzrpy_to_matrix([0.002, 0.0, 0.0], [np.radians(30.0), 0.0, 0.0])   # 2 mm gained
     det2 = _ScrewAdvance(rb, T_tool0_conn, T_base_tconn, 0.005)
     rb._T = ref_of(partial)
@@ -2904,13 +2925,14 @@ def test_bnc_clocking_geometry():
     rb._T = T_tool0_engaged                                       # gripper back at engaged pose
     det2.rebase(inverse(rb.tool0()) @ C_conn)                     # re-grip: adopt the new relation
     assert abs(det2.advance_m() - 0.002) < 1e-12, \
-        'the 2 mm already gained must survive the regrasp'
-    assert not np.allclose(det2.T_tool0_conn, T_tool0_conn, atol=1e-9), \
-        'the connector-in-gripper relation MUST change across a regrasp'
+        'the 2 mm already gained must survive the change of grip'
+    assert not np.allclose(det2.T_tool0_conn, T_tool0_conn, atol=1e-9), (
+        'the connector-in-gripper relation MUST change when the gripper travels and the part '
+        'does not')
     # the second identical stroke then adds to it rather than restarting from zero
     rb._T = (T_base_tconn @ screw @ inverse(T_base_tconn)) @ T_tool0_engaged
     assert abs(det2.advance_m() - (0.002 + push_m)) < 1e-12 and det2.check(), \
-        'a second stroke after the regrasp must accumulate onto the first'
+        'a second stroke after the rebase must accumulate onto the first'
 
     # _AnyGuard must remember WHICH watchdog fired -- success and jam are the same 'seated'
     class _Trip:
@@ -3160,12 +3182,17 @@ def test_bnc_clocking_config():
     with open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')) as fh:
         a = yaml.safe_load(fh)['assembly']
     cc, cl = a['cable_clocking'], a['collar_clocking']
-    assert 'retry_mode' not in cc, \
-        'retry_mode is gone -- a retry is always a regrasp at the engaged pose, never an unscrew'
+    assert 'retry_mode' not in cc, (
+        'retry_mode is gone -- a retry is the REVERSAL onto the next sweep_deg position, '
+        'with the gripper still closed')
     assert float(cc['success_advance_mm']) > 0, 'no way to tell the screw worked'
     assert int(cc['max_tries']) >= 1
+    # ONE TRY = ONE LEG, so more than one try needs more than one position to alternate
+    # between, or the extra legs have nothing to turn (the app warns about exactly this).
     if int(cc['max_tries']) > 1:
-        assert cc['open_gripper_after'], 'a retry regrasps, so it needs the gripper to open'
+        assert len(cc.get('sweep_deg') or []) >= 2, (
+            'max_tries > 1 with fewer than two sweep_deg positions gives zero-rotation legs -- '
+            'the oscillation needs two ends to rock between')
     assert float(cc['max_force_n']) > 0 and float(cc['max_torque_nm']) > 0
     # `enabled` is the MANEUVER's switch; the guard's is force_guard_enabled. Writing `enabled`
     # twice in one block is silently legal in YAML (last wins), so the guard override would have
@@ -3198,11 +3225,11 @@ def test_bnc_clocking_config():
             assert key not in seen, f'assembly.{nm}.{key} is defined twice -- YAML keeps the last'
             seen.add(key)
         assert len(seen) >= 3, f'duplicate scan saw only {seen} under {nm} -- it is vacuous'
-    # Advance is CUMULATIVE across regrasp retries, so the reachable ceiling is the stroke times
-    # the number of bites -- not a single stroke.
-    # success_advance_mm is an EARLY-OUT, not the success condition (completion = seated), so it
-    # no longer has to be deliverable within max_tries strokes -- an unreachable early-out just
-    # never fires. Only the > 0 floor above still matters (zero would trip on the first cycle).
+    # Advance is CUMULATIVE from the ORIGINAL engaged pose, so a reversal does not re-zero what
+    # an earlier leg gained. success_advance_mm is an EARLY-OUT, not the success condition (a
+    # sweep that runs its legs is assumed seated), so it does not have to be deliverable within
+    # max_tries legs -- an unreachable early-out just never fires. Only the > 0 floor above
+    # still matters (zero would trip on the first servo cycle, before anything turned).
     shared = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))
     assert float(cc['max_force_n']) >= float(shared['force_guard']['max_force_n']), \
         'the screw guard must not be TIGHTER than the probing guard or it trips immediately'
@@ -3700,8 +3727,15 @@ def test_the_collar_axis_offset_is_read_from_config_in_the_connector_frame():
     The declared connector frame origin is the mating-face reference, placed for insertion --
     nothing forces it onto the barrel centreline the collar physically turns about (bench: ~5 mm
     along the connector -Z). collar_clocking.axis_offset_mm shifts the axis LINE by a vector in
-    the CONNECTOR frame's own axes, scoped to the collar maneuver only; cable clocking keeps the
-    unoffset axis, since the socket physically corrects that captive stroke anyway."""
+    the SOCKET frame's own axes, scoped to the collar maneuver only; cable clocking keeps the
+    unoffset axis, since the socket physically corrects that captive stroke anyway.
+
+    AND IT MUST NOT ROLL WITH assembly.engage_clock_deg. That key rolls the working frame about
+    its own +X, so the frame's Y and Z stop being the axes this number was measured in -- while
+    the offset itself is a property of the FIXTURE and stays put however far round the plug is
+    mated. Resolving it in the rolled basis would swing a bench-measured -Z correction round to
+    -Y at a 90 deg clock angle: the same YAML, a collar axis 10 mm somewhere nobody measured, and
+    nothing in the log to say so. That is what axis_offset_base's roll-free basis prevents."""
     import numpy as np
     import yaml
 
@@ -3722,21 +3756,47 @@ def test_the_collar_axis_offset_is_read_from_config_in_the_connector_frame():
     assert abs(lat - float(np.hypot(off[1], off[2]))) < 1e-9, (
         'a connector-frame offset must shift the axis line by exactly its Y/Z magnitude')
 
+    # ---- INVARIANT TO THE ENGAGE CLOCK ANGLE ----
+    # The app resolves the offset as (T_clk_rot @ R_clock_rot.T) @ off, and T_clk is the socket
+    # frame ALREADY rolled by R_clock -- so the two cancel and the vector is the same at every
+    # clock angle. Checked against the raw socket basis at a spread of angles, including the
+    # -90 the config ships and the 180 where a sign slip would hide.
+    d_socket = T_t[:3, :3] @ (np.asarray(off) / 1000.0)
+    for clock_deg in (0.0, -90.0, 45.0, 180.0):
+        R_clock = T.xyzrpy_to_matrix([0.0, 0.0, 0.0], np.radians([clock_deg, 0.0, 0.0]))
+        T_clk = T_t @ R_clock                              # what the app builds and works in
+        d_app = (T_clk[:3, :3] @ R_clock[:3, :3].T) @ (np.asarray(off) / 1000.0)
+        assert np.allclose(d_app, d_socket, atol=1e-12), (
+            f'the collar axis offset moved when engage_clock_deg = {clock_deg}: it is measured '
+            f'against the fixture and must not roll with the plug')
+    # and the roll-free basis is doing real work -- rolling WITH the frame would move it
+    R_90 = T.xyzrpy_to_matrix([0.0, 0.0, 0.0], np.radians([-90.0, 0.0, 0.0]))
+    d_naive = (T_t @ R_90)[:3, :3] @ (np.asarray(off) / 1000.0)
+    assert np.linalg.norm(d_naive - d_socket) * 1000.0 > 1.0, (
+        'this test has lost its subject: with a Y/Z offset and a 90 deg clock angle the naive '
+        'rolled basis must land somewhere measurably different')
+
     with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
         src = fh.read()
     assert "cl.get('axis_offset_mm'" in src, 'the offset must come from the config'
+    helper = src[src.index('def axis_offset_base('):src.index('def clocking_retract(')]
+    assert 'R_clock[:3, :3].T' in helper, (
+        'the offset must be resolved in the frame ROLL-FREE basis -- undo the engage clock '
+        'roll before rotating a fixture-measured vector into base')
     body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
-    assert 'T_clk[:3, :3] @ off_conn' in body, (
-        'the offset must be rotated from the CONNECTOR frame into base before shifting the point')
+    assert 'axis_offset_base()' in body, (
+        'the collar maneuver must shift its point by the shared, roll-free offset')
     cable = src[src.index('def cable_clocking('):src.index('def collar_clocking(')]
-    assert 'off_conn' not in cable and 'axis_offset_mm' not in cable, (
+    assert ('off_conn' not in cable and 'axis_offset_mm' not in cable
+            and 'axis_offset_base' not in cable), (
         'the offset is scoped to the collar maneuver and the tug; cable clocking keeps the '
         'unoffset axis')
     # the tug centres its RE-GRIP on the same offset axis -- the pull direction cannot carry a
-    # line offset, so the grasp position is where the correction lands
+    # line offset, so the grasp position is where the correction lands. SAME helper, so the two
+    # cannot disagree about where the collar's axis is.
     tug = src[src.index('def tug_verify('):src.index('def engage_insertion(')]
-    assert 'cl_axis_off' in tug and 'T_grasp = translation_matrix(-d_r) @ T_grasp' in tug, (
-        'tug verification must centre its re-grip on the offset connector axis')
+    assert 'axis_offset_base()' in tug and 'T_grasp = translation_matrix(-d_r) @ T_grasp' in tug, (
+        'tug verification must centre its re-grip on the same offset connector axis')
 
 
 def test_the_escape_releases_the_collar_before_retracting():
@@ -3881,7 +3941,9 @@ def test_a_clocking_stroke_follows_the_arc_and_not_the_chord():
     cfg = urconfig.load('bnc_assembly')
     frames, targets = tool_frames.load_frames(cfg), tool_frames.load_targets(cfg)
     cc = cfg['assembly']['cable_clocking']
-    rot = np.radians(float(cc['rotation_deg']))
+    # The WIDEST leg the sweep commands -- the worst case for chord error, and what the app
+    # actually hands screw_ramp. (It used to be the single relative rotation_deg stroke.)
+    rot = widest_cable_leg(cfg['assembly'])
     push = float(cc['push_mm']) / 1000.0
     T_base_tconn = targets[cfg['assembly']['target_frame']]
     T_tool0_conn = frames[cfg['estimation']['initial_connector_frame']]
@@ -3921,13 +3983,16 @@ def test_a_clocking_stroke_follows_the_arc_and_not_the_chord():
     assert 'screw_ramp(' in body and 'adm_cc.ramp(' not in body, (
         'cable_clocking must take its stroke through screw_ramp, not a single adm_cc.ramp -- a '
         'one-call ramp cuts the chord and drags the connector off its axis')
-    # The RETRY is a rotation too. move_l back to the engaged pose executes the ~90 deg return as
-    # a straight line + slerp -- the same chord, with the OPEN fingers around the captive cable.
-    # It hid for a while because its label said 'realign', not 'rotate'.
+    # EVERY leg of the sweep, not just the first. The retry is now the REVERSAL -- the gripper
+    # stays closed and rotates back -- so it is a rotation about the socket axis exactly like the
+    # leg before it, and a move_l would cut the same chord with the part clamped in the fingers.
+    # (This hid for a while in the old ratchet, whose label said 'realign', not 'rotate'.)
     assert 'move_l(' not in body, (
-        'no move_l inside cable_clocking: the retry return is a ~90 deg rotation about the socket '
-        'axis and must travel the screw in reverse (screw_ramp), not cut the chord to ref_start')
-    assert 'retry-unwind' in body, 'the retry must unwind along the achieved screw'
+        'no move_l inside cable_clocking: every leg is a rotation about the socket axis and must '
+        'travel the arc (screw_ramp), not cut the chord between its endpoints')
+    assert 'for k in range(1, cc_tries + 1):' in body and 'cc_legs[(k - 1) % len(cc_legs)]' in body, (
+        'the sweep must WALK the sweep_deg positions, one per try, cycling when there are more '
+        'tries than positions -- that cycling IS the oscillation')
     body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
     assert 'screw_ramp(' in body, (
         'collar_clocking must take its turn through screw_ramp too -- the fingers are CLOSED on '
@@ -3986,7 +4051,7 @@ def test_the_target_frame_and_the_in_hand_belief_name_the_same_point():
     lin, ang = pose_error(frames[tname], belief)
     # Report the consequence in the units the operator cares about: the arc the connector would be
     # dragged through by the ACTUAL clocking stroke, chord = 2 d sin(theta / 2).
-    theta = np.radians(float(cfg['assembly']['cable_clocking']['rotation_deg']))
+    theta = widest_cable_leg(cfg['assembly'])
     arc_mm = 2.0 * lin * 1000.0 * abs(np.sin(theta / 2.0))
     assert lin * 1000.0 < 0.05 and np.degrees(ang) < 0.05, (
         f'assembly.target_frame {tname!r} sits {lin * 1000.0:.2f} mm / {np.degrees(ang):.2f} deg '
@@ -4824,10 +4889,55 @@ def test_collar_prewind_makes_room_without_moving_the_grip():
     assert seen['jaws swapped'] < 1e-6, (
         'swapping the jaws must make the approach a PURE rotation about the connector axis, got '
         f'{seen["jaws swapped"]:.3f} deg off it')
-    # and the app must actually pick between them rather than hard-coding one
-    assert 'grip = min(' in body and 'np.pi' in body[:i_orbit], (
+    # ---- AND IT MUST BE PICKED ON THE OFF-AXIS RESIDUAL, NOT ON THE TOTAL ANGLE -------------
+    # "Smallest total rotation" NAMES the right candidate at a 90 deg screw (90 vs 180) purely by
+    # luck of the arithmetic, and it TIES at a 180 deg one: the correct candidate is then a
+    # 180 deg orbit about the connector axis, the wrong one a 180 deg rotation about an axis
+    # square to it, and both report 180. With cable_clocking.rotation_deg at 180 that tie is the
+    # shipped configuration, and losing it sends the OPEN fingers on a wide swing through the
+    # part -- caught by the tilt gate, but only as an aborted run. What actually separates them
+    # at every angle is the residual no rotation about the connector axis explains.
+    from urlab.apps.bnc_assembly import _wrap_near
+    for screw_deg in (90.0, 180.0):
+        arm = rotate_about_axis(T_base_conn @ T.inverse(T_tool0_ftip @ T_ftip_conn),
+                                axis, point, np.radians(screw_deg))
+        scores = {}
+        for name, G in (('as defined', T.inverse(T_tool0_ftip)),
+                        ('jaws swapped', flip @ T.inverse(T_tool0_ftip))):
+            T_nb = T_collar @ G
+            rel = arm @ T.inverse(T_nb)
+            th = _wrap_near(float(np.dot(_R.from_matrix(rel[:3, :3]).as_rotvec(), axn)),
+                            np.radians(screw_deg))
+            resid = T.pose_error(arm, rotate_about_axis(T_nb, axis, point, th))[1]
+            total = T.pose_error(arm, T_nb)[1]
+            scores[name] = (resid, total)
+        assert scores['jaws swapped'][0] < 1e-9, (
+            f'{screw_deg:.0f} deg screw: the correct roll must leave NO off-axis residual, got '
+            f'{np.degrees(scores["jaws swapped"][0]):.3f} deg')
+        assert np.degrees(scores['as defined'][0]) > 45.0, (
+            f'{screw_deg:.0f} deg screw: the wrong roll must be separated by the residual, got '
+            f'{np.degrees(scores["as defined"][0]):.3f} deg')
+    # the tie the OLD criterion walks into, pinned so the reason for the change stays visible
+    arm180 = rotate_about_axis(T_base_conn @ T.inverse(T_tool0_ftip @ T_ftip_conn),
+                               axis, point, np.pi)
+    tot = [T.pose_error(arm180, T_collar @ G)[1]
+           for G in (T.inverse(T_tool0_ftip), flip @ T.inverse(T_tool0_ftip))]
+    assert abs(tot[0] - tot[1]) < 1e-9, (
+        'this test has lost its subject: at a 180 deg screw the two grasp rolls are supposed to '
+        'be INDISTINGUISHABLE by total rotation angle, which is why the residual is scored')
+
+    # and the app must actually pick between them rather than hard-coding one, on the residual
+    assert 'np.pi' in body[:i_orbit] and 'def _solve(' in body, (
         'collar_clocking must CHOOSE the grasp roll that keeps the approach on the connector '
         'axis, not inherit the connector orientation blindly')
+    assert 'key=lambda r: r[0]' in body and 'pose_error(here, rotate_about_axis(' in body, (
+        'the roll must be scored on the OFF-AXIS RESIDUAL -- scoring the total rotation angle '
+        'ties at a 180 deg screw, which is the shipped cable_clocking.rotation_deg')
+    assert 'grip = min(' not in body, (
+        'the total-angle criterion is the bug this replaced; it must not come back')
+    assert '_wrap_near(' in body, (
+        'the arm clock angle must be wrapped onto the screw branch -- as_rotvec caps at pi, so '
+        'at 180 deg its sign is a coin flip and its sign IS the unwind direction')
     # and both ends are IK-checked before anything grips
     assert body.index('unreachable') < i_close, (
         'reachability must be checked before the close, or an impossible turn leaves the collar '
@@ -4839,6 +4949,269 @@ def test_collar_prewind_makes_room_without_moving_the_grip():
     assert 'prewind_deg' in cl, 'prewind_deg must be declared so the behaviour is discoverable'
     assert cl['prewind_deg'] is None or float(cl['prewind_deg']) >= 0.0, \
         'prewind_deg is null (= rotation_deg) or a non-negative angle'
+
+
+def test_the_cable_sweep_rocks_between_absolute_roll_positions():
+    """cable_clocking walks sweep_deg's roll positions, one leg per try, rocking across the slot.
+
+    A bayonet pin that did not line up with its slot at the mate will not find it by turning
+    harder in one direction -- it rides the rim and jams. It finds it by crossing back and forth
+    over the slot under a steady axial load, which is why the sweep alternates and why the press
+    is established once and HELD through every reversal.
+
+    Four things have to hold, and each is a way a plausible implementation goes wrong:
+      * THE LEGS ALTERNATE. Positions are absolute, so the rotations between them must flip sign;
+        a walk that only ever turns one way is the old behaviour wearing new config.
+      * EACH LEG IS A TRUE SCREW about the socket axis. The rotation is about +X and the push is
+        ALONG +X, so they commute and the axis LINE is invariant -- the connector origin must
+        never leave it, at any roll, on any leg.
+      * THE PRESS DOES NOT BLINK. push ramps to its full value on leg 1 and is CONSTANT after,
+        so a reversal does not unload the connector and make the cams give back what they gained.
+      * A JAMMED LEG CONTINUES FROM WHERE IT STOPPED. screw_ramp reports the fraction reached;
+        restarting the next leg from the endpoint it never got to would command a jump across
+        the arc the guard just refused.
+    """
+    import yaml
+
+    from urlab import config as urconfig, tool_frames
+    from urlab.transforms import inverse, xyzrpy_to_matrix
+
+    asm = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))['assembly']
+    cc = asm['cable_clocking']
+    eng = float(asm['engage_clock_deg'])
+    sweep = [float(v) for v in cc['sweep_deg']]
+    tries = int(cc['max_tries'])
+    assert len(sweep) >= 2, 'the oscillation needs two ends to rock between'
+
+    # ---- THE LEG WALK: one position per try, cycling ----
+    walk = [eng] + [sweep[(k - 1) % len(sweep)] for k in range(1, tries + 1)]
+    turns = [b - a for a, b in zip(walk, walk[1:])]
+    assert all(abs(t) > 1e-9 for t in turns), f'a leg with nothing to turn: {turns}'
+    assert turns[0] < 0, (
+        f'leg 1 turns {turns[0]:+.0f} deg from the engaged roll {eng:+.0f} -- the first rotation '
+        f'is supposed to be NEGATIVE, which needs sweep_deg[0] below engage_clock_deg')
+    assert all(a * b < 0 for a, b in zip(turns, turns[1:])), (
+        f'the legs must ALTERNATE direction -- got turns {[round(t) for t in turns]}, which only '
+        f'ever rocks one way')
+    # the band worked is the config's, not something derived from the engage angle
+    assert min(walk) == min([eng] + sweep) and max(walk) == max([eng] + sweep)
+
+    # ---- EACH LEG IS A TRUE SCREW: the connector origin never leaves the axis line ----
+    cfg = urconfig.load('bnc_assembly')
+    T_clk = tool_frames.load_targets(cfg)[cfg['assembly']['target_frame']] \
+        @ xyzrpy_to_matrix([0.0, 0.0, 0.0], np.radians([eng, 0.0, 0.0]))
+    T_tool0_conn = tool_frames.load_frames(cfg)[cfg['estimation']['initial_connector_frame']]
+    ref_start = T_clk @ inverse(T_tool0_conn)
+    push_m = float(cc['push_mm']) / 1000.0
+    axn = T_clk[:3, 0] / np.linalg.norm(T_clk[:3, 0])
+    org = T_clk[:3, 3]
+
+    def arm_at(th_rel, push):                       # mirrors the app's closure exactly
+        return (T_clk @ xyzrpy_to_matrix([push, 0.0, 0.0], [th_rel, 0.0, 0.0])
+                @ inverse(T_clk)) @ ref_start
+
+    for th_deg in np.linspace(min(walk), max(walk), 25):
+        d = (arm_at(np.radians(th_deg - eng), push_m) @ T_tool0_conn)[:3, 3] - org
+        radial = float(np.linalg.norm(d - float(d @ axn) * axn))
+        assert radial < 1e-9, (
+            f'at {th_deg:+.0f} deg the connector origin is {radial * 1000:.4f} mm off the socket '
+            f'axis -- the leg is not a screw about that line')
+        assert abs(float(d @ axn) - push_m) < 1e-9, (
+            'the axial station must be exactly push_mm at every roll -- rotation about +X and '
+            'translation along +X commute, so the two cannot interfere')
+
+    # ---- THE PRESS DOES NOT BLINK: push is full from the end of leg 1 onward ----
+    # Replays the app's recursion: each leg interpolates its own start push -> cc_push_m, and
+    # carries the value it reached into the next.
+    push_at, seen = 0.0, []
+    for _ in turns:
+        start_push = push_at
+        seen.append((start_push, push_at + (push_m - push_at) * 1.0))   # a leg that completes
+        push_at = push_at + (push_m - push_at) * 1.0
+    assert abs(seen[0][0]) < 1e-12 and abs(seen[0][1] - push_m) < 1e-12, \
+        'leg 1 must build the press from zero to push_mm'
+    for lo, hi in seen[1:]:
+        assert abs(lo - push_m) < 1e-12 and abs(hi - push_m) < 1e-12, (
+            'every leg after the first must hold push_mm CONSTANT -- re-ramping it from zero '
+            'would unload the connector on every reversal, which is when the cams give back')
+
+    # ---- SOURCE: the structure the arithmetic above assumes ----
+    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
+        src = fh.read()
+    body = src[src.index('def cable_clocking('):src.index('def collar_clocking(')]
+    assert 'res, f_done = screw_ramp(' in body and 'th_at = _a + turn * f_done' in body, (
+        'a jammed leg must continue from the FRACTION screw_ramp reached, not from the endpoint '
+        'it never got to -- restarting at the endpoint commands a jump across the arc the guard '
+        'just refused')
+    assert "return 'seated', k / n" in src and "return 'done', 1.0" in src, \
+        'screw_ramp must report how far the reference actually got'
+    # ONE warm-up for the whole sweep: adm.ramp keeps its integrator across calls, so resetting
+    # per leg would dump the axial deflection holding the part loaded.
+    assert body.count('adm_cc.warmup(') == 1, (
+        'the sweep must warm up ONCE, not per leg -- a reset between legs dumps the integrator '
+        'and the press has to build again on every reversal')
+    assert body.index('adm_cc.warmup(') < body.index('for k in range(1, cc_tries + 1):'), (
+        'the single warm-up belongs BEFORE the leg loop')
+    # and the gripper stays closed for the whole sweep -- the retry is the reversal
+    for banned in ('gripper.open(f\'release for clocking retry', 'gripper.close(f\'regrasp',
+                   'det.rebase('):
+        assert banned not in body, (
+            f'{banned}...) is the old regrasp ratchet; a retry is now the REVERSAL onto the next '
+            f'sweep position, with the gripper still closed')
+
+
+def test_engage_clock_angle_places_the_sweep_without_changing_the_insertion():
+    """assembly.engage_clock_deg picks WHERE in the roll the whole sequence sits.
+
+    A BNC is free about its own axis until the bayonet pins pick up, so the clock angle the
+    connector is ENGAGED at is a free parameter -- and cable_clocking.rotation_deg sweeps FROM it.
+    A 180 deg screw started at the declared roll ends 180 deg past it, out where the fixture and
+    the cable are; started at -90 the same stroke runs -90 -> +90, symmetric about the declared
+    roll. That is the point of the key: it MOVES the band, it does not shorten the stroke.
+
+    Three properties make it safe to set, and this pins each one:
+      * THE INSERTION IS UNTOUCHED. The roll is about +X, so +X itself -- the insertion axis, the
+        push direction, the retract leg, every depth reading -- is identical at any setting.
+      * THE PATH ROLLS RIGIDLY WITH THE PART. Every pose is built from the rolled frame, so the
+        connector's relationship to its own trajectory is exactly what it was; only the pair's
+        placement about the axis moves. Rolling any ONE of them instead would put the part at one
+        clock angle and its reference at another.
+      * IT IS APPLIED ONCE. The rolled frame is what the rest of the app is handed, so no caller
+        can forget to roll it (or roll it twice).
+    """
+    import yaml
+    from scipy.spatial.transform import Rotation as _R
+
+    T_socket = T.xyzrpy_to_matrix([0.4, -0.1, 0.3], np.radians([10.0, -25.0, 40.0]))
+    axn = T_socket[:3, 0] / np.linalg.norm(T_socket[:3, 0])
+
+    for clock_deg in (0.0, -90.0, 45.0, 180.0, -180.0):
+        R_clock = T.xyzrpy_to_matrix([0.0, 0.0, 0.0], np.radians([clock_deg, 0.0, 0.0]))
+        T_clk = T_socket @ R_clock
+        # +X survives a roll about +X: the axis, the origin, and therefore the whole insertion
+        assert np.allclose(T_clk[:3, 0], T_socket[:3, 0], atol=1e-12), \
+            f'engage_clock_deg {clock_deg} moved the INSERTION AXIS'
+        assert np.allclose(T_clk[:3, 3], T_socket[:3, 3], atol=1e-12), \
+            f'engage_clock_deg {clock_deg} moved the mate POINT'
+        # and the difference from the socket frame is a pure rotation about that axis
+        rel = T.inverse(T_socket) @ T_clk
+        rv = _R.from_matrix(rel[:3, :3]).as_rotvec()
+        assert np.linalg.norm(rel[:3, 3]) < 1e-12, 'the roll must not translate the frame'
+        if np.linalg.norm(rv) > 1e-9:
+            assert abs(abs(float(np.dot(rv / np.linalg.norm(rv), [1.0, 0.0, 0.0]))) - 1.0) < 1e-9, \
+                'the roll must be about the frame\'s own +X and nothing else'
+
+        # THE PATH ROLLS WITH THE PART. traj_ref is T_base_targetobj @ row @ inv(T_tool0_conn),
+        # so anchoring on the rolled frame moves BOTH the reference and the part it carries: the
+        # connector-wrt-path relationship is preserved exactly, which is the whole claim.
+        row = T.xyzrpy_to_matrix([-0.02, 0.003, -0.001], np.radians([0.0, 2.0, -1.0]))
+        conn_plain = T_socket @ row
+        conn_rolled = T_clk @ row
+        assert np.allclose(T.inverse(T_socket) @ conn_plain,
+                           T.inverse(T_clk) @ conn_rolled, atol=1e-12), \
+            'the trajectory must roll rigidly with the frame it is anchored to'
+        # the two differ in BASE coordinates by exactly the roll -- i.e. it really did move
+        if abs(clock_deg) > 1e-9:
+            assert not np.allclose(conn_plain, conn_rolled, atol=1e-6), \
+                'a non-zero clock angle must actually place the path somewhere else'
+        # depth along the axis is the SAME number measured in either frame
+        assert abs(float((T.inverse(T_socket) @ conn_plain)[0, 3])
+                   - float((T.inverse(T_clk) @ conn_rolled)[0, 3])) < 1e-12, \
+            'axial depth must not depend on the clock angle'
+        # and the retract leg (target-frame -X) is the same direction in base
+        assert np.allclose(T_clk[:3, :3] @ [-1.0, 0.0, 0.0], -axn, atol=1e-12), \
+            'the target-frame retract leg must be unmoved by the clock angle'
+
+    # ---- APPLIED ONCE, AND EVERYTHING DOWNSTREAM IS HANDED THE ROLLED FRAME ----
+    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
+        src = fh.read()
+    assert 'T_base_socket = targets[tname]' in src and \
+           'T_base_tconn = T_base_socket @ R_clock' in src, (
+        'the clock angle must be folded into the target frame ONCE, at the catalogue load, so no '
+        'caller downstream can forget it or apply it twice')
+    assert 'T_base_targetobj = T_base_tconn @ inverse(mats[-1])' in src, \
+        'the trajectory must be anchored on the ROLLED frame'
+    assert src.count('T_base_socket') == 2, (
+        'the raw socket frame exists only to build the rolled one -- anything else reading it '
+        'would be working at a different clock angle from the rest of the app')
+    # the estimator matches a map collected at ONE clock angle, so a non-zero roll must say so
+    tail = src[src.index('T_base_tconn = T_base_socket @ R_clock'):]
+    assert "ins_mode == 'estimate'" in tail[:2500] and 'manifold' in tail[:2500], (
+        'a non-zero clock angle with insertion_mode: estimate must warn -- the contact manifold '
+        'was collected at one clock angle and the socket is not a body of revolution')
+
+    # ---- THE SHIPPED PAIR STAYS INSIDE ONE TURN ----
+    a = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))['assembly']
+    assert 'engage_clock_deg' in a, 'the key must be declared so the behaviour is discoverable'
+    start = float(a['engage_clock_deg'])
+    assert abs(start) <= 180.0, f'engage_clock_deg {start} is outside one turn'
+    stops = [start] + [float(v) for v in a['cable_clocking']['sweep_deg']]
+    assert max(stops) - min(stops) <= 360.0, (
+        f'the engaged roll and the sweep span {max(stops) - min(stops):.0f} deg -- more than one '
+        f'turn, so a measured clock angle cannot be told from itself plus 360 and the app refuses')
+    # the engage angle decides WHICH WAY the first leg turns, and the config comment claims it
+    # goes negative first -- pin that, because it is the whole of the user-visible ordering
+    assert stops[1] < stops[0], (
+        f'leg 1 runs from the engaged roll {stops[0]:+.0f} to {stops[1]:+.0f} deg, which is a '
+        f'POSITIVE rotation -- sweep_deg[0] must be below engage_clock_deg for the first leg to '
+        f'rock negative')
+
+
+def test_the_achieved_clock_angle_is_wrapped_onto_the_stroke_branch():
+    """A 180 deg screw makes the naive angle read-back sign-ambiguous, and the sign is a DIRECTION.
+
+    Every achieved clock angle in bnc_assembly is recovered from a measured pose -- as an Euler
+    roll, or as dot(rotvec, axis) -- and both return a value in (-pi, pi]. Harmless at 90 deg. At
+    180 it is a trap: a stroke that actually turned +182 reads back as -178, and that number is
+    handed straight to the unwind, which reverses it. Negating -178 orbits the OPEN gripper +178
+    deg the wrong way round the captive cable instead of retracing the arc it came in on -- a full
+    turn into exactly the region the clock angle was chosen to avoid, with the fingers wrapped
+    around the part.
+
+    The achieved angle always lies in [0, commanded], so wrapping near the middle of that range
+    puts the whole feasible range inside one branch. This pins that, including the sign-symmetric
+    case (a negative commanded stroke) and the ordinary angles that must NOT be moved.
+    """
+    from urlab.apps.bnc_assembly import _wrap_near
+
+    half = np.radians(90.0)                     # centre for a +180 deg commanded stroke
+    # the failure case: +182 achieved, read back as -178
+    assert abs(np.degrees(_wrap_near(np.radians(-178.0), half)) - 182.0) < 1e-9, \
+        'an overshoot past 180 must wrap FORWARD, not flip the unwind direction'
+    # ordinary readings inside the stroke are untouched
+    for deg in (0.0, 20.0, 90.0, 179.0):
+        assert abs(np.degrees(_wrap_near(np.radians(deg), half)) - deg) < 1e-9, \
+            f'{deg} deg is already on the branch and must not be moved'
+    # exactly 180, either sign, resolves to the direction the stroke actually turned
+    for deg in (180.0, -180.0):
+        assert abs(np.degrees(_wrap_near(np.radians(deg), half)) - 180.0) < 1e-9, \
+            'a 180 deg reading must resolve onto the commanded end, not its negation'
+    # a NEGATIVE commanded stroke is the mirror image, not a special case
+    assert abs(np.degrees(_wrap_near(np.radians(178.0), np.radians(-90.0))) + 182.0) < 1e-9, \
+        'a -180 deg stroke must wrap BACKWARD by the same rule'
+    # a 90 deg stroke never needs the wrap -- the fix must not disturb the tuned behaviour
+    for deg in (-30.0, 0.0, 45.0, 95.0):
+        assert abs(np.degrees(_wrap_near(np.radians(deg), np.radians(45.0))) - deg) < 1e-9, \
+            'the 90 deg stroke branch must be unchanged by the wrap'
+
+    # ---- and every place that reads an achieved angle must use it ----
+    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
+        src = fh.read()
+    cable = src[src.index('def cable_clocking('):src.index('def collar_clocking(')]
+    assert '_wrap_near(float(got[1][0]), cc_mid)' in cable, (
+        'the achieved-roll read-back must be wrapped onto the sweep band centre -- it is handed '
+        'to collar clocking as the angle to UNWIND, so a sign that flipped at the band edge '
+        'would orbit the open gripper the long way round the part')
+    assert 'screw_rad' in cable and 'float(np.degrees(screw_rad))' in cable, (
+        'the WRAPPED angle is what collar clocking must be given, not the raw Euler roll')
+    # cc_mid is only an honest branch if the band it centres is under a full turn -- the app
+    # refuses a wider one rather than reading an angle back wrong
+    assert 'cc_hi - cc_lo > 2.0 * np.pi' in src, (
+        'a sweep spanning more than one turn must be REFUSED at config time: there is no branch '
+        'that tells a measured roll from itself plus 360')
+    collar = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
+    assert '_wrap_near(' in collar, \
+        'the arm clock angle solved in collar clocking must be wrapped onto the same branch'
 
 
 def test_wrench_in_moves_the_moment_off_the_flange():

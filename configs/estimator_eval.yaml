@@ -251,7 +251,7 @@ eval:
     # exact excitation, so a matching duration sees the same fraction of the Lissajous orbit
     # (shared frequencies close their pattern on a fixed period; a shorter window samples a
     # different, partial figure and its rows cluster differently than the map's).
-    wiggle_s: 15.0                 # seconds of oscillation per pass. THE ONLY KNOB this app
+    wiggle_s: 5.0                 # seconds of oscillation per pass. THE ONLY KNOB this app
                                    # owns -- everything else comes from the file below.
     wiggle_from: wiggle_sampling.yaml
     # wiggle:                      # uncomment to override a single key for a one-off; it is
@@ -386,7 +386,7 @@ eval:
   # contact instead of the same nominal path every time. Uses its OWN random stream, so
   # toggling it does not change the injected-error draws (noised/nominal runs stay pairable).
   trajectory_noise:
-    enabled: true
+    enabled: false
     # PER-DIMENSION per-waypoint std [x, y, z (m), roll, pitch, yaw (deg)], applied after
     # smoothing; a zero entry leaves that DOF unperturbed. (Legacy scalar keys translation_m /
     # rotation_deg still work when 'std' is absent.)
@@ -492,7 +492,7 @@ estimation:
   # bnc_connector_finger_holder with the wrong y sign, which is a +91.4 mm offset along the
   # connector's own +x -- invisible straight-in, an 8 mm z lever arm at 5 deg of pitch. Anything
   # paired with this file must be in the same frame (see analysis/bnc_tuning/fix_obs_frame.py).
-  manifold_csv: ./configs/data/bnc_manifold_wiggle_250k.csv
+  manifold_csv: ./configs/data/bnc_manifold_wiggle_prime_1M.csv
   # WRENCH REPRESENTATION: unit | rawcap | raw.
   #   unit    direction only -- magnitude discarded entirely.
   #   rawcap  direction x magnitude, SATURATED (see rawcap_* below).

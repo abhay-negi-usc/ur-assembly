@@ -40,19 +40,49 @@ and the operator has called the assembly successful, each with its own complianc
 speed scale (`assembly.cable_clocking`, `assembly.collar_clocking`; a failed screw and a finished
 collar turn share one escape, `assembly.clocking_retract`):
 
-  * CABLE CLOCKING. A screw about the connector's +X -- rotate while pushing along the same axis,
-    aimed at a VIRTUAL target past where the connector can physically go, so compliance follows
-    whatever path the bayonet cams allow. Success is MEASURED (the connector must advance a set
-    distance along +X) rather than commanded, and it terminates the motion the moment it is
-    reached. A rotation that finishes without it RETRIES AS A REGRASP, never an unscrew: open,
-    take the gripper back to the saved engaged pose, re-grip, repeat the identical stroke. The
-    connector is captive and keeps its progress, so tries accumulate like a ratchet -- which is
-    why advance is tracked cumulatively across the regrasp rather than per try. Then the gripper
-    opens.
+  * CABLE CLOCKING. An OSCILLATING screw about the connector's +X -- rock between the roll
+    positions in `sweep_deg` (absolute, wrt the target frame; -75 and +75 as shipped) while
+    pushing along that same axis, aimed at a VIRTUAL target past where the connector can
+    physically go, so compliance follows whatever path the bayonet cams allow. It rocks rather
+    than turning further because a pin that missed its slot at the mate will not find it by
+    turning harder -- it rides the rim and jams -- but it will find it by crossing back and forth
+    under a steady axial load. That load is established on the first leg and HELD across every
+    reversal. Progress is MEASURED (the connector must advance a set distance along +X) and ends
+    the motion the moment it is reached; otherwise the legs run to `max_tries`. A leg stopped by
+    the force guard is the normal way to find the far edge of the slot, and the next leg simply
+    reverses from where it stopped. The gripper stays CLOSED throughout -- there is no regrasp,
+    because an oscillation never spends wrist range it does not immediately give back. Then the
+    gripper opens.
   * COLLAR CLOCKING. Only if the screw succeeded. The opened gripper aligns its CLOSED fingertip
     frame with the collar (a fixed offset along the connector's +X from the junction), closes, and
     turns about the believed connector's +X -- about an axis fixed in space, so the fingers orbit
     the collar rather than scrubbing across it.
+
+EVERY ANGLE IN THE APP IS ONE OF TWO KINDS, and keeping them apart is most of the arithmetic:
+
+  * ABSOLUTE roll positions about the socket +X, stated WRT THE TARGET FRAME. That is what
+    `assembly.engage_clock_deg` and `cable_clocking.sweep_deg` are. The target frame is the
+    fixture's own declared roll, so these are the angles obstacles and wrist limits live in, and
+    what the config says is what the arm does.
+  * ROTATIONS from the pose the connector was ENGAGED at. That is what every stroke is actually
+    built from, and what `collar_clocking.rotation_deg` / `prewind_deg` are measured in.
+
+`engage_clock_deg` converts between them: it rolls the socket frame about its +X by that much,
+ONCE, and every pose in the app is built from the rolled frame -- trajectory, stand-off,
+observations, belief reset, screw axis, collar frame. The part's relationship to its own path is
+therefore untouched; the only thing that moves is where about the axis the sequence sits. As
+shipped:
+
+    engage_clock_deg 0 + cable_clocking.sweep_deg [-75, +75]  ->  the arm works -75 .. +75 deg
+    about the socket +X: engage at 0, rock to -75, to +75, to -75 (or until the cams pick up),
+    unwind to 0, turn the collar to +90.
+
++X is unchanged by a roll about +X, so the insertion axis, the push, the retract legs and every
+depth reading are identical at any engage angle. Two things are deliberately NOT rolled with it:
+`collar_clocking.axis_offset_mm`, a bench-measured property of the FIXTURE that stays put while the
+plug turns (see `axis_offset_base`), and the contact manifold, which was collected at one clock
+angle and describes different contact at another -- so `insertion_mode: estimate` warns when the
+engage angle is non-zero.
 
 THE BELIEF RESET at the start of cable clocking is the load-bearing idea. Everything before it
 estimates where the connector is in the hand; once the mate is made, the connector's pose is known
@@ -139,6 +169,21 @@ def _path_time(lin_mm, ang_deg, v_mm_s, w_deg_s, min_s):
                (ang_deg / w_deg_s) if w_deg_s > 0 else 0.0, min_s)
 
 
+def _wrap_near(angle, centre):
+    """`angle` (rad) shifted by whole turns so it lands within pi of `centre`.
+
+    WHY THIS IS NOT COSMETIC. Every achieved clock angle in this app is recovered from a measured
+    pose, either as an Euler roll or as `dot(rotvec, axis)`, and BOTH of those return a value in
+    (-pi, pi]. That is fine for a 90 deg stroke and it is a trap at 180: a screw that actually
+    turned +182 deg reads back as -178, and the unwind that reverses it would then orbit the OPEN
+    gripper the wrong way round the part -- a full turn in the direction the stroke was chosen to
+    avoid. The feasible range of an achieved stroke is [0, commanded], so wrapping near the middle
+    of that range (`centre`) puts the whole range inside one branch and the ambiguity disappears.
+
+    Module level, like _path_time, so the branch selection is testable without a robot."""
+    return float(angle) + 2.0 * np.pi * np.round((float(centre) - float(angle)) / (2.0 * np.pi))
+
+
 def _clocking_plan(cable, collar):
     """Which post-mate maneuvers to run, from their `enabled` flags in configs/bnc_assembly.yaml.
 
@@ -205,6 +250,12 @@ class _ScrewAdvance:
 
     def rebase(self, T_tool0_conn):
         """Adopt a new connector-in-gripper relationship, keeping the engaged reference frame.
+
+        NO CALLER IN THE CURRENT SWEEP. The oscillating cable screw never lets go, so nothing
+        rebases it; this is the detector's contract for any caller that DOES release and re-take
+        the part (the collar maneuver's seat push does exactly that, and would need this if it
+        ever tracked advance). Kept because it is the arithmetic that makes "cumulative advance"
+        mean anything across a change of grip, and that is easy to get wrong from scratch.
 
         Needed after a REGRASP. Releasing the connector breaks the relationship the detector was
         built with: the connector stays put in the socket while the gripper travels back, so the
@@ -490,6 +541,13 @@ def build_and_run(cfg, robot, camera, args):
             log.warning('assembly.engage.max_axial_force_n is 0 -- the engage will run the whole '
                         'trajectory no matter how hard it presses.')
 
+    # ---- ENGAGE CLOCK ANGLE: the roll the connector is MATED at ------------------------------
+    # Parsed here, ahead of the clocking blocks, because the cable sweep is stated in ABSOLUTE
+    # roll positions about the socket +X and needs this to convert them into rotations from the
+    # engaged pose. The frame it rolls (T_base_tconn) is built where the target is loaded.
+    eng_clock = np.radians(_num(a, 'engage_clock_deg', 0.0))
+    R_clock = xyzrpy_to_matrix([0.0, 0.0, 0.0], [eng_clock, 0.0, 0.0])
+
     # ---- CLOCKING (post-mate): CABLE clocking, then COLLAR clocking --------------------------
     # Two maneuvers that run only after a mate the operator called successful. Each gets its OWN
     # compliance and force guard, and unlike final_insertion the guard override is not optional in
@@ -507,7 +565,49 @@ def build_and_run(cfg, robot, camera, args):
     log.info('Post-mate clocking: cable clocking %s, collar clocking %s (a run therefore ends %s '
              'at best).', 'ON' if cc_on else 'off', 'ON' if cl_on else 'off',
              'LOCKED/ASSEMBLED' if cl_on else ('SEATED' if cc_on else 'ENGAGED'))
-    cc_rot = np.radians(_num(cc, 'rotation_deg', 90.0))
+    # ---- THE CABLE SWEEP: absolute roll POSITIONS, alternated ---------------------------------
+    # `sweep_deg` is a list of roll angles about the socket +X, stated WRT THE TARGET FRAME (not
+    # wrt where the connector was engaged), and the screw visits them IN TURN -- one per try. Two
+    # entries, one negative and one positive, is the shape this exists for: a bayonet whose pin
+    # did not line up with its slot at the mate will not find it by turning further one way, but
+    # it will find it by rocking across it under axial load. `success_advance_mm` ends the search
+    # the instant the cams pick up, so a lucky first leg costs nothing.
+    #
+    # ABSOLUTE, DELIBERATELY. A relative sweep has to be re-derived every time the engage angle
+    # moves, and the reachable band is a property of the FIXTURE, not of where the plug happened
+    # to be mated. Stating the endpoints against the target frame means the band the arm works in
+    # is exactly what the config says, whatever engage_clock_deg is set to.
+    #
+    # `rotation_deg` is the legacy single relative stroke and still works: it becomes a one-entry
+    # sweep at engage_clock_deg + rotation_deg, so the two are one code path rather than two.
+    _sw = cc.get('sweep_deg')
+    if _sw is None:
+        cc_sweep = [eng_clock + np.radians(_num(cc, 'rotation_deg', 90.0))]
+    else:
+        try:
+            cc_sweep = [np.radians(float(v)) for v in _sw]
+        except (TypeError, ValueError):
+            log.error('assembly.cable_clocking.sweep_deg must be a list of numbers (roll angles '
+                      'in deg wrt the target frame), got %r.', _sw)
+            return False
+        if not cc_sweep:
+            log.error('assembly.cable_clocking.sweep_deg is empty -- give it at least one roll '
+                      'position, or delete it to use the legacy rotation_deg stroke.')
+            return False
+    # ROTATIONS FROM THE ENGAGED POSE, which is what the strokes are actually built from. 0.0 is
+    # included in the span because the arm starts there.
+    cc_legs = [th - eng_clock for th in cc_sweep]
+    cc_lo, cc_hi = min(cc_legs + [0.0]), max(cc_legs + [0.0])
+    # The centre of the band, used to wrap every measured clock angle onto one branch (_wrap_near).
+    # A band wider than a full turn has no unambiguous branch, so it is refused rather than read
+    # back wrong -- and a bayonet search that spans more than 360 deg is a configuration error.
+    cc_mid = 0.5 * (cc_lo + cc_hi)
+    if cc_hi - cc_lo > 2.0 * np.pi:
+        log.error('assembly.cable_clocking.sweep_deg spans %.0f deg from the engaged roll '
+                  '(%+.1f deg) -- more than one turn, so a measured clock angle cannot be told '
+                  'from itself plus 360. Narrow the sweep or move assembly.engage_clock_deg.',
+                  np.degrees(cc_hi - cc_lo), np.degrees(eng_clock))
+        return False
     cc_push_m = _num(cc, 'push_mm', 5.0) / 1000.0
     cc_need_m = _num(cc, 'success_advance_mm', 5.0) / 1000.0
     cc_tries = max(1, int(_num(cc, 'max_tries', 3)))
@@ -572,13 +672,14 @@ def build_and_run(cfg, robot, camera, args):
         log.error('assembly.collar_clocking needs cable_clocking.open_gripper_after true: the '
                   'collar is grasped by the same gripper, which must release the cable first.')
         return False
-    if cc_on and cc_tries > 1 and not cc_open_after:
-        # A retry is a regrasp, so it needs the gripper. (open_gripper_after governs the FINAL
-        # release; the per-retry release is unconditional, but a config that says "never open"
-        # while asking for retries is contradictory and worth catching before the robot moves.)
-        log.error('assembly.cable_clocking.max_tries > 1 needs open_gripper_after true: a retry '
-                  'releases, realigns to the engaged pose and re-grips -- it never unscrews.')
-        return False
+    if cc_on and cc_tries > 1 and len(cc_sweep) < 2:
+        # Not fatal -- one position is a legal (legacy) sweep -- but the extra tries turn into
+        # zero-rotation no-ops, so a config asking for 3 tries against 1 position is almost
+        # certainly a half-finished edit rather than an intent.
+        log.warning('assembly.cable_clocking: max_tries is %d but the sweep has only ONE roll '
+                    'position (%+.1f deg). Legs 2..%d have nothing to turn. Give sweep_deg a '
+                    'second position to rock across the slot.',
+                    cc_tries, np.degrees(cc_sweep[0]), cc_tries)
     if cc_on and cc_need_m <= 0.0:
         log.error('assembly.cable_clocking.success_advance_mm must be > 0 (got %.2f) -- a zero '
                   'early-out threshold trips on the first servo cycle, ending the stroke before '
@@ -625,7 +726,48 @@ def build_and_run(cfg, robot, camera, args):
         log.error('assembly.target_frame %r needs a targets: entry in %s.',
                   tname, tool_frames.frames_path(cfg))
         return False
-    T_base_tconn = targets[tname]
+    T_base_socket = targets[tname]
+    # ---- ENGAGE CLOCK ANGLE: the roll the connector is MATED at ------------------------------
+    # The socket frame declares ONE roll about its own +X, and nothing physical forces the plug to
+    # be mated at it: a BNC is free about that axis until the bayonet pins pick up. So the clock
+    # angle the connector is ENGAGED at is a free parameter, and `engage_clock_deg` (parsed with
+    # the clocking blocks above) is it -- a roll of the whole sequence about the socket's +X,
+    # applied ONCE, here.
+    #
+    # WHY IT IS A ROLL OF THE FRAME AND NOT A ROLL OF THE STROKE. Every pose in this app is built
+    # from `T_base_tconn`: the anchored trajectory, the standoff, the observations the estimator
+    # matches, the belief reset, the screw axis, the collar frame. Rolling the FRAME rolls all of
+    # them rigidly together, so the connector's relationship to its own path is untouched and the
+    # only thing that changes is where about the axis the whole maneuver sits. Rolling any one of
+    # them instead would put the part at one clock angle and its reference at another.
+    #
+    # IT NO LONGER PLACES THE SWEEP. cable_clocking.sweep_deg states its roll positions against
+    # the TARGET frame, so the band the screw works in is what the config says whatever this is;
+    # this only decides where the connector starts, and therefore which direction the first leg
+    # turns. (It did place the sweep while the stroke was a relative rotation_deg, which is why
+    # the legacy path below still adds it.)
+    #
+    # +X is unchanged by a roll about +X, so the insertion axis, the push direction, the retract
+    # legs and every depth measurement are all identical whatever this is set to.
+    T_base_tconn = T_base_socket @ R_clock
+    log.info('Clock angles about the socket +X: engage at %+.1f deg, cable sweep visits %s deg '
+             'in turn (up to %d leg%s) -- the run works the %+.1f .. %+.1f deg band about the '
+             'declared roll of %r.',
+             np.degrees(eng_clock), [round(float(np.degrees(t)), 1) for t in cc_sweep],
+             cc_tries, '' if cc_tries == 1 else 's',
+             np.degrees(eng_clock + cc_lo), np.degrees(eng_clock + cc_hi), tname)
+    if abs(eng_clock) > 1e-9:
+        if ins_mode == 'estimate':
+            # The contact map is a set of poses in the TARGET frame, collected by
+            # apps/uncertain_sampling at whatever clock angle it ran at. Rolling the frame keeps
+            # the observations near identity (so they land in the map's coordinates), but the
+            # bayonet slots and the socket's keyway are NOT bodies of revolution: the contact the
+            # part actually makes at a different clock angle is different contact.
+            log.warning('  insertion_mode is ESTIMATE and the clock angle is not 0. The manifold '
+                        'was collected at ONE clock angle; the observations will be expressed in '
+                        'the rolled frame but the CONTACT they describe is a different part of '
+                        'the socket. Re-collect the map at this clock angle, or engage with '
+                        'insertion_mode: engage (which matches nothing and is unaffected).')
     # FRAME FOR THE POST-ENGAGEMENT MANEUVERS. Everything after the engagement that works on the
     # connector (cable clocking, collar clocking, the escape's target-frame leg, tug
     # verification) builds its axes and stations from T_clk. 'target' binds it to the recorded
@@ -746,7 +888,14 @@ def build_and_run(cfg, robot, camera, args):
 
         The speed cap is applied to the ARC rather than the chord, which seg_time cannot do -- it
         measures the straight line between endpoints and so under-counts a 90 deg turn's real path
-        by about 11%, quietly running the stroke that much fast."""
+        by about 11%, quietly running the stroke that much fast.
+
+        Returns ('done' | 'seated', f) where f is the FRACTION of the stroke the reference reached
+        -- 1.0 on a clean finish, and where the guard stopped it otherwise. A caller that continues
+        the motion needs that number: restarting from the nominal endpoint would command a jump
+        across the arc the guard just refused, and restarting from the MEASURED pose would throw
+        away the spring deflection that is holding the part loaded. ref_at(f) is neither -- it is
+        exactly the last reference commanded, so the next leg picks up where this one left off."""
         SAMPLES = 64
         coarse = [ref_at(k / SAMPLES) for k in range(SAMPLES + 1)]
         pts = [T[:3, 3] for T in coarse]
@@ -770,8 +919,8 @@ def build_and_run(cfg, robot, camera, args):
             out = adm.ramp(prev, cur, dt, guard)
             prev = cur
             if out == 'seated':
-                return 'seated'
-        return 'done'
+                return 'seated', k / n
+        return 'done', 1.0
 
     retract_m = float(a.get('retract_distance_m', 0.05))
     decim = max(1, int(a.get('log_decimation', 5)))
@@ -946,6 +1095,25 @@ def build_and_run(cfg, robot, camera, args):
     # ====================================================================================
     clock_rows = []
 
+    def axis_offset_base():
+        """collar_clocking.axis_offset_mm as a BASE-frame vector.
+
+        THE OFFSET BELONGS TO THE FIXTURE, NOT TO THE PLUG'S ROLL. It is the bench-measured shift
+        from the DECLARED socket axis to the barrel centreline the collar physically turns about
+        (~-Z, a few mm) -- a property of where the frame was declared against real hardware, so it
+        is a fixed line in space no matter how far round the plug happens to be mated.
+
+        `engage_clock_deg` rolls T_clk about its own +X, so T_clk's Y and Z axes are NOT the axes
+        the number was measured in any more. Rolling the offset with them would swing a measured
+        -Z correction round to -Y at a 90 deg clock angle and move the collar axis somewhere it
+        was never measured. So the offset is resolved in the frame's roll-FREE basis: undo the
+        engage roll, apply the offset, and the line lands where the bench put it.
+
+        X is exempt by construction -- it only slides the reference point along the axis -- and
+        with engage_clock_deg 0 this is exactly T_clk's own basis, i.e. unchanged."""
+        return (T_clk[:3, :3] @ R_clock[:3, :3].T) @ (np.asarray(cl_axis_off, dtype=float)
+                                                      / 1000.0)
+
     def clocking_retract(label='clocking retract'):
         """The post-clocking escape, in two legs.
 
@@ -1004,7 +1172,7 @@ def build_and_run(cfg, robot, camera, args):
         # Centring the fingertip onto the OFFSET axis (radial shift only; the axial station and
         # the orientation are kept) loads the connector along its bench-measured centreline
         # instead of off it.
-        p_axis = T_clk[:3, 3] + T_clk[:3, :3] @ (np.asarray(cl_axis_off, dtype=float) / 1000.0)
+        p_axis = T_clk[:3, 3] + axis_offset_base()
         d_r = (T_grasp @ robot.T_tool0_fingertip)[:3, 3] - p_axis
         d_r = d_r - np.dot(d_r, axn_t) * axn_t              # radial part only
         if float(np.linalg.norm(d_r)) > 1e-6:
@@ -1264,7 +1432,7 @@ def build_and_run(cfg, robot, camera, args):
         return status, last_ref, depth
 
     def cable_clocking():
-        """CABLE CLOCKING -- the bayonet screw, and the belief reset that makes it well posed.
+        """CABLE CLOCKING -- the bayonet search, and the belief reset that makes it well posed.
 
         The mate is made, so for the first time in the run the connector's pose is known from a
         PHYSICAL CONSTRAINT rather than estimated: it is AT the target. That replaces the
@@ -1272,39 +1440,42 @@ def build_and_run(cfg, robot, camera, args):
         instead of inheriting the accumulated in-hand error. The pose the arm is standing at is
         kept as the engaged pose and every measurement below is relative to it.
 
-        The motion is a screw about the connector's +X: rotate `rotation_deg` while translating
-        `push_mm` along that same axis. Because the translation is ALONG the rotation axis the two
-        commute, so the reference is a true helix and the order they are composed in does not
-        matter. The push target is VIRTUAL -- it aims past where the connector can actually go and
-        lets compliance follow whatever path the bayonet cams allow.
+        THE MOTION IS AN OSCILLATING SCREW. `sweep_deg` lists roll positions about the connector's
+        +X -- absolute, wrt the TARGET frame -- and the arm visits them IN TURN, one per try,
+        while pushing `push_mm` along that same axis. Because the translation is ALONG the
+        rotation axis the two commute, so each leg is a true helix and the order they are composed
+        in does not matter. The push target is VIRTUAL -- it aims past where the connector can
+        actually go and lets compliance follow whatever path the bayonet cams allow.
 
-        SUCCESS IS ASSUMED when the stroke runs to completion. `success_advance_mm` is the
-        EARLY-OUT -- _ScrewAdvance ends the stroke as soon as the connector has advanced that far
-        along the engaged frame's +X -- and telemetry, never a post-hoc verdict. The only
-        not-seated outcome is a force-guard stop mid-stroke, which goes to the ratchet retry.
+        WHY IT ROCKS INSTEAD OF TURNING FURTHER. A bayonet pin that did not line up with its slot
+        at the mate is not going to find it by turning harder in one direction -- it will ride the
+        rim and jam. Rocking across the slot under a steady axial load is what finds it, and the
+        moment it drops in, the cams pull the connector home. That is why the axial press is
+        established on the first leg and HELD across every reversal (one warm-up for the whole
+        sweep, so the integrator is never dumped), and why the search ends on measured x-advance
+        rather than on any commanded angle.
 
-        A RETRY IS A REGRASP, NOT AN UNSCREW. The gripper has rotated with the cable, so the stroke
-        cannot simply be repeated -- but undoing it would give back whatever the cams gained. So:
-        open the gripper, take it back to the SAVED ENGAGED POSE, re-grip, and repeat the identical
-        stroke. The connector is captive in the socket and keeps its progress while the gripper
-        travels, exactly like backing a ratchet handle off and taking a fresh bite.
+        A LEG THAT JAMS IS NORMAL, NOT A FAILURE. The force guard stopping a leg part-way is the
+        expected way to find the far edge of the slot; the next leg simply reverses, and it starts
+        from where the reference actually stopped rather than from the endpoint it never reached
+        (see screw_ramp's returned fraction -- restarting at the nominal endpoint would command a
+        jump across the arc the guard just refused, and restarting from the MEASURED pose would
+        throw away the deflection holding the part loaded).
 
-        Two consequences worth being explicit about, because both are easy to get silently wrong:
+        SUCCESS IS ASSUMED when the sweep runs. `success_advance_mm` is the EARLY-OUT --
+        _ScrewAdvance ends the motion as soon as the connector has advanced that far along the
+        engaged frame's +X -- and telemetry, never a post-hoc verdict. Cross-checking against
+        measured advance turned soft-spring deflection into false failures. The only not-seated
+        outcome is a sweep in which EVERY leg was stopped by the force guard: nothing ever swung
+        freely, so the connector is wedged rather than searching.
 
-          * THE STROKE IS THE SAME EVERY TRY. It is written as a base-frame screw about the fixed
-            axis LINE through the engaged connector origin along its +X. Since the rotation is
-            about +X and the push is ALONG +X, that line is invariant under the screw -- so no
-            per-try accumulation is needed, and the form is independent of the connector-in-gripper
-            belief that the regrasp invalidates.
-          * ADVANCE STAYS CUMULATIVE. Releasing breaks the connector-in-gripper relationship: the
-            connector stays put while the gripper moves back, so the two differ afterwards by
-            exactly the progress made. The detector is REBASED across the regrasp with the last
-            observed connector pose, so advance keeps being measured from the ORIGINAL engaged
-            pose and progress accumulates across tries instead of resetting to zero.
+        NO REGRASP. The old ratchet -- open, orbit the empty gripper back to the engaged pose,
+        re-grip, repeat -- existed because a one-way stroke could only be retried by giving back
+        the wrist range it had spent. An oscillation never spends range it does not immediately
+        return, so the retry IS the reversal and the gripper stays closed throughout.
 
-        Returns (ok, T_tool0_conn, T_base_conn): the connector in the gripper (rebased across any
-        regrasps) and where it actually ended up -- read from the MEASURED arm pose, so it is the
-        ACHIEVED screw and not the commanded one."""
+        Returns (ok, T_tool0_conn, T_base_conn, achieved_deg) -- where the connector ended up,
+        read from the MEASURED arm pose, so it is the ACHIEVED roll and not the commanded one."""
         T_tool0_engaged = robot.tool0()
         T_tool0_conn = inverse(T_tool0_engaged) @ T_clk
         moved = matrix_to_xyzrpy(inverse(robot.T_tool0_fingertip @ T_ftip_conn) @ T_tool0_conn)
@@ -1312,36 +1483,103 @@ def build_and_run(cfg, robot, camera, args):
                  '(shifts the in-hand belief by %s mm, %s deg)', pe_frame,
                  np.round(moved[0] * 1000.0, 2).tolist(),
                  np.round(np.degrees(moved[1]), 2).tolist())
-        log.info('  screw: %+.1f deg about the connector +X while pushing %+.1f mm along it; '
-                 'early-out at %.1f mm of CUMULATIVE advance (completion = seated), up to %d '
-                 'tr%s (a retry regrasps at the engaged pose and repeats the stroke)',
-                 np.degrees(cc_rot), cc_push_m * 1000.0, cc_need_m * 1000.0, cc_tries,
-                 'y' if cc_tries == 1 else 'ies')
+        log.info('  oscillating screw: roll to %s deg (wrt the target frame) in turn, up to %d '
+                 'leg%s, while pushing %+.1f mm along the connector +X and HOLDING it; early-out '
+                 'at %.1f mm of CUMULATIVE advance (a completed sweep = seated).',
+                 [round(float(np.degrees(t)), 1) for t in cc_sweep], cc_tries,
+                 '' if cc_tries == 1 else 's', cc_push_m * 1000.0, cc_need_m * 1000.0)
+        log.info('  starting at the engaged roll of %+.1f deg, so leg 1 turns %+.1f deg (%s) and '
+                 'the band worked is %+.1f .. %+.1f deg about the socket +X.',
+                 np.degrees(eng_clock), np.degrees(cc_legs[0]),
+                 'NEGATIVE' if cc_legs[0] < 0 else 'POSITIVE',
+                 np.degrees(eng_clock + cc_lo), np.degrees(eng_clock + cc_hi))
 
-        # The stroke as a BASE-frame motion about the fixed axis line L (engaged connector origin,
-        # along its +X). Independent of the connector-in-gripper belief, and the SAME every try.
-        # Built at each FRACTION of the stroke rather than only at its end, so the commanded path
-        # stays on that axis line instead of cutting the chord between the endpoints -- see
-        # screw_ramp for why a single ramp across 90 deg does not.
+        # Each leg as a BASE-frame motion about the fixed axis line L (engaged connector origin,
+        # along its +X). Independent of the connector-in-gripper belief, and the SAME line every
+        # leg: the rotation is about +X and the push is ALONG +X, so L is invariant under the
+        # motion and no per-leg accumulation is needed. Built at each FRACTION rather than only at
+        # its end, so the commanded path stays on that axis line instead of cutting the chord --
+        # see screw_ramp for why a single ramp across a big turn does not.
         ref_start = T_tool0_engaged
+
+        def arm_at(th_rel, push):
+            """The arm pose at roll `th_rel` (rad from the ENGAGED roll) and axial offset `push`."""
+            return (T_clk
+                    @ xyzrpy_to_matrix([push, 0.0, 0.0], [th_rel, 0.0, 0.0])
+                    @ inverse(T_clk)) @ ref_start
+
+        # ---- REACHABILITY OF THE SWEPT BAND, before anything turns ----------------------------
+        # The legs are servoed, not planned, so nothing else looks ahead of them: the arm finds out
+        # a pose is unreachable by failing at it, mid-turn, with the connector gripped and cammed
+        # part-way home. The band is the union of every leg, so checking it once covers all of
+        # them however the tries fall.
+        #
+        # ADVISORY, NOT A GATE. This is a sampled check with its own seeds, so a marginal pose can
+        # solve here and not on the arm (or the reverse); refusing on it would abort runs that
+        # would have completed. It NAMES where the range runs out and lets the operator decide,
+        # which is what sweep_deg and assembly.engage_clock_deg exist to fix.
+        #
+        # THE SEED IS CHAINED from the previous sample, not re-taken from the current joints. The
+        # analytic solver returns the branch nearest its seed, and the servo walks each leg in
+        # fractions of a degree -- so chaining is what the arm will actually do. Seeding every
+        # sample from the pose the arm is standing in now would let the far end of a wide band
+        # resolve onto a branch the arm can never reach from here and report a range problem that
+        # is really a seeding artefact.
+        #
+        # arm.ik logs 'No IK solution' at ERROR for each pose it cannot solve, so a marginal band
+        # prints a burst of them right here. They belong to this scan; nothing has moved.
+        bad, seed_scan = [], robot.arm.q()
+        for _k in range(25):
+            _th = cc_lo + (cc_hi - cc_lo) * (_k / 24.0)
+            _q = robot.arm.ik(arm_at(_th, cc_push_m), seed_scan)
+            if _q is None:
+                bad.append(_th)
+            else:
+                seed_scan = _q
+        if bad:
+            log.warning('  CABLE CLOCKING: %d of 25 poses sampled across the %.0f deg band have '
+                        'no IK solution (first at %+.0f deg wrt the target frame). The sweep will '
+                        'be attempted anyway, but it is likely to run out of wrist range there -- '
+                        'move assembly.cable_clocking.sweep_deg, or the engage angle, rather than '
+                        'letting a leg discover it mid-turn.',
+                        len(bad), np.degrees(cc_hi - cc_lo), np.degrees(eng_clock + bad[0]))
 
         det = _ScrewAdvance(robot, T_tool0_conn, T_clk, cc_need_m)
         combo = _AnyGuard(det, guard_cc)
-        ok = False
+        # ONE WARM-UP FOR THE WHOLE SWEEP, not one per leg. The legs are a single continuous
+        # compliant motion -- adm.ramp keeps its integrator across calls by design -- so resetting
+        # between them would dump the axial deflection holding the connector loaded, and the press
+        # would have to build again on every reversal. The press is what makes the search work; it
+        # must not blink. (Taring is once, here, for the same reason.)
+        phase('cable_clock')
+        adm_cc.reset()
+        adm_cc.warmup(ref_start, tare_fn=cc_tare)
+
+        ok = swung = False
+        ran = 0                          # legs that actually turned something
+        th_at, push_at = 0.0, 0.0        # where the REFERENCE stands: roll from engaged, and push
         for k in range(1, cc_tries + 1):
-            phase('cable_clock')
-            adm_cc.reset()
-            adm_cc.warmup(ref_start, tare_fn=cc_tare)
+            th_to = cc_legs[(k - 1) % len(cc_legs)]
+            turn = th_to - th_at
+            if abs(turn) < 1e-9:
+                log.info('  leg %d/%d: the reference is already at %+.1f deg -- nothing to turn.',
+                         k, cc_tries, np.degrees(eng_clock + th_to))
+                continue
+            ran += 1
             combo.reset()
-            # SUBDIVIDED ON THE TRUE SCREW -- see screw_ramp. A single ramp here interpolates
-            # the tool0 POSITION in a straight line, which for this 90 deg orbit about an axis
-            # 178 mm away drags the connector 52 mm sideways off its own axis at mid-stroke.
-            res = screw_ramp(
+            _a, _pa = th_at, push_at
+            # SUBDIVIDED ON THE TRUE SCREW -- see screw_ramp. A single ramp interpolates the tool0
+            # POSITION in a straight line, which for a 150 deg orbit about an axis 178 mm away
+            # drags the connector far off its own axis at mid-leg. The push ramps to its full
+            # value on the FIRST leg and then stays there (_pa == cc_push_m for every leg after),
+            # so the axial load is established once and carried through the reversals.
+            res, f_done = screw_ramp(
                 adm_cc,
-                lambda f: (T_clk
-                           @ xyzrpy_to_matrix([cc_push_m * f, 0.0, 0.0], [cc_rot * f, 0.0, 0.0])
-                           @ inverse(T_clk)) @ ref_start,
-                combo, cc_v, cc_w, abs(np.degrees(cc_rot)), label='screw ')
+                lambda f, _s=_a, _e=th_to, _p=_pa: arm_at(_s + (_e - _s) * f,
+                                                          _p + (cc_push_m - _p) * f),
+                combo, cc_v, cc_w, abs(np.degrees(turn)),
+                label='leg %d/%d (%+.0f -> %+.0f deg) ' % (
+                    k, cc_tries, np.degrees(eng_clock + _a), np.degrees(eng_clock + th_to)))
             adv = det.advance_m()
             # `stopped`, not `seated`: ramp's 'seated' means "a guard tripped", which is the robot
             # layer's word and unrelated to the assembly state. WHICH guard fired is what decides
@@ -1349,94 +1587,62 @@ def build_and_run(cfg, robot, camera, args):
             stopped = res == 'seated'
             early_seat = stopped and combo.tripped is det
             jammed = stopped and not early_seat
-            # SUCCESS IS ASSUMED when the stroke runs to completion. success_advance_mm is the
-            # EARLY-OUT (the detector ends the stroke the moment the cams have pulled the
-            # connector home) and telemetry -- never a post-hoc verdict. Cross-checking a
-            # completed stroke against measured advance turned soft-spring deflection into false
-            # failures and sent the ratchet on retry swings a completed screw never needed. The
-            # only not-seated outcome is a FORCE-GUARD stop mid-stroke.
-            seated_now = early_seat or res == 'done'
+            swung = swung or res == 'done'          # at least one leg swung its whole arc
+            # CONTINUE FROM WHERE THE REFERENCE ACTUALLY GOT TO. A jammed leg stopped short, and
+            # the next leg reverses from there -- not from the endpoint it never reached.
+            th_at = _a + turn * f_done
+            push_at = _pa + (cc_push_m - _pa) * f_done
             clock_rows.append({'maneuver': 'cable_clocking', 'try': k, 'ramp_result': res,
+                               'target_deg': round(float(np.degrees(eng_clock + th_to)), 3),
+                               'reached_deg': round(float(np.degrees(eng_clock + th_at)), 3),
                                'advance_mm': round(adv * 1000.0, 3),
                                'peak_advance_mm': round(det.peak_m * 1000.0, 3),
                                'need_mm': round(cc_need_m * 1000.0, 3),
-                               'success': bool(seated_now), 'force_stop': bool(jammed),
-                               'state_after': 'seated' if seated_now else 'engaged',
+                               'success': bool(early_seat), 'force_stop': bool(jammed),
+                               'state_after': 'seated' if early_seat else 'engaged',
                                'stopped_by': combo.tripped_by or ''})
-            if seated_now:
+            if early_seat:
                 ok = True
-                log.info('  try %d/%d: SEATED -- %s (advance %.2f mm)', k, cc_tries,
-                         'early out: %s' % det.tripped_by if early_seat
-                         else 'stroke completed, success assumed', adv * 1000.0)
+                log.info('  leg %d/%d: SEATED at %+.1f deg -- early out: %s (advance %.2f mm)',
+                         k, cc_tries, np.degrees(eng_clock + th_at), det.tripped_by,
+                         adv * 1000.0)
                 break
-            log.warning('  try %d/%d: NOT SEATED, force guard stopped the screw (%s); '
-                        'advance %.2f mm', k, cc_tries, combo.tripped_by, adv * 1000.0)
-            if k == cc_tries:
-                break
+            if jammed:
+                log.warning('  leg %d/%d: the force guard stopped the turn at %+.1f deg of the '
+                            '%+.1f deg aimed for (%s); advance %.2f mm -- the next leg reverses '
+                            'from there.', k, cc_tries, np.degrees(eng_clock + th_at),
+                            np.degrees(eng_clock + th_to), combo.tripped_by, adv * 1000.0)
+            else:
+                log.info('  leg %d/%d: turned to %+.1f deg without the cams picking up '
+                         '(advance %.2f mm of the %.2f mm needed).', k, cc_tries,
+                         np.degrees(eng_clock + th_at), adv * 1000.0, cc_need_m * 1000.0)
+        if ok:
+            verdict = 'early_out'                  # the advance threshold fired mid-leg
+        else:
+            # SUCCESS IS ASSUMED when the sweep runs -- see the docstring. The not-seated case is
+            # a sweep in which EVERY leg was cut short by the guard: the connector never swung
+            # freely at all, which is a wedge and not a search.
+            ok = swung
+            verdict = 'completed' if ok else 'all_legs_guard_stopped'
+            log.info('  sweep finished after %d leg%s: %s (peak advance %.2f mm, needed %.2f).',
+                     ran, '' if ran == 1 else 's',
+                     'SEATED -- at least one leg swung its whole arc, success assumed' if ok
+                     else 'NOT SEATED -- every leg was stopped by the force guard',
+                     det.peak_m * 1000.0, cc_need_m * 1000.0)
+        # ONE SUMMARY ROW for the sweep, on top of the per-leg rows. Without it the CSV carries no
+        # row holding the verdict whenever the sweep seated by COMPLETION rather than by the
+        # advance early-out: every per-leg row would read success=False and the file would
+        # contradict the log.
+        clock_rows.append({'maneuver': 'cable_sweep', 'try': ran, 'ramp_result': verdict,
+                           'reached_deg': round(float(np.degrees(eng_clock + th_at)), 3),
+                           'advance_mm': round(det.advance_m() * 1000.0, 3),
+                           'peak_advance_mm': round(det.peak_m * 1000.0, 3),
+                           'need_mm': round(cc_need_m * 1000.0, 3),
+                           'success': bool(ok), 'force_stop': bool(not swung),
+                           'state_after': 'seated' if ok else 'engaged',
+                           'stopped_by': ''})
 
-            # ---- REGRASP RATCHET: release, return the GRIPPER to the engaged pose, re-grip ----
-            # The connector keeps whatever it gained. Its pose is captured BEFORE releasing --
-            # while the gripper still holds it -- because it is unobservable once the fingers open.
-            C_conn = robot.tool0() @ det.T_tool0_conn
-            adm_cc.stop()
-            robot.arm.servo_stop()
-            phase('retract')
-            if not robot.gripper.open(f'release for clocking retry {k + 1}'):
-                log.error('Gripper did not open for the clocking retry.')
-                break
-            phase('standoff')
-            # UNWIND ALONG THE SCREW, do not move_l straight to the engaged pose. The arm stands
-            # up to a full stroke clocked from ref_start, and move_l executes that ~90 deg
-            # reorientation as a straight tool0 line + slerp -- the chord, ~52 mm inside the true
-            # arc -- with the OPEN fingers wrapped around the captive cable. The return is a
-            # rotation about the same socket axis as the stroke itself, so it must travel the
-            # same way: solve the ACHIEVED screw (angle about the axis, advance along it) from
-            # the measured pose and run it in reverse through screw_ramp. The lateral/angular
-            # drift the solve discards is exactly what the socket forbids, so discarding it is
-            # the correction, not an approximation.
-            here_r = robot.tool0()
-            axn_cc = T_clk[:3, 0] / float(np.linalg.norm(T_clk[:3, 0]))
-            pt_cc = T_clk[:3, 3]
-            rel_r = here_r @ inverse(ref_start)
-            phi = float(np.dot(Rotation.from_matrix(rel_r[:3, :3]).as_rotvec(), axn_cc))
-            T_rot = rotate_about_axis(ref_start, T_clk[:3, 0], pt_cc, phi)
-            s_adv = float(np.dot(here_r[:3, 3] - T_rot[:3, 3], axn_cc))
-
-            def back_at(f, _phi=phi, _s=s_adv):
-                g = 1.0 - f          # g=1 is the solved achieved screw, g=0 is the engaged pose
-                return (translation_matrix(_s * g * axn_cc)
-                        @ rotate_about_axis(ref_start, T_clk[:3, 0], pt_cc, _phi * g))
-
-            u_lin, u_ang = pose_error(back_at(0.0), here_r)
-            log.info('  retry unwind: %+.1f deg / %+.2f mm of achieved screw run in reverse '
-                     '(off-screw drift discarded: %.2f mm / %.2f deg -- the socket forbids it)',
-                     np.degrees(-phi), -s_adv * 1000.0, u_lin * 1000.0, np.degrees(u_ang))
-            adm_cc.reset()
-            adm_cc.warmup(back_at(0.0))
-            guard_shared.reset()
-            res_r = screw_ramp(adm_cc, back_at, guard_shared, cc_v, cc_w,
-                               abs(np.degrees(phi)), label=f'retry-unwind {k + 1} ')
-            adm_cc.stop()
-            robot.arm.servo_stop()
-            if res_r == 'seated':
-                log.error('Force guard tripped while unwinding to the engaged pose (%s) -- the '
-                          'open fingers hit something on the way back around the cable.',
-                          guard_shared.tripped_by or 'unknown')
-                break
-            if not robot.gripper.close(f'regrasp for clocking retry {k + 1}'):
-                log.error('Gripper did not close on the regrasp.')
-                break
-            if not verify_cable_held(robot, check, f'clocking regrasp {k + 1}'):
-                log.error('The regrasp missed the cable -- screwing again would turn nothing.')
-                break
-            # Rebase: the connector sat still while the gripper travelled, so the relationship
-            # between them changed by exactly the progress made. Without this, advance would be
-            # re-zeroed at every regrasp and a cumulative threshold could never be reached.
-            det.rebase(inverse(robot.tool0()) @ C_conn)
-            log.info('  regrasped at the engaged pose, carrying %.2f mm of advance into try %d',
-                     det.advance_m() * 1000.0, k + 1)
-
-        # Settle at wherever the screw actually ended. The integrator is zeroed first so the hold
+        # Settle at wherever the sweep actually ended. The integrator is zeroed first so the hold
         # commands the pose the arm is AT rather than that pose plus the deflection already in it.
         last = robot.tool0()
         adm_cc.reset()
@@ -1447,16 +1653,22 @@ def build_and_run(cfg, robot, camera, args):
         adm_cc.stop()
         robot.arm.servo_stop()
 
-        # det.T_tool0_conn, NOT the local from the belief reset: a regrasp rebases it, and reading
-        # the stale one here would hand collar clocking a connector pose wrong by exactly the
-        # progress the ratchet made -- placing the collar grasp that far off.
+        # det.T_tool0_conn, NOT the local from the belief reset: the detector owns the
+        # connector-in-gripper relation, and reading a stale copy here would hand collar clocking
+        # a connector pose wrong by exactly whatever the detector has since accounted for.
         T_tool0_conn_now = det.T_tool0_conn
         T_base_conn = robot.tool0() @ T_tool0_conn_now
         got = matrix_to_xyzrpy(inverse(T_clk) @ T_base_conn)
-        log.info('  achieved screw: %+.2f mm along +X, %+.2f deg about +X '
-                 '(commanded %+.2f mm x %d tr%s, %+.1f deg); peak advance %.2f mm',
-                 got[0][0] * 1000.0, np.degrees(got[1][0]), cc_push_m * 1000.0, cc_tries,
-                 'y' if cc_tries == 1 else 'ies', np.degrees(cc_rot), det.peak_m * 1000.0)
+        # WRAPPED ONTO THE SWEEP'S OWN BRANCH. The Euler roll caps at +/-180, and this number is
+        # handed to collar clocking as the angle to UNWIND -- so a sign that flipped at the band
+        # edge would orbit the open gripper the long way round the part. cc_mid is the centre of
+        # the band the roll must lie in, which is the branch to read it on.
+        screw_rad = _wrap_near(float(got[1][0]), cc_mid)
+        log.info('  achieved: %+.2f mm along +X, %+.2f deg about it from the engaged roll -- so '
+                 '%+.1f deg wrt the target frame (aimed for %s). Peak advance %.2f mm.',
+                 got[0][0] * 1000.0, np.degrees(screw_rad),
+                 np.degrees(eng_clock + screw_rad),
+                 [round(float(np.degrees(t)), 1) for t in cc_sweep], det.peak_m * 1000.0)
         if robot.arm.dry_run and not ok:
             # arm.fk is a fixed stand-in offline, so tcp_pose never moves and advance is
             # unmeasurable by construction -- pass it so the rest of the sequence is exercised.
@@ -1468,7 +1680,7 @@ def build_and_run(cfg, robot, camera, args):
             if not robot.gripper.open('release (post cable clocking)'):
                 log.error('Gripper did not open after cable clocking.')
                 return False, T_tool0_conn_now, T_base_conn
-        return ok, T_tool0_conn_now, T_base_conn, float(np.degrees(got[1][0]))
+        return ok, T_tool0_conn_now, T_base_conn, float(np.degrees(screw_rad))
 
     def collar_clocking(T_base_conn, screw_deg=None):
         """COLLAR CLOCKING -- grasp the locking collar and turn it.
@@ -1504,18 +1716,22 @@ def build_and_run(cfg, robot, camera, args):
         axn = axis / float(np.linalg.norm(axis))
         cammed = float(np.dot(T_base_conn[:3, 3] - T_clk[:3, 3], axn))
         point = T_clk[:3, 3] + cammed * axn
-        # COLLAR AXIS OFFSET (config: collar_clocking.axis_offset_mm, CONNECTOR-frame xyz). The
+        # COLLAR AXIS OFFSET (config: collar_clocking.axis_offset_mm, SOCKET-frame xyz). The
         # declared frame origin is the mating-face reference, placed for insertion -- not
         # necessarily on the barrel centreline the collar physically turns about. This shifts the
         # LINE the whole collar maneuver works about (centre, unwind, advance, turn) by a vector
-        # expressed in the connector frame's own axes; bench-measured ~5 mm along -Z. The Y/Z
+        # expressed in the socket frame's own axes; bench-measured ~5 mm along -Z. The Y/Z
         # components move the line, X only slides the reference point along it. Scoped to collar
         # clocking -- cable clocking still turns about the unoffset target axis.
+        # RESOLVED IN THE ROLL-FREE BASIS -- see axis_offset_base. The number is bench-measured
+        # against the fixture, so engage_clock_deg must not swing it round the axis with the plug.
         off_conn = np.asarray(cl_axis_off, dtype=float) / 1000.0
+        off_base = axis_offset_base()
         if float(np.linalg.norm(off_conn)) > 0.0:
-            point = point + T_clk[:3, :3] @ off_conn
-            log.info('  collar axis OFFSET by %s mm (connector frame) -> the line moves %.2f mm '
-                     'laterally.', np.round(cl_axis_off, 2).tolist(),
+            point = point + off_base
+            log.info('  collar axis OFFSET by %s mm (socket frame, NOT rolled by the %+.1f deg '
+                     'engage clock angle) -> the line moves %.2f mm laterally.',
+                     np.round(cl_axis_off, 2).tolist(), np.degrees(eng_clock),
                      float(np.linalg.norm(off_conn - np.dot(off_conn, [1.0, 0.0, 0.0])
                                           * np.array([1.0, 0.0, 0.0]))) * 1000.0)
         T_base_axis = T_clk.copy()
@@ -1530,7 +1746,6 @@ def build_and_run(cfg, robot, camera, args):
         # that 45.7 mm; from the junction it is pads +collar_offset_mm.
         pad_x = float((inverse(T_base_axis) @ here @ robot.T_tool0_fingertip)[0, 3])
         collar_x = pad_x + cl_off_m
-        T_base_collar = T_base_axis @ translation_matrix([collar_x, 0.0, 0.0])
         # Report the drift that was being used as an axis -- it is the direct measure of how far
         # the screw's accumulated error would have thrown this turn.
         _d = T_base_conn[:3, 3] - point
@@ -1554,26 +1769,48 @@ def build_and_run(cfg, robot, camera, args):
         # 180 deg rolled from the fingertip's own (estimation.initial_connector_in_fingertip
         # carries rpy [0, 0, 180]). Taking that literally demands a 180 deg wrist roll on the way
         # in -- and that roll is about an axis 90 deg OFF the connector axis, so the approach stops
-        # being an orbit and becomes a wide swing through the part. Measured, arm -> pre-wound:
+        # being an orbit and becomes a wide swing through the part. Measured, arm -> pre-wound,
+        # after a 90 deg screw:
         #     as defined    180.0 deg about an axis 90.0 deg off the connector axis
         #     jaws swapped   90.0 deg about an axis  0.0 deg off it  -- a PURE ORBIT
         # So pick the roll that keeps the approach on the axis. Nothing about the grasp changes.
-        grip = min((inverse(robot.T_tool0_fingertip),
-                    xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, 0.0, np.pi])
-                    @ inverse(robot.T_tool0_fingertip)),
-                   key=lambda G: pose_error(here, T_base_collar @ G)[1])
-        # The stroke poses are defined AFTER the clock-angle solve below -- the unwind lands
-        # relative to where the arm actually is, not relative to the nominal alignment.
+        #
+        # PICKED ON THE OFF-AXIS RESIDUAL, NOT ON THE TOTAL ANGLE, and that distinction is the
+        # whole of it once the screw can turn 180 deg. "Smallest total rotation" happens to name
+        # the on-axis candidate at a 90 deg screw (90 vs 180) and it TIES at a 180 deg one: the
+        # correct candidate is then a 180 deg orbit about the connector axis, and the wrong one is
+        # a 180 deg rotation about an axis square to it -- both report 180 deg, so the choice fell
+        # to tuple order and a coin-flip landed on the swing. What actually distinguishes them is
+        # what the tilt gate below already measures: the part of the difference that NO rotation
+        # about the connector axis explains. That is zero for the right candidate at every screw
+        # angle, so score on it directly instead of on a proxy that only works at 90 deg.
         # The gripper unwinds AT the junction station (where the pads already are, clear of the
         # ring) and only then ADVANCES the collar_offset_mm onto the collar. approach_mm shifts
         # the unwind station relative to the junction; null = stay where the pads are.
         app_x = pad_x + (0.0 if cl_app_mm is None else float(cl_app_mm) / 1000.0)
         adv_m = collar_x - app_x
-        T_nom_back = T_base_axis @ translation_matrix([app_x, 0.0, 0.0]) @ grip
-        # The arm's CLOCK ANGLE about the axis, solved from the measured pose -- everything
-        # downstream hangs off this, so it is solved once, here.
-        rel = here @ inverse(T_nom_back)
-        th_now = float(np.dot(Rotation.from_matrix(rel[:3, :3]).as_rotvec(), axn))
+
+        def _solve(G):
+            """(off-axis residual rad, nominal-back pose, arm clock angle) for one grip roll.
+
+            The clock angle is WRAPPED onto the sweep's branch for the same reason the screw's own
+            read-back is (see _wrap_near): near a half turn the rotvec's sign is a coin flip, and
+            its sign is the DIRECTION the open gripper orbits back round the part. The screw
+            reports where it ACTUALLY finished, so that is the branch; cc_mid (the centre of the
+            band the sweep is confined to) is the fallback when it did not report."""
+            T_nb = T_base_axis @ translation_matrix([app_x, 0.0, 0.0]) @ G
+            rel_g = here @ inverse(T_nb)
+            th = _wrap_near(float(np.dot(Rotation.from_matrix(rel_g[:3, :3]).as_rotvec(), axn)),
+                            np.radians(screw_deg) if screw_deg is not None else cc_mid)
+            return pose_error(here, rotate_about_axis(T_nb, axis, point, th))[1], T_nb, th
+
+        _resid, T_nom_back, th_now = min(
+            (_solve(G) for G in (inverse(robot.T_tool0_fingertip),
+                                 xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, 0.0, np.pi])
+                                 @ inverse(robot.T_tool0_fingertip))),
+            key=lambda r: r[0])
+        # The stroke poses are defined AFTER the clock-angle solve above -- the unwind lands
+        # relative to where the arm actually is, not relative to the nominal alignment.
         T_centred = rotate_about_axis(T_nom_back, axis, point, th_now)
         # THE UNWIND ANGLE. Default: undo exactly the ACHIEVED screw, landing the gripper back at
         # the ENGAGED clock angle -- wrist range the screw itself just proved reachable, and the
@@ -1582,6 +1819,16 @@ def build_and_run(cfg, robot, camera, args):
         # undoes the screw and keeps going another prewind past it (a ~70 deg achieved screw plus
         # the 90 deg pre-wind was the observed 160 deg unwind). That semantics survives only when
         # prewind_deg is set to an explicit number.
+        #
+        # "NOMINAL" IS THE ENGAGE CLOCK ANGLE, not the socket frame's declared roll. T_clk carries
+        # engage_clock_deg, so T_nom_back above is the collar alignment AT the angle the connector
+        # was mated at, and every angle in this maneuver is measured from there. That is what keeps
+        # the whole sequence inside one placed arc: with engage_clock_deg -90 and a +180 screw the
+        # arm runs -90 -> +90 (screw), back to -90 (this unwind), then -90 -> 0 (the collar turn),
+        # so nothing ever leaves the -90 .. +90 band the clock angle was chosen to make safe.
+        # An explicit prewind_deg unwinds that far BEFORE the engaged angle and therefore steps
+        # OUTSIDE that band by exactly prewind_deg -- deliberate, but worth knowing it is the one
+        # setting here that does.
         if cl_prewind_explicit:
             theta = -cl_prewind - th_now
         else:
@@ -1601,8 +1848,16 @@ def build_and_run(cfg, robot, camera, args):
                  'same axis while pushing %+.1f mm along it.',
                  cl_off_m * 1000.0, np.degrees(theta), app_x * 1000.0,
                  'at the engaged clock angle' if not cl_prewind_explicit
-                 else '%+.1f deg before nominal' % np.degrees(-cl_prewind),
+                 else '%+.1f deg before the engaged clock angle' % np.degrees(-cl_prewind),
                  adv_m * 1000.0, np.degrees(cl_rot), cl_push_m * 1000.0)
+        # The same journey in SOCKET terms, which is the frame obstacles live in. th_now is where
+        # the arm stands now, measured from the engaged clock angle, so eng_clock + th_now is its
+        # absolute roll about the socket +X.
+        _abs_now = eng_clock + th_now
+        log.info('  clock angle about the socket +X: %+.1f deg (now, after the screw) -> '
+                 '%+.1f deg (grasp the collar) -> %+.1f deg (turn complete).',
+                 np.degrees(_abs_now), np.degrees(_abs_now + theta),
+                 np.degrees(_abs_now + theta + cl_rot))
         # REACHABILITY of BOTH ends, before anything grips. Discovering mid-turn that the far end
         # is unreachable leaves the collar clamped in a stalled gripper, which is the one failure
         # this maneuver must not have -- and it is exactly what the pre-wind exists to prevent, so
@@ -1635,6 +1890,8 @@ def build_and_run(cfg, robot, camera, args):
         # That much travel is real geometry, not error, and it is NOT a rotation -- so a straight
         # move is exactly the right path for it and there is no chord to cut. Doing it first is
         # what leaves the rest of the approach a pure orbit.
+        # c_ang IS `_resid` above -- the residual the grip roll was chosen to minimise. Recomputed
+        # here rather than carried, so the gate reads the pose actually about to be driven to.
         c_lin, c_ang = pose_error(here, T_centred)   # the solve itself ran above
         # ALWAYS LOGGED, gated only above max_offaxis_tilt_deg. The number is the diagnostic: a
         # value that repeats run to run is a declared-frame orientation error; one that varies is
@@ -1678,7 +1935,7 @@ def build_and_run(cfg, robot, camera, args):
             adm_cl.reset()
             adm_cl.warmup(T_centred)
             guard_shared.reset()
-            res_uw = screw_ramp(
+            res_uw, _f_uw = screw_ramp(
                 adm_cl,
                 lambda f: rotate_about_axis(T_centred, axis, point, theta * f),
                 guard_shared, g_v * s_std, g_w * s_std, abs(np.degrees(theta)),
@@ -1784,7 +2041,7 @@ def build_and_run(cfg, robot, camera, args):
         # collar's lugs engaged with their ramps while it turns. A translation along the
         # rotation axis commutes with the rotation, so the composed path is still an exact screw
         # and screw_ramp subdivides it the same way.
-        res = screw_ramp(
+        res, _f_turn = screw_ramp(
             adm_cl,
             lambda f: (translation_matrix(cl_push_m * f * axn)
                        @ rotate_about_axis(start, axis, point, cl_rot * f)),

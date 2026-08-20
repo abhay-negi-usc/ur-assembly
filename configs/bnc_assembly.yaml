@@ -271,6 +271,34 @@ assembly:
   # `T_base_targetobj @ row @ inverse(T_tool0_conn)` and the belief is the other, so
   # naming different points there puts the connector off by exactly their difference.
 
+  # ---- ENGAGE CLOCK ANGLE: the roll the connector is MATED at --------------------------------
+  # Deg about the socket frame's own +X. A BNC is free about that axis until the bayonet pins
+  # pick up, so the clock angle the connector is ENGAGED at is a free choice -- and this is the
+  # one place it is made. The socket frame is rolled by this much ONCE, and every pose in the app
+  # is then built from the rolled frame: the trajectory, the stand-off, the observations, the
+  # belief reset at the start of cable clocking, the screw axis, the collar frame. So the part's
+  # relationship to its own insertion path is UNCHANGED and the only thing that moves is where
+  # about the axis the whole sequence sits.
+  #
+  # IT DOES NOT PLACE THE SWEEP. cable_clocking.sweep_deg states its roll positions against the
+  # TARGET frame, so the band the screw works in is what that key says whatever this is set to.
+  # What this decides is where the connector STARTS -- and therefore which way the first leg
+  # turns. At 0 with a [-75, +75] sweep, leg 1 turns NEGATIVE, which is the intended order.
+  #
+  # FREE OF SIDE EFFECTS ON THE INSERTION: +X is unchanged by a roll about +X, so the insertion
+  # axis, push_mm, the retract legs and every depth reading are identical at any value here.
+  # 0.0 = the declared roll, i.e. exactly the behaviour before this key existed -- and the only
+  # engagement pose that has actually been run on hardware.
+  #
+  # TWO THINGS DO NOT ROLL WITH IT, both on purpose:
+  #   * collar_clocking.axis_offset_mm -- bench-measured against the FIXTURE, so it is a fixed
+  #     line in space however far round the plug is mated. Applied in the roll-free basis.
+  #   * the contact manifold -- collected at ONE clock angle by apps/uncertain_sampling, and the
+  #     socket is not a body of revolution, so the contact at another angle is different contact.
+  #     insertion_mode: estimate warns when this is non-zero; insertion_mode: engage matches
+  #     nothing and is unaffected.
+  engage_clock_deg: 0.0
+
   # The ideal insertion path: CONNECTOR w.r.t. the TARGET connector, last row = identity (the mate).
   trajectory_csv: assembly_trajectory.csv
   trajectory_angles_deg: false
@@ -569,7 +597,37 @@ assembly:
 
   cable_clocking:
     enabled: true             # OPTIONAL -- false ends the run ENGAGED
-    rotation_deg: 120.0            # + about the CONNECTOR's +X
+    # ---- THE SWEEP: roll POSITIONS the screw rocks between, deg wrt the TARGET frame ---------
+    # Not a rotation amount -- absolute angles about the socket +X. The arm visits them IN TURN,
+    # one per try: from the engaged roll (assembly.engage_clock_deg, 0 here) leg 1 goes to -75,
+    # leg 2 to +75, leg 3 back to -75, and so on until max_tries or until the connector advances
+    # success_advance_mm along +X.
+    #
+    # WHY IT ROCKS INSTEAD OF TURNING FURTHER ONE WAY. A bayonet pin that did not line up with
+    # its slot at the mate will not find it by turning harder -- it rides the rim and jams. It
+    # finds it by crossing back and forth over the slot under a steady axial load, and the moment
+    # it drops in, the cams pull the connector home and the x-advance early-out ends the search.
+    # push_mm is that load: it is applied on the first leg and HELD through every reversal (the
+    # app warms the admittance up once for the whole sweep, so the press never blinks).
+    #
+    # WHY ABSOLUTE AND NOT RELATIVE. The reachable band is a property of the FIXTURE, not of
+    # where the plug happened to be mated. Stated against the target frame, these ARE the angles
+    # obstacles and wrist limits live in, and moving engage_clock_deg cannot silently drag the
+    # sweep somewhere else.
+    #
+    # A LEG STOPPED BY THE FORCE GUARD IS NORMAL -- that is how the far edge of the slot is
+    # found. The next leg reverses from wherever it stopped, not from the endpoint it never
+    # reached. Only a sweep in which EVERY leg was guard-stopped is reported NOT SEATED: nothing
+    # ever swung freely, so the connector is wedged rather than searching.
+    #
+    # The app pre-samples 25 poses across the whole band and WARNS (it does not refuse) if any
+    # has no IK solution: a servoed leg otherwise finds out mid-turn, with the connector gripped
+    # and cammed part-way home. If that fires, move these endpoints.
+    #
+    # More than two entries is legal (e.g. [-75, 75, -40, 40] to narrow in). One entry reproduces
+    # a single one-way stroke. Deleting the key falls back to the legacy `rotation_deg`, a single
+    # RELATIVE stroke of that many degrees from the engaged roll.
+    sweep_deg: [-75.0, +75.0]
     # PUSH: how far past the engaged pose the virtual target aims, along the connector +X. This is
     # a target, not a prediction -- the connector advances as far as the cams allow and the
     # compliant deflection absorbs the rest. TUNE: too small and the cams never engage; too large
@@ -577,20 +635,24 @@ assembly:
     push_mm: 25.0
     # SUCCESS: measured advance of the connector along the ENGAGED frame's +X, read from the
     # MEASURED arm pose (never the commanded reference -- under admittance the difference between
-    # them IS the signal here). Checked every servo cycle, so reaching it ENDS the rotation early.
-    # EARLY-OUT ONLY: a stroke that runs to completion is assumed seated regardless of measured
-    # advance -- cross-checking completion against this number turned soft-spring deflection into
-    # false failures and needless ratchet retries. Cumulative across retries.
+    # them IS the signal here). Checked every servo cycle, so reaching it ENDS the sweep the
+    # instant the cams pick up, mid-leg -- which is the whole point of rocking rather than
+    # committing to one long turn.
+    #
+    # EARLY-OUT ONLY: a sweep that runs its legs is assumed seated regardless of measured advance
+    # -- cross-checking against this number turned soft-spring deflection into false failures.
+    # CUMULATIVE from the ORIGINAL engaged pose, so progress made on one leg still counts on the
+    # next; a reversal does not re-zero it.
     success_advance_mm: 5.0
+    # HOW MANY LEGS the sweep runs before giving up. One try = one leg = one rotation to the next
+    # sweep_deg position, so 3 with a two-entry sweep is -75, +75, -75. A retry is the REVERSAL,
+    # not a regrasp: the gripper stays CLOSED for the whole sweep. (The old ratchet -- open, orbit
+    # the empty gripper back to the engaged pose, re-grip -- existed because a one-way stroke
+    # could only be retried by giving back the wrist range it had spent. An oscillation never
+    # spends range it does not immediately return, so there is nothing to give back.)
     max_tries: 3
-    # WHAT A RETRY DOES -- a REGRASP, never an unscrew. The gripper has turned with the cable, so
-    # the stroke cannot just be repeated; undoing it would hand back whatever the cams gained. So
-    # the gripper OPENS, returns to the SAVED ENGAGED POSE, RE-GRIPS (counts-checked), and repeats
-    # the identical stroke. The connector is captive in the socket and keeps its progress while the
-    # gripper travels -- a ratchet handle taking a fresh bite. Tries therefore ACCUMULATE, which is
-    # why success_advance_mm is measured from the original engaged pose and not per try.
     open_gripper_after: true      # the FINAL release, after success or max tries -- then the escape
-    settle_s: 0.5                 # compliant settle at whatever pose the screw reached
+    settle_s: 0.5                 # compliant settle at whatever pose the sweep reached
     hold_after_s: 0.0             # extra un-guarded dwell on top of settle_s
     # TARE at warm-up. OFF here, unlike the insertion, because the arm is standing in a MATED,
     # LOADED pose when clocking starts: re-zeroing the F/T there defines the mate load as zero, so
@@ -633,7 +695,7 @@ assembly:
     # reference ~45.7 mm further forward, and measuring from it overshot the advance by exactly
     # that much (observed: aimed ~+70 mm for a collar ~+25 mm away).
     collar_offset_mm: 25.0
-    # COLLAR AXIS OFFSET, mm, expressed in the CONNECTOR (target) frame's own axes. Shifts the
+    # COLLAR AXIS OFFSET, mm, expressed in the SOCKET (target) frame's own axes. Shifts the
     # LINE the whole collar maneuver works about -- centring, unwind, advance and turn all move
     # with it -- and the TUG VERIFICATION centres its re-grip on the same offset axis before
     # pulling. Cable clocking is NOT affected; it still turns about the unoffset target axis.
@@ -644,6 +706,12 @@ assembly:
     # from the declared one. Y and Z move the line; X only slides the reference point along it
     # (no geometric effect). If this settles to a stable value it belongs in the frame
     # declaration itself (frames.yaml) rather than here -- this knob is the fast bench tune.
+    #
+    # NOT ROLLED BY assembly.engage_clock_deg. This is measured against the FIXTURE, so it is a
+    # fixed line in space however far round the plug happens to be mated; the app resolves it in
+    # the frame's roll-FREE basis. Rolling it with the plug would swing a bench-measured -Z
+    # correction round to -Y at a 90 deg clock angle and put the collar axis somewhere nobody
+    # measured. Re-measure it only if the FIXTURE moves, never because the clock angle changed.
     axis_offset_mm: [0.0, 0.0, -10.0]
     # UNWIND STATION, mm along the connector +X RELATIVE TO THE JUNCTION (= the closed pads, see
     # collar_offset_mm above). The gripper unwinds here, then ADVANCES onto the collar before
@@ -679,6 +747,11 @@ assembly:
       max_travel_mm: 15.0
     # PRE-WIND, deg. Before grasping, unwind the OPEN gripper this far about the
     # connector's +X, so the turn that follows has the wrist range to complete it.
+    #
+    # "NOMINAL", EVERYWHERE BELOW, IS assembly.engage_clock_deg -- not the socket frame's declared
+    # roll. Every frame this maneuver works in carries the engage clock angle, so all of these
+    # angles are measured from the roll the connector was MATED at.
+    #
     # null (default) = unwind exactly the ACHIEVED cable screw, landing the gripper back at the
     #   ENGAGED clock angle -- wrist range the screw itself just proved reachable. The turn then
     #   ends rotation_deg past the engaged angle, NOT on the nominal alignment.
@@ -687,11 +760,18 @@ assembly:
     #   after a ~70 deg screw that was the observed 160 deg unwind.
     # 0 = start the turn from the nominal alignment itself (pre-2026-08-17 behaviour).
     #
-    # WHY. The turn is a rigid orbit about the connector +X. Beginning it at the nominal
-    # alignment asks for 90 deg of range on whichever side the arm is already on, and
+    # KEEP THIS null. The default is what keeps the whole run inside the band the cable sweep was
+    # chosen to make safe: with engage_clock_deg 0 and sweep_deg [-75, +75] the arm goes
+    # 0 -> -75 -> +75 -> -75 (the sweep) -> 0 (this unwind) -> +90 (the collar turn), so the only
+    # excursion past the sweep band is the collar turn itself. An explicit number unwinds that
+    # far BEYOND the engaged roll before turning -- a prewind of 90 would put the OPEN gripper at
+    # -90 and finish the collar turn back at 0. It is the one setting in this block that can
+    # leave the band, so set it only when the collar genuinely needs to end on the engaged roll.
+    #
+    # WHY A PRE-WIND AT ALL. The turn is a rigid orbit about the connector +X. Beginning it at
+    # the nominal alignment asks for 90 deg of range on whichever side the arm is already on, and
     # there may not be 90 deg left there; unwinding first puts the whole stroke on the
-    # reachable side. The turn then LANDS on the nominal alignment rather than finishing
-    # 90 deg past it, which is also where the collar is expected to end up.
+    # reachable side.
     #
     # The unwind runs with the gripper OPEN -- doing it while gripping would turn the
     # collar backwards. Both ends of the stroke are IK-checked before the gripper closes,

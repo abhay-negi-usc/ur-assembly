@@ -672,11 +672,11 @@ assembly:
     #
     # NOT ROLLED BY assembly.engage_clock_deg -- measured against the FIXTURE, so the app resolves
     # it in the roll-FREE basis. Re-measure only if the FIXTURE moves.
-    axis_offset_mm: [0.0, 0.0, -10.0]
-    # APPROACH STATION, mm along the connector +X RELATIVE TO THE JUNCTION (= the closed pads).
-    # Where the fingertip sits when the axial advance onto the ring begins, so with null/0 the
-    # advance is exactly collar_offset_mm. Negative = start further back along the cable.
-    approach_mm: null
+    # ZERO: the collar turns about the CONNECTOR AXIS itself. A non-zero Y/Z here moves the
+    # whole maneuver's line off that axis -- which is what put the fingertip 10 mm off the
+    # ring. Only set it if the barrel centreline is MEASURED to differ from the declared
+    # frame, and re-check the collar lands on the ring afterwards.
+    axis_offset_mm: [0.0, 0.0, 0.0]
     # LIFT-OFF, mm along the GRIPPER's own -Z, before anything reorients. The connector sweep leaves
     # the open fingers wrapped around the cable at the junction; the radial -> axial change is a
     # 90 deg pitch that would sweep them straight through it. This is the move that frees them.

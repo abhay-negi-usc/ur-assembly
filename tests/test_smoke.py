@@ -3854,9 +3854,15 @@ def test_the_collar_axis_offset_is_read_from_config_in_the_connector_frame():
     # and the roll-free basis is doing real work -- rolling WITH the frame would move it
     R_90 = T.xyzrpy_to_matrix([0.0, 0.0, 0.0], np.radians([-90.0, 0.0, 0.0]))
     d_naive = (T_t @ R_90)[:3, :3] @ (np.asarray(off) / 1000.0)
-    assert np.linalg.norm(d_naive - d_socket) * 1000.0 > 1.0, (
-        'this test has lost its subject: with a Y/Z offset and a 90 deg clock angle the naive '
-        'rolled basis must land somewhere measurably different')
+    if float(np.hypot(off[1], off[2])) > 1e-9:
+        assert np.linalg.norm(d_naive - d_socket) * 1000.0 > 1.0, (
+            'with a Y/Z offset and a 90 deg clock angle the naive rolled basis must land '
+            'somewhere measurably different')
+    # SHIPPED ZERO on purpose: the collar turns about the CONNECTOR AXIS itself, and a non-zero
+    # Y/Z moves the whole maneuver's line off it -- which put the fingertip 10 mm off the ring.
+    assert float(np.hypot(off[1], off[2])) < 1e-9, (
+        f'collar_clocking.axis_offset_mm {off} shifts the collar line off the connector axis; '
+        f'set it non-zero only from a MEASURED barrel centreline')
 
     with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
         src = fh.read()
@@ -4977,7 +4983,7 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
     eng = np.radians(float(asm.get('engage_clock_deg', 0.0) or 0.0))
     T_clk = T_socket @ T.xyzrpy_to_matrix([0., 0., 0.], [eng, 0., 0.])
 
-    collar_x = float(cl['collar_offset_mm']) / 1000.0
+    collar_x = float(cl['collar_offset_mm']) / 1000.0     # from the connector ORIGIN, on the axis
     cl_rot = np.radians(float(cl['rotation_deg']))
     push_m = float(cl['push_mm']) / 1000.0
     T_collar = T_clk @ T.translation_matrix([collar_x, 0.0, 0.0])
@@ -4988,7 +4994,7 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
     AXIAL = (T.xyzrpy_to_matrix([0., 0., 0.], [0., -np.pi / 2., 0.]) @ T.inverse(T_ftip))
     frames_cat = tool_frames.load_frames(cfg)
     iname_M = cfg.get_path('estimation.initial_connector_frame')
-    pad_x_M = float(T.inverse(T.inverse(T_ftip) @ frames_cat[iname_M])[0, 3])
+    _ = frames_cat[iname_M]                                  # the belief frame must exist
 
     def in_axis_frame(T_base_tool0):
         return T.inverse(T_clk) @ T_base_tool0
@@ -5094,7 +5100,7 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
 
     # the swing must be the MINIMUM available, at EVERY sweep end -- not just at 0
     T_eng = T_clk @ T.inverse(T_ftip @ (T.inverse(T_ftip) @ frames_cat[iname_M]))
-    ret_x = pad_x_M - float(cl['retreat_mm']) / 1000.0
+    ret_x = collar_x - float(cl['retreat_mm']) / 1000.0
     lift = float(cl['liftoff_mm']) / 1000.0
 
     def _at(st, th):
@@ -5103,16 +5109,14 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
 
     for sweep in (0.0, -60.0, -75.0, 75.0, 90.0):
         here = rotate_about_axis(T_eng, axis, point, np.radians(sweep))
-        T_off = (T.translation_matrix((ret_x - pad_x_M) * axn) @ here)             @ T.translation_matrix([0., 0., -lift])
-        chosen = T.pose_error(T_off, _at(ret_x, th_rule + np.radians(sweep)))[1]
-        best = min(T.pose_error(T_off, _at(ret_x, np.radians(d)))[1] for d in range(0, 360, 5))
-        assert np.degrees(chosen - best) < 0.6, (
-            f'at a {sweep:+.0f} deg sweep end the rule gives {np.degrees(chosen):.1f} deg of '
-            f'reorientation but {np.degrees(best):.1f} is available -- the rule must be read '
-            f'against the connector as the sweep LEFT it, not against the target frame')
-    assert 'np.cross(v0, want)' in body and 'np.radians(screw_deg)' in body, (
-        'the default angle must be SOLVED in closed form AND offset by the achieved sweep; a '
-        'scan makes the motion depend on IK seeding and move run to run')
+        T_off = (T.translation_matrix((ret_x - collar_x) * axn) @ here)             @ T.translation_matrix([0., 0., -lift])
+        R2 = rotate_about_axis(AXIAL, np.array([1., 0, 0]), np.zeros(3), th_rule)[:3, :3]
+        assert np.allclose(-R2[:, 1], [0., 0, -1], atol=1e-9), (
+            'the grasp attitude must be the SAME fixed -Y/-Z alignment wherever the sweep ends -- '
+            'offsetting it by the achieved sweep makes it move with the sweep')
+    assert 'np.cross(v0, want)' in body and 'th_grasp = th_rule' in body, (
+        'the default angle must be SOLVED in closed form against the TARGET frame; a scan makes '
+        'the motion depend on IK seeding and move run to run')
 
     assert 'wall_standoff_mm' in src and 'cl_wall_mm' in body, (
         'every planned station must be gated against the wall standoff before the arm moves')

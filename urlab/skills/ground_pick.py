@@ -11,8 +11,7 @@ by assuming the cable lies on a GROUND PLANE parallel to the robot XY plane at a
     detector labels and draws), projected onto the plane. This matches the multi-view connector axis
     (so the same grasp geometry aligns) and is robust for a curved cable, where the free-end->junction
     CHORD would be off by the curve angle. The free-end->junction chord is kept only as a fallback if
-    the direction can't be projected -- but its SIGN is used either way, because a junction yaw is a
-    LINE and says nothing about which end of it the connector is on (see _sign_toward_connector);
+    the direction can't be projected;
   * orientation -- x = heading, z = up (frame_from_axis), the connector-frame convention.
 
 At the selection prompt the user can enter 'n' to take a NEW image from a small camera translation
@@ -113,24 +112,19 @@ class GroundPlaneScanner:
     # ------------------------------------------------------------------ geometry
     def _project_all(self, cables, frame):
         """Each cable's ground-plane {'junction': P, 'heading': v}, or None where it can't project.
+        heading = the CONNECTOR direction projected to the plane; free-end->junction chord fallback.
 
-        heading = the CONNECTOR direction projected to the plane, SIGNED to point AWAY from the
-        cable's free end (i.e. toward the connector); free-end->junction chord as the fallback.
+        THE SIGN COMES FROM THE DETECTOR AND IS NOT SECOND-GUESSED HERE. A junction yaw describes a
+        LINE, so in principle it could point either way -- but there is no reliable tie-breaker in
+        this data: sam3's `ends` are BOTH endpoints of the traced assembly (one the cable's free
+        end, one the CONNECTOR's tip), ordered by image-centre proximity, not by which is which.
+        Taking the endpoint farthest from the junction as "the cable end" and signing the heading
+        away from it flips a CORRECT heading whenever the connector's tip happens to be the farther
+        of the two -- which lands the wrong end of the connector on the target, 91.4 mm out.
 
-        THE SIGN IS NOT IN THE DETECTOR'S YAW. A junction yaw describes a LINE, not a ray -- the
-        detector has no way to say which end of it is the connector -- and `frame_from_axis` takes
-        the vector as given, so whichever way it happens to point becomes the grasp frame's +x. A
-        parallel jaw is symmetric under a 180 deg roll about its approach axis, so a reversed
-        heading still produces a perfectly good GRASP: nothing upstream notices. The first thing
-        that depends on the sign is the cable-grab reseat (GraspRecovery shifts +x "toward the
-        connector end"), which then reseats the wrong way, AWAY from the connector, and every
-        retry makes it worse.
-
-        The free end disambiguates it: the connector is on the far side of the junction from the
-        cable, so free-end -> junction points toward the connector. That is a much weaker
-        requirement than using the chord as the heading itself -- it only has to be within 90 deg
-        -- which is why the chord stays a fallback for the VALUE while being trusted for the SIGN.
-        A cable curved enough to make even that ambiguous is warned about rather than guessed."""
+        If the detected sign is ever genuinely wrong, fix it where the label is produced, or give
+        the ends a class (cable vs connector) so there is something real to test against.
+        """
         out = []
         for cab in cables:
             ju, jv, jyaw = cab['junction']
@@ -138,19 +132,16 @@ class GroundPlaneScanner:
             if Pj is None:
                 out.append(None)
                 continue
-            # The free end, projected. Needed for BOTH the sign test and the fallback heading, so
-            # it is computed once here rather than only inside the fallback.
-            ends = [p for p in (self._project(e[:2], frame) for e in cab['ends']) if p is not None]
-            fe = max(ends, key=lambda e: float(np.linalg.norm(e - Pj))) if ends else None
             du, dv = float(np.cos(jyaw)), float(np.sin(jyaw))
             P_along = self._project((ju + self._dir_px * du, jv + self._dir_px * dv), frame)
             heading = None
             if P_along is not None:
                 heading = P_along - Pj
                 heading[2] = 0.0
-                heading = self._sign_toward_connector(heading, Pj, fe)
             if heading is None or float(np.linalg.norm(heading)) < 1e-6:   # fallback: free-end chord
-                if fe is not None:
+                ends = [p for p in (self._project(e[:2], frame) for e in cab['ends']) if p is not None]
+                if ends:
+                    fe = max(ends, key=lambda e: float(np.linalg.norm(e - Pj)))
                     heading = Pj - fe
                     heading[2] = 0.0
             if heading is None or float(np.linalg.norm(heading)) < 1e-6:
@@ -158,34 +149,6 @@ class GroundPlaneScanner:
                 continue
             out.append({'junction': Pj, 'heading': heading})
         return out
-
-    @staticmethod
-    def _sign_toward_connector(heading, Pj, fe, min_cos=0.2):
-        """`heading` flipped if it points at the cable's free end instead of at the connector.
-
-        Returns it unchanged when there is no free end to test against, or when the two are too
-        near perpendicular for the test to mean anything (a sharply curved cable) -- an ambiguous
-        sign is worth a warning, not a coin flip."""
-        n = float(np.linalg.norm(heading))
-        if fe is None or n < 1e-6:
-            return heading
-        ref = Pj - fe
-        r = float(np.linalg.norm(ref))
-        if r < 1e-6:
-            return heading
-        c = float(np.dot(heading / n, ref / r))
-        if c < -min_cos:
-            log.info('  heading flipped: the detector labelled the junction direction toward the '
-                     'CABLE (cos %.2f vs the free end). Signed toward the connector, so a '
-                     'cable-grab reseat moves onto it rather than off it.', c)
-            return -heading
-        if abs(c) <= min_cos:
-            log.warning('  heading sign is AMBIGUOUS (cos %.2f): the detected connector direction '
-                        'is nearly perpendicular to the free-end chord, so which way the connector '
-                        'lies cannot be told from this image. Leaving it as detected -- if a '
-                        'cable-grab reseat walks the wrong way, that is why.', c)
-            return heading
-        return heading
 
     def _pose(self, target):
         """T_base_connector from a projected {'junction', 'heading'} (x = heading, z = up)."""

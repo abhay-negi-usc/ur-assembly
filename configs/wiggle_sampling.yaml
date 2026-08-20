@@ -86,15 +86,15 @@ wiggle:
   # depends on your mount, and this file cannot know. Jog there once with the teach pendant. The
   # free-space move to each station is force-guarded, so a mistake stops rather than crashes, but
   # a guard trip is a wasted run, not a plan.
-  stations:
-    - {name: free,     label: free,   depth_mm: -40.0, lateral_mm: [0.0, 40.0], contact: false}
-    - {name: beside3,  label: beside, depth_mm:  -3.0, lateral_mm: [0.0, 30.0], contact: false}
-    - {name: beside0,  label: beside, depth_mm:   0.0, lateral_mm: [0.0, 30.0], contact: false}
-    - {name: d10,      label: insert, depth_mm: -10.0}
-    - {name: d6,       label: insert, depth_mm:  -6.0}
-    - {name: d3,       label: insert, depth_mm:  -3.0}    # matched to beside3
-    - {name: d1_5,     label: insert, depth_mm:  -1.5}
-    - {name: mate,     label: insert, depth_mm:   0.0}    # matched to beside0
+  # stations:
+  #   - {name: free,     label: free,   depth_mm: -40.0, lateral_mm: [0.0, 40.0], contact: false}
+  #   - {name: beside3,  label: beside, depth_mm:  -3.0, lateral_mm: [0.0, 30.0], contact: false}
+  #   - {name: beside0,  label: beside, depth_mm:   0.0, lateral_mm: [0.0, 30.0], contact: false}
+  #   - {name: d10,      label: insert, depth_mm: -10.0}
+  #   - {name: d6,       label: insert, depth_mm:  -6.0}
+  #   - {name: d3,       label: insert, depth_mm:  -3.0}    # matched to beside3
+  #   - {name: d1_5,     label: insert, depth_mm:  -1.5}
+  #   - {name: mate,     label: insert, depth_mm:   0.0}    # matched to beside0
 
   # ---- STATION GRID: ranges + resolutions instead of a hand-written list ---------------------
   # The uncertain_sampling contract: give lower/upper/resolution and the app samples ALL of it
@@ -135,7 +135,7 @@ wiggle:
   # (It does not prove modes on its own -- friction produces hysteresis too -- which is what the
   # amplitude sweep below is for: frictional hysteresis collapses past breakaway, geometric
   # hysteresis does not. 4.6.)
-  passes: [in, out]
+  passes: [in]
 
   # ---- THE EXCITATION ------------------------------------------------------------------------
   # BASE amplitude, in the CONNECTOR's own axes (mm / deg). x is the insertion axis.
@@ -149,12 +149,12 @@ wiggle:
   # excitation has to stay inside the stratum it is measuring, or it measures the neighbourhood
   # instead. That is also exactly what makes the amplitude sweep informative (below).
   amplitude:
-    x_mm:      2.5
-    y_mm:      2.5
+    x_mm:      0.0
+    y_mm:      0.0
     z_mm:      2.5
-    roll_deg:  2.5
+    roll_deg:  0.0
     pitch_deg: 2.5
-    yaw_deg:   2.5
+    yaw_deg:   0.0
 
   # FREQUENCY per axis (Hz). Three separate constraints bind here, and they pull against each
   # other -- read all three before retuning.
@@ -191,12 +191,12 @@ wiggle:
   # floor). Minimum gap 0.2 Hz x wiggle_s 15 s = 3.0 bins, exactly constraint 2's bound.
   # Translations take the LOW tones so the linear peak speeds stay tame (see the caps below).
   frequency_hz:
-    x_mm:      0.3
-    y_mm:      0.5
+    x_mm:      0.0
+    y_mm:      0.0
     z_mm:      0.7
-    roll_deg:  1.1
-    pitch_deg: 1.3
-    yaw_deg:   1.7
+    roll_deg:  0.0
+    pitch_deg: 0.11
+    yaw_deg:   0.0
 
   # PHASE per axis (deg). Spread so the three axes do not all peak at the same instant, which
   # would make the excitation effectively one-dimensional at the corners of the box and put an
@@ -223,7 +223,7 @@ wiggle:
   # 3 points over an 4x range is the minimum that draws a curve. Widen to
   # [0.125, 0.25, 0.5, 1.0, 2.0, 4.0] once the pilot shows the small end is above the noise floor
   # -- that is 32x and the run is 2x longer.
-  amplitude_scales: [0.5, 1.0, 2.0]
+  amplitude_scales: [1.0]
 
   # ---- PRELOAD SWEEP (3.3, 6) ----------------------------------------------------------------
   # mm past the station along the connector's own +X, pressed before the hold.
@@ -250,7 +250,7 @@ wiggle:
   # 0.0 IS IN THE LIST ON PURPOSE. It is the unilateral control, and it is what shows the preload
   # is doing anything at all. 3.3 asks for a preload sweep "including zero"; the app warns if you
   # drop it.
-  preloads_mm: [0.0, 1.5, 4.0]
+  preloads_mm: [0.0]
 
   # ---- TIMING --------------------------------------------------------------------------------
   # HOLD-STILL, before each wiggle. This is the SENSOR NOISE FLOOR (3.3), and it is measured per

@@ -86,6 +86,7 @@ from ..log import StepRunner
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import manifold_debug, reset
 from ..skills import trajectory as traj
+from ..skills import wiggle as wigmod
 from ..skills.manifold import mats_from_vec6, vec6_from_mats
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
                            GraspRecovery, retry_offset_x, verify_cable_held)
@@ -433,6 +434,30 @@ def build_and_run(cfg, robot, camera, args):
     # top (amplitude x 2*pi*f) that the path speed does not bound. The cap derives a time dilation
     # of the oscillation clock only -- amplitude (the search area) and the frequency RATIO (the
     # orbit shape) are untouched, so it costs wall-clock and nothing else. null = uncapped.
+    # ONE WIGGLE IMPLEMENTATION (urlab/skills/wiggle.py). engage used to add the offset to a
+    # TARGET-frame 6-vector and dilate its clock to fit the speed cap; wiggle_sampling
+    # right-multiplies in the CONNECTOR frame and refuses instead. Those are different motions and
+    # different spectra, so observations from one were never comparable with a map from the other.
+    # PARAMETERS FROM configs/wiggle_sampling.yaml, where they are tuned, unless engage sets its
+    # own. Keeping a second copy here is how engage and the sampler would end up driving different
+    # excitations while both claiming to be "the wiggle".
+    _eblk, _esrc = wigmod.from_shared(cfg, en.get('wiggle'),
+                                      en.get('wiggle_from', 'wiggle_sampling.yaml'), 'engage')
+    en_wig = None
+    try:
+        en_wig = wigmod.Wiggle.from_cfg(_eblk, 'engage')
+        if en_wig is not None:
+            en_wig.validate(rate_hz=en_rate,
+                            cap_v=_eblk.get('max_speed_mm_s')
+                            or en.get('max_oscillation_speed_mm_s'),
+                            cap_w=_eblk.get('max_rotation_deg_s')
+                            or en.get('max_oscillation_rotation_deg_s'))
+            en_amp = list(en_wig.amp)
+            en_frq = list(en_wig.frq)
+            log.info('ENGAGE wiggle: %s (parameters from %s).', en_wig.describe(), _esrc)
+    except wigmod.WiggleError as exc:
+        log.error('%s', exc)
+        return False
     en_scale, en_pv, en_pw, en_orbit = traj.wiggle_time_scale(
         en_amp, en_frq, en.get('max_oscillation_speed_mm_s'),
         en.get('max_oscillation_rotation_deg_s'))
@@ -1141,15 +1166,17 @@ def build_and_run(cfg, robot, camera, args):
             f = 0.0 if span <= 1e-12 else (d - cum[j]) / span
             return rows6[j] + f * (rows6[j + 1] - rows6[j])
 
-        def ref_at(t):
-            v = path_at(v_mm_s * t).copy()
-            for i in range(6):
-                if abs(en_amp[i]) > 0.0 and en_frq[i] > 0.0:
-                    # t * en_scale: the oscillation clock is dilated by the speed cap, the PATH
-                    # clock above is not. Scaling the argument keeps a co-prime frequency pair
-                    # co-prime.
-                    v[i] += en_amp[i] * np.sin(2.0 * np.pi * en_frq[i] * float(t) * en_scale)
-            return traj_ref(_corr_to_m(mats_from_vec6(v)), T_tool0_conn)
+        def ref_at(t, dur=None):
+            """The path point at time t, with the wiggle RIGHT-MULTIPLIED onto it.
+
+            The path still advances by distance and the oscillation by time -- two clocks, as
+            before -- but the offset now acts in the connector's OWN frame rather than being added
+            to the target-frame 6-vector. A misaligned part therefore rocks about its own axes,
+            which is both what the part physically does and what wiggle_sampling collected."""
+            T = _corr_to_m(mats_from_vec6(path_at(v_mm_s * t)))
+            if en_wig is not None:
+                T = T @ en_wig.delta(t, dur)
+            return traj_ref(T, T_tool0_conn)
 
         live = [f'{d} {en_amp[i]:+.2f}@{en_frq[i]:.2f}Hz'
                 for i, d in enumerate(DIM_KEYS) if abs(en_amp[i]) > 0.0]
@@ -1194,10 +1221,18 @@ def build_and_run(cfg, robot, camera, args):
         adm_en.reset()
         adm_en.warmup(first, tare_fn=tare)
         combo.reset()
-        nstep = int(np.ceil((total_mm / max(v_mm_s, 1e-9)) * en_rate))
+        # REAL ELAPSED TIME, not i*dt. The servo loop does not necessarily cycle at
+        # reference_rate_hz -- on 19 Aug it ran at ~332 Hz against a configured 125, which
+        # delivered every frequency 2.65x high. Reading the clock makes the delivered frequency
+        # the configured one whatever the loop does.
+        dur_s = total_mm / max(v_mm_s, 1e-9)
         status, prev, last_ref = 'complete', first, first
-        for i in range(1, nstep + 1):
-            cur = ref_at(i * dt)
+        t_wig0 = _t.monotonic()
+        while True:
+            t = _t.monotonic() - t_wig0
+            if t >= dur_s:
+                break
+            cur = ref_at(t, dur_s)
             res = adm_en.ramp(prev, cur, dt, combo, on_step=log_cb)
             prev = last_ref = cur
             if res != 'seated':

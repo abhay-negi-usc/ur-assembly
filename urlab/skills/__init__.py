@@ -7,11 +7,12 @@ These are the "several modules and skills which can be abstracted out into commo
     pick    -- grasp geometry, the counts-based grasp check, recovery
     touch   -- probe the connector height by contact
     insert  -- stand-off, compliant chunked insertion, multi-step retract
+    wiggle  -- the multisine excitation, shared by every app that superimposes one
 
 A demo is a short script that composes these; they do not know about each other, so any two
 combine (scan + insert, scan + touch + insert) without one being a base class of the other.
 """
 
-from . import insert, pick, reset, scan, servo, touch
+from . import insert, pick, reset, scan, servo, touch, wiggle
 
-__all__ = ['servo', 'scan', 'pick', 'touch', 'insert', 'reset']
+__all__ = ['servo', 'scan', 'pick', 'touch', 'insert', 'reset', 'wiggle']

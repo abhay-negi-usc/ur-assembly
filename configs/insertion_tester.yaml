@@ -87,53 +87,6 @@ insertion:
     # x = +5 mm is PAST the mate plane on purpose: the spring should be pushing home throughout,
     # with the oscillation superimposed on that push rather than replacing it.
     target: [5.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    amplitude:
-      x_mm: 0.0                  # x is the push direction -- `target` owns it, not the wiggle
-      y_mm: 0.0
-      z_mm: 1.0
-      roll_deg: 0.0
-      pitch_deg: 1.0
-      yaw_deg: 0.0
-    # FREQUENCY per axis (Hz), required wherever the amplitude is non-zero.
-    # MUTUALLY PRIME ON PURPOSE. Two axes at a rational frequency ratio retrace the same closed
-    # Lissajous curve forever, so the wiggle would keep re-probing a ONE-dimensional path through
-    # the (z, pitch) rectangle. 0.7 and 1.1 Hz are 7 and 11 in units of 0.1 Hz -- co-prime, so the
-    # orbit closes only every 10 s and sweeps the rectangle rather than a line through it. Keep
-    # any new pair co-prime for the same reason.
-    frequency_hz:
-      x_mm: 0.0
-      y_mm: 0.0
-      z_mm: 0.7
-      roll_deg: 0.0
-      pitch_deg: 1.1
-      yaw_deg: 0.0
-    # How often the reference is rebuilt. Must be >= 4x the highest frequency or the sampled sine
-    # aliases into a slower one -- validated pre-motion, because an aliased wiggle looks like it
-    # ran correctly, just at a frequency nobody chose.
-    # SPEED CAP for the oscillation. null = uncapped (the historical behaviour).
-    #
-    # WHY THIS EXISTS AS ITS OWN KNOB. The wiggle paces by TIME -- each reference pair is ramped
-    # over exactly one sample period so the frequency it commands is the frequency configured --
-    # which means seg_time() never sees it, and therefore speed.max_cartesian_* and
-    # speed.phase_scale do NOT bound it. It is the only motion in this app with no speed limit of
-    # its own. Peak reference speed is amplitude x 2*pi*frequency.
-    #
-    # HOW IT IS APPLIED. The cap DERIVES a time-dilation factor s = cap / peak, and the waveform
-    # clock is evaluated at t*s. That scales every peak speed by s while leaving
-    #   * amplitude   -- so the search AREA is unchanged; and
-    #   * the frequency RATIO -- so a mutually-prime pair stays mutually prime and the orbit
-    #     still sweeps the rectangle instead of collapsing onto one closed path through it.
-    # The only cost is wall-clock: the orbit takes 1/s times as long to close.
-    #
-    # Stated in physical units rather than as a bare multiplier so it stays correct when an
-    # amplitude or a frequency is edited -- the scale is re-derived every run, not maintained by
-    # hand. Both caps are optional and the binding one wins; the app logs the derived scale, the
-    # resulting peaks, and how much of one orbit max_duration_s now buys.
-    #
-    # RAISE max_duration_s WITH IT. Dilation stretches the orbit but not the timeout, so a cap
-    # silently buys less of the pattern unless the duration follows. The startup line says so.
-    max_speed_mm_s: null
-    max_rotation_deg_s: null
     sample_rate_hz: 25.0
     max_duration_s: 30.0         # give up after this long without engaging
     # ENGAGEMENT: measured advance of the TRUE connector along the mate's +X, checked every servo
@@ -151,6 +104,13 @@ insertion:
     max_force_n: 10.0
     max_torque_nm: 8.0
     persistence_s: 0.3
+
+    # amplitude / frequency_hz / phase_deg / taper_s and the speed caps are NOT set here on
+    # purpose -- they come from configs/wiggle_sampling.yaml, where they were tuned against real
+    # hardware. This app exists to compare a DIRECT insertion against a WIGGLED one, so its wiggle
+    # has to be the same motion the sampler characterised; a local copy would make the comparison
+    # against a near-relative instead. Add a `wiggle:` sub-block only for a deliberate one-off.
+    wiggle_from: wiggle_sampling.yaml
 
 speed:
   approach_translation_mm_s: 2.0 # SLOW on purpose: gentle first contact, crisp trip point

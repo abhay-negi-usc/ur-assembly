@@ -46,6 +46,7 @@ from .. import log as urlog
 from .. import tool_frames
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import trajectory as traj
+from ..skills import wiggle as wigmod
 from ..skills.manifold import mats_from_vec6
 from ..transforms import inverse, matrix_to_xyzrpy, pose_error
 from ._runner import run_app
@@ -166,8 +167,19 @@ def build_and_run(cfg, robot, camera, args):
     wg = a.get('wiggle', {}) or {}
     adm_wg, guard_wg = adm, guard
     wg_target = [float(v) for v in (wg.get('target') or [5.0, 0.0, 0.0, 0.0, 0.0, 0.0])]
-    wg_amp = [float((wg.get('amplitude') or {}).get(d, 0.0)) for d in _DIMS]
-    wg_frq = [float((wg.get('frequency_hz') or {}).get(d, 0.0)) for d in _DIMS]
+    # PARAMETERS FROM configs/wiggle_sampling.yaml, the one place they are tuned. This app exists
+    # to compare a direct insertion against a WIGGLED one, so its wiggle has to be the same wiggle
+    # the sampler and the assembly run -- otherwise the comparison is against a different motion.
+    _wblk, _wsrc = wigmod.from_shared(cfg, wg, wg.get('wiggle_from', 'wiggle_sampling.yaml'),
+                                      'insertion-tester')
+    wg_amp = [float((_wblk.get('amplitude') or {}).get(d, 0.0)) for d in _DIMS]
+    wg_frq = [float((_wblk.get('frequency_hz') or {}).get(d, 0.0)) for d in _DIMS]
+    wg_obj = None
+    try:
+        wg_obj = wigmod.Wiggle.from_cfg(_wblk, 'insertion-tester')
+    except wigmod.WiggleError as exc:
+        log.error('%s', exc)
+        return False
     wg_rate = float(wg.get('sample_rate_hz', 25.0))
     wg_max_s = float(wg.get('max_duration_s', 60.0))
     wg_engage_mm = float(wg.get('engage_advance_mm', 4.0))
@@ -296,8 +308,7 @@ def build_and_run(cfg, robot, camera, args):
             else:
                 seated_by, advance_mm, last_ref, reached = _wiggle(
                     robot, adm_wg, guard_wg, T_base_tconn, T_believed, T_true, wg_target,
-                    wg_amp, wg_frq, wg_rate, wg_max_s, wg_engage_mm, tare, seed_q,
-                    wg_scale)
+                    wg_obj, None, wg_rate, wg_max_s, wg_engage_mm, tare, seed_q, 1.0)
             if last_ref is None:                   # IK/approach failed -- reported by the helper
                 ok = False
                 break
@@ -384,7 +395,7 @@ def _direct(robot, adm, guard, T_base_tconn, T_believed, T_true, standoff_m, ove
     return ('force' if tripped else 'end'), adv, last_ref, not tripped
 
 
-def _wiggle(robot, adm_wg, guard_wg, T_base_tconn, T_believed, T_true, target, amp, frq,
+def _wiggle(robot, adm_wg, guard_wg, T_base_tconn, T_believed, T_true, target, wig, _unused_frq,
             rate, max_s, engage_mm, tare, seed_q, scale=1.0):
     """WIGGLE insertion -- bnc_assembly's maneuver, planned against the BELIEF.
 
@@ -401,17 +412,17 @@ def _wiggle(robot, adm_wg, guard_wg, T_base_tconn, T_believed, T_true, target, a
     jam. Both outcomes are distinguished through _AnyGuard, because `ramp` only reports 'seated'
     and the two mean opposite things."""
     def ref_at(t):
-        # DILATED waveform clock: t is wall-clock, t*scale is where the sine is evaluated.
-        # Scaling the ARGUMENT rather than the frequencies is what keeps a mutually-prime
-        # pair mutually prime.
-        t = float(t) * scale
-        v = np.array(target, dtype=float)
-        for i in range(6):
-            if abs(amp[i]) > 0.0 and frq[i] > 0.0:
-                v[i] += amp[i] * np.sin(2.0 * np.pi * frq[i] * float(t))
+        """The fixed target with the SHARED wiggle right-multiplied onto it.
+
+        Right-multiplied in the connector's own frame, and no clock dilation -- both to match
+        wiggle_sampling, so a wiggled insertion here is the same motion the sampler characterised
+        rather than a near-relative of it."""
+        T = _corr_to_m(mats_from_vec6(np.array(target, dtype=float)))
+        if wig is not None:
+            T = T @ wig.delta(float(t))
         # inverse(T_believed): the robot commands the connector IT THINKS it holds
         # to pose v w.r.t. the target, which is what realises the injected offset.
-        return T_base_tconn @ _corr_to_m(mats_from_vec6(v)) @ inverse(T_believed)
+        return T_base_tconn @ T @ inverse(T_believed)
 
     first = ref_at(0.0)
     q = robot.arm.ik(first, seed_q)

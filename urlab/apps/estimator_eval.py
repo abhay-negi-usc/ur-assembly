@@ -1163,6 +1163,15 @@ def build_and_run(cfg, robot, camera, args):
                   "collect ZERO observations and the estimator would have nothing to fit. "
                   "Set collection.wiggle_s, or switch observe_during to 'insertion'.")
         return False
+    # THE CONTACT THRESHOLD for the probe (see run_insertion). NOT the force guard: that is the
+    # abort limit, and a nominal insertion never crosses it -- 2026-08-20, a 10 N / 5 s guard
+    # read every pass of a deployment as free space and collected nothing. Default 1.0 N, the
+    # same |f| the wiggle map's own build treats as contact (contact_manifold --min-force).
+    contact_force_n = float(_col.get('contact_force_n', 1.0))
+    if obs_during == 'wiggle' and contact_force_n <= 0:
+        log.error('eval.collection.contact_force_n must be > 0 (got %.2f) -- with no threshold '
+                  'the probe cannot tell a loaded part from free space.', contact_force_n)
+        return False
     log.info('Observations come from the %s.',
              'WIGGLE ONLY -- the approach/press/settle move the arm but log nothing'
              if obs_during == 'wiggle' else 'whole pass (approach, press, wiggle, settle)')
@@ -1386,6 +1395,25 @@ def build_and_run(cfg, robot, camera, args):
             log.info('  observation passes end ON the mate (no preload), matching '
                      'uncertain_sampling.')
         _report_sampling_divergence(cfg, samp_ref)
+    if obs_during == 'wiggle':
+        # PROBE REACHABILITY. The probe reads spring x stretch, and the press is the stretch it
+        # can COUNT on: a part that stopped short of the trajectory end has extra standing
+        # stretch on top, but a part stopped exactly AT the end has only the press. If the
+        # threshold exceeds what the press can generate, that pass reads as free space and
+        # silently collects nothing -- the 2026-08-20 failure with different numbers.
+        _K = np.asarray((cfg.get_path('compliance.stiffness') or [0.0] * 3)[:3], dtype=float)
+        _s_min = float(np.min(_K))
+        if obs_pre_mm <= 0:
+            log.warning('observe_during: wiggle with NO preload: the contact probe relies on '
+                        'standing spring stretch alone, so a pass whose part stops exactly at '
+                        'the trajectory end reads as free space and observes nothing.')
+        elif _s_min * obs_pre_mm / 1000.0 < contact_force_n:
+            log.warning('collection.contact_force_n (%.1f N) exceeds what the %.1f mm preload '
+                        'can generate at %.0f N/m (%.1f N) -- a part that stops exactly at the '
+                        'trajectory end will read as FREE SPACE and the pass will observe '
+                        'nothing. Lower the threshold or raise the preload.',
+                        contact_force_n, obs_pre_mm, _s_min,
+                        _s_min * obs_pre_mm / 1000.0)
 
     # ---- TRAJECTORY ANCHORING -- where the path's last row actually lands --------------------
     # configs/assembly_trajectory.csv states its last row MUST be the identity (the connector
@@ -1666,7 +1694,7 @@ def build_and_run(cfg, robot, camera, args):
 
     def run_insertion(adm_ctl, refs, T_bel, peck=False, guard_ctl=None, settle=None,
                       hold=None, speed=None, pause=None, preload_mm=0.0, approach_only=False,
-                      observe_wiggle=False):
+                      observe_wiggle=False, contact_force_n=0.0):
         """One admittance-followed insertion along refs, collecting observations (same law and
         logging as cable_pick_estimate_assemble), the seated kinematic check, then the compliant
         UN-guarded retract along the believed part's own -X (a seated part is already over the
@@ -1757,16 +1785,10 @@ def build_and_run(cfg, robot, camera, args):
         # reach the estimator; UN-guarded, because at the seat the guard has already tripped and
         # would refuse the very motion the press exists to make. Distance is the limit.
         #
-        # APPROACH ONLY (eval.collection.approach_only) withholds it when the pass never made
-        # contact. `seated` is the guard trip; without one the ramp has driven the reference all
-        # the way to the mate, and pressing preload_mm PAST that un-guarded is a seating attempt
-        # made from an uncorrected belief. There is also nothing to gain: a pass that touched
-        # nothing has no contact rows to load.
-        press = preload_mm > 0 and (seated or not approach_only)
-        if approach_only and not seated:
-            log.warning('APPROACH ONLY: the trajectory ran to its end with no contact stop -- '
-                        'skipping the press and the wiggle. This pass never touched the part, '
-                        'so it observes nothing and seats nothing.')
+        # Under observe_wiggle the press ALSO runs when the guard never tripped -- there it is
+        # the CONTACT PROBE (see below): distance-bounded at preload_mm, it loads a stopped part
+        # and does nothing to a free one, which is exactly the measurement the wiggle gate needs.
+        press = preload_mm > 0 and (seated or observe_wiggle or not approach_only)
         if press:
             T_pre = _axial_ref(last_ref, T_bel, preload_mm / 1000.0)
             # advance_cb, not log_cb: under observe_wiggle the press still LOADS the contact (the
@@ -1775,10 +1797,31 @@ def build_and_run(cfg, robot, camera, args):
             adm_ctl.ramp(last_ref, T_pre, seg_time(last_ref, T_pre, sv, sw), guard=None,
                          on_step=advance_cb)
             last_ref = T_pre
+        # CONTACT IS A MEASUREMENT, NOT A GUARD EVENT. The force guard is the pass's ABORT
+        # limit (e.g. 10 N held for 5 s), and a nominal insertion never crosses it: the whole
+        # approach finishes in less time than the persistence window, and a jammed part stands
+        # at spring-stretch forces well under the threshold. Gating the wiggle on the guard trip
+        # therefore read every deployed pass as 'no contact' and collected NOTHING (2026-08-20).
+        # So contact is read off the F/T instead, after the press has had its chance to load
+        # whatever is there: a stopped part holds spring x stretch, a free part holds ~zero, and
+        # the threshold sits at the same |f| the wiggle map itself calls contact.
+        in_contact = seated or not approach_only
+        if not in_contact and observe_wiggle:
+            f_now = float(np.linalg.norm(robot.arm.wrench()[:3]))
+            in_contact = f_now >= contact_force_n
+            log.info('   contact probe after the %s: |f| = %.2f N against %.1f N -> %s.',
+                     'press' if press else 'trajectory', f_now, contact_force_n,
+                     'CONTACT' if in_contact else 'free space')
+        if not in_contact:
+            log.warning('No contact established (guard never tripped%s) -- skipping the '
+                        'wiggle%s.',
+                        '' if not observe_wiggle else
+                        f', probe under {contact_force_n:.1f} N',
+                        '; this pass observes nothing' if observe_wiggle else '')
         # WIGGLE at the seat, if configured -- the same multisine wiggle_sampling drives, applied
         # by right-multiplication in the BELIEVED part's own frame so a misaligned connector rocks
         # about its own axes. Un-guarded for the same reason the settle below is.
-        if obs_wig is not None and obs_wig_s > 0 and (seated or not approach_only):
+        if obs_wig is not None and obs_wig_s > 0 and in_contact:
             def _anchor(delta, _ref=last_ref, _bel=T_bel):
                 return _ref @ _bel @ delta @ inverse(_bel)
             wigmod.run(adm_ctl, obs_wig, _anchor, obs_wig_s, 1.0 / adm_ctl.rate,
@@ -1933,7 +1976,8 @@ def build_and_run(cfg, robot, camera, args):
                     obs_i, meas_i, seated, lin, ang, seat6, stops_i = run_insertion(
                         adm, refs, T_believed, peck=(col_mode == 'peck'),
                         preload_mm=obs_pre_mm, approach_only=approach_only,
-                        observe_wiggle=(obs_during == 'wiggle'))
+                        observe_wiggle=(obs_during == 'wiggle'),
+                        contact_force_n=contact_force_n)
                     obs.extend(obs_i)
                     meas.extend(meas_i)
                     attempt_stops.extend(stops_i)

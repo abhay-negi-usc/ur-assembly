@@ -4378,15 +4378,21 @@ def test_observation_passes_do_not_attempt_to_seat():
         'eval.collection.approach_only must ship ON -- an observation pass that seats does so '
         'from an uncorrected belief, and nothing about the run reports that it happened')
 
-    # the press is gated on CONTACT, not merely on the config
-    assert 'press = preload_mm > 0 and (seated or not approach_only)' in src, (
-        'the press must be conditioned on `seated` -- the guard trip IS the evidence that the '
-        'pass reached contact, and without it there is nothing to press against anyway')
-    # the wiggle rides the same gate: with no contact there is nothing to excite
+    # CONTACT IS MEASURED, NOT INFERRED FROM THE GUARD. The first deployment gated the wiggle on
+    # the guard trip, and the guard is the ABORT limit (10 N held 5 s at the time) -- a 3-second
+    # approach cannot trip it even in principle, so every pass read as free space and collected
+    # zero observations (2026-08-20). The press runs first (distance-bounded, doubling as the
+    # probe) and the F/T decides: spring x stretch on a stopped part, ~zero on a free one.
+    assert 'press = preload_mm > 0 and (seated or observe_wiggle or not approach_only)' in src, (
+        'under observe_wiggle the press must run even without a guard trip -- it IS the contact '
+        'probe, and without it a part stopped exactly at the trajectory end reads as free space')
+    assert 'in_contact = f_now >= contact_force_n' in src, \
+        'contact must be a force MEASUREMENT -- the guard trip alone reads real contact as free space'
+    # the wiggle rides the measured gate: with no contact there is nothing to excite
     wig = src[src.index('if obs_wig is not None and obs_wig_s > 0'):]
-    assert 'seated or not approach_only' in wig[:120], (
-        'the wiggle must be withheld on the same condition: oscillating in free space logs rows '
-        'that carry no contact information and pulls the manifold toward zero-force poses')
+    assert 'and in_contact' in wig[:120], (
+        'the wiggle must be withheld without measured contact: oscillating in free space logs '
+        'rows that carry no contact information and pulls the manifold toward zero-force poses')
 
     # ---- the commit is exempt, and that exemption is the point ----
     assert src.count('approach_only=approach_only') == 1, \
@@ -4422,7 +4428,9 @@ def test_observations_come_from_the_wiggle():
     # one callback split decides who logs: the advance/press/settle go quiet, the wiggle keeps
     # logging in BOTH modes (it was an observation source before this mode existed)
     assert 'advance_cb = None if observe_wiggle else log_cb' in src
-    body = src[src.index('def run_insertion('):src.index('def run_insertion(') + 8000]
+    # the function's actual extent, not a guessed character count -- the body grows with its
+    # comments, and a window that silently excludes the wiggle asserts nothing about it
+    body = src[src.index('def run_insertion('):src.index('    out_dir = os.path.join')]
     assert body.count('on_step=advance_cb') >= 3, (
         'approach, peck back-off, press and settle must all log through advance_cb -- any one of '
         'them still holding log_cb leaks drive-in rows into a wiggle-only collection')

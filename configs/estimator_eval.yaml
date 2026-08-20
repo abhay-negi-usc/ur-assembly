@@ -217,21 +217,26 @@ eval:
   # (eval.final_insertion, default ON since 2026-08-13).
   collection:
     # ---- APPROACH ONLY: observation passes probe, they do not seat -----------------------
-    # An observation pass may go exactly as deep as CONTACT, and no deeper.
+    # An observation pass may go exactly as deep as CONTACT (plus the bounded preload press),
+    # and no deeper. eval.final_insertion -- which runs AFTER the observations have corrected
+    # the belief -- is the one pass that should be attempting a seat.
     #
-    # The guarded ramp already stops itself at first contact, so on a pass that touches the
-    # part this changes nothing. What it governs is the pass that does NOT touch it: with no
-    # guard trip the ramp drives the reference all the way to the mate, and preload_mm then
-    # presses that far PAST it un-guarded. That is a seating attempt in all but name, made
-    # from the belief the pass exists to correct -- so it seats (or jams) the connector on an
-    # error the estimator has not seen yet, before it has seen it. It also gains nothing: a
-    # pass that touched nothing has no contact rows to load and nothing to wiggle against.
+    # HOW CONTACT IS DECIDED (under observe_during: wiggle): it is MEASURED, not inferred from
+    # the force guard. The guard is the pass's abort limit -- e.g. 10 N held 5 s, which a
+    # 3-second approach cannot trip even in principle, and which a jammed part standing at
+    # spring-stretch forces never reaches. The first deployment gated on the guard trip and
+    # read every pass as free space (2026-08-20, zero observations). Now the press runs first
+    # (distance-bounded at preload_mm; it doubles as the probe) and the F/T is read against
+    # contact_force_n below: a stopped part holds spring x stretch, a free part holds ~zero.
     #
-    # eval.final_insertion -- which runs AFTER the observations are collected and the belief
-    # has been updated -- is the one pass that should be attempting a seat.
-    #
-    # false = the pre-2026-08-19 behaviour: every pass presses, contact or not.
+    # false = every pass presses and wiggles, contact or not.
     approach_only: true
+    # The probe's threshold, N. Default 1.0 -- the same |f| the wiggle map's own build treats
+    # as contact (contact_manifold --min-force), so "wiggle here" and "these rows are contact"
+    # are one definition. Must stay below stiffness x preload_mm (the force the press can
+    # guarantee against a part stopped at the trajectory end): 500 N/m x 5 mm = 2.5 N ceiling
+    # with the current numbers. The app warns when it does not fit.
+    contact_force_n: 1.0
 
     # ---- OBSERVATION WIGGLE -------------------------------------------------------------
     # The SAME excitation wiggle_sampling collects its map under. Two things make that literal

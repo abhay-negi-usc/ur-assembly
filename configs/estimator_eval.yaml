@@ -543,7 +543,7 @@ estimation:
   # For the BNC maps, s_force 0.11 / s_torque 0.20 reproduces `unit`'s block loudness. The
   # "Metric block balance" line logged at startup reports what the metric actually weights,
   # so this does not have to be guessed.
-  wrench_representation: rawcap
+  wrench_representation: raw
   # rawcap SATURATION: the wrench feature is unit(f) x min(|f| / rawcap_force_ref_n,
   # rawcap_cap) -- magnitude in units of the reference, CAPPED at rawcap_cap. Saturation
   # therefore sits at ref x cap: 10 N x 3.0 = 30 N force, 1 Nm x 3.0 = 3 Nm torque. Above
@@ -589,7 +589,7 @@ estimation:
   # (5.00 deg = no correction). Torque weight only hurt here: every s_torque > 0 variant
   # scored at or below its s_torque 0 sibling.
   scaling_constant_unit_force_to_mm: 1.0
-  scaling_constant_unit_torque_to_mm: 1.0
+  scaling_constant_unit_torque_to_mm: 0.1
   # PER-AXIS wrench weights -- the exact counterpart of dim_weights above, for the six wrench
   # feature columns. The two scalars above stay the BLOCK-level unit conversion; these say how
   # much each individual axis matters, so the metric has one weight per channel across all
@@ -622,7 +622,7 @@ estimation:
     y_mm: 0.0
     z_mm: 0.0
     roll_deg: 0.0
-    pitch_deg: 15.0
+    pitch_deg: 10.0
     yaw_deg: 0.0
   step_gain: 1.0
   ransac_iters: 100
@@ -640,7 +640,7 @@ estimation:
   # all give 0.75 deg -- but it decides PRECISION: the fraction within 0.5 deg is 34% at k=128
   # and 44-46% at k=8. Large k smooths the energy curve (median local minima 6 -> 2), which is
   # real but was never the binding constraint; see README section 14.
-  interp_neighbors: 1
+  interp_neighbors: 10
   # ROWS the dense landscape is built from. With `commit: argmin` this curve IS the estimate, so
   # it is an ACCURACY setting: it was a hard-coded 120 in _landscape() justified as "the shape is
   # unaffected", which measurement contradicts -- 120 gives a 1.00 deg median that a fixed

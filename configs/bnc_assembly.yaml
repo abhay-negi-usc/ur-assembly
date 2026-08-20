@@ -206,7 +206,7 @@ speed:
   # Per-PHASE scaling of ALL FOUR limits above (1.0 = the global limit itself), one entry per
   # phase of cable_pick_estimate_assemble. An absent phase runs at 1.0.
   phase_scale:
-    reset: 1.5       # start/end home moves (and the between-retry homes)
+    reset: 3.0       # start/end home moves (and the between-retry homes)
     scan: 1.0        # the multi-view scan + grasp-align + reseat moves
     pickup: 1.5      # the compliant grasp descent
     lift: 0.8        # the compliant lift (including the slip-check partial lift)
@@ -878,8 +878,8 @@ estimation:
     # nothing at runtime; leaving it stale just made the app log a 2.60 mm disagreement warning
     # every run and left a wrong number sitting where a reader would trust it.
     # Value = inverse(fingertip_grasp) @ frames[bnc_connector_in_fingerpads].
-    xyz: [0.0457, 0.0000, 0.0075]            # m
-    rpy: [0.0, 0.0, 0.0]                     # rad -- fingertip +X now PARALLEL to connector +X
+    xyz: [-0.0457, 0.0000, 0.0075]           # m
+    rpy: [0.0, 0.0, 3.14159265358979]       # rad (exactly 180 deg yaw)
   # The AUGMENTED manifold (clean map + 30k truth-corrected production-process rows) and the
   # rawcap wrench representation -- the 2026-08-09 offline winners. Fall back to the classic
   # setup with: manifold_csv ./configs/data/banana_manifold_20260807_clean.csv,

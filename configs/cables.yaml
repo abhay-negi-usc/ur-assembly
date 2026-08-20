@@ -96,14 +96,18 @@ cables:
   bnc:
     connector: [196, 211]
     cable: 224
-    # yaw 0 puts the fingertip's +X PARALLEL to the connector's +X (the insertion direction).
-    # It was 180, which left them antiparallel -- the fingertip pointing back down the cable.
-    # This yaw is the ONLY thing that sets that: the grasp pose is
-    # T_conn @ inverse(junction_in_fingertip), with no fingertip-frame term in it, so the
-    # fingertip frame's own definition cannot change the relationship.
+    # THIS YAW SETS WHICH WAY THE FINGERTIP FACES AT PICKUP. The grasp pose is
+    # T_conn @ inverse(junction_in_fingertip), so 0 lays the fingertip +X ALONG the detected
+    # heading and 180 opposes it. Both are the same physical bite (a parallel jaw is symmetric
+    # under 180 deg about its approach axis); they differ by which side the wrist sits on.
+    #
+    # IT IS ONE HALF OF A PAIR. The other half is the in-hand belief -- frames.yaml
+    # bnc_connector_in_fingerpads / _finger_holder and estimation.initial_connector_in_fingertip.
+    # Flipping BOTH rotates the wrist at pickup and leaves the assemble untouched; flipping one
+    # alone puts the belief 180 deg and ~91 mm out and mates the wrong end of the connector.
     junction_in_fingertip:    # MEASURE (see banana); zeros = junction exactly at the fingertip
       xyz_mm:  [0.0, 0.0, 0.0]
-      rpy_deg: [0.0, 0.0, 0.0]
+      rpy_deg: [0.0, 0.0, 180.0]
     # (Held-connector frame + mate target: declare in configs/frames.yaml when this cable runs
     # the assembly apps.)
 

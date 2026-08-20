@@ -1611,6 +1611,7 @@ def build_and_run(cfg, robot, camera, args):
                       _tilt, cl_tilt_deg)
             return False
 
+<<<<<<< HEAD
         # STATIONS ALONG THE AXIS, taken from the FRAMES rather than from where the arm happens
         # to be. The belief reset put the connector AT T_clk, so the cable is at the target and
         # the junction is a fixed point on it: the pads close ON the junction, which makes the
@@ -1629,10 +1630,17 @@ def build_and_run(cfg, robot, camera, args):
         # applied to the other. test_the_target_frame_and_the_in_hand_belief_name_the_same_point
         # is that check.
         pad_x = float(inverse(T_ftip_conn)[0, 3])
+=======
+        # STATIONS ALONG THE AXIS, all measured from the fingertip where it is RIGHT NOW. The pick
+        # closed the pads on the cable junction, so the junction's station is wherever the
+        # fingertip sits; the connector FRAME origin is a different point ~45.7 mm ahead of it.
+        pad_x = float((inverse(T_base_axis) @ here @ robot.T_tool0_fingertip)[0, 3])
+>>>>>>> b0a4af6770690c5b5bd0723ab139c80ab93ecb46
         collar_x = pad_x + cl_off_m
         app_x = pad_x + (0.0 if cl_app_mm is None else float(cl_app_mm) / 1000.0)
         adv_m = collar_x - app_x
 
+<<<<<<< HEAD
         # THE AXIAL GRASP, stated the way the tool actually is: THE FINGERTIP LIES 183 mm ALONG
         # TOOL0'S +Z (fingertip_grasp is a pure +Z translation). So aligning tool0's +Z with the
         # connector's +X puts the fingertip on the connector axis, 183 mm ahead of the flange and
@@ -1659,6 +1667,26 @@ def build_and_run(cfg, robot, camera, args):
         # angle grips the same ring -- what this decides is where the TURN starts and ends, and
         # therefore how much wrist range it needs. null = the engaged roll.
         #
+=======
+        # THE AXIAL GRASP. Roll the fingertip frame 90 deg about the collar frame's Y -- the
+        # jaw-CLOSING axis, which is why the grasp on the ring is unchanged -- so the fingertip's
+        # approach axis lands along the connector +X. tool0 then sits ON the axis, 183 mm back,
+        # with its Z collinear: a turn about the axis is a turn about tool0's own Z.
+        G_axial = (xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, -np.pi / 2.0, 0.0])
+                   @ inverse(robot.T_tool0_fingertip))
+
+        def at(station_m, clock_rad):
+            """The arm pose with the fingertip at `station_m` along the axis, rolled `clock_rad`
+            about it (measured from the ENGAGED roll, like every other angle in this app)."""
+            T_nom = T_base_axis @ translation_matrix([station_m, 0.0, 0.0]) @ G_axial
+            return rotate_about_axis(T_nom, axis, point, clock_rad)
+
+        # WHERE TO GRASP, as an ABSOLUTE roll about the socket +X (wrt the target frame), the same
+        # convention cable_clocking.sweep_deg uses. The collar is a body of revolution, so any
+        # angle grips the same ring -- what this decides is where the TURN starts and ends, and
+        # therefore how much wrist range it needs. null = the engaged roll.
+        #
+>>>>>>> b0a4af6770690c5b5bd0723ab139c80ab93ecb46
         # This replaces prewind_deg. A pre-wind existed because the radial approach could only
         # reach the ring by orbiting from wherever the sweep left the arm, so the start angle was
         # whatever that orbit could afford. The axial approach is placed in free space, so the

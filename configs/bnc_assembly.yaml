@@ -220,8 +220,23 @@ speed:
     cable_clock: 0.10    # the bayonet sweep legs
     collar_clock: 0.10   # the collar turn
     clock_retract: 1.0   # the shared two-leg escape (free space, gripper already clear)
+    # The collar maneuver's FREE-SPACE approach: withdraw along the cable, lift the open fingers
+    # off, and the big reorient onto the axis. Nothing is being inserted, so this should not run
+    # at contact pacing -- and the reorient is the longest single move in the app (a ~90 deg swing
+    # plus a few hundred mm), so at 1.0x the 25 mm/s translation cap alone can push it toward
+    # move_timeout_s. The axial ADVANCE onto the ring is NOT paced by this -- it threads the
+    # cable and stays on `standoff`.
+    #
+    # 2.0x = 50 mm/s / 60 deg/s, and note the scale multiplies ALL FOUR caps: it also lifts the
+    # joint-velocity cap to 180 deg/s, which is already at a UR's own ceiling. Going higher only
+    # commands speeds the controller clamps anyway, so raise the CARTESIAN caps in speed: if this
+    # is still too slow rather than pushing this number up.
+    collar_approach: 2.0
 
-move_timeout_s: 60.0
+# Per-MOVE limit for a guarded (async) move -- arm._await_move stops the arm and fails the move
+# when it expires. The collar reorient is the longest single move here; if it reports "did not
+# finish" rather than "unreachable", this and speed.phase_scale.collar_approach are the two knobs.
+move_timeout_s: 120.0
 settle_s: 0.5
 confirm_each_step: true
 debug: false
@@ -570,7 +585,7 @@ assembly:
     # More than two entries is legal (e.g. [-75, 75, -40, 40] to narrow in); one entry is a single
     # one-way stroke. Deleting the key falls back to the legacy `rotation_deg`, a single RELATIVE
     # stroke from the engaged roll.
-    sweep_deg: [-75.0, +75.0]
+    sweep_deg: [-60.0, +60.0]
     # PUSH: how far past the engaged pose the virtual target aims, along the connector +X. This is
     # a target, not a prediction -- the connector advances as far as the cams allow and the
     # compliant deflection absorbs the rest. TUNE: too small and the cams never engage; too large
@@ -665,11 +680,11 @@ assembly:
     # LIFT-OFF, mm along the GRIPPER's own -Z, before anything reorients. The cable sweep leaves
     # the open fingers wrapped around the cable at the junction; the radial -> axial change is a
     # 90 deg pitch that would sweep them straight through it. This is the move that frees them.
-    liftoff_mm: 100.0
+    liftoff_mm: 150.0
     # RETREAT, mm BEHIND approach_mm along the connector -X. Where the arm reorients to axial --
     # AWAY from the wall, and the furthest-from-it station in the whole maneuver. The advance
     # then runs retreat -> collar in one guarded compliant leg.
-    retreat_mm: 100.0
+    retreat_mm: 200.0
     # WALL STANDOFF, mm: the largest tool0 station along the connector +X that any planned pose
     # may take, measured in the TARGET frame (+X points INTO the wall, 0 = the mating face). Every
     # station is on the axis and known before the arm moves, so the whole maneuver's closest
@@ -699,8 +714,25 @@ assembly:
       max_travel_mm: 15.0
     # GRASP CLOCK ANGLE, deg: the ABSOLUTE roll about the socket +X to take the collar at, wrt
     # the TARGET frame -- the same convention cable_clocking.sweep_deg uses. The turn then runs
-    # from here to here + rotation_deg. null = the engaged roll (assembly.engage_clock_deg), so
-    # as shipped the collar is taken at 0 and the turn ends at +90.
+    # from here to here + rotation_deg.
+    #
+    # null = LAY TOOL0'S -Y ON THE CONNECTOR'S -Z, solved in closed form. The collar is a body of
+    # revolution so this angle is free, and it is the only thing that sets how big the
+    # reorientation onto the axis is -- and the cable sweep leaves the wrist already near that
+    # attitude. It halves the swing: a constant 90 deg, against up to 180 deg at a clock angle of
+    # 0. That matters because a 180 deg tool reorientation is where the analytic IK stops finding
+    # a branch reachable from the seed, which shows up as "the axial retreat station is
+    # unreachable".
+    #
+    # THE CONNECTOR'S -Z IS WHERE THE SWEEP LEFT IT, not where the target frame declares it: the
+    # gripper turned the connector, so its own Z came with it. The app adds the ACHIEVED sweep
+    # angle for that reason -- read against the target frame the rule only hits the minimum when
+    # the sweep happens to end at 0 (it costs ~15-30 deg of extra swing otherwise).
+    #
+    # tool0 +Z is already pinned along the connector +X by the axial grasp, so the only freedom
+    # left is the roll about that axis -- this rule spends it. If the resulting angle does not
+    # IK-solve, the app scans 24 alternatives and takes the cheapest reachable one, warning that
+    # it did. Pin a number here once it is stable, so the motion cannot move run to run.
     #
     # The collar is a body of revolution, so any angle grips the same ring; what this decides is
     # how much WRIST range the turn needs and where it ends up. It replaces prewind_deg, which

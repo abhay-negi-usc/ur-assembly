@@ -4904,6 +4904,9 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
 
     RADIAL = T.inverse(T_ftip)                                   # the grasp this replaced
     AXIAL = (T.xyzrpy_to_matrix([0., 0., 0.], [0., -np.pi / 2., 0.]) @ T.inverse(T_ftip))
+    frames_cat = tool_frames.load_frames(cfg)
+    iname_M = cfg.get_path('estimation.initial_connector_frame')
+    pad_x_M = float(T.inverse(T.inverse(T_ftip) @ frames_cat[iname_M])[0, 3])
 
     def in_axis_frame(T_base_tool0):
         return T.inverse(T_clk) @ T_base_tool0
@@ -4987,6 +4990,48 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
         'must happen with the arm already backed off')
     assert 'AXIAL' in body and '-np.pi / 2.0' in body, (
         'the axial grasp roll must be built explicitly, not inherited from the fingertip frame')
+
+    # ---- THE DEFAULT GRASP CLOCK ANGLE: tool0 -Y laid on the connector -Z --------------------
+    # tool0 +Z is pinned along the connector +X by the axial grasp, so the only freedom left is
+    # the roll about that axis. Spending it to put tool0 -Y on the connector -Z is the attitude
+    # the sweep already leaves the wrist near, which HALVES the reorientation onto the axis --
+    # and a 180 deg tool reorientation is where the analytic IK stops finding a reachable branch.
+    #
+    # THE CONNECTOR'S -Z IS WHERE THE SWEEP LEFT IT. The gripper turned the connector, so its own
+    # Z came with it; reading the rule against the TARGET frame lands the minimum only when the
+    # sweep happens to end at 0. Adding the achieved sweep makes it a constant 90 deg swing
+    # wherever the sweep ends, which is what this pins.
+    v0 = AXIAL[:3, 1]                                       # tool0 +Y at zero clock
+    th_rule = float(np.arctan2(float(np.dot([1., 0, 0], np.cross(v0, [0., 0, 1.]))),
+                               float(np.dot(v0, [0., 0, 1.]))))
+    R = rotate_about_axis(AXIAL, np.array([1., 0, 0]), np.zeros(3), th_rule)[:3, :3]
+    assert np.allclose(-R[:, 1], [0., 0, -1], atol=1e-9), (
+        f'the rule must lay tool0 -Y on the connector -Z, got {-R[:, 1]}')
+    assert np.allclose(R[:, 2], [1., 0, 0], atol=1e-9), (
+        'and it must not disturb tool0 +Z, which stays on the connector +X')
+
+    # the swing must be the MINIMUM available, at EVERY sweep end -- not just at 0
+    T_eng = T_clk @ T.inverse(T_ftip @ (T.inverse(T_ftip) @ frames_cat[iname_M]))
+    ret_x = pad_x_M - float(cl['retreat_mm']) / 1000.0
+    lift = float(cl['liftoff_mm']) / 1000.0
+
+    def _at(st, th):
+        return rotate_about_axis(T_clk @ T.translation_matrix([st, 0., 0.]) @ AXIAL,
+                                 axis, point, th)
+
+    for sweep in (0.0, -60.0, -75.0, 75.0, 90.0):
+        here = rotate_about_axis(T_eng, axis, point, np.radians(sweep))
+        T_off = (T.translation_matrix((ret_x - pad_x_M) * axn) @ here)             @ T.translation_matrix([0., 0., -lift])
+        chosen = T.pose_error(T_off, _at(ret_x, th_rule + np.radians(sweep)))[1]
+        best = min(T.pose_error(T_off, _at(ret_x, np.radians(d)))[1] for d in range(0, 360, 5))
+        assert np.degrees(chosen - best) < 0.6, (
+            f'at a {sweep:+.0f} deg sweep end the rule gives {np.degrees(chosen):.1f} deg of '
+            f'reorientation but {np.degrees(best):.1f} is available -- the rule must be read '
+            f'against the connector as the sweep LEFT it, not against the target frame')
+    assert 'np.cross(v0, want)' in body and 'np.radians(screw_deg)' in body, (
+        'the default angle must be SOLVED in closed form AND offset by the achieved sweep; a '
+        'scan makes the motion depend on IK seeding and move run to run')
+
     assert 'wall_standoff_mm' in src and 'cl_wall_mm' in body, (
         'every planned station must be gated against the wall standoff before the arm moves')
     # comments may still EXPLAIN what prewind was; no code may still read it

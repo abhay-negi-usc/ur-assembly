@@ -1641,7 +1641,6 @@ def build_and_run(cfg, robot, camera, args):
         # reach the ring by orbiting from wherever the sweep left the arm, so the start angle was
         # whatever that orbit could afford. The axial approach is placed in free space, so the
         # start angle is simply stated.
-        th_grasp = (0.0 if cl_grasp_clock is None else cl_grasp_clock - eng_clock)
         x_retreat = app_x - cl_retreat_m
 
         # THE ORDER IS WALL-DRIVEN. The sweep leaves the arm deep (tool0 barely behind the mating
@@ -1651,6 +1650,84 @@ def build_and_run(cfg, robot, camera, args):
         # wall -- and only lift off once the arm is a retreat's worth back.
         T_withdraw = translation_matrix((x_retreat - pad_x) * axn) @ here
         T_off = T_withdraw @ translation_matrix([0.0, 0.0, -abs(cl_liftoff_m)])
+
+        # ---- THE GRASP CLOCK ANGLE, and why it is worth solving for ---------------------------
+        # The reorientation from the lift-off pose (radial, where the sweep left the wrist) to the
+        # axial retreat pose is the largest single rotation in the app, and its size depends
+        # ENTIRELY on this angle: measured on the shipped fixture it runs 180 deg at 0 and 90 deg
+        # at 180. A 180 deg tool reorientation is where the analytic IK's nearest-branch answer
+        # stops being reachable from the seed -- which is what "the axial retreat station is
+        # unreachable" looks like.
+        #
+        # The collar is a body of revolution, so this angle is FREE: any of them grips the same
+        # ring. So spend it. null = pick the cheapest angle that actually solves; a number pins it
+        # (absolute, wrt the target frame, like cable_clocking.sweep_deg).
+        #
+        # The tool0 station along the axis does NOT depend on the angle -- every candidate is a
+        # rotation ABOUT the axis -- so this cannot trade wall clearance for reach.
+        def _reachable(th):
+            """True when the retreat, grasp and turn-end all IK-solve at clock angle `th`."""
+            _grip = at(collar_x, th)
+            return all(robot.arm.ik(_T, seed_c) is not None for _T in (
+                at(x_retreat, th), _grip,
+                translation_matrix(cl_push_m * axn)
+                @ rotate_about_axis(_grip, axis, point, cl_rot)))
+
+        seed_c = robot.arm.ik(T_off, robot.arm.q()) or robot.arm.q()
+        if cl_grasp_clock is not None:
+            th_grasp = cl_grasp_clock - eng_clock
+        else:
+            # ---- THE DEFAULT RULE: tool0's -Y along the connector's -Z ------------------------
+            # Closed form, not a search. The cable sweep leaves the wrist in a particular
+            # orientation, and of all the clock angles that grip the ring identically, the one
+            # that lands tool0's -Y on the connector's -Z is the one the arm is already nearly
+            # in -- it halves the reorientation onto the axis (measured on this fixture: 90 deg
+            # against 180 deg at a clock angle of 0). A 180 deg tool reorientation is where the
+            # analytic IK stops finding a branch reachable from the seed, which is what "the
+            # axial retreat station is unreachable" looks like.
+            #
+            # tool0 +Z is already pinned along the connector +X by G_axial, so the only freedom
+            # left is the roll about that axis, and tool0's +Y is perpendicular to it. Rotating
+            # that onto the connector +Z is therefore a plain 2-D angle in the plane normal to
+            # the axis: atan2(x . (v x w), v . w).
+            v0 = G_axial[:3, 1]                      # tool0 +Y at zero clock, connector frame
+            want = np.array([0.0, 0.0, 1.0])         # connector +Z
+            th_rule = float(np.arctan2(float(np.dot([1.0, 0.0, 0.0], np.cross(v0, want))),
+                                       float(np.dot(v0, want))))
+            # ...AND THE CONNECTOR'S -Z IS WHERE THE SWEEP LEFT IT, not where the target frame
+            # declares it. The gripper turned the connector, so its own Z came with it: reading
+            # the rule against the target frame only lands the minimum when the sweep happens to
+            # end at 0. Adding the achieved sweep makes the swing a constant 90 deg wherever it
+            # ends -- measured 90.0 at every sweep end, against 90..120 for the target-frame
+            # reading.
+            th_grasp = th_rule + (0.0 if screw_deg is None else np.radians(screw_deg))
+            log.info('  grasp clock angle %+.0f deg wrt the target frame: tool0 -Y laid on the '
+                     'connector -Z as the sweep left it (%+.0f deg rule %+.0f deg achieved '
+                     'sweep), a %.0f deg reorientation from the lift-off pose.',
+                     np.degrees(eng_clock + th_grasp), np.degrees(th_rule),
+                     0.0 if screw_deg is None else screw_deg,
+                     np.degrees(pose_error(T_off, at(x_retreat, th_grasp))[1]))
+            if not _reachable(th_grasp):
+                # The rule is a good default, not a guarantee. Fall back to whatever angle IS
+                # reachable, cheapest reorientation first -- the collar is a body of revolution,
+                # so every candidate grips the same ring. arm.ik logs 'No IK solution' at ERROR
+                # per rejected pose; those belong to this scan, nothing has moved.
+                log.warning('  ...but that angle is NOT reachable here. Scanning for one that is '
+                            '(arm.ik errors below belong to the scan).')
+                cands = [(pose_error(T_off, at(x_retreat, np.radians(float(d))))[1],
+                          np.radians(float(d)), d)
+                         for d in range(0, 360, 15) if _reachable(np.radians(float(d)))]
+                if not cands:
+                    log.error('COLLAR CLOCKING: NO grasp clock angle from 0 to 345 deg gives a '
+                              'reachable retreat, grasp and turn end. The axial orientation '
+                              'itself is out of reach at this fixture pose -- reduce '
+                              'collar_clocking.retreat_mm (now %.0f mm, which sets how far back '
+                              'the flange goes) or move the fixture.', cl_retreat_m * 1000.0)
+                    return False
+                _swing, th_grasp, _deg = min(cands, key=lambda c: c[0])
+                log.warning('  falling back to %+.0f deg (%d of 24 reachable, %.0f deg of '
+                            'reorientation). Pin it with collar_clocking.grasp_clock_deg.',
+                            np.degrees(eng_clock) + _deg, len(cands), np.degrees(_swing))
         T_retreat = at(x_retreat, th_grasp)         # on the axis, clear, already axial
         T_start = at(app_x, th_grasp)               # fingertip at the approach station
         T_grip = at(collar_x, th_grasp)             # fingertip on the collar
@@ -1770,7 +1847,14 @@ def build_and_run(cfg, robot, camera, args):
                     T_grip = translation_matrix(d_push * axn) @ T_grip
                     T_end = translation_matrix(d_push * axn) @ T_end
 
-        phase('standoff')
+        # PACED BY ITS OWN PHASE SCALE. The three legs below are FREE SPACE -- the fingers are
+        # open and clear, nothing is being inserted -- but they used to run at the `standoff`
+        # scale, which is contact-approach pacing (the global 25 mm/s / 30 deg/s at 1.0x). The
+        # reorient is the longest single move in the app: a ~90 deg swing plus a few hundred mm of
+        # travel, and at 25 mm/s the translation cap alone puts it near arm.move_timeout_s.
+        # `collar_approach` exists so it can be paced like the escape it is. The axial ADVANCE
+        # below deliberately does NOT use it -- that one threads the cable and stays slow.
+        phase('collar_approach')
         # ---- 1. WITHDRAW ALONG THE CABLE, straight away from the wall -------------------------
         # A pure translation along the connector -X with the open fingers still around the cable:
         # they slide ALONG it rather than across it, so nothing is swept, and every millimetre is
@@ -1799,18 +1883,45 @@ def build_and_run(cfg, robot, camera, args):
         # angle. A joint move rather than a straight line because this is the only large
         # reorientation in the maneuver -- and x_retreat is the FURTHEST station from the wall,
         # so it happens as far from it as the maneuver ever gets.
+        # TWO FAILURES, REPORTED APART. "Could not reach" used to cover both an unreachable pose
+        # and a move that started and did not finish, which are opposite problems: one is fixed by
+        # moving the station, the other by pacing or the pendant.
         q_ret = robot.arm.ik(T_retreat, robot.arm.q())
-        if q_ret is None or not _guarded(robot, guard_shared, lambda: robot.arm.move_j(
+        if q_ret is None:
+            # UNREACHABLE. Say so, and say how far back it IS solvable -- the retreat distance is
+            # the knob, and a ladder turns a dead end into a number to put in the config. (IK is
+            # seeded from the current joints, so this also catches a branch the arm cannot get to
+            # from where it stands, not only true out-of-reach.)
+            ok_mm = [d for d in (0.0, 25.0, 50.0, 75.0, 100.0, 150.0, 200.0, 250.0)
+                     if robot.arm.ik(at(app_x - d / 1000.0, th_grasp), robot.arm.q()) is not None]
+            log.error('COLLAR CLOCKING: the axial retreat station is UNREACHABLE -- no IK '
+                      'solution with the fingertip at %+.1f mm along the connector +X (tool0 '
+                      '%+.1f mm, on the axis, pointing at the socket). This is REACH or a joint '
+                      'limit, not speed: collar_clocking.retreat_mm (%.0f) is what puts the '
+                      'flange that far back. %s',
+                      x_retreat * 1000.0, x_tool['retreat'], cl_retreat_m * 1000.0,
+                      ('Retreat distances that DO solve from here: %s mm.'
+                       % ', '.join('%.0f' % d for d in ok_mm)) if ok_mm else
+                      'NO retreat distance from 0 to 250 mm solves -- the axial orientation '
+                      'itself is out of reach at this fixture pose, not just the distance.')
+            return False
+        if not _guarded(robot, guard_shared, lambda: robot.arm.move_j(
                 q_ret, label='collar retreat + reorient axial')):
-            log.error('Could not reach the axial retreat station (%+.1f mm along the connector '
-                      '+X).', x_retreat * 1000.0)
+            log.error('COLLAR CLOCKING: the move to the axial retreat station did not finish. '
+                      'The pose IS reachable (IK solved), so this is the force guard tripping on '
+                      'the way, the controller rejecting the move, or arm.move_timeout_s (%.0f s) '
+                      'running out -- raise speed.phase_scale.collar_approach (now %.2fx) or '
+                      'move_timeout_s.', robot.arm.move_timeout,
+                      float(scales.get('collar_approach', 1.0)))
             return False
 
         # ---- 4. ADVANCE DOWN THE AXIS, threading the cable into the open jaw ------------------
         # A PURE TRANSLATION along the connector +X: no rotation, so a straight move is exactly
         # the right path and there is no chord to cut. Guarded, because this is the leg that runs
         # the cable between the open fingers -- a snag must stop it rather than push through.
-        # Compliant, for the same reason, and paced by the standoff scale.
+        # Compliant, for the same reason, and back on the SLOW standoff pacing: this is the one
+        # leg of the approach with something in front of it.
+        phase('standoff')
         adm_cl.reset()
         adm_cl.warmup(T_retreat)
         guard_shared.reset()

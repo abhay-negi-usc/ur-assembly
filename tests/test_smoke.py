@@ -1938,6 +1938,86 @@ def test_success_basin_labels_gates_and_signs():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_held_and_target_frames_are_resolved_separately():
+    """calibration_check / insertion_tester take the target frame as its OWN input.
+
+    Both apps drive a HELD part at a RECORDED mate, and those are two different catalogue
+    sections: `held_frame` is a frames: entry (tool0 -> the part in the fingers) and
+    `target_frame` is a targets: entry (base_link <- the mate). They used to be one name, which
+    forced every held part to carry a targets: entry of its own before it could be probed against
+    anything.
+
+    What has to hold:
+      * target_frame DEFAULTS to held_frame, so a config predating the key behaves exactly as
+        before;
+      * the two are looked up in DIFFERENT sections -- a name that is only a frames: entry is a
+        legal held_frame and an illegal target_frame, and the error has to say which;
+      * both apps resolve them through the SAME helper, so they cannot drift apart.
+    """
+    from urlab import tool_frames
+
+    frames = {'part_a': np.eye(4), 'part_b': np.eye(4), 'no_target': np.eye(4)}
+    T_a = T.translation_matrix([0.5, 0.0, 0.2])
+    T_b = T.translation_matrix([0.1, 0.4, 0.3])
+    targets = {'part_a': T_a, 'part_b': T_b}
+
+    # ---- DEFAULT: target_frame absent -> the held name, in the targets: section ----
+    for absent in (None, ''):
+        held, tgt, name = tool_frames.resolve_held_and_target(frames, targets, 'part_a', absent)
+        assert name == 'part_a' and np.allclose(tgt, T_a) and np.allclose(held, frames['part_a'])
+
+    # ---- DECOUPLED: hold one part, drive it at another's recorded mate ----
+    held, tgt, name = tool_frames.resolve_held_and_target(frames, targets, 'part_a', 'part_b')
+    assert name == 'part_b', 'the explicit target_frame must win'
+    assert np.allclose(tgt, T_b), 'the target must come from the TARGETS section, not frames'
+    assert np.allclose(held, frames['part_a']), 'the held pose must still be held_frame'
+
+    # ---- THE TWO SECTIONS ARE NOT INTERCHANGEABLE ----
+    # 'no_target' is a legal held_frame (it has a frames: entry) and an illegal target_frame.
+    held, tgt, name = tool_frames.resolve_held_and_target(frames, targets, 'no_target', 'part_a')
+    assert name == 'part_a', 'a held frame with no targets: entry is fine when target_frame names one'
+    for bad_held in (None, '', 'nope'):
+        try:
+            tool_frames.resolve_held_and_target(frames, targets, bad_held, 'part_a')
+        except ValueError as exc:
+            assert 'held_frame' in str(exc), str(exc)
+        else:
+            raise AssertionError(f'held_frame {bad_held!r} must be rejected')
+    try:
+        tool_frames.resolve_held_and_target(frames, targets, 'part_a', 'nope')
+    except ValueError as exc:
+        assert 'target_frame' in str(exc) and 'targets:' in str(exc), str(exc)
+    else:
+        raise AssertionError('a target_frame with no targets: entry must be rejected')
+    # the DEFAULTED case must say so, or the operator reads "target_frame 'x'" for a key they
+    # never set and goes looking for the wrong typo
+    try:
+        tool_frames.resolve_held_and_target(frames, targets, 'no_target', None)
+    except ValueError as exc:
+        assert 'held_frame' in str(exc) and 'defaults' in str(exc), str(exc)
+    else:
+        raise AssertionError('a held_frame with no targets: entry and no target_frame must fail')
+
+    # ---- BOTH APPS GO THROUGH THE SAME HELPER ----
+    for app in ('calibration_check', 'insertion_tester'):
+        src = open(os.path.join(ROOT, 'urlab', 'apps', f'{app}.py'), encoding='utf-8').read()
+        assert 'tool_frames.resolve_held_and_target(' in src, (
+            f'{app} must resolve the two frames through the shared helper, not its own lookup')
+        assert "cfg.get('target_frame')" in src, f'{app} must read target_frame from the config'
+        assert 'targets[held_name]' not in src, (
+            f'{app} must not index targets: by the HELD name -- that is the coupling this removed')
+
+    # ---- AND BOTH CONFIGS DECLARE THE KEY, so it is discoverable ----
+    import yaml
+    for name in ('calibration_check', 'insertion_tester'):
+        c = yaml.safe_load(open(os.path.join(ROOT, 'configs', f'{name}.yaml')))
+        assert 'target_frame' in c, f'{name}.yaml must declare target_frame (null = held_frame)'
+        assert c['held_frame'] in tool_frames.load_frames(), c['held_frame']
+        eff = c['target_frame'] or c['held_frame']
+        assert eff in tool_frames.load_targets(), (
+            f'{name}.yaml resolves to target {eff!r}, which has no targets: entry')
+
+
 def test_calibration_check_line_and_config():
     """apps/calibration_check: the probe line must run from -standoff to +overshoot along the
     connector's +X, monotone, at the requested resolution; and the shipped config must keep the
@@ -3669,25 +3749,27 @@ def test_the_seat_push_can_reach_its_force_and_keeps_the_gripper_logic_straight(
     with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
         src = fh.read()
     body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
-    order = ["rotate_about_axis(T_centred, axis, point, theta * f)",   # unwind (open)
-             "gripper.close('seat-push grasp')",                       # close on the junction
+    # The push now runs FIRST -- the pads are already around the cable at the junction where it
+    # wants them -- and everything after it needs OPEN fingers: the withdraw slides along the
+    # cable, the lift-off frees the fingers, the advance threads the cable into the jaw.
+    order = ["gripper.close('seat-push grasp')",                       # close on the junction
              "verify_cable_held(robot, check, 'seat-push grasp')",     # ...and verify the bite
              "guard_push.reset()",                                     # the push guard, not global
              "'release (seat push)'",                                  # reopen...
-             "label='collar advance onto the ring'",                   # ...BEFORE the advance
+             "label='collar withdraw (connector -X)'",                 # ...BEFORE anything moves
+             "label='collar lift-off (gripper -Z)'",
+             "label='collar retreat + reorient axial'",
              "gripper.close('grasp collar')"]                          # then the collar bite
     idx = [body.index(t) for t in order]
     assert idx == sorted(idx), (
-        'the seat push must run unwind -> close -> verify -> press -> RELEASE -> advance -> '
-        'collar close; a release after the advance would slide clamped fingers into the ring')
-    assert "cannot advance onto the '\n                              'collar" in body or \
-           'not \'\n                              \'advancing' in body or \
-           'return False' in body[body.index("'release (seat push)'"):
-                                  body.index("label='collar advance onto the ring'")], (
-        'a failed release must abort before the advance')
+        'the seat push must run close -> verify -> press -> RELEASE before the withdraw; a '
+        'release after it would drag the clamped junction along the cable')
+    assert 'return False' in body[body.index("'release (seat push)'"):
+                                  body.index("label='collar withdraw (connector -X)'")], (
+        'a failed release must abort before the withdraw')
     # the connector moves with the press, so the collar poses must ride it
-    assert 'T_start = translation_matrix(d_push * axn) @ T_start' in body, (
-        'the advance target must shift by the measured press travel, or it stops short of '
+    assert 'T_grip = translation_matrix(d_push * axn) @ T_grip' in body, (
+        'the grasp target must shift by the measured press travel, or the jaw closes short of '
         'the ring by exactly that much')
 
 
@@ -3850,11 +3932,18 @@ def test_the_offaxis_tilt_gate_clears_the_screws_own_compliance():
     with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
         src = fh.read()
     assert "_num(cl, 'max_offaxis_tilt_deg'" in src, 'the gate must be a config knob'
-    assert 'np.degrees(c_ang) > cl_tilt_deg' in src, 'the gate must be READ, not hardcoded'
-    assert 'out-of-axis tilt at the end of the screw' in src, (
+    assert '_tilt > cl_tilt_deg' in src, 'the gate must be READ, not hardcoded'
+    # It gates the CONNECTOR's tilt from the socket axis, not the arm's orientation. The arm's
+    # only mattered while the approach was an orbit from wherever the sweep ended; the axial
+    # approach is placed in free space, so what matters is whether the cable lies on the line the
+    # gripper is about to advance down.
+    assert 'tilted from it (gate' in src, (
         'the measured tilt must be logged unconditionally -- it is the diagnostic that separates '
         'a constant frame error from variable compliance yield, and raising the gate must not '
         'hide it')
+    assert 'refusing to thread it' in src, (
+        'a cocked connector must abort BEFORE the axial advance -- that is the leg whose whole '
+        'premise is that the cable lies on the axis')
 
 
 def test_both_clockings_turn_about_the_socket_and_not_about_the_arm():
@@ -3997,13 +4086,15 @@ def test_a_clocking_stroke_follows_the_arc_and_not_the_chord():
     assert 'screw_ramp(' in body, (
         'collar_clocking must take its turn through screw_ramp too -- the fingers are CLOSED on '
         'the collar there, so the chord excursion goes straight into the ring')
-    # adm_cl.ramp is allowed for exactly one thing: the SEAT PUSH, whose endpoints differ by a
-    # pure translation along the axis (identical orientation) -- a straight ramp draws that path
-    # exactly, so there is no chord to cut. Any OTHER direct ramp risks spanning a rotation.
+    # adm_cl.ramp is allowed only where the endpoints differ by a PURE TRANSLATION along the
+    # axis (identical orientation) -- a straight ramp draws that path exactly, so there is no
+    # chord to cut. Two qualify: the seat push, and the axial advance onto the ring. Any OTHER
+    # direct ramp risks spanning a rotation.
+    allowed = ('adm_cl.ramp(T_a, T_b', 'adm_cl.ramp(T_retreat, T_grip')
     direct = [ln for ln in body.splitlines() if 'adm_cl.ramp(' in ln]
-    assert all('adm_cl.ramp(T_a, T_b' in ln for ln in direct) and len(direct) == 1, (
-        f'collar_clocking may direct-ramp only the seat push (a pure translation); found '
-        f'{direct!r} -- any ramp spanning a rotation cuts the chord')
+    assert all(any(a in ln for a in allowed) for ln in direct) and len(direct) == 2, (
+        f'collar_clocking may direct-ramp only pure translations (the seat push and the axial '
+        f'advance); found {direct!r} -- any ramp spanning a rotation cuts the chord')
 
 
 def test_the_target_frame_and_the_in_hand_belief_name_the_same_point():
@@ -4773,182 +4864,144 @@ def test_every_app_resolves_to_the_tuned_wiggle():
         wigmod.Wiggle.from_cfg(blk, app)          # and it must still validate
 
 
-def test_collar_prewind_makes_room_without_moving_the_grip():
-    """Unwinding before the collar turn must buy wrist range and change nothing else.
+def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
+    """collar_clocking takes the ring with the fingers PARALLEL to the cable and twists the wrist.
 
-    The turn is a rigid orbit about the connector's +X, so beginning it at the nominal alignment
-    asks for the full rotation_deg of range on whichever side the arm is already on -- and there
-    may not be that much left. Unwinding by the same amount first puts the whole stroke on the
-    reachable side.
+    The socket is wall-mounted, and that is what decides the grasp. Making the fingertip frame
+    coincide with the collar frame -- the obvious reading of "put the pads on the ring" -- puts
+    tool0 183 mm OFF the connector axis, level with the mating face, and a rotation about that
+    axis then swings the flange through a 258 mm arc ACROSS the wall. Rolling the grasp 90 deg
+    about the jaw-CLOSING axis instead lays tool0 ON the axis with its Z collinear: the same bite
+    on the same ring, but the turn becomes a rotation about tool0's own Z and the flange does not
+    move at all.
 
-    Three things have to survive that, and each is a way a plausible implementation goes wrong:
-      * the collar must still end up turned by rotation_deg (not 0, not double);
-      * the fingertip must stay ON the collar's circle -- the pre-wind slides the grip around the
-        ring, it does not lift off it or slide along the axis; and
-      * the unwind must happen with the gripper OPEN, because unwinding while gripping turns the
-        collar BACKWARDS -- undoing the lock instead of making room to apply it.
+    Four properties, and each is a way a plausible implementation goes wrong:
+      * TOOL0 ON THE AXIS, Z COLLINEAR -- otherwise the turn is still an orbit, just a smaller one.
+      * THE BITE IS UNCHANGED. The fingertip still lands on the collar station and the jaws still
+        close ACROSS a diameter; a roll about the wrong axis would close them along the cable.
+      * THE FLANGE STAYS PUT through the turn, moving only by push_mm.
+      * THE APPROACH IS A PURE AXIAL TRANSLATION, so a straight ramp draws it exactly.
     """
+    import yaml
+
+    from urlab import config as urconfig, tool_frames
     from urlab.transforms import rotate_about_axis
 
-    # a deliberately oblique connector pose, so nothing passes by symmetry
-    T_base_conn = T.xyzrpy_to_matrix([0.4, -0.1, 0.3], np.radians([10.0, -25.0, 40.0]))
-    T_tool0_ftip = T.xyzrpy_to_matrix([0.0, 0.0, 0.183], np.radians([180.0, 0.0, -90.0]))
-    off_m, rot = 0.025, np.radians(90.0)
-    axis, point = T_base_conn[:3, 0], T_base_conn[:3, 3]
-    T_collar = T_base_conn @ T.translation_matrix([off_m, 0.0, 0.0])
-    T_nom = T_collar @ T.inverse(T_tool0_ftip)
+    cfg = urconfig.load('bnc_assembly')
+    asm = cfg.section('assembly')
+    cl = asm['collar_clocking']
+    T_ftip = tool_frames.load_frames(cfg)['fingertip']
+    T_socket = tool_frames.load_targets(cfg)[asm['target_frame']]
+    eng = np.radians(float(asm.get('engage_clock_deg', 0.0) or 0.0))
+    T_clk = T_socket @ T.xyzrpy_to_matrix([0., 0., 0.], [eng, 0., 0.])
 
-    T_start = rotate_about_axis(T_nom, axis, point, -rot)     # pre-wound, gripper OPEN
-    T_end = rotate_about_axis(T_start, axis, point, rot)      # the turn
-
-    # ---- the turn LANDS on the nominal alignment when prewind == rotation ----
-    assert np.allclose(T_end, T_nom, atol=1e-12), (
-        'with prewind == rotation_deg the stroke must finish exactly at the nominal alignment, '
-        'not rotation_deg past it')
-
-    # ---- net collar rotation is still the commanded angle, about the connector axis ----
-    R = T_end[:3, :3] @ T_start[:3, :3].T
-    ang = float(np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2.0, -1.0, 1.0))))
-    assert abs(ang - 90.0) < 1e-6, f'the collar must still turn 90 deg, got {ang:.4f}'
-    ax = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]])
-    ax = ax / np.linalg.norm(ax)
-    assert np.allclose(ax, axis, atol=1e-9), 'the turn must be about the connector +X'
-
-    # ---- the fingertip never leaves the collar's circle ----
-    for lab, Tp in (('nominal', T_nom), ('pre-wound', T_start), ('end', T_end)):
-        d = (Tp @ T_tool0_ftip)[:3, 3] - point
-        along = float(d @ axis)
-        radial = float(np.linalg.norm(d - along * axis))
-        assert abs(along - off_m) < 1e-9, \
-            f'{lab}: the grip slid ALONG the axis ({along * 1000:.3f} mm, want {off_m * 1000:.1f})'
-        assert radial < 1e-9, f'{lab}: the grip left the collar circle by {radial * 1000:.3f} mm'
-
-    # ---- prewind 0 must reproduce the pre-2026-08-17 behaviour exactly ----
-    assert np.allclose(rotate_about_axis(T_nom, axis, point, 0.0), T_nom, atol=1e-12)
-
-    # ---- ORDER: the unwind is between the align and the close, never after it ----
-    src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8').read()
-    body = src[src.index('def collar_clocking('):]
-    body = body[:body.index('return True')]
-    # FOUR STEPS, IN THIS ORDER: ONE orbit about the connector axis from wherever the cable screw
-    # left the arm to the pre-wound pose, then a pure axial advance onto the ring, then close,
-    # then turn. Each rotation is anchored on the call that performs it.
-    i_centre = body.index("label='collar centre on the axis'")
-    i_orbit = body.index('rotate_about_axis(T_centred, axis, point, theta * f)')
-    i_adv = body.index("label='collar advance onto the ring'")
-    i_close = body.index("gripper.close('grasp collar')")
-    i_turn = body.index('rotate_about_axis(start, axis, point, cl_rot * f)')
-    assert i_centre < i_orbit < i_adv < i_close < i_turn, (
-        'the order must be centre -> orbit -> advance -> close -> turn. The centring is a pure '
-        'translation onto the axis, which is what leaves the rest of the approach a pure orbit. '
-        'The unwind precedes the close '
-        'because unwinding on a GRIPPED collar turns it backwards, undoing the lock; and it '
-        'precedes the ADVANCE because the roll wants the fingers clear of the ring')
-    # NOTHING MAY SWING STRAIGHT TO A COLLAR POSE. tool0 sits ~183 mm off the connector axis, so
-    # any move_l between two poses that differ by a rotation about that axis cuts inside the arc
-    # and sweeps the fingertip -- which is ON the axis -- right through the part.
-    assert 'screw_ramp(' in body[i_orbit - 400:i_adv], (
-        'the unwind must be taken through screw_ramp so it follows the axis')
-    for banned in ('move_l(T_start', 'move_l(T_nom_back', 'move_l(T_nominal'):
-        assert banned not in body, (
-            f'{banned}...) swings straight to a collar pose; every approach rotation has to be an '
-            f'orbit about the connector axis')
-    # THE ADVANCE MUST BE A PURE TRANSLATION along the connector +X, arriving on the ring rather
-    # than swinging onto it.
-    assert 'T_start_back' in body[:i_adv] and 'adv_m' in body[:i_adv], (
-        'the advance must run from the backed-off pre-wound pose along the connector +X')
-
-    # ---- THE GRASP ROLL MUST BE CHOSEN, NOT INHERITED ----------------------------------------
-    # A parallel jaw is symmetric under a 180 deg roll about its approach axis (fingertip Z): the
-    # pads swap and the grasp is identical. The nominal alignment inherits the CONNECTOR's
-    # orientation, which sits 180 deg rolled from the fingertip's own whenever
-    # initial_connector_in_fingertip carries a 180 deg yaw -- as this cable's does. Taking that
-    # literally demands a 180 deg wrist roll on the way in, about an axis 90 deg OFF the connector
-    # axis, so the approach stops being an orbit and becomes a wide swing through the part.
-    #
-    # This is the arithmetic behind that, on the same oblique pose: the two rolls are the same
-    # grasp, and only one of them keeps the approach on the axis.
-    from scipy.spatial.transform import Rotation as _R
-    flip = T.xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, 0.0, np.pi])
-    # where the cable screw leaves the arm: the connector held, clocked by the screw
-    T_ftip_conn = T.xyzrpy_to_matrix([-0.0457, 0.0, 0.0075], [0.0, 0.0, np.pi])
-    arm_now = T_base_conn @ T.inverse(T_tool0_ftip @ T_ftip_conn)
+    collar_x = float(cl['collar_offset_mm']) / 1000.0
+    cl_rot = np.radians(float(cl['rotation_deg']))
+    push_m = float(cl['push_mm']) / 1000.0
+    T_collar = T_clk @ T.translation_matrix([collar_x, 0.0, 0.0])
+    axis, point = T_clk[:3, 0], T_collar[:3, 3]
     axn = axis / np.linalg.norm(axis)
-    seen = {}
-    for name, G in (('as defined', T.inverse(T_tool0_ftip)),
-                    ('jaws swapped', flip @ T.inverse(T_tool0_ftip))):
-        goal = rotate_about_axis(T_collar @ G, axis, point, -rot)
-        rel = goal @ T.inverse(arm_now)
-        rv = _R.from_matrix(rel[:3, :3]).as_rotvec()
-        n = float(np.linalg.norm(rv))
-        seen[name] = np.degrees(np.arccos(np.clip(abs(float(np.dot(rv / max(n, 1e-9), axn))),
-                                                  0.0, 1.0)))
-    assert seen['as defined'] > 45.0, (
-        'this test has lost its subject: the literal roll is supposed to put the approach '
-        f'rotation well off the connector axis, got {seen["as defined"]:.1f} deg')
-    assert seen['jaws swapped'] < 1e-6, (
-        'swapping the jaws must make the approach a PURE rotation about the connector axis, got '
-        f'{seen["jaws swapped"]:.3f} deg off it')
-    # ---- AND IT MUST BE PICKED ON THE OFF-AXIS RESIDUAL, NOT ON THE TOTAL ANGLE -------------
-    # "Smallest total rotation" NAMES the right candidate at a 90 deg screw (90 vs 180) purely by
-    # luck of the arithmetic, and it TIES at a 180 deg one: the correct candidate is then a
-    # 180 deg orbit about the connector axis, the wrong one a 180 deg rotation about an axis
-    # square to it, and both report 180. With cable_clocking.rotation_deg at 180 that tie is the
-    # shipped configuration, and losing it sends the OPEN fingers on a wide swing through the
-    # part -- caught by the tilt gate, but only as an aborted run. What actually separates them
-    # at every angle is the residual no rotation about the connector axis explains.
-    from urlab.apps.bnc_assembly import _wrap_near
-    for screw_deg in (90.0, 180.0):
-        arm = rotate_about_axis(T_base_conn @ T.inverse(T_tool0_ftip @ T_ftip_conn),
-                                axis, point, np.radians(screw_deg))
-        scores = {}
-        for name, G in (('as defined', T.inverse(T_tool0_ftip)),
-                        ('jaws swapped', flip @ T.inverse(T_tool0_ftip))):
-            T_nb = T_collar @ G
-            rel = arm @ T.inverse(T_nb)
-            th = _wrap_near(float(np.dot(_R.from_matrix(rel[:3, :3]).as_rotvec(), axn)),
-                            np.radians(screw_deg))
-            resid = T.pose_error(arm, rotate_about_axis(T_nb, axis, point, th))[1]
-            total = T.pose_error(arm, T_nb)[1]
-            scores[name] = (resid, total)
-        assert scores['jaws swapped'][0] < 1e-9, (
-            f'{screw_deg:.0f} deg screw: the correct roll must leave NO off-axis residual, got '
-            f'{np.degrees(scores["jaws swapped"][0]):.3f} deg')
-        assert np.degrees(scores['as defined'][0]) > 45.0, (
-            f'{screw_deg:.0f} deg screw: the wrong roll must be separated by the residual, got '
-            f'{np.degrees(scores["as defined"][0]):.3f} deg')
-    # the tie the OLD criterion walks into, pinned so the reason for the change stays visible
-    arm180 = rotate_about_axis(T_base_conn @ T.inverse(T_tool0_ftip @ T_ftip_conn),
-                               axis, point, np.pi)
-    tot = [T.pose_error(arm180, T_collar @ G)[1]
-           for G in (T.inverse(T_tool0_ftip), flip @ T.inverse(T_tool0_ftip))]
-    assert abs(tot[0] - tot[1]) < 1e-9, (
-        'this test has lost its subject: at a 180 deg screw the two grasp rolls are supposed to '
-        'be INDISTINGUISHABLE by total rotation angle, which is why the residual is scored')
 
-    # and the app must actually pick between them rather than hard-coding one, on the residual
-    assert 'np.pi' in body[:i_orbit] and 'def _solve(' in body, (
-        'collar_clocking must CHOOSE the grasp roll that keeps the approach on the connector '
-        'axis, not inherit the connector orientation blindly')
-    assert 'key=lambda r: r[0]' in body and 'pose_error(here, rotate_about_axis(' in body, (
-        'the roll must be scored on the OFF-AXIS RESIDUAL -- scoring the total rotation angle '
-        'ties at a 180 deg screw, which is the shipped cable_clocking.rotation_deg')
-    assert 'grip = min(' not in body, (
-        'the total-angle criterion is the bug this replaced; it must not come back')
-    assert '_wrap_near(' in body, (
-        'the arm clock angle must be wrapped onto the screw branch -- as_rotvec caps at pi, so '
-        'at 180 deg its sign is a coin flip and its sign IS the unwind direction')
-    # and both ends are IK-checked before anything grips
-    assert body.index('unreachable') < i_close, (
-        'reachability must be checked before the close, or an impossible turn leaves the collar '
-        'clamped in a stalled gripper')
+    RADIAL = T.inverse(T_ftip)                                   # the grasp this replaced
+    AXIAL = (T.xyzrpy_to_matrix([0., 0., 0.], [0., -np.pi / 2., 0.]) @ T.inverse(T_ftip))
 
-    import yaml
-    cl = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))[
-        'assembly']['collar_clocking']
-    assert 'prewind_deg' in cl, 'prewind_deg must be declared so the behaviour is discoverable'
-    assert cl['prewind_deg'] is None or float(cl['prewind_deg']) >= 0.0, \
-        'prewind_deg is null (= rotation_deg) or a non-negative angle'
+    def in_axis_frame(T_base_tool0):
+        return T.inverse(T_clk) @ T_base_tool0
+
+    # ---- TOOL0 ON THE AXIS, ITS Z COLLINEAR WITH IT ----
+    T_grip = T_collar @ AXIAL
+    rel = in_axis_frame(T_grip)
+    off = rel[:3, 3] - np.dot(rel[:3, 3], [1., 0, 0]) * np.array([1., 0, 0])
+    assert np.linalg.norm(off) * 1000.0 < 1e-9, (
+        f'tool0 sits {np.linalg.norm(off) * 1000:.3f} mm off the connector axis -- the turn would '
+        f'still orbit that radius instead of twisting the wrist')
+    assert abs(abs(float(np.dot(rel[:3, 2], [1., 0, 0]))) - 1.0) < 1e-9, (
+        'tool0 Z must be COLLINEAR with the connector axis, or a rotation about the axis is not '
+        'a rotation about the tool')
+
+    # ---- THE BITE IS UNCHANGED: fingertip on the ring, jaws across a diameter ----
+    for name, G in (('radial', RADIAL), ('axial', AXIAL)):
+        ft = T.inverse(T_collar) @ (T_collar @ G @ T_ftip)
+        assert np.linalg.norm(ft[:3, 3]) * 1000.0 < 1e-9, (
+            f'{name}: the fingertip must land ON the collar frame, got '
+            f'{np.linalg.norm(ft[:3, 3]) * 1000:.3f} mm off')
+    closing = (T.inverse(T_clk) @ T_grip @ T_ftip)[:3, 1]        # fingertip Y = the jaw axis
+    assert abs(float(closing[0])) < 1e-9, (
+        f'the jaws must close ACROSS the connector axis, not along it (axis component '
+        f'{closing[0]:.3e}) -- a roll about the wrong axis would pinch the cable lengthwise')
+
+    # ---- THE FLANGE STAYS PUT: this is the whole point, and the wall is why ----
+    for name, G, want_travel in (('radial', RADIAL, 258.0), ('axial', AXIAL, 0.0)):
+        T0 = T_collar @ G
+        T1 = rotate_about_axis(T0, axis, point, cl_rot)
+        travel = float(np.linalg.norm(T1[:3, 3] - T0[:3, 3])) * 1000.0
+        if name == 'axial':
+            assert travel < 1e-9, f'the axial turn must not move the flange, got {travel:.3f} mm'
+        else:
+            assert travel > 200.0, (
+                'this test has lost its subject: the radial grasp is supposed to swing the '
+                f'flange a long way for a {np.degrees(cl_rot):.0f} deg turn, got {travel:.1f} mm')
+    # with push_mm the flange advances by exactly that and nothing else
+    T_end = T.translation_matrix(push_m * axn) @ rotate_about_axis(T_grip, axis, point, cl_rot)
+    assert abs(float(np.linalg.norm(T_end[:3, 3] - T_grip[:3, 3])) - push_m) < 1e-9, (
+        'the only flange motion during the twist may be push_mm along the axis')
+
+    # ---- WALL CLEARANCE: the axial grasp is a whole gripper length further back ----
+    x_ax = float(in_axis_frame(T_grip)[0, 3]) * 1000.0
+    x_rad = float(in_axis_frame(T_collar @ RADIAL)[0, 3]) * 1000.0
+    assert x_ax < x_rad - 150.0, (
+        f'the axial grasp must stand well clear of the wall: got {x_ax:+.1f} mm vs the radial '
+        f'{x_rad:+.1f} mm along the connector +X')
+    wall = cl.get('wall_standoff_mm')
+    if wall is not None:
+        assert x_ax <= float(wall), (
+            f'the shipped grasp sits at {x_ax:+.1f} mm, past its own wall_standoff_mm '
+            f'({float(wall):+.1f}) -- the app would refuse to run')
+        assert x_rad > float(wall), (
+            'this test has lost its subject: wall_standoff_mm is supposed to REJECT the old '
+            'radial grasp, which is why the grasp changed')
+
+    # ---- THE APPROACH IS A PURE AXIAL TRANSLATION ----
+    retreat_m = float(cl['retreat_mm']) / 1000.0
+    T_retreat = T.translation_matrix(-(retreat_m + collar_x) * axn) @ T_grip
+    d = T_grip[:3, 3] - T_retreat[:3, 3]
+    lat = float(np.linalg.norm(d - np.dot(d, axn) * axn)) * 1000.0
+    _l, ang = T.pose_error(T_retreat, T_grip)
+    assert lat < 1e-9 and np.degrees(ang) < 1e-9, (
+        f'the advance onto the ring must be a PURE translation along the axis ({lat:.4f} mm '
+        f'lateral, {np.degrees(ang):.4f} deg) -- that is what makes a straight ramp exact')
+
+    # ---- ORDER, and every leg guarded ----
+    src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8').read()
+    body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
+    order = ["label='collar withdraw (connector -X)'",     # back off ALONG the cable first...
+             "label='collar lift-off (gripper -Z)'",       # ...then free the fingers, far back
+             "label='collar retreat + reorient axial'",    # ...then reorient in clear space
+             "adm_cl.ramp(T_retreat, T_grip",              # ...then advance down the axis
+             "gripper.close('grasp collar')",
+             "label='twist '"]
+    idx = [body.index(t) for t in order]
+    assert idx == sorted(idx), (
+        'the order must be withdraw -> lift-off -> reorient -> advance -> close -> twist. The '
+        'withdraw comes FIRST because the lateral lift-off travels parallel to the wall, so it '
+        'must happen with the arm already backed off')
+    assert 'AXIAL' in body and '-np.pi / 2.0' in body, (
+        'the axial grasp roll must be built explicitly, not inherited from the fingertip frame')
+    assert 'wall_standoff_mm' in src and 'cl_wall_mm' in body, (
+        'every planned station must be gated against the wall standoff before the arm moves')
+    # comments may still EXPLAIN what prewind was; no code may still read it
+    code = ' '.join(ln for ln in body.splitlines() if not ln.lstrip().startswith('#'))
+    assert 'cl_prewind' not in code, (
+        'prewind belonged to the radial orbit -- the axial approach states its grasp angle '
+        'outright (grasp_clock_deg) instead of deriving it from where the sweep ended')
+
+    # ---- CONFIG SHAPE ----
+    c = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))
+    ccl = c['assembly']['collar_clocking']
+    assert 'prewind_deg' not in ccl, 'prewind_deg is gone with the radial approach'
+    for k in ('grasp_clock_deg', 'liftoff_mm', 'retreat_mm', 'wall_standoff_mm'):
+        assert k in ccl, f'collar_clocking must declare {k} so the axial approach is tunable'
+    assert float(ccl['liftoff_mm']) > 0 and float(ccl['retreat_mm']) > 0
 
 
 def test_the_cable_sweep_rocks_between_absolute_roll_positions():
@@ -5209,9 +5262,15 @@ def test_the_achieved_clock_angle_is_wrapped_onto_the_stroke_branch():
     assert 'cc_hi - cc_lo > 2.0 * np.pi' in src, (
         'a sweep spanning more than one turn must be REFUSED at config time: there is no branch '
         'that tells a measured roll from itself plus 360')
+    # collar_clocking does NOT wrap anything any more: the axial approach is placed in free
+    # space from the frames, so there is no measured arm clock angle to recover a branch for.
     collar = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
-    assert '_wrap_near(' in collar, \
-        'the arm clock angle solved in collar clocking must be wrapped onto the same branch'
+    assert '_wrap_near(' not in collar, (
+        'the axial collar approach is built from the frames, not solved from the measured arm '
+        'pose -- nothing there has a branch to wrap')
+    assert 'th_grasp' in collar and 'cl_grasp_clock' in collar, (
+        'the collar grasp angle must come from grasp_clock_deg, stated absolutely, rather than '
+        'being derived from where the sweep left the arm')
 
 
 def test_wrench_in_moves_the_moment_off_the_flange():

@@ -131,6 +131,41 @@ def load_targets(cfg=None, path=None):
     return targets
 
 
+def resolve_held_and_target(frames, targets, held_name, target_name=None, path=None):
+    """(T_tool0_held, T_base_target, target_name) for an app that drives a HELD part at a
+    RECORDED mate.
+
+    TWO LOOKUPS, TWO SECTIONS. `held_name` is a `frames:` entry -- where the part sits w.r.t.
+    tool0, i.e. what the arm is carrying. `target_name` is a `targets:` entry -- the recorded
+    base_link pose that part is driven to. `target_name=None` means "the same name", which is the
+    usual case and the behaviour before the key existed.
+
+    They are separate because they answer different questions: one held part can be probed against
+    several recorded mates (a second socket, a re-measured one), and the same mate can be
+    approached with a different frame declared on the part. Requiring one name to satisfy both
+    sections forced a new catalogue entry for either.
+
+    NOTE the two names should still describe the SAME POINT on the part. The apps report the held
+    frame's pose w.r.t. the target frame, so naming different points offsets every number they
+    print by exactly the difference between them.
+
+    Raises ValueError carrying the operator-facing reason. Pure, so the rule is testable without a
+    robot or a catalogue file."""
+    tgt = target_name or held_name
+    where = f' in {path}' if path else ''
+    if not held_name:
+        raise ValueError('held_frame is required.')
+    if held_name not in frames:
+        raise ValueError(f'held_frame {held_name!r} needs a frames: entry{where}.')
+    if tgt not in targets:
+        raise ValueError(
+            f'target_frame {tgt!r} needs a targets: entry{where}'
+            + ('' if target_name else
+               f' (it defaults to held_frame, so either add a targets: entry for {held_name!r} '
+               f'or set target_frame to a name that has one)') + '.')
+    return frames[held_name], targets[tgt], tgt
+
+
 def check_drift(frames, cfg, tol_mm=0.5, tol_deg=0.2):
     """Warn for every frame where frames.yaml and the loaded config's LEGACY section disagree.
 

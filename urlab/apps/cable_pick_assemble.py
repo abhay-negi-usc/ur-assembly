@@ -15,6 +15,8 @@ from ..skills import insert as ins
 from ..skills import reset
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
                            GraspRecovery, log_grasp_delta, retry_offset_x)
+import numpy as np
+
 from ..transforms import from_cfg, inverse, translation_matrix
 from ._cable import build_scanner, make_confirm
 from ._runner import run_app
@@ -39,6 +41,19 @@ def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder, 
         log.info('Retry perturbation: %+.1f mm along the junction x-axis.', offset_x_m * 1000)
         T_conn = T_conn @ translation_matrix([offset_x_m, 0.0, 0.0])
     geom.T_base_grasp = T_conn @ inverse(T_ftip_junction)
+    # WHICH WAY THE FINGERTIP WILL FACE, reported before the arm moves. The grasp pose is
+    # T_conn @ inverse(junction_in_fingertip), so the fingertip's +X ends up along the DETECTED
+    # heading rotated by that block's yaw -- and nothing downstream can tell you which way it came
+    # out. The knob is cables.yaml <cable>.junction_in_fingertip's yaw: 0 lays the fingertip +X
+    # along the detected heading, 180 opposes it. Everything that cares reads off this: the
+    # cable-grab reseat shifts along the grasp +x, and the assembly's in-hand belief
+    # (estimation.initial_connector_frame) must describe the connector in the SAME orientation.
+    _d = float(np.dot(geom.T_base_grasp[:3, 0], T_conn[:3, 0]))
+    log.info('Grasp orientation: fingertip +X is %s the detected connector heading (dot %+.2f). '
+             'If that is the wrong way round, flip cables.yaml junction_in_fingertip.rpy_deg yaw '
+             'by 180 -- and rotate the held-connector frames in frames.yaml with it, or the '
+             'in-hand belief ends up 180 deg and ~91 mm out.',
+             'ALONG' if _d > 0 else 'OPPOSED to', _d)
 
     # PICKUP HEIGHT from the gripper model (pickup.height_from_model). ASSUMES the connector
     # rests ON THE GROUND PLANE -- the ground-plane scan puts the junction estimate AT the plane,

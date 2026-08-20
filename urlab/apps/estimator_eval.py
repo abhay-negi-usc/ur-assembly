@@ -71,6 +71,7 @@ from .. import tool_frames
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import trajectory as traj
 from ..skills import wiggle as wigmod
+from ..skills import wiggle as wigmod
 from ..skills.manifold import (DIMS, FORCE_COLS, POSE_COLS, TORQUE_COLS,
                                mats_from_vec6, scaled12, vec6_from_mats)
 from ..skills.mixture import from_energy
@@ -1110,6 +1111,34 @@ def build_and_run(cfg, robot, camera, args):
         log.error('eval.success_pose_tol must have 6 entries [x,y,z (mm), r,p,y (deg)].')
         return False
     decim = max(1, int(ev.get('log_decimation', 5)))
+    # THE OBSERVATION WIGGLE (urlab/skills/wiggle.py) -- the same excitation wiggle_sampling
+    # collects its map under. Absent or all-zero amplitudes means no oscillation and this app
+    # behaves exactly as before.
+    _col = ev.get('collection') or {}
+    obs_wig_s = float(_col.get('wiggle_s', 0.0) or 0.0)
+    _wblk, _wsrc = wigmod.from_shared(cfg, _col.get('wiggle'),
+                                      _col.get('wiggle_from', 'wiggle_sampling.yaml'),
+                                      'observation')
+    try:
+        obs_wig = wigmod.Wiggle.from_cfg(_wblk, 'observation')
+        if obs_wig is not None:
+            obs_wig.validate(rate_hz=float(cfg.get_path('compliance.reference_rate_hz', 125.0)),
+                             cap_v=_wblk.get('max_speed_mm_s'),
+                             cap_w=_wblk.get('max_rotation_deg_s'),
+                             duration_s=obs_wig_s or None)
+    except wigmod.WiggleError as exc:
+        log.error('%s', exc)
+        return False
+    if obs_wig is not None and obs_wig_s <= 0:
+        log.error('eval.collection.wiggle has amplitudes but collection.wiggle_s is 0 -- nothing '
+                  'would be driven. Set a duration or clear the amplitudes.')
+        return False
+    if obs_wig is not None:
+        log.info('OBSERVATION WIGGLE at the seat: %s, for %.1f s per pass, logged at the same '
+                 'decimation. Parameters from %s, so these observations are collected under the '
+                 'same excitation the map was built with.',
+                 obs_wig.describe(), obs_wig_s, _wsrc)
+
     # THE OBSERVATION WIGGLE (urlab/skills/wiggle.py) -- the same excitation wiggle_sampling
     # collects its map under. Absent or all-zero amplitudes means no oscillation and this app
     # behaves exactly as before.

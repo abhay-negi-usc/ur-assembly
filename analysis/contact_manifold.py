@@ -9,6 +9,7 @@ in the two column groups that are frame-invariant w.r.t. the cell:
                           that misalignment, along the part's own axes
 
 Three sources are understood, freely mixed in one build:
+Three sources are understood, freely mixed in one build:
 
   * uncertain_sampling runs (one 34-column CSV per run; docs/uncertain_sampling.md). The manifold
     columns are copied out directly -- the sampler logs the TRUE relative pose (the part is
@@ -24,6 +25,20 @@ Three sources are understood, freely mixed in one build:
     Passing a run folder sweeps its *_observations.csv; trials.csv / summary.csv are read as
     metadata for the rebase, never as samples.
 
+  * wiggle_sampling runs (apps/wiggle_sampling.py; configs/data/wiggle_sampling/<geometry>/
+    run_<stamp>/samples.csv). The pose and wrench columns are the sampler's, so they copy through
+    like a sampling log -- but a wiggle run also logs its TRANSIT, and those rows are not contact
+    at any misalignment. `datum` is the free-space return-to-reference pose 60 mm off the mate in
+    two axes; `approach` and `retract` run from a 25 mm standoff. By default only the contact
+    phases are kept (quiet, wiggle, press, recentre, both tugs); --segments overrides that.
+    Point at a geometry directory to sweep every run under it, or at a single run_<stamp>/.
+    bursts.csv is per-burst metadata and is skipped, like an eval run's trials.csv.
+
+All three sources land in the same 16-column schema (pose incl. quaternion + wrench), so the
+output is a drop-in manifold for the estimator (urlab/skills/manifold.py) and the analysis stack.
+The output path and filename are YOURS to choose via the required --out. Tip: keep the
+*_contact_manifold.csv suffix when the output lands beside its inputs -- directory sweeps skip
+that suffix, which is what keeps rebuilds idempotent.
   * wiggle_sampling runs (apps/wiggle_sampling.py; configs/data/wiggle_sampling/<geometry>/
     run_<stamp>/samples.csv). The pose and wrench columns are the sampler's, so they copy through
     like a sampling log -- but a wiggle run also logs its TRANSIT, and those rows are not contact
@@ -104,6 +119,19 @@ WIGGLE_TRANSIT_SEGMENTS = ('approach', 'retract', 'datum')
 
 # How many rows a file needs before _degenerate_note is willing to call it a dry run. See there.
 _DEGENERATE_MIN_ROWS = 200
+
+# wiggle_sampling: samples.csv carries the sampler's columns PLUS a `segment` label naming which
+# phase of the burst each row came from. bursts.csv is the per-burst summary -- metadata here.
+WIGGLE_META = ('bursts.csv',)
+# The phases where the part is AT a pose and in contact. `approach`/`retract` are transit from a
+# 25 mm standoff and `datum` is the free-space reference pose 60 mm away; none of them is contact
+# at a misalignment, and all of them stretch the manifold's extent enough to distort the kNN
+# distance scaling that the support/OOD reference is computed against.
+WIGGLE_CONTACT_SEGMENTS = ('quiet', 'wiggle', 'press', 'recentre', 'tug_axial', 'tug_lateral')
+WIGGLE_TRANSIT_SEGMENTS = ('approach', 'retract', 'datum')
+
+# How many rows a file needs before _degenerate_note is willing to call it a dry run. See there.
+_DEGENERATE_MIN_ROWS = 200
 _EVAL_OBS_RE = re.compile(r'^trial_(\d+)_(?:attempt_(\d+)|final_insertion)_observations\.csv$')
 
 
@@ -137,11 +165,18 @@ def expand_inputs(patterns):
             # there. Harmless for the flat layouts -- they have no subdirectories to match.
             hits = sorted(set(glob.glob(os.path.join(pat, '*.csv'))
                               + glob.glob(os.path.join(pat, '*', '*.csv'))))
+            # ONE LEVEL DEEPER TOO: a wiggle_sampling geometry directory holds run_<stamp>/
+            # subdirectories rather than CSVs, so a sweep that only looked at *.csv found nothing
+            # there. Harmless for the flat layouts -- they have no subdirectories to match.
+            hits = sorted(set(glob.glob(os.path.join(pat, '*.csv'))
+                              + glob.glob(os.path.join(pat, '*', '*.csv'))))
         elif os.path.isfile(pat):
             hits, swept = [pat], False
         else:
             hits = []
             for h in sorted(glob.glob(pat, recursive=True)):
+                hits.extend(sorted(set(glob.glob(os.path.join(h, '*.csv'))
+                                       + glob.glob(os.path.join(h, '*', '*.csv'))))
                 hits.extend(sorted(set(glob.glob(os.path.join(h, '*.csv'))
                                        + glob.glob(os.path.join(h, '*', '*.csv'))))
                             if os.path.isdir(h) else [h])
@@ -150,6 +185,7 @@ def expand_inputs(patterns):
             for h in hits:
                 if h.endswith(MANIFOLD_SUFFIX):
                     self_ingest.append(h)
+                elif os.path.basename(h) in EVAL_META + WIGGLE_META:
                 elif os.path.basename(h) in EVAL_META + WIGGLE_META:
                     meta.append(h)
                 else:
@@ -161,6 +197,9 @@ def expand_inputs(patterns):
     for h in self_ingest:
         print(f'  (ignoring existing manifold {os.path.basename(h)})', file=sys.stderr)
     for h in meta:
+        why = ('used for the rebase, not ingested' if os.path.basename(h) in EVAL_META
+               else 'per-burst summary, not observation data')
+        print(f'  ({os.path.basename(h)} is run metadata -- {why})', file=sys.stderr)
         why = ('used for the rebase, not ingested' if os.path.basename(h) in EVAL_META
                else 'per-burst summary, not observation data')
         print(f'  ({os.path.basename(h)} is run metadata -- {why})', file=sys.stderr)
@@ -184,9 +223,15 @@ def classify(path):
     if os.path.basename(path) in WIGGLE_META:
         return None, ("a wiggle_sampling run's per-burst summary, not observation data -- pass "
                       'the run DIRECTORY (or the geometry directory above it) instead')
+    if os.path.basename(path) in WIGGLE_META:
+        return None, ("a wiggle_sampling run's per-burst summary, not observation data -- pass "
+                      'the run DIRECTORY (or the geometry directory above it) instead')
     with open(path, newline='') as fh:
         cols = next(csv.reader(fh), None) or []
     if all(c in cols for c in MANIFOLD_COLS):
+        # A wiggle run carries the sampler's columns plus a phase label. Distinguished so the
+        # transit rows can be dropped and so the report says which kind it was.
+        return ('wiggle' if 'segment' in cols else 'sampling'), None
         # A wiggle run carries the sampler's columns plus a phase label. Distinguished so the
         # transit rows can be dropped and so the report says which kind it was.
         return ('wiggle' if 'segment' in cols else 'sampling'), None
@@ -212,6 +257,17 @@ def read_manifold_rows(path, min_force=None, segments=None):
     TWO FILTERS, TWO COUNTS. `n_offseg` is what the segment filter removed and `n_seen` is what
     then reached the force filter, so each rejection can be attributed to the filter that actually
     made it. A single combined figure reads as though the force threshold rejected the transit
+    rows too, which makes the threshold look far more aggressive than it is."""
+def read_manifold_rows(path, min_force=None, segments=None):
+    """(rows, n_seen, n_offseg, note) -- the manifold columns of one sampling or wiggle log.
+
+    `segments`, when given, keeps only rows whose `segment` column is in it -- how a wiggle run's
+    transit and free-space datum rows are left out. It is ignored for logs with no such column,
+    so a plain sampling log reads exactly as before.
+
+    TWO FILTERS, TWO COUNTS. `n_offseg` is what the segment filter removed and `n_seen` is what
+    then reached the force filter, so each rejection can be attributed to the filter that actually
+    made it. A single combined figure reads as though the force threshold rejected the transit
     rows too, which makes the threshold look far more aggressive than it is.
 
     `note` is a human-readable reason when the file is skipped entirely, so the caller can report
@@ -224,7 +280,15 @@ def read_manifold_rows(path, min_force=None, segments=None):
         has_seg = 'segment' in (reader.fieldnames or [])
         keep_seg = set(segments) if (segments and has_seg) else None
         rows, n_seen, n_offseg = [], 0, 0
+            return [], 0, 0, f'missing {len(missing)} column(s), first: {missing[0]}'
+        has_seg = 'segment' in (reader.fieldnames or [])
+        keep_seg = set(segments) if (segments and has_seg) else None
+        rows, n_seen, n_offseg = [], 0, 0
         for rec in reader:
+            if keep_seg is not None and rec.get('segment') not in keep_seg:
+                n_offseg += 1
+                continue
+            n_seen += 1
             if keep_seg is not None and rec.get('segment') not in keep_seg:
                 n_offseg += 1
                 continue
@@ -237,6 +301,45 @@ def read_manifold_rows(path, min_force=None, segments=None):
                 if f < min_force:
                     continue
             rows.append(rec)
+        note = _degenerate_note(rows)
+        if note:
+            return [], n_seen, n_offseg, note
+        return rows, n_seen, n_offseg, None
+
+
+def _degenerate_note(rows):
+    """A reason to reject a whole file whose rows cannot be real contact, or None.
+
+    A DRY RUN produces a log that is structurally perfect and physically meaningless: with no
+    robot, arm.fk() returns one fixed placeholder pose for every cycle and the F/T reads zeros. The
+    file then has the right columns, the right row count and a valid quaternion in every row -- and
+    would drop tens of thousands of identical, force-free samples into a manifold, where they are
+    not merely useless but actively harmful: they pull the kNN scaling and sit as a dense fake
+    cluster the estimator can match against.
+
+    Two signatures, both of which a real log fails immediately: the pose never moves, or the wrench
+    is identically zero throughout.
+
+    ONLY APPLIED TO A SUBSTANTIAL FILE. "The pose never moves" is a claim about a distribution, and
+    a handful of rows cannot support it -- a short capture, a hand-built fixture or a single held
+    station can legitimately repeat one pose, and rejecting those would turn a guard against a
+    silent hazard into a silent hazard of its own. A dry run writes thousands of rows, so the floor
+    costs nothing on the case this exists to catch."""
+    if len(rows) < _DEGENERATE_MIN_ROWS:
+        return None
+    try:
+        xs = {rec['connector_target_x_mm'] for rec in rows}
+        zs = {rec['connector_target_z_mm'] for rec in rows}
+        if len(xs) == 1 and len(zs) == 1:
+            return (f'every one of {len(rows)} rows has the same pose '
+                    f'(x={next(iter(xs))}, z={next(iter(zs))}) -- this is a DRY-RUN log, where '
+                    'arm.fk() returns a fixed placeholder; it is not contact data')
+        if all(float(rec[c]) == 0.0 for rec in rows for c in _FORCE_COLS):
+            return (f'the wrench is identically zero in all {len(rows)} rows -- a DRY-RUN log '
+                    '(no F/T sensor), not contact data')
+    except (KeyError, TypeError, ValueError):
+        return None                                # malformed rows are the caller's problem
+    return None
         note = _degenerate_note(rows)
         if note:
             return [], n_seen, n_offseg, note
@@ -347,10 +450,16 @@ def read_eval_rows(path, truth, min_force=None):
         return None, 0, 0, (
             'does not match trial_*_{attempt_*|final_insertion}_observations.csv -- '
             'cannot pair it with a trials.csv row for the rebase')
+        return None, 0, 0, (
+            'does not match trial_*_{attempt_*|final_insertion}_observations.csv -- '
+            'cannot pair it with a trials.csv row for the rebase')
     if truth is None:
+        return None, 0, 0, 'no trials.csv beside it -- believed-frame rows cannot be rebased'
         return None, 0, 0, 'no trials.csv beside it -- believed-frame rows cannot be rebased'
     err6 = truth.get(key)
     if err6 is None:
+        return None, 0, 0, (f'trials.csv has no row for trial {key[0]} attempt {key[1]} '
+                            '(run aborted mid-attempt?)')
         return None, 0, 0, (f'trials.csv has no row for trial {key[0]} attempt {key[1]} '
                             '(run aborted mid-attempt?)')
     rows, n_read = [], 0
@@ -365,6 +474,7 @@ def read_eval_rows(path, truth, min_force=None):
     arr = np.asarray(rows, dtype=float).reshape(-1, 12)
     if min_force is not None and len(arr):
         arr = arr[np.linalg.norm(arr[:, 6:9], axis=1) >= float(min_force)]
+    return _rebase_to_truth(arr, err6), n_read, 0, None
     return _rebase_to_truth(arr, err6), n_read, 0, None
 
 
@@ -397,6 +507,10 @@ def build(paths, out_path, min_force=None, with_source=False, segments=None,
             if kind in ('sampling', 'wiggle'):
                 recs, n_read, n_offseg, note = read_manifold_rows(
                     path, min_force, segments if kind == 'wiggle' else None)
+            out_rows, n_read, n_offseg = [], 0, 0
+            if kind in ('sampling', 'wiggle'):
+                recs, n_read, n_offseg, note = read_manifold_rows(
+                    path, min_force, segments if kind == 'wiggle' else None)
                 for rec in recs:
                     lead = [base, rec.get('trial', '')] if with_source else []
                     out_rows.append(lead + [rec[c] for c in MANIFOLD_COLS])
@@ -404,6 +518,7 @@ def build(paths, out_path, min_force=None, with_source=False, segments=None,
                 run_dir = os.path.dirname(os.path.abspath(path))
                 if run_dir not in truths:
                     truths[run_dir] = load_truth_table(run_dir)
+                arr, n_read, _, note = read_eval_rows(path, truths[run_dir], min_force)
                 arr, n_read, _, note = read_eval_rows(path, truths[run_dir], min_force)
                 if not note:
                     trial_id = '{}/{}'.format(*_eval_key(base))
@@ -498,6 +613,8 @@ def main():
                'in the connector frame). estimator_eval rows are rebased into the TRUE frame via '
                "their run's trials.csv before landing in those columns.")
     ap.add_argument('inputs', nargs='+',
+                    help='sampling CSVs, estimator_eval run folders, wiggle_sampling geometry or '
+                         'run directories, or globs')
                     help='sampling CSVs, estimator_eval run folders, wiggle_sampling geometry or '
                          'run directories, or globs')
     ap.add_argument('--out', required=True, metavar='PATH',

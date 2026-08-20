@@ -324,25 +324,6 @@ assembly:
     # Distinct from final_insertion.preload_mm, which belongs to the estimate-mode commit.
     preload_mm: 25.0
 
-    # OSCILLATION superimposed on the trajectory, in the connector-w.r.t.-target frame. All
-    # zero = a direct insertion. Frequencies are required wherever an amplitude is non-zero, and
-    # should be MUTUALLY PRIME for the same reason as the wiggle block: a rational ratio retraces
-    # one closed path instead of sweeping the rectangle.
-    # MIGRATED from the retired assembly.wiggle block. All zero = a direct insertion.
-    amplitude:
-      x_mm: 0.0                  # x is the push direction -- the trajectory owns it
-      y_mm: 0.0
-      z_mm: 2.5
-      roll_deg: 0.0
-      pitch_deg: 1.0
-      yaw_deg: 0.0
-    frequency_hz:
-      x_mm: 0.0
-      y_mm: 0.0
-      z_mm: 0.7
-      roll_deg: 0.0
-      pitch_deg: 1.1
-      yaw_deg: 0.0
     # Reference rebuild rate. Must be >= 4x the highest active frequency or the sampled sine
     # aliases into a slower one -- validated pre-motion.
     sample_rate_hz: 25.0
@@ -350,8 +331,14 @@ assembly:
     # OPTIONAL cap on the OSCILLATION's own speed (the path has speed_mm_s; the oscillation adds
     # amplitude x 2*pi*f on top, which speed_mm_s does not bound). Derives a time dilation of the
     # oscillation clock alone, so amplitude and the frequency RATIO survive it. null = uncapped.
-    max_oscillation_speed_mm_s: null
-    max_oscillation_rotation_deg_s: null
+    # AXES, AMPLITUDES, FREQUENCIES, PHASES and the taper are read from
+    # configs/wiggle_sampling.yaml at run time -- the one place they are tuned. engage keeping its
+    # own copy is how it and the sampler would end up driving different excitations while both
+    # calling it "the wiggle", which is precisely what made their data incomparable.
+    wiggle_from: wiggle_sampling.yaml
+    # wiggle:                      # uncomment to override one key for this app only
+    #   taper_s: 0.5
+
 
     # ---- TERMINATION -------------------------------------------------------------------------
     # AXIAL force limit: the component along the CONNECTOR'S +X, i.e. the insertion reaction.
@@ -572,6 +559,14 @@ assembly:
   # replaces the estimated in-hand belief, which is what makes the screw axis the target's +X
   # exactly instead of inheriting the accumulated in-hand error. The log prints how far the belief
   # moved -- a large shift there is a useful read on how wrong the estimate had been.
+
+    # amplitude / frequency_hz / phase_deg / taper_s and the speed caps are NOT set here on
+    # purpose -- they come from configs/wiggle_sampling.yaml, where they were tuned against real
+    # hardware. Setting any of them here would silently override the tuned value for this app
+    # only, which is the drift this arrangement exists to prevent. Add one back deliberately, as
+    # a `wiggle:` sub-block, if a one-off override is really wanted.
+
+
   cable_clocking:
     enabled: true             # OPTIONAL -- false ends the run ENGAGED
     rotation_deg: 120.0            # + about the CONNECTOR's +X

@@ -102,8 +102,8 @@ targets:
   # Prefer a FRESH monitor reading when there is bench time -- this is arithmetic, not a
   # measurement.  (was xyz_mm [+108.52, +1013.93, -141.11])
   bnc_connector_finger_holder:
-    xyz_mm:  [99.19, 1103.38, -138.45]
-    rpy_deg: [-47.93, -0.66, 94.81]
+    xyz_mm:  [100.16, 1100.77, -138.42]
+    rpy_deg: [-47.81, -0.10, 94.77]
 
   # bnc_connector_in_fingerpads at the mate -- the target bnc_assembly drives to.
   #

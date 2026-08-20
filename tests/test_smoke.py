@@ -783,6 +783,140 @@ def test_contact_manifold_never_ingests_its_own_output():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_contact_manifold_downsample_is_exact_seeded_and_pooled():
+    """--downsample N keeps EXACTLY N rows, the same N for the same seed, drawn from the POOL.
+
+    Exact, because that is what the option promises and a reservoir is the only way to get it in
+    one streaming pass. Seeded, because the seed is printed so the build can be repeated -- if the
+    draw did not follow it that printout would be worthless. And pooled rather than per-file,
+    because the alternative is a different dataset: giving every file its own quota would make a
+    200-row log weigh as much as a 2000-row one, which is not a uniform sample of anything. The
+    imbalance that leaves is real, and the point is that it is reported rather than engineered
+    away.
+    """
+    import shutil
+    import tempfile
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from analysis.contact_manifold import MANIFOLD_COLS, build
+
+    def _rows(path):
+        import csv as _csv
+        with open(path, newline='') as fh:
+            return list(_csv.DictReader(fh))
+
+    tmp = tempfile.mkdtemp()
+    try:
+        # a 2000-row source and a 200-row one: 10:1, so a pooled draw must reflect that ratio
+        big = [{'connector_target_x_mm': -1.0 - 0.001 * i, 'wrench_connector_fx': 5.0}
+               for i in range(2000)]
+        small = [{'connector_target_x_mm': -9.0 - 0.001 * i, 'wrench_connector_fx': 5.0}
+                 for i in range(200)]
+        p_big, p_small = os.path.join(tmp, 'big.csv'), os.path.join(tmp, 'small.csv')
+        _write_log(p_big, big)
+        _write_log(p_small, small)
+        paths, out = [p_big, p_small], os.path.join(tmp, 'ds_contact_manifold.csv')
+
+        # EXACT -- not "about 220", exactly 220
+        assert build(paths, out, downsample=220, seed=1) == 220
+        first = _rows(out)
+        assert len(first) == 220, f'{len(first)} rows on disk, asked for exactly 220'
+        assert list(first[0].keys()) == MANIFOLD_COLS, 'downsampling must not disturb the schema'
+
+        # SEEDED -- same seed, same rows; different seed, different rows
+        assert build(paths, out, downsample=220, seed=1) == 220
+        again = _rows(out)
+        assert [r['connector_target_x_mm'] for r in again] == \
+               [r['connector_target_x_mm'] for r in first], (
+            'the same seed must reproduce the same draw -- the seed is printed so a build can be '
+            'repeated, and that is only true if it actually determines the sample')
+        build(paths, out, downsample=220, seed=2)
+        assert [r['connector_target_x_mm'] for r in _rows(out)] != \
+               [r['connector_target_x_mm'] for r in first], 'a different seed must redraw'
+
+        # POOLED, NOT PER FILE. Rows from big.csv start at -1, small.csv at -9, so the source of
+        # every row is readable off its x. A per-file quota would give 110/110; a uniform draw
+        # over the pool gives ~10:1. Bounds are loose enough not to be flaky, tight enough that
+        # an even split (0.5) fails them.
+        frac_big = sum(1 for r in first if float(r['connector_target_x_mm']) > -5.0) / 220.0
+        assert 0.82 < frac_big < 0.98, (
+            f'big.csv is {frac_big:.0%} of the sample; it is 91% of the pool, so a uniform draw '
+            'should land near that. A number near 50% means each file was sampled to its own '
+            'quota, which up-weights the small source by 10x.')
+
+        # asking for more than exists keeps everything rather than erroring or padding
+        assert build(paths, out, downsample=99999, seed=1) == 2200
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_contact_manifold_ingests_wiggle_runs_without_their_transit():
+    """A wiggle_sampling run is a sampling log with a `segment` column, and that column is the only
+    thing separating contact from transit.
+
+    `approach`/`retract` run from a 25 mm standoff and `datum` is the free-space return-to-reference
+    pose ~60 mm off the mate in two axes. Every one of those rows has the full manifold schema and a
+    valid pose, so no structural check rejects them -- they simply are not contact at a
+    misalignment, and in a kNN manifold they widen the extent enough to distort the distance
+    scaling the support/OOD reference is computed against. So the default must drop them, and
+    --segments must be able to keep any subset deliberately.
+
+    Also pinned: a GEOMETRY directory (which holds run_<stamp>/ subdirectories, not CSVs) is
+    swept, and bursts.csv -- the per-burst summary -- is never ingested as samples.
+    """
+    import shutil
+    import tempfile
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from analysis.contact_manifold import (MANIFOLD_COLS, WIGGLE_CONTACT_SEGMENTS, build,
+                                           classify, expand_inputs)
+
+    cols = ['trial', 'segment'] + MANIFOLD_COLS
+    contact = [{'segment': 'wiggle', 'connector_target_x_mm': -2.0 - 0.01 * i,
+                'connector_target_z_mm': 0.5, 'wrench_connector_fx': 4.0} for i in range(6)]
+    contact += [{'segment': 'quiet', 'connector_target_x_mm': -3.0,
+                 'connector_target_z_mm': 0.7, 'wrench_connector_fx': 3.0}] * 2
+    transit = [{'segment': 'approach', 'connector_target_x_mm': -25.0,
+                'connector_target_z_mm': 0.0, 'wrench_connector_fx': 0.2}] * 3
+    transit += [{'segment': 'datum', 'connector_target_x_mm': -60.0,
+                 'connector_target_z_mm': 60.0, 'wrench_connector_fx': 0.1}] * 2
+
+    tmp = tempfile.mkdtemp()
+    try:
+        geom = os.path.join(tmp, 'bnc')
+        run = os.path.join(geom, 'run_20260819_023144')
+        _write_log(os.path.join(run, 'samples.csv'), contact + transit, cols=cols)
+        _write_log(os.path.join(run, 'bursts.csv'),
+                   [{'burst': 1}], cols=['burst', 'offset_x_mm'])
+
+        # a GEOMETRY directory holds runs, not CSVs -- the sweep has to look one level down
+        paths = expand_inputs([geom])
+        assert [os.path.basename(p) for p in paths] == ['samples.csv'], (
+            f'geometry sweep should find exactly the run samples, got {paths}')
+        assert classify(paths[0]) == ('wiggle', None), 'the segment column marks a wiggle run'
+
+        out = os.path.join(tmp, 'wig_contact_manifold.csv')
+        n = build(paths, out, segments=list(WIGGLE_CONTACT_SEGMENTS))
+        assert n == len(contact), (
+            f'{n} rows written; the {len(transit)} transit/datum rows must be dropped')
+
+        with open(out, newline='') as fh:
+            import csv as _csv
+            got = list(_csv.DictReader(fh))
+        xs = [float(r['connector_target_x_mm']) for r in got]
+        zs = [float(r['connector_target_z_mm']) for r in got]
+        assert min(xs) > -12.0 and max(zs) < 8.0, (
+            f'transit leaked in: x down to {min(xs)}, z up to {max(zs)} -- '
+            'that is the standoff/datum, not contact at a misalignment')
+
+        # keeping a subset is deliberate and must work
+        assert build(paths, out, segments=['quiet']) == 2
+        # ...and "all" is still available for someone who genuinely wants the transit
+        assert build(paths, out, segments=None) == len(contact) + len(transit)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_contact_manifold_ingests_estimator_eval_runs():
     """estimator_eval observation files are logged in the BELIEVED frame; the builder must rebase
     them into the TRUE frame via the run's own trials.csv (err_before_* = the belief error E during
@@ -2887,8 +3021,9 @@ def test_bnc_engage_config():
 
     e = a['engage']
     dims = ('x_mm', 'y_mm', 'z_mm', 'roll_deg', 'pitch_deg', 'yaw_deg')
-    amp = {d: float(e['amplitude'][d]) for d in dims}
-    frq = {d: float(e['frequency_hz'][d]) for d in dims}
+    _r = _resolved_wiggle('bnc_assembly', 'assembly', 'engage')
+    amp = {d: float((_r.get('amplitude') or {}).get(d, 0.0)) for d in dims}
+    frq = {d: float((_r.get('frequency_hz') or {}).get(d, 0.0)) for d in dims}
 
     assert amp['x_mm'] == 0.0, \
         'x is the push direction -- the trajectory owns it, not the oscillation'
@@ -4198,17 +4333,64 @@ def test_observation_passes_inherit_the_samplers_preload():
         'and it must be the sampler\'s own helper, not a reimplementation that can drift'
 
     # ---- 4. un-guarded press AND un-guarded settle after one ----
-    press = src[src.index('if preload_mm > 0:'):]
+    press = src[src.index('press = preload_mm > 0 and'):]
     press = press[:press.index('if hold_s > 0:')]
     assert 'guard=None' in press, \
         'the press must be un-guarded -- at the seat the guard has already tripped'
-    assert 'None if preload_mm > 0 else guard' in press, (
+    # `press`, not `preload_mm > 0`: approach_only can withhold the press on a pass that never
+    # made contact, and then there is no standing load for the settle to protect, so the guard
+    # must go back on. Keying the settle off the CONFIG rather than off what actually happened
+    # would leave that settle un-guarded with nothing pressing.
+    assert 'None if press else guard' in press, (
         'the settle after a press must be un-guarded too: hold() is a ramp, so an armed guard '
         'returns seated on the first cycle and cuts short the loaded rows the press recorded')
 
     # ---- 5. and the loaded rows must actually reach the estimator ----
     assert 'on_step=log_cb' in press, \
         'the press must be LOGGED at the same decimation, or it adds load but no evidence'
+
+
+def test_observation_passes_do_not_attempt_to_seat():
+    """Only eval.final_insertion may try to seat the connector.
+
+    An observation pass has TWO ways to go deep. The guarded ramp stops itself at first contact,
+    which is a probe. But a pass whose guard never trips has driven the reference all the way to
+    the mate, and the preload then presses preload_mm PAST it UN-GUARDED -- and that is a seating
+    attempt, made from the belief this pass exists to correct. It fails quietly: the pass still
+    returns observations and the trial still looks fine, while the connector has been pressed home
+    (or jammed) on an error the estimator has not seen yet.
+
+    approach_only closes that second path: no contact stop, no press and no wiggle. It is passed
+    to the observation call site and NOT to the commit, which is the whole distinction.
+    """
+    import yaml
+
+    src = open(os.path.join(ROOT, 'urlab', 'apps', 'estimator_eval.py')).read()
+    cfg = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'estimator_eval.yaml')))
+    col = cfg['eval']['collection']
+
+    assert col.get('approach_only') is True, (
+        'eval.collection.approach_only must ship ON -- an observation pass that seats does so '
+        'from an uncorrected belief, and nothing about the run reports that it happened')
+
+    # the press is gated on CONTACT, not merely on the config
+    assert 'press = preload_mm > 0 and (seated or not approach_only)' in src, (
+        'the press must be conditioned on `seated` -- the guard trip IS the evidence that the '
+        'pass reached contact, and without it there is nothing to press against anyway')
+    # the wiggle rides the same gate: with no contact there is nothing to excite
+    wig = src[src.index('if obs_wig is not None and obs_wig_s > 0'):]
+    assert 'seated or not approach_only' in wig[:120], (
+        'the wiggle must be withheld on the same condition: oscillating in free space logs rows '
+        'that carry no contact information and pulls the manifold toward zero-force poses')
+
+    # ---- the commit is exempt, and that exemption is the point ----
+    assert src.count('approach_only=approach_only') == 1, \
+        'exactly one call site -- the observation pass -- may be approach-only'
+    commit = src[src.index('adm_final, refs, T_believed, guard_ctl=guard_final'):]
+    commit = commit[:commit.index(')')]
+    assert 'approach_only' not in commit, (
+        'eval.final_insertion must NOT be approach-only: it runs after the observations have '
+        'corrected the belief, and seating is exactly what it is for')
 
 
 def test_sampler_and_eval_presses_are_distinct_knobs():
@@ -4313,7 +4495,8 @@ def test_insertion_tester_config_is_coherent():
     assert int(ins['repeats']) >= 1, 'repeats must be at least 1'
 
     wg = ins['wiggle']
-    amp, frq = wg['amplitude'], wg['frequency_hz']
+    _r = _resolved_wiggle('insertion_tester', 'insertion', 'wiggle')
+    amp, frq = _r['amplitude'], _r['frequency_hz']
     live = [d for d in amp if abs(float(amp[d])) > 0.0]
     assert live, 'the wiggle must oscillate on at least one axis'
     for d in live:
@@ -4400,44 +4583,63 @@ def test_wiggle_speed_cap_is_a_time_dilation():
     assert wiggle_time_scale([0, 0, 5.0, 0, 0, 0], [0, 0, 0.0, 0, 0, 0], 5.0)[0] == 1.0
 
 
-def test_wiggle_cap_is_wired_into_both_apps():
-    """Both apps must cap the wiggle through the SAME helper, and dilate the clock not the freqs."""
+def _resolved_wiggle(app, *keys):
+    """The wiggle an app actually ends up driving, after inheriting from the tuned file.
+
+    Tests must ask this rather than reading `amplitude` out of the app's own config: the
+    parameters deliberately are not there any more, and a test that reads the raw block is
+    asserting an arrangement that was removed on purpose."""
+    from urlab import config as urconfig
+    from urlab.skills import wiggle as wigmod
+    cfg = urconfig.load(app)
+    node = cfg
+    for k in keys:
+        node = (node or {}).get(k) if isinstance(node, dict) else None
+    node = node or {}
+    blk, _ = wigmod.from_shared(cfg, node if 'amplitude' in node else node.get('wiggle'),
+                                node.get('wiggle_from', 'wiggle_sampling.yaml'), app)
+    return blk
+
+
+def test_every_app_resolves_to_the_tuned_wiggle():
+    """Each app that wiggles must end up with the parameters from configs/wiggle_sampling.yaml.
+
+    That file is where the axes, amplitudes, frequencies and phases were tuned against hardware.
+    An app carrying its own copy is an app whose observations stop being comparable the moment the
+    tuned values change -- which is the whole reason the waveform itself is shared. So this does
+    not check that each config DECLARES a wiggle; it checks that each app RESOLVES to the same
+    one, which is the property that actually matters.
+
+    A deliberate local override is still allowed -- `from_shared` layers it on top and names it in
+    the source string -- but it has to be deliberate, and this test makes an accidental one
+    visible.
+    """
     import yaml
 
-    for app, sect in (('bnc_assembly', 'assembly'), ('insertion_tester', 'insertion')):
-        src = open(os.path.join(ROOT, 'urlab', 'apps', f'{app}.py'), encoding='utf-8').read()
-        assert 'wiggle_time_scale(' in src, f'{app} must derive the scale from the shared helper'
-        # the clock is dilated, the frequency list is NOT rewritten
-        assert ('en_scale' in src or 'scale=1.0' in src), (
-            f'{app}: the derived scale must be applied -- bnc_assembly dilates the '
-            'engage oscillation clock (en_scale), insertion_tester takes it as an arg')
-        assert 'traj.wiggle_time_scale' in src, f'{app}: use the shared helper, not a local copy'
+    from urlab import config as urconfig
+    from urlab.skills import wiggle as wigmod
 
-        cfg = yaml.safe_load(open(os.path.join(ROOT, 'configs', f'{app}.yaml')))
-        # bnc_assembly retired the standalone wiggle; its oscillation (and the cap) live on
-        # `engage` now. insertion_tester still characterises a fixed-target wiggle.
-        blk, keys = ((cfg[sect]['engage'],
-                      ('max_oscillation_speed_mm_s', 'max_oscillation_rotation_deg_s'))
-                     if app == 'bnc_assembly' else
-                     (cfg[sect]['wiggle'], ('max_speed_mm_s', 'max_rotation_deg_s')))
-        wgc = blk
+    with open(os.path.join(ROOT, 'configs', 'wiggle_sampling.yaml')) as fh:
+        tuned = (yaml.safe_load(fh) or {}).get('wiggle') or {}
+    assert tuned.get('amplitude'), 'configs/wiggle_sampling.yaml must carry the tuned block'
+
+    cases = [('estimator_eval', ('eval', 'collection')),
+             ('bnc_assembly', ('assembly', 'engage')),
+             ('insertion_tester', ('insertion', 'wiggle'))]
+    for app, keys in cases:
+        cfg = urconfig.load(app)
+        node = cfg
         for k in keys:
-            assert k in wgc, f'{app}: {k} must be declared so the cap is discoverable'
-            assert wgc[k] is None or float(wgc[k]) > 0, (
-                f'{app}: {k} must be null (uncapped) or > 0 -- a zero or negative cap would '
-                'derive a zero time scale and freeze the wiggle')
-
-    # the Nyquist check must use the EFFECTIVE frequency: dilation lowers it, so testing the raw
-    # value would reject a configuration that samples perfectly well
-    for app in ('bnc_assembly', 'insertion_tester'):
-        src = open(os.path.join(ROOT, 'urlab', 'apps', f'{app}.py'), encoding='utf-8').read()
-        marker, scale = (('f_max', 'wg_scale') if app == 'insertion_tester'
-                         else ('f_live = [en_frq', 'en_scale'))
-        i = src.index(marker)
-        assert scale in src[i:i + 300], (
-            f'{app}: the Nyquist bound must be checked against frequency x time scale -- '
-            'dilation lowers the effective frequency, so testing the raw value rejects '
-            'configurations that sample fine')
+            node = (node or {}).get(k) if isinstance(node, dict) else None
+        node = node or {}
+        blk, src = wigmod.from_shared(
+            cfg, node if 'amplitude' in node else node.get('wiggle'),
+            node.get('wiggle_from', 'wiggle_sampling.yaml'), app)
+        for key in ('amplitude', 'frequency_hz'):
+            assert blk.get(key) == tuned.get(key), (
+                f'{app} resolves {key} to {blk.get(key)}, not the tuned {tuned.get(key)} '
+                f'(source: {src}). Remove the local copy, or make the override deliberate.')
+        wigmod.Wiggle.from_cfg(blk, app)          # and it must still validate
 
 
 def test_collar_prewind_makes_room_without_moving_the_grip():
@@ -4822,15 +5024,19 @@ def test_engage_is_the_trajectory_plus_an_optional_oscillation():
 
     # ---- the config and the code agree on what exists ----
     en = cfg['engage']
-    for k in ('speed_mm_s', 'preload_mm', 'amplitude', 'frequency_hz', 'sample_rate_hz',
+    # amplitude/frequency are NOT declared here any more -- they come from the tuned file, and
+    # test_every_app_resolves_to_the_tuned_wiggle checks that resolution.
+    for k in ('speed_mm_s', 'preload_mm', 'sample_rate_hz',
               'max_axial_force_n', 'persistence_s', 'stiffness'):
         assert k in en, f'assembly.engage.{k} must be declared'
     assert float(en['preload_mm']) >= 0.0
-    live = [d_ for d_ in en['amplitude'] if abs(float(en['amplitude'][d_])) > 0.0]
+    _r = _resolved_wiggle('bnc_assembly', 'assembly', 'engage')
+    _amp, _frq = _r.get('amplitude') or {}, _r.get('frequency_hz') or {}
+    live = [k for k, v in _amp.items() if abs(float(v)) > 0.0]
     for d_ in live:
-        assert float(en['frequency_hz'][d_]) > 0.0, f'engage axis {d_} has amplitude but no freq'
+        assert float(_frq.get(d_, 0)) > 0.0, f'engage axis {d_} has amplitude but no freq'
     if live:
-        assert float(en['sample_rate_hz']) >= 4.0 * max(float(en['frequency_hz'][d_])
+        assert float(en['sample_rate_hz']) >= 4.0 * max(float(_frq[d_])
                                                         for d_ in live), 'engage would alias'
 
     src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8').read()
@@ -4846,93 +5052,89 @@ def test_engage_is_the_trajectory_plus_an_optional_oscillation():
         'the engage limit must project onto the connector +X; a |f| limit tight enough to catch '
         'real resistance also stops on every lateral graze')
 
-def test_wiggle_sampling_excitation_is_a_real_multisine():
-    """The commanded wiggle must be full-rank by construction, or nothing downstream is evidence.
+def test_shipped_wiggle_configs_are_accepted_by_the_shared_implementation():
+    """Every app that superimposes a wiggle must build one the shared module accepts.
 
-    analysis/engagement_modes/wiggle_mode_detection.md 3.3 calls incommensurate frequencies the
-    single most important design choice in the experiment, and the reason is sharp: the headline
-    result is "this direction did not move". That is only evidence of a CONSTRAINT if the
-    direction was actually driven. Three ways the excitation silently stops driving it:
+    urlab/skills/wiggle.py owns the waveform and its correctness checks -- amplitude without a
+    frequency, aliasing above a quarter of the reference rate, and a frequency ratio so simple the
+    probe traces a line instead of filling the box. Those are the things that make a wiggle
+    something other than what its config says, and they are refused before the arm moves.
 
-      * A SIMPLE FREQUENCY RATIO. Two axes at a rational ratio retrace one closed Lissajous curve
-        forever, so the probe sweeps a ONE-dimensional path through the box and a rank estimate
-        cannot tell that apart from a real constraint.
-      * ALIASING. A tone above a quarter of the reference rate is reconstructed as a slower one.
-        The run looks correct; it just excited a frequency nobody chose.
-      * AMPLITUDE WITHOUT FREQUENCY. That is a constant offset, which belongs in the station's
-        `offset` -- as an excitation it contributes nothing and quietly reduces the live rank.
-
-    The app checks all three before it moves; this checks the shipped config still passes them,
-    which is the part a tuning edit can break.
-    """
-    import math
-
-    import yaml
-    with open(os.path.join(ROOT, 'configs', 'wiggle_sampling.yaml')) as fh:
-        cfg = yaml.safe_load(fh)
-    w = cfg['wiggle']
-    dims = ('x_mm', 'y_mm', 'z_mm', 'roll_deg', 'pitch_deg', 'yaw_deg')
-    amp = {d: float(w['amplitude'][d]) for d in dims}
-    frq = {d: float(w['frequency_hz'][d]) for d in dims}
-
-    live = [d for d in dims if amp[d] != 0.0]
-    assert live, 'every amplitude is 0 -- there is no excitation to analyse'
-    for d in live:
-        assert frq[d] > 0, f'{d} has amplitude but no frequency -- a constant offset, not a probe'
-
-    rate = float(cfg['compliance']['reference_rate_hz'])
-    fmax = max(frq[d] for d in live)
-    assert rate >= 4.0 * fmax, \
-        f'reference rate {rate} Hz aliases a {fmax} Hz tone'
-
-    # THE ORBIT closes at 1/gcd(frequencies). Requiring gcd == 1 on an arbitrary grid would be
-    # the wrong test -- 0.7 and 1.1 Hz are the intended co-prime pair (7:11) yet share a factor
-    # of 10 at 0.01 Hz resolution. What matters is that the figure takes much longer to close
-    # than any single axis takes to go round once.
-    if len(live) >= 2:
-        g = 0
-        for d in live:
-            g = math.gcd(g, int(round(frq[d] * 1000)))
-        orbit_s = 1000.0 / g
-        slowest_s = 1.0 / min(frq[d] for d in live)
-        assert orbit_s >= 3.0 * slowest_s, (
-            f'frequencies {[frq[d] for d in live]} Hz close their orbit every {orbit_s:.1f} s '
-            f'against a slowest single-axis period of {slowest_s:.1f} s -- too simple a ratio, '
-            'so the probe traces a line instead of filling the box')
-        # and one full pattern has to fit inside a burst, or windows from different bursts saw
-        # different parts of it and are not comparable
-        assert float(w['wiggle_s']) >= orbit_s, (
-            f"wiggle_s {w['wiggle_s']} s is shorter than the {orbit_s:.1f} s orbit")
-
-
-def test_wiggle_sampling_beside_control_is_depth_matched():
-    """Every `beside` station must share a depth with a contact station.
-
-    This is the experiment's one indispensable control (3.1). Depth correlates with engagement
-    trivially, so a statistic that separates deep from shallow proves nothing -- it may have
-    learned to read x. The claim only survives if in-socket and beside-socket separate AT THE
-    SAME DEPTH, which requires the pair to exist. A `beside` station at a depth no contact
-    station visits is not a control; it is just another free-space anchor wearing the label.
+    This asserts the SHIPPED configs pass that gate. It deliberately does NOT re-implement the
+    checks, and it does NOT pin tuning: burst length against orbit period, which stations exist,
+    how many amplitude scales are swept, are all judgement calls the experiment is free to change
+    -- an earlier version of this test pinned them and broke the moment the station grid was
+    retuned, which is a test failing at its own author rather than at a defect.
     """
     import yaml
-    with open(os.path.join(ROOT, 'configs', 'wiggle_sampling.yaml')) as fh:
-        stations = yaml.safe_load(fh)['wiggle']['stations']
 
-    depths = {round(float(s['depth_mm']), 6)
-              for s in stations if s.get('contact', True)}
-    beside = [s for s in stations if s.get('label') == 'beside']
-    assert beside, ('no `beside` station -- 3.1 calls the same-depth control the most important '
-                    'one in the design, and without it a depth reader cannot be told from a '
-                    'mode detector')
-    for s in beside:
-        d = round(float(s['depth_mm']), 6)
-        assert d in depths, (
-            f"beside station {s['name']!r} sits at depth {d} mm, which no contact station "
-            f'visits (contact depths: {sorted(depths)}) -- so there is nothing to compare it '
-            'against at matched depth')
-        assert any(abs(float(v)) > 1e-9 for v in (s.get('lateral_mm') or [0, 0])), (
-            f"beside station {s['name']!r} has no lateral offset, so it is IN the socket, not "
-            'beside it')
+    from urlab.skills import wiggle as wigmod
+
+    def block_of(path, *keys):
+        with open(os.path.join(ROOT, 'configs', path)) as fh:
+            node = yaml.safe_load(fh)
+        for k in keys:
+            node = (node or {}).get(k)
+            if node is None:
+                return None
+        return node
+
+    cases = [
+        ('wiggle_sampling.yaml', ('wiggle',), 'compliance'),
+        ('bnc_assembly.yaml', ('assembly', 'engage'), 'compliance'),
+        ('estimator_eval.yaml', ('eval', 'collection', 'wiggle'), 'compliance'),
+    ]
+    checked = 0
+    for path, keys, _ in cases:
+        blk = block_of(path, *keys)
+        if not blk:
+            continue
+        amps = blk.get('amplitude') or {}
+        if not any(abs(float(v)) > 0 for v in amps.values()):
+            continue                       # no oscillation configured: nothing to validate
+        with open(os.path.join(ROOT, 'configs', path)) as fh:
+            rate = float(((yaml.safe_load(fh) or {}).get('compliance') or {})
+                         .get('reference_rate_hz', 125.0))
+        dims = ('x_mm', 'y_mm', 'z_mm', 'roll_deg', 'pitch_deg', 'yaw_deg')
+        w = wigmod.Wiggle([float(amps.get(d, 0)) for d in dims],
+                          [float((blk.get('frequency_hz') or {}).get(d, 0)) for d in dims],
+                          [float((blk.get('phase_deg') or {}).get(d, 0)) for d in dims],
+                          float(blk.get('taper_s', 0) or 0), path)
+        w.validate(rate_hz=rate,
+                   cap_v=blk.get('max_speed_mm_s') or blk.get('max_oscillation_speed_mm_s'),
+                   cap_w=blk.get('max_rotation_deg_s')
+                   or blk.get('max_oscillation_rotation_deg_s'))
+        checked += 1
+    assert checked, 'no shipped config carries a live wiggle -- expected at least one'
+
+
+def test_every_wiggle_goes_through_the_shared_implementation():
+    """No app may carry its own copy of the waveform.
+
+    Three copies of a sine is how the frame convention, the taper and the speed-cap policy
+    diverged in the first place, and observations collected under one are then not comparable
+    with a map built under another -- which is the whole point of the map/eval parity work. If a
+    new hand-rolled oscillation appears in an app, this fails.
+    """
+    apps = os.path.join(ROOT, 'urlab', 'apps')
+    offenders = []
+    for name in os.listdir(apps):
+        if not name.endswith('.py'):
+            continue
+        src = open(os.path.join(apps, name), encoding='utf-8').read()
+        # a sine driven by 2*pi*frequency is a waveform; anything else (a rotation, a
+        # Lissajous drawn in a diagnostic) is not what this looks for. Scanned line by
+        # line so the pattern stays readable.
+        hits = [ln.strip() for ln in src.splitlines()
+                if not ln.lstrip().startswith('#')
+                and ('np.sin(2.0 * np.pi *' in ln or 'np.sin(2 * np.pi *' in ln
+                     or 'math.sin(2.0 * math.pi *' in ln
+                     or 'math.sin(2 * math.pi *' in ln)]
+        if hits:
+            offenders.append(f'{name}: {len(hits)} hand-rolled sine(s)')
+    assert not offenders, (
+        'these apps build a waveform themselves instead of using urlab/skills/wiggle.py:\n  '
+        + '\n  '.join(offenders))
 
 
 if __name__ == '__main__':

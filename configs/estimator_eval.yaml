@@ -216,6 +216,40 @@ eval:
   # Whatever the mode, the trial ends with ONE zero-noise insertion from the final belief
   # (eval.final_insertion, default ON since 2026-08-13).
   collection:
+    # ---- APPROACH ONLY: observation passes probe, they do not seat -----------------------
+    # An observation pass may go exactly as deep as CONTACT, and no deeper.
+    #
+    # The guarded ramp already stops itself at first contact, so on a pass that touches the
+    # part this changes nothing. What it governs is the pass that does NOT touch it: with no
+    # guard trip the ramp drives the reference all the way to the mate, and preload_mm then
+    # presses that far PAST it un-guarded. That is a seating attempt in all but name, made
+    # from the belief the pass exists to correct -- so it seats (or jams) the connector on an
+    # error the estimator has not seen yet, before it has seen it. It also gains nothing: a
+    # pass that touched nothing has no contact rows to load and nothing to wiggle against.
+    #
+    # eval.final_insertion -- which runs AFTER the observations are collected and the belief
+    # has been updated -- is the one pass that should be attempting a seat.
+    #
+    # false = the pre-2026-08-19 behaviour: every pass presses, contact or not.
+    approach_only: true
+
+    # ---- OBSERVATION WIGGLE -------------------------------------------------------------
+    # The SAME excitation wiggle_sampling collects its map under. Two things make that literal
+    # rather than aspirational: urlab/skills/wiggle.py owns the waveform, and the AXES,
+    # AMPLITUDES, FREQUENCIES AND PHASES are read from configs/wiggle_sampling.yaml at run time
+    # rather than copied here. Tune them once, there, and every app that wiggles follows.
+    #
+    # Driven AT THE SEAT, after the preload, logged at the same decimation, un-guarded (at the
+    # seat the guard has already tripped, so arming it would cut the wiggle to nothing).
+    #
+    # OFF BY DEFAULT: wiggle_s 0 and this app settles still, exactly as before.
+    wiggle_s: 0.0                  # seconds of oscillation per pass. 0 = off. THE ONLY KNOB
+                                   # this app owns -- everything else comes from the file below.
+    wiggle_from: wiggle_sampling.yaml
+    # wiggle:                      # uncomment to override a single key for a one-off; it is
+    #   taper_s: 0.5               # layered over the shared block and logged as a diff.
+
+
     # SAMPLING PARITY. The map is built by apps/uncertain_sampling; observations collected under
     # different contact physics do not lie on it however good the estimator is. MEASURED
     # 2026-08-17 against bnc_manifold_v5 (analysis/bnc_tuning/v5_*.py): the map's contact force is

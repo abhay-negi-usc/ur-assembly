@@ -101,6 +101,7 @@ from .. import log as urlog
 from .. import tool_frames
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import trajectory as traj
+from ..skills import wiggle as wigmod
 from ..transforms import (
     inverse, pose_error, slerp_matrix, translation_matrix, xyzrpy_to_matrix)
 from ._runner import run_app
@@ -177,32 +178,6 @@ def _station_pose(depth_m, lat_m, bias, preload_m, wig6):
     w = np.asarray(wig6, dtype=float)
     wig = xyzrpy_to_matrix(w[:3] / 1000.0, np.radians(w[3:]))
     return depth @ bias @ pre @ wig
-
-
-def _envelope(t, duration, taper_s):
-    """Raised-cosine amplitude envelope, 0 -> 1 -> 0 over `taper_s` at each end.
-
-    WITHOUT IT the multisine would step to its full value at t=0 (the per-axis phases are chosen
-    for crest factor, so they are NOT all zero and sin(phi) != 0), and a step on the reference is
-    an impulse into the contact -- which shows up in the wrench as a transient that has nothing to
-    do with the constraint geometry. Tapered samples are FLAGGED rather than dropped, so the
-    analysis can exclude them from a covariance window while still seeing them."""
-    if taper_s <= 0.0:
-        return 1.0
-    if t < taper_s:
-        return 0.5 * (1.0 - math.cos(math.pi * t / taper_s))
-    if t > duration - taper_s:
-        return 0.5 * (1.0 - math.cos(math.pi * max(0.0, duration - t) / taper_s))
-    return 1.0
-
-
-def _wig_at(t, amp, frq, pha, env):
-    """The 6-vec excitation (mm / deg) at time t."""
-    out = np.zeros(6)
-    for i in range(6):
-        if abs(amp[i]) > 0.0 and frq[i] > 0.0:
-            out[i] = env * amp[i] * math.sin(2.0 * math.pi * frq[i] * t + pha[i])
-    return out
 
 
 # ===================================================================================================
@@ -424,7 +399,6 @@ def build_and_run(cfg, robot, camera, args):
     except ValueError as exc:
         log.error('%s', exc)
         return False
-    pha = [math.radians(v) for v in pha_deg]
     active = [i for i in range(6) if abs(amp0[i]) > 0.0]
     if not active:
         log.error('every wiggle.amplitude is 0 -- this app has nothing to excite. Set at least '
@@ -451,65 +425,31 @@ def build_and_run(cfg, robot, camera, args):
         log.error("wiggle.passes entries must be 'in' or 'out' (got %s).", passes)
         return False
 
+    # THE SHARED WIGGLE (urlab/skills/wiggle.py). Everything about the waveform -- taper, phase,
+    # the connector-frame right-multiply, and the refusal to dilate past the speed cap -- lives
+    # there, so bnc_assembly and estimator_eval superimpose the identical excitation rather than
+    # each carrying a copy that drifts.
+    try:
+        wg = wigmod.Wiggle(amp0, frq, pha_deg, float(w.get('taper_s', 1.0) or 0.0), 'wiggle')
+    except wigmod.WiggleError as exc:
+        log.error('%s', exc)
+        return False
+
     quiet_s = float(w.get('quiet_s', 2.0))
     wiggle_s = float(w.get('wiggle_s', 12.0))
-    taper_s = float(w.get('taper_s', 1.0))
-    if taper_s * 2.0 >= wiggle_s:
-        log.error('wiggle.taper_s %.2f s x2 does not fit inside wiggle_s %.2f s -- the excitation '
-                  'would never reach full amplitude.', taper_s, wiggle_s)
-        return False
 
     rate = float(cfg.get_path('compliance.reference_rate_hz', 125.0))
-    fmax = max(frq[i] for i in active)
-    if rate < 4.0 * fmax:
-        log.error('the reference is rebuilt at %.0f Hz but the fastest axis is %.2f Hz -- below '
-                  '4x the sampled sine ALIASES into a slower one and the run looks correct while '
-                  'exciting a frequency nobody chose.', rate, fmax)
+    # Aliasing, the co-primality of the orbit, amplitude-without-frequency and the speed cap are
+    # all checked in one place now, at the LARGEST amplitude scale so the sweep's worst case is
+    # the one that has to pass.
+    try:
+        wg.validate(rate_hz=rate, cap_v=w.get('max_speed_mm_s'),
+                    cap_w=w.get('max_rotation_deg_s'), scale=max(scales),
+                    duration_s=wiggle_s)
+    except wigmod.WiggleError as exc:
+        log.error('%s', exc)
         return False
-
-    # NO TIME DILATION HERE, and this is a deliberate difference from bnc_assembly's engage.
-    # That app caps the oscillation's peak speed by stretching the waveform clock, which is the
-    # right trade when the oscillation is a means to an end. Here the frequencies ARE the
-    # experiment: dilating them would make the effective spectrum a function of amplitude, so the
-    # amplitude sweep (3.3) -- whose whole point is to vary the radius at a FIXED excitation
-    # spectrum -- would confound the two. The cap is enforced by REFUSING TO RUN instead.
-    cap_v = w.get('max_speed_mm_s')
-    cap_w = w.get('max_rotation_deg_s')
-    big = [amp0[i] * max(scales) for i in range(6)]
-    peak_v = max([abs(big[i]) * math.tau * frq[i] for i in range(3) if frq[i] > 0], default=0.0)
-    peak_w = max([abs(big[i]) * math.tau * frq[i] for i in range(3, 6) if frq[i] > 0], default=0.0)
-    if cap_v and peak_v > float(cap_v):
-        log.error('at the largest amplitude scale (%.2f) the wiggle peaks at %.1f mm/s, over the '
-                  '%.1f mm/s cap. Lower the amplitude or the frequency -- this app will NOT dilate '
-                  'the clock, because that would tie the spectrum to the amplitude and confound '
-                  'the amplitude sweep.', max(scales), peak_v, float(cap_v))
-        return False
-    if cap_w and peak_w > float(cap_w):
-        log.error('at the largest amplitude scale (%.2f) the wiggle peaks at %.1f deg/s, over the '
-                  '%.1f deg/s cap.', max(scales), peak_w, float(cap_w))
-        return False
-
-    # THE ORBIT. Two axes at a simple frequency ratio retrace one closed Lissajous curve forever,
-    # so the excitation would sweep a ONE-dimensional path through the rectangle and a rank
-    # estimate could not tell that apart from a genuine constraint. Mutually-prime frequencies
-    # close the orbit only at 1/gcd, which must be long enough to actually fill the box.
-    live_mhz = [int(round(frq[i] * 1000.0)) for i in active]
-    g = 0
-    for n in live_mhz:
-        g = math.gcd(g, n)
-    orbit_s = (1000.0 / g) if g else 0.0
-    slowest_s = 1.0 / min(frq[i] for i in active)
-    if len(active) >= 2 and orbit_s < 3.0 * slowest_s:
-        log.error('frequencies %s Hz close their orbit every %.1f s against a slowest single-axis '
-                  'period of %.1f s -- the ratio is too simple, so the excitation traces a LINE '
-                  'through the box instead of filling it. Pick mutually-prime frequencies.',
-                  [frq[i] for i in active], orbit_s, slowest_s)
-        return False
-    if wiggle_s < orbit_s:
-        log.warning('wiggle_s %.1f s is shorter than the %.1f s orbit -- each burst sees only '
-                    '%.0f%% of the excitation pattern, so windows from different bursts are not '
-                    'comparable. Raise wiggle_s to at least one orbit.',
-                    wiggle_s, orbit_s, 100.0 * wiggle_s / orbit_s)
+    orbit_s, slowest_s = wg.orbit_s()
 
     # ---- the tug oracle --------------------------------------------------------------------
     # TWO probes, because "engaged" is not one question. See the config for why a bayonet before
@@ -843,22 +783,25 @@ def build_and_run(cfg, robot, camera, args):
             # ---- wiggle -----------------------------------------------------------------
             enter('wiggle', T_station)
             safety.reset()
-            nstep = max(1, int(round(wiggle_s * adm.rate)))
-            prev = T_station
-            for i in range(1, nstep + 1):
-                t = i * dt
-                env = _envelope(t, wiggle_s, taper_s)
-                ctx['taper'] = 0 if env > 0.999 else 1
-                T = _station_pose(st['depth_m'], st['lat_m'], st['bias'], pre / 1000.0,
-                                  _wig_at(t, amp, frq, pha, env))
-                cur = traj.tool0_at(T_base_targetobj, T, T_tool0_held)
+
+            def anchor(delta, _st=st, _pre=pre):
+                """Where the wiggle hangs: this station, at this preload. The shared runner owns
+                the waveform; the caller owns the anchoring."""
+                T = _station_pose(_st['depth_m'], _st['lat_m'], _st['bias'], _pre / 1000.0,
+                                  np.zeros(6)) @ delta
+                return traj.tool0_at(T_base_targetobj, T, T_tool0_held)
+
+            def on_ref(cur, _t, tapered):
                 ctx['cmd'] = cur
-                if adm.ramp(prev, cur, dt, safety, on_step=log_cb) == 'seated':
-                    log.warning('  SAFETY guard tripped during the wiggle (%s) -- ending the '
-                                'burst here.', safety.tripped_by)
-                    break
-                prev = cur
+                ctx['taper'] = 1 if tapered else 0
+
+            res_w, _ = wigmod.run(adm, wg, anchor, wiggle_s, dt, guard=safety, on_step=log_cb,
+                                  scale=sc, on_ref=on_ref)
+            if res_w == 'seated':
+                log.warning('  SAFETY guard tripped during the wiggle (%s) -- ending the burst '
+                            'here.', safety.tripped_by)
             ctx['taper'] = 0
+            prev = anchor(wg.delta(wiggle_s, wiggle_s, sc))
             # Back to the un-excited station pose, so the tug starts from a known reference
             # rather than from wherever in the cycle the wiggle happened to end. Its OWN segment:
             # tagging it 'wiggle' would put un-excited rows into the window the rank estimate is

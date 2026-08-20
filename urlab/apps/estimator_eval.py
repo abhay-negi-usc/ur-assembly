@@ -70,6 +70,7 @@ from .. import log as urlog
 from .. import tool_frames
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import trajectory as traj
+from ..skills import wiggle as wigmod
 from ..skills.manifold import (DIMS, FORCE_COLS, POSE_COLS, TORQUE_COLS,
                                mats_from_vec6, scaled12, vec6_from_mats)
 from ..skills.mixture import from_energy
@@ -1109,6 +1110,34 @@ def build_and_run(cfg, robot, camera, args):
         log.error('eval.success_pose_tol must have 6 entries [x,y,z (mm), r,p,y (deg)].')
         return False
     decim = max(1, int(ev.get('log_decimation', 5)))
+    # THE OBSERVATION WIGGLE (urlab/skills/wiggle.py) -- the same excitation wiggle_sampling
+    # collects its map under. Absent or all-zero amplitudes means no oscillation and this app
+    # behaves exactly as before.
+    _col = ev.get('collection') or {}
+    obs_wig_s = float(_col.get('wiggle_s', 0.0) or 0.0)
+    _wblk, _wsrc = wigmod.from_shared(cfg, _col.get('wiggle'),
+                                      _col.get('wiggle_from', 'wiggle_sampling.yaml'),
+                                      'observation')
+    try:
+        obs_wig = wigmod.Wiggle.from_cfg(_wblk, 'observation')
+        if obs_wig is not None:
+            obs_wig.validate(rate_hz=float(cfg.get_path('compliance.reference_rate_hz', 125.0)),
+                             cap_v=_wblk.get('max_speed_mm_s'),
+                             cap_w=_wblk.get('max_rotation_deg_s'),
+                             duration_s=obs_wig_s or None)
+    except wigmod.WiggleError as exc:
+        log.error('%s', exc)
+        return False
+    if obs_wig is not None and obs_wig_s <= 0:
+        log.error('eval.collection.wiggle has amplitudes but collection.wiggle_s is 0 -- nothing '
+                  'would be driven. Set a duration or clear the amplitudes.')
+        return False
+    if obs_wig is not None:
+        log.info('OBSERVATION WIGGLE at the seat: %s, for %.1f s per pass, logged at the same '
+                 'decimation. Parameters from %s, so these observations are collected under the '
+                 'same excitation the map was built with.',
+                 obs_wig.describe(), obs_wig_s, _wsrc)
+
     save_obs = bool(ev.get('save_observations', True))
     log.info('%d trials x max %d attempts (%s perturbations, bounds lower=%s upper=%s).',
              num_trials, max_attempts, mode.upper(), list(lo), list(hi))
@@ -1210,6 +1239,22 @@ def build_and_run(cfg, robot, camera, args):
             return False
         log.info('Collection mode PECK: %.1f mm back-off on force stop, %.0f s budget per '
                  'attempt.', peck_mm, peck_timeout_s)
+    # APPROACH ONLY -- an OBSERVATION pass may go exactly as deep as CONTACT, and no deeper.
+    #
+    # The guarded ramp already stops itself at first contact, so on a pass that touches the part
+    # nothing changes. What this governs is the pass that DOESN'T: with no guard trip the ramp
+    # drives the reference to the mate, and the preload then presses preload_mm past it
+    # UN-GUARDED. That is a seating attempt in all but name -- and it is made from the belief
+    # this pass exists to correct, so it seats (or jams) the connector on an error the estimator
+    # has not seen yet. eval.final_insertion, which runs after the observations are collected and
+    # the belief has been updated, is the one pass that should be trying to seat anything.
+    #
+    # false restores the old behaviour: every observation pass presses, contact or not.
+    approach_only = bool(col.get('approach_only', True))
+    log.info('Observation passes: %s.',
+             'APPROACH ONLY -- a pass with no contact stop makes no press and no wiggle; only '
+             'eval.final_insertion attempts a seat' if approach_only
+             else 'every pass presses to preload_mm whether or not it found contact')
 
     # ---- SAMPLING PARITY ---------------------------------------------------------------------
     # The map these observations are matched against is built by apps/uncertain_sampling. An
@@ -1591,7 +1636,7 @@ def build_and_run(cfg, robot, camera, args):
         return max(t_lin, t_ang, min_seg_s)
 
     def run_insertion(adm_ctl, refs, T_bel, peck=False, guard_ctl=None, settle=None,
-                      hold=None, speed=None, pause=None, preload_mm=0.0):
+                      hold=None, speed=None, pause=None, preload_mm=0.0, approach_only=False):
         """One admittance-followed insertion along refs, collecting observations (same law and
         logging as cable_pick_estimate_assemble), the seated kinematic check, then the compliant
         UN-guarded retract along the believed part's own -X (a seated part is already over the
@@ -1665,15 +1710,36 @@ def build_and_run(cfg, robot, camera, args):
         # the map was built with this one. Logged at the same decimation, so the loaded rows
         # reach the estimator; UN-guarded, because at the seat the guard has already tripped and
         # would refuse the very motion the press exists to make. Distance is the limit.
-        if preload_mm > 0:
+        #
+        # APPROACH ONLY (eval.collection.approach_only) withholds it when the pass never made
+        # contact. `seated` is the guard trip; without one the ramp has driven the reference all
+        # the way to the mate, and pressing preload_mm PAST that un-guarded is a seating attempt
+        # made from an uncorrected belief. There is also nothing to gain: a pass that touched
+        # nothing has no contact rows to load.
+        press = preload_mm > 0 and (seated or not approach_only)
+        if approach_only and not seated:
+            log.warning('APPROACH ONLY: the trajectory ran to its end with no contact stop -- '
+                        'skipping the press and the wiggle. This pass never touched the part, '
+                        'so it observes nothing and seats nothing.')
+        if press:
             T_pre = _axial_ref(last_ref, T_bel, preload_mm / 1000.0)
             adm_ctl.ramp(last_ref, T_pre, seg_time(last_ref, T_pre, sv, sw), guard=None,
                          on_step=log_cb)
             last_ref = T_pre
+        # WIGGLE at the seat, if configured -- the same multisine wiggle_sampling drives, applied
+        # by right-multiplication in the BELIEVED part's own frame so a misaligned connector rocks
+        # about its own axes. Un-guarded for the same reason the settle below is.
+        if obs_wig is not None and obs_wig_s > 0 and (seated or not approach_only):
+            def _anchor(delta, _ref=last_ref, _bel=T_bel):
+                return _ref @ _bel @ delta @ inverse(_bel)
+            wigmod.run(adm_ctl, obs_wig, _anchor, obs_wig_s, 1.0 / adm_ctl.rate,
+                       guard=None, on_step=log_cb)
+
         # The settle is un-guarded after a press for the same reason: hold() is a ramp, so an
         # armed guard would report 'seated' on the first cycle and cut short exactly the loaded
-        # rows the press was made to record.
-        adm_ctl.hold(last_ref, settle_s, None if preload_mm > 0 else guard, on_step=log_cb)
+        # rows the press was made to record. `press`, not preload_mm: when approach_only withheld
+        # the press there is no standing load to protect, so the guard goes back on.
+        adm_ctl.hold(last_ref, settle_s, None if press else guard, on_step=log_cb)
         if hold_s > 0:                             # dwell: un-guarded, unlogged (see above)
             log.info('   holding the stop for %.1f s.', hold_s)
             adm_ctl.hold(last_ref, hold_s, guard=None)
@@ -1811,9 +1877,12 @@ def build_and_run(cfg, robot, camera, args):
                     # ASSEMBLE under admittance (same law as the pick app), check, retract.
                     # obs_pre_mm carries uncertain_sampling's press so these passes reach
                     # the LOADED rows the map holds past the mate; 0 = the map has none.
+                    # approach_only is passed HERE and not to the final insertion below: the
+                    # commit is the pass that is supposed to seat, and it runs after the
+                    # observations have corrected the belief it drives from.
                     obs_i, meas_i, seated, lin, ang, seat6, stops_i = run_insertion(
                         adm, refs, T_believed, peck=(col_mode == 'peck'),
-                        preload_mm=obs_pre_mm)
+                        preload_mm=obs_pre_mm, approach_only=approach_only)
                     obs.extend(obs_i)
                     meas.extend(meas_i)
                     attempt_stops.extend(stops_i)

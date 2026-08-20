@@ -581,7 +581,6 @@ def build_and_run(cfg, robot, camera, args):
     # the spring yielding to the standing load during warm-up.
     cc_tare = tare if bool(cc.get('tare_before', False)) else None
     cl_tare = tare if bool(cl.get('tare_before', False)) else None
-    cl_app_mm = cl.get('approach_mm')     # None = the fingertip's station at that moment
     cl_tilt_deg = _num(cl, 'max_offaxis_tilt_deg', 5.0)
     cl_axis_off = [float(v) for v in (cl.get('axis_offset_mm') or [0.0, 0.0, 0.0])]
     if len(cl_axis_off) != 3:
@@ -1618,13 +1617,19 @@ def build_and_run(cfg, robot, camera, args):
                       _tilt, cl_tilt_deg)
             return False
 
-        # STATIONS ALONG THE AXIS, all measured from the fingertip where it is RIGHT NOW. The pick
-        # closed the pads on the cable junction, so the junction's station is wherever the
-        # fingertip sits; the connector FRAME origin is a different point ~45.7 mm ahead of it.
-        pad_x = float((inverse(T_base_axis) @ here @ robot.T_tool0_fingertip)[0, 3])
-        collar_x = pad_x + cl_off_m
-        app_x = pad_x + (0.0 if cl_app_mm is None else float(cl_app_mm) / 1000.0)
-        adv_m = collar_x - app_x
+        # THE COLLAR SITS ON THE CONNECTOR AXIS, collar_offset_mm along it from the connector
+        # frame ORIGIN. Nothing here is back-calculated from how the part sits in the fingers: the
+        # belief reset put the connector AT T_clk, so the ring's station is a property of the
+        # CONNECTOR, and T_base_axis already carries that axis and the cammed origin.
+        #
+        # Deriving it through the FINGERTIP (collar = the live pad station + offset) is what put
+        # the target 45.7 mm behind where it belongs: that 45.7 mm is where the PADS sit relative
+        # to the mating face -- a fact about the grasp, not about the collar -- and it dragged the
+        # ring's station with it.
+        collar_x = cl_off_m
+        # Where the fingertip is RIGHT NOW on the same axis. MEASURED, and used only to size the
+        # withdraw, which is a relative move; it never places the collar.
+        here_x = float((inverse(T_base_axis) @ here @ robot.T_tool0_fingertip)[0, 3])
 
         # THE AXIAL GRASP. Roll the fingertip frame 90 deg about the collar frame's Y -- the
         # jaw-CLOSING axis, which is why the grasp on the ring is unchanged -- so the fingertip's
@@ -1648,14 +1653,15 @@ def build_and_run(cfg, robot, camera, args):
         # reach the ring by orbiting from wherever the sweep left the arm, so the start angle was
         # whatever that orbit could afford. The axial approach is placed in free space, so the
         # start angle is simply stated.
-        x_retreat = app_x - cl_retreat_m
+        x_retreat = collar_x - cl_retreat_m
+        adv_m = collar_x - x_retreat          # the guarded axial leg that threads the cable
 
         # THE ORDER IS WALL-DRIVEN. The sweep leaves the arm deep (tool0 barely behind the mating
         # face) with the open fingers around the cable, and the lateral lift-off that frees them
         # travels PARALLEL to the wall at whatever depth it happens at. So withdraw ALONG the
         # cable first -- a pure axial translation, fingers still around it, straight away from the
         # wall -- and only lift off once the arm is a retreat's worth back.
-        T_withdraw = translation_matrix((x_retreat - pad_x) * axn) @ here
+        T_withdraw = translation_matrix((x_retreat - here_x) * axn) @ here
         T_off = T_withdraw @ translation_matrix([0.0, 0.0, -abs(cl_liftoff_m)])
 
         # ---- THE GRASP CLOCK ANGLE, and why it is worth solving for ---------------------------
@@ -1707,12 +1713,14 @@ def build_and_run(cfg, robot, camera, args):
             # end at 0. Adding the achieved sweep makes the swing a constant 90 deg wherever it
             # ends -- measured 90.0 at every sweep end, against 90..120 for the target-frame
             # reading.
-            th_grasp = th_rule + (0.0 if screw_deg is None else np.radians(screw_deg))
+            # AGAINST THE TARGET FRAME, not the swept connector. Offsetting by the achieved sweep
+            # buys a smaller reorientation, but then the grasp attitude moves with wherever the
+            # sweep happened to stop; stated against the target frame it is ONE fixed, inspectable
+            # attitude, which is what the rule is for.
+            th_grasp = th_rule
             log.info('  grasp clock angle %+.0f deg wrt the target frame: tool0 -Y laid on the '
-                     'connector -Z as the sweep left it (%+.0f deg rule %+.0f deg achieved '
-                     'sweep), a %.0f deg reorientation from the lift-off pose.',
-                     np.degrees(eng_clock + th_grasp), np.degrees(th_rule),
-                     0.0 if screw_deg is None else screw_deg,
+                     'connector -Z. A %.0f deg reorientation from the lift-off pose.',
+                     np.degrees(eng_clock + th_grasp),
                      np.degrees(pose_error(T_off, at(x_retreat, th_grasp))[1]))
             if not _reachable(th_grasp):
                 # The rule is a good default, not a guarantee. Fall back to whatever angle IS
@@ -1736,20 +1744,15 @@ def build_and_run(cfg, robot, camera, args):
                             'reorientation). Pin it with collar_clocking.grasp_clock_deg.',
                             np.degrees(eng_clock) + _deg, len(cands), np.degrees(_swing))
         T_retreat = at(x_retreat, th_grasp)         # on the axis, clear, already axial
-        T_start = at(app_x, th_grasp)               # fingertip at the approach station
-        T_grip = at(collar_x, th_grasp)             # fingertip on the collar
+        T_grip = at(collar_x, th_grasp)             # fingertip ON the collar, ON the axis
         T_end = translation_matrix(cl_push_m * axn) @ rotate_about_axis(
             T_grip, axis, point, cl_rot)
-        if adv_m < 0.0:
-            log.warning('COLLAR CLOCKING: the approach station (%+.1f mm) is AHEAD of the collar '
-                        '(%+.1f mm), so the advance runs backwards along the connector +X. Check '
-                        'collar_clocking.approach_mm.', app_x * 1000.0, collar_x * 1000.0)
         log.info('--- COLLAR CLOCKING (axial) --- collar %.1f mm along the connector +X from the '
-                 'pads. Withdraw along the cable to the %+.1f mm station, lift the fingers off, '
+                 'ORIGIN, on the axis. Withdraw to the %+.1f mm station, lift the fingers off, '
                  'reorient AXIAL (fingers parallel to the cable), advance %+.1f mm back down the '
                  'axis onto the ring, grasp, then TWIST the wrist %+.1f deg while pushing '
                  '%+.1f mm.',
-                 cl_off_m * 1000.0, x_retreat * 1000.0, (collar_x - x_retreat) * 1000.0,
+                 cl_off_m * 1000.0, x_retreat * 1000.0, adv_m * 1000.0,
                  np.degrees(cl_rot), cl_push_m * 1000.0)
         log.info('  clock angle about the socket +X: grasp at %+.1f deg -> %+.1f deg when the '
                  'turn completes.', np.degrees(eng_clock + th_grasp),
@@ -1761,7 +1764,7 @@ def build_and_run(cfg, robot, camera, args):
         # Every pose below is a planned station on the axis, so the whole maneuver's approach to
         # the wall is known up front rather than discovered by driving into it.
         stations = (('withdraw', T_withdraw), ('lift-off', T_off), ('retreat', T_retreat),
-                    ('axial approach', T_start), ('collar grasp', T_grip), ('turn end', T_end))
+                    ('collar grasp', T_grip), ('turn end', T_end))
         x_tool = {lab: float((inverse(T_clk) @ T)[0, 3]) * 1000.0 for lab, T in stations}
         worst_lab = max(x_tool, key=x_tool.get)
         log.info('  tool0 station along the connector +X (larger = closer to the wall): %s. '
@@ -1850,7 +1853,7 @@ def build_and_run(cfg, robot, camera, args):
                     return False
                 if abs(d_push) > 1e-6:
                     # the connector (and its collar) moved deeper -- keep the ring in the sights
-                    T_start = translation_matrix(d_push * axn) @ T_start
+                    T_retreat = translation_matrix(d_push * axn) @ T_retreat
                     T_grip = translation_matrix(d_push * axn) @ T_grip
                     T_end = translation_matrix(d_push * axn) @ T_end
 
@@ -1866,7 +1869,7 @@ def build_and_run(cfg, robot, camera, args):
         # A pure translation along the connector -X with the open fingers still around the cable:
         # they slide ALONG it rather than across it, so nothing is swept, and every millimetre is
         # away from the wall. This is what buys the clearance for the lateral move below.
-        if abs(x_retreat - pad_x) > 1e-6:
+        if abs(x_retreat - here_x) > 1e-6:
             if not _guarded(robot, guard_shared, lambda: robot.arm.move_l(
                     T_withdraw, label='collar withdraw (connector -X)')):
                 log.error('Could not withdraw along the cable to the %+.1f mm station.',
@@ -1900,7 +1903,8 @@ def build_and_run(cfg, robot, camera, args):
             # seeded from the current joints, so this also catches a branch the arm cannot get to
             # from where it stands, not only true out-of-reach.)
             ok_mm = [d for d in (0.0, 25.0, 50.0, 75.0, 100.0, 150.0, 200.0, 250.0)
-                     if robot.arm.ik(at(app_x - d / 1000.0, th_grasp), robot.arm.q()) is not None]
+                     if robot.arm.ik(at(collar_x - d / 1000.0, th_grasp),
+                                     robot.arm.q()) is not None]
             log.error('COLLAR CLOCKING: the axial retreat station is UNREACHABLE -- no IK '
                       'solution with the fingertip at %+.1f mm along the connector +X (tool0 '
                       '%+.1f mm, on the axis, pointing at the socket). This is REACH or a joint '

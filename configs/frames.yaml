@@ -55,8 +55,8 @@ frames:
   # CANCELS for a straight insertion but acts as a LEVER ARM on any pitch: a commanded 5 deg
   # displaced the part 8 mm in z. targets: below was re-derived by the same correction.
   bnc_connector_finger_holder:
-    xyz_mm:  [0.0, +45.7, 158.0]
-    rpy_deg: [180.0, 0.0, +90.0]
+    xyz_mm:  [0.0, -45.7, 158.0]
+    rpy_deg: [180.0, 0.0, -90.0]
 
   # The BNC connector as HELD BETWEEN THE FINGER PADS -- the believed in-hand pose that
   # bnc_assembly plans from and the estimator corrects.
@@ -71,8 +71,8 @@ frames:
   # A picked connector does not sit where a fixtured one does, so the two are different frames for
   # different situations -- see the note under targets: about which one a target belongs to.
   bnc_connector_in_fingerpads:
-    xyz_mm:  [0.0, +45.7, 175.5]
-    rpy_deg: [180.0, 0.0, +90.0]
+    xyz_mm:  [0.0, -45.7, 175.5]
+    rpy_deg: [180.0, 0.0, -90.0]
 
 # ============================================================================
 # TARGETS -- recorded BASE_LINK poses of the frames above (base_link <- frame), e.g. the assembly

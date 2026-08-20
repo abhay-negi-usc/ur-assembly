@@ -176,7 +176,7 @@ def expand_inputs(patterns):
             hits = []
             for h in sorted(glob.glob(pat, recursive=True)):
                 hits.extend(sorted(set(glob.glob(os.path.join(h, '*.csv'))
-                                       + glob.glob(os.path.join(h, '*', '*.csv'))))
+                                       + glob.glob(os.path.join(h, '*', '*.csv')))))
                 hits.extend(sorted(set(glob.glob(os.path.join(h, '*.csv'))
                                        + glob.glob(os.path.join(h, '*', '*.csv'))))
                             if os.path.isdir(h) else [h])
@@ -185,7 +185,6 @@ def expand_inputs(patterns):
             for h in hits:
                 if h.endswith(MANIFOLD_SUFFIX):
                     self_ingest.append(h)
-                elif os.path.basename(h) in EVAL_META + WIGGLE_META:
                 elif os.path.basename(h) in EVAL_META + WIGGLE_META:
                     meta.append(h)
                 else:
@@ -280,10 +279,6 @@ def read_manifold_rows(path, min_force=None, segments=None):
         has_seg = 'segment' in (reader.fieldnames or [])
         keep_seg = set(segments) if (segments and has_seg) else None
         rows, n_seen, n_offseg = [], 0, 0
-            return [], 0, 0, f'missing {len(missing)} column(s), first: {missing[0]}'
-        has_seg = 'segment' in (reader.fieldnames or [])
-        keep_seg = set(segments) if (segments and has_seg) else None
-        rows, n_seen, n_offseg = [], 0, 0
         for rec in reader:
             if keep_seg is not None and rec.get('segment') not in keep_seg:
                 n_offseg += 1
@@ -339,11 +334,6 @@ def _degenerate_note(rows):
                     '(no F/T sensor), not contact data')
     except (KeyError, TypeError, ValueError):
         return None                                # malformed rows are the caller's problem
-    return None
-        note = _degenerate_note(rows)
-        if note:
-            return [], n_seen, n_offseg, note
-        return rows, n_seen, n_offseg, None
 
 
 def _degenerate_note(rows):
@@ -613,8 +603,6 @@ def main():
                'in the connector frame). estimator_eval rows are rebased into the TRUE frame via '
                "their run's trials.csv before landing in those columns.")
     ap.add_argument('inputs', nargs='+',
-                    help='sampling CSVs, estimator_eval run folders, wiggle_sampling geometry or '
-                         'run directories, or globs')
                     help='sampling CSVs, estimator_eval run folders, wiggle_sampling geometry or '
                          'run directories, or globs')
     ap.add_argument('--out', required=True, metavar='PATH',

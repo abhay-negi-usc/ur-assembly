@@ -27,14 +27,14 @@ def approx(a, b, tol=1e-9):
 
 
 def widest_cable_leg(asm):
-    """The largest single rotation bnc_assembly's cable sweep commands, in radians.
+    """The largest single rotation bnc_assembly's connector sweep commands, in radians.
 
-    cable_clocking.sweep_deg is a list of ABSOLUTE roll positions wrt the target frame, and the
+    connector_clocking.sweep_deg is a list of ABSOLUTE roll positions wrt the target frame, and the
     arm starts at assembly.engage_clock_deg -- so the legs are the gaps along that walk, and the
     widest of them is the biggest arc any one servoed stroke has to cover. Tests that care about
     the geometry of a stroke (chord error, axis drag) want that worst case, not a config key.
     Falls back to the legacy single relative rotation_deg when no sweep is declared."""
-    cc = asm['cable_clocking']
+    cc = asm['connector_clocking']
     sw = cc.get('sweep_deg')
     if sw is None:
         return abs(np.radians(float(cc['rotation_deg'])))
@@ -2988,7 +2988,7 @@ def test_bnc_clocking_geometry():
     assert abs(det.advance_m() - push_m) < 1e-12 and det.check()
     assert 'advance' in det.tripped_by and abs(det.peak_m - push_m) < 1e-12
 
-    # REBASING ACROSS A CHANGE OF GRIP. The cable sweep no longer regrasps -- a retry is the
+    # REBASING ACROSS A CHANGE OF GRIP. The connector sweep no longer regrasps -- a retry is the
     # REVERSAL onto the next sweep_deg position and the gripper stays closed -- so nothing in
     # bnc_assembly calls rebase today. What is tested here is the detector's CONTRACT, which is
     # what makes "cumulative advance" mean anything at all: release the connector and it stays
@@ -3033,7 +3033,7 @@ def test_bnc_clocking_geometry():
     assert not _AnyGuard(quiet).check()
 
     # COLLAR: offset along the connector's OWN +X, CLOSED fingertip frame on it
-    T_base_conn = T_base_tconn @ screw                            # where cable clocking left it
+    T_base_conn = T_base_tconn @ screw                            # where connector clocking left it
     T_ftip = xyzrpy_to_matrix([0.0, 0.0, 0.183], [np.pi, 0.0, -np.pi / 2])
     T_collar = T_base_conn @ translation_matrix([off, 0.0, 0.0])
     T_ref = T_collar @ inverse(T_ftip)
@@ -3071,7 +3071,7 @@ def test_bnc_insertion_holds_the_seat():
 
     It used to retract unconditionally, which was wrong twice over: the operator was asked whether
     the mate had succeeded AFTER the gripper had already backed 30 mm out along the connector's own
-    -X (taking the connector with it, since the gripper holds the cable), and cable clocking then
+    -X (taking the connector with it, since the gripper holds the cable), and connector clocking then
     read that retracted pose as its "engaged pose" -- anchoring the screw axis and the entire
     clocking sequence 30 mm away from the actual mate.
 
@@ -3185,7 +3185,7 @@ def test_bnc_engage_config():
 
 def test_bnc_clocking_enable_gating():
     """Both post-mate maneuvers are OPTIONAL and independently switchable, with one dependency:
-    collar clocking requires cable clocking, and that combination is REJECTED rather than silently
+    collar clocking requires connector clocking, and that combination is REJECTED rather than silently
     reinterpreted (it would otherwise turn the collar on a connector still proud of the socket,
     using a connector pose that was never established).
 
@@ -3205,9 +3205,9 @@ def test_bnc_clocking_enable_gating():
     try:
         _clocking_plan({'enabled': False}, {'enabled': True})
     except ValueError as exc:
-        assert 'collar_clocking' in str(exc) and 'cable_clocking' in str(exc), str(exc)
+        assert 'collar_clocking' in str(exc) and 'connector_clocking' in str(exc), str(exc)
     else:
-        raise AssertionError('collar clocking without cable clocking must be REJECTED')
+        raise AssertionError('collar clocking without connector clocking must be REJECTED')
     # and the app must route the rejection to a pre-motion failure, not an exception at runtime
     src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py')).read()
     assert '_clocking_plan(cc, cl)' in src and 'except ValueError as exc' in src, \
@@ -3217,7 +3217,7 @@ def test_bnc_clocking_enable_gating():
 def test_bnc_clocking_state_vocabulary():
     """The run reports progress as ENGAGED -> SEATED -> LOCKED -> ASSEMBLED, and that vocabulary is
     STRUCTURAL rather than prose: the app walks CLOCK_STATES through _advance_state, so a future
-    edit that skips a step -- calling collar clocking without cable clocking, or advancing twice --
+    edit that skips a step -- calling collar clocking without connector clocking, or advancing twice --
     raises instead of quietly logging LOCKED for a connector that was never seated.
 
     Also pinned: 'seated' is OVERLOADED. AdmittanceController.ramp returns the string 'seated' to
@@ -3261,7 +3261,7 @@ def test_bnc_clocking_config():
     import yaml
     with open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')) as fh:
         a = yaml.safe_load(fh)['assembly']
-    cc, cl = a['cable_clocking'], a['collar_clocking']
+    cc, cl = a['connector_clocking'], a['collar_clocking']
     assert 'retry_mode' not in cc, (
         'retry_mode is gone -- a retry is the REVERSAL onto the next sweep_deg position, '
         'with the gripper still closed')
@@ -3277,11 +3277,11 @@ def test_bnc_clocking_config():
     # `enabled` is the MANEUVER's switch; the guard's is force_guard_enabled. Writing `enabled`
     # twice in one block is silently legal in YAML (last wins), so the guard override would have
     # eaten the maneuver's own switch -- assert the guard key is the distinct one.
-    for blk, nm in ((cc, 'cable_clocking'), (cl, 'collar_clocking')):
+    for blk, nm in ((cc, 'connector_clocking'), (cl, 'collar_clocking')):
         assert 'force_guard_enabled' in blk, f'{nm} must name the guard switch separately'
     with open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')) as fh:
         lines = fh.read().splitlines()
-    for nm in ('cable_clocking', 'collar_clocking', 'clocking_retract'):
+    for nm in ('connector_clocking', 'collar_clocking', 'clocking_retract'):
         start = next(i for i, ln in enumerate(lines) if ln.strip() == f'{nm}:')
         indent = len(lines[start]) - len(lines[start].lstrip())
         body = []
@@ -3314,21 +3314,21 @@ def test_bnc_clocking_config():
     assert float(cc['max_force_n']) >= float(shared['force_guard']['max_force_n']), \
         'the screw guard must not be TIGHTER than the probing guard or it trips immediately'
     # each maneuver carries its OWN guard block, so they can be tuned apart
-    for blk, nm in ((cc, 'cable_clocking'), (cl, 'collar_clocking')):
+    for blk, nm in ((cc, 'connector_clocking'), (cl, 'collar_clocking')):
         for k in ('max_force_n', 'max_torque_nm', 'persistence_s'):
             assert blk.get(k) is not None, f'{nm} must set its own {k}'
     # and its OWN phase scale, so the strokes can be paced apart from each other and from the
     # insertion. A maneuver whose speed_* keys are null depends on this entry existing.
     ps = shared['speed']['phase_scale']
-    for nm in ('cable_clock', 'collar_clock', 'clock_retract'):
+    for nm in ('connector_clock', 'collar_clock', 'clock_retract'):
         assert nm in ps and float(ps[nm]) > 0, f'speed.phase_scale.{nm} missing or non-positive'
-    for blk, nm in ((cc, 'cable_clock'), (cl, 'collar_clock')):
+    for blk, nm in ((cc, 'connector_clock'), (cl, 'collar_clock')):
         if blk.get('speed_rotation_deg_s') is None:
             assert float(ps[nm]) * float(shared['speed']['max_cartesian_rotation_deg_s']) > 0
     assert len(cc['stiffness']) == 6 and len(cl['stiffness']) == 6
     assert float(cl['collar_offset_mm']) > 0
     if cl.get('enabled'):
-        assert cc.get('enabled'), 'collar clocking depends on cable clocking'
+        assert cc.get('enabled'), 'collar clocking depends on connector clocking'
     r = a['clocking_retract']
     for k in ('gripper_axis', 'target_axis'):
         assert len(r[k]) == 3 and any(abs(float(v)) > 1e-9 for v in r[k]), r[k]
@@ -3646,7 +3646,7 @@ def test_preload_force_is_a_spike_not_a_press():
 def test_a_null_speed_override_is_resolved_before_it_reaches_the_arithmetic():
     """A `null` speed override must be defaulted by the caller, never compared to a number.
 
-    THE BUG THIS EXISTS TO CATCH. cable_clocking and collar_clocking both ship
+    THE BUG THIS EXISTS TO CATCH. connector_clocking and collar_clocking both ship
     `speed_translation_mm_s: null` / `speed_rotation_deg_s: null`, which the app turns into a
     literal None meaning "no override". seg_time defaulted those; a second duration path was added
     that duplicated seg_time's arithmetic WITHOUT its defaulting, so `v > 0` compared None to an
@@ -3686,7 +3686,7 @@ def test_a_null_speed_override_is_resolved_before_it_reaches_the_arithmetic():
     import yaml
     asm = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))['assembly']
     assert any(asm[b].get(k) is None
-               for b in ('cable_clocking', 'collar_clocking')
+               for b in ('connector_clocking', 'collar_clocking')
                for k in ('speed_translation_mm_s', 'speed_rotation_deg_s')),         'if no clocking block ships a null any more, this guard has lost its subject'
 
 
@@ -3774,7 +3774,7 @@ def test_the_seat_push_can_reach_its_force_and_keeps_the_gripper_logic_straight(
 
 
 def test_post_engage_frame_is_a_config_choice_defaulting_to_target():
-    """cable clocking, collar clocking, the escape leg and the tug all read ONE frame, T_clk --
+    """connector clocking, collar clocking, the escape leg and the tug all read ONE frame, T_clk --
     'target' (default) binds it to the recorded socket pose, 'believed' to the estimator's
     in-hand belief frozen at clocking time. The engagement itself always uses the target."""
     import yaml
@@ -3789,7 +3789,7 @@ def test_post_engage_frame_is_a_config_choice_defaulting_to_target():
     assert "a.get('post_engage_frame')" in src and "'believed'" in src, (
         'the choice must be read from the config and validated')
     # every post-engage maneuver goes through the shared frame
-    checks = (('def cable_clocking(', 'inverse(T_clk)) @ ref_start'),
+    checks = (('def connector_clocking(', 'inverse(T_clk)) @ ref_start'),
               ('def collar_clocking(', 'axis = T_clk[:3, 0]'),
               ('def tug_verify(', 'axn_t = T_clk[:3, 0]'),
               ('def clocking_retract(', 'T_clk[:3, :3] @ step'))
@@ -3809,7 +3809,7 @@ def test_the_collar_axis_offset_is_read_from_config_in_the_connector_frame():
     The declared connector frame origin is the mating-face reference, placed for insertion --
     nothing forces it onto the barrel centreline the collar physically turns about (bench: ~5 mm
     along the connector -Z). collar_clocking.axis_offset_mm shifts the axis LINE by a vector in
-    the SOCKET frame's own axes, scoped to the collar maneuver only; cable clocking keeps the
+    the SOCKET frame's own axes, scoped to the collar maneuver only; connector clocking keeps the
     unoffset axis, since the socket physically corrects that captive stroke anyway.
 
     AND IT MUST NOT ROLL WITH assembly.engage_clock_deg. That key rolls the working frame about
@@ -3868,10 +3868,10 @@ def test_the_collar_axis_offset_is_read_from_config_in_the_connector_frame():
     body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
     assert 'axis_offset_base()' in body, (
         'the collar maneuver must shift its point by the shared, roll-free offset')
-    cable = src[src.index('def cable_clocking('):src.index('def collar_clocking(')]
+    cable = src[src.index('def connector_clocking('):src.index('def collar_clocking(')]
     assert ('off_conn' not in cable and 'axis_offset_mm' not in cable
             and 'axis_offset_base' not in cable), (
-        'the offset is scoped to the collar maneuver and the tug; cable clocking keeps the '
+        'the offset is scoped to the collar maneuver and the tug; connector clocking keeps the '
         'unoffset axis')
     # the tug centres its RE-GRIP on the same offset axis -- the pull direction cannot carry a
     # line offset, so the grasp position is where the correction lands. SAME helper, so the two
@@ -3905,7 +3905,7 @@ def test_the_offaxis_tilt_gate_clears_the_screws_own_compliance():
 
     Collar clocking checks how far the arm's orientation is from the collar-frame family in a way
     no rotation about the connector axis explains, and refuses to orbit above the gate. The arm
-    arrives there straight off the cable screw, whose block is soft in exactly that direction --
+    arrives there straight off the connector screw, whose block is soft in exactly that direction --
     5 Nm/rad about tool0 Rx, with tare_before false -- so 0.1 Nm of out-of-axis moment is already
     1.15 deg, and a bayonet cam pushes sideways by design.
 
@@ -3921,12 +3921,12 @@ def test_the_offaxis_tilt_gate_clears_the_screws_own_compliance():
     asm = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))['assembly']
     gate = float(asm['collar_clocking']['max_offaxis_tilt_deg'])
     # the screw axis is the connector +X; the SOFTEST out-of-axis rotational term is what tilts
-    S_rot = [float(v) for v in asm['cable_clocking']['stiffness'][3:]]
+    S_rot = [float(v) for v in asm['connector_clocking']['stiffness'][3:]]
     tilt_per_nm = np.degrees(1.0 / min(S_rot))
     assert gate >= 0.25 * tilt_per_nm, (
         f'the {gate:.1f} deg gate is below the {0.25 * tilt_per_nm:.1f} deg that a modest 0.25 Nm '
         f'out-of-axis cam moment produces at {min(S_rot):.0f} Nm/rad -- ordinary compliance yield '
-        f'would abort the run. Raise max_offaxis_tilt_deg or stiffen cable_clocking')
+        f'would abort the run. Raise max_offaxis_tilt_deg or stiffen connector_clocking')
 
     # and the gate must come from the config, not be baked into the app
     with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
@@ -3949,12 +3949,12 @@ def test_the_offaxis_tilt_gate_clears_the_screws_own_compliance():
 def test_both_clockings_turn_about_the_socket_and_not_about_the_arm():
     """The two clocking strokes must share a frame, not just a function.
 
-    They already share the motion: cable clocking builds its stroke as the conjugation
+    They already share the motion: connector clocking builds its stroke as the conjugation
     (T_f @ screw @ inverse(T_f)) @ T_arm, collar clocking calls rotate_about_axis(T_arm, T_f.X,
     T_f.origin, angle), and those are the SAME operation to 1e-12. Both then run through
     screw_ramp. So a difference in behaviour between them cannot come from the maths.
 
-    It came from the FRAME. Cable clocking turns about T_base_tconn -- the fixed, hand-measured
+    It came from the FRAME. Connector clocking turns about T_base_tconn -- the fixed, hand-measured
     socket pose. Collar clocking turned about T_base_conn, which is rebuilt at runtime as
     robot.tool0() @ T_tool0_conn_now and therefore carries every deviation the screw accumulated:
     spring yield under load, an advance that stopped short, a regrasp rebase. The socket does not
@@ -4029,7 +4029,7 @@ def test_a_clocking_stroke_follows_the_arc_and_not_the_chord():
 
     cfg = urconfig.load('bnc_assembly')
     frames, targets = tool_frames.load_frames(cfg), tool_frames.load_targets(cfg)
-    cc = cfg['assembly']['cable_clocking']
+    cc = cfg['assembly']['connector_clocking']
     # The WIDEST leg the sweep commands -- the worst case for chord error, and what the app
     # actually hands screw_ramp. (It used to be the single relative rotation_deg stroke.)
     rot = widest_cable_leg(cfg['assembly'])
@@ -4068,16 +4068,16 @@ def test_a_clocking_stroke_follows_the_arc_and_not_the_chord():
     with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
         src = fh.read()
     assert 'def screw_ramp(' in src, 'the arc-following ramp helper is gone'
-    body = src[src.index('def cable_clocking('):src.index('def collar_clocking(')]
+    body = src[src.index('def connector_clocking('):src.index('def collar_clocking(')]
     assert 'screw_ramp(' in body and 'adm_cc.ramp(' not in body, (
-        'cable_clocking must take its stroke through screw_ramp, not a single adm_cc.ramp -- a '
+        'connector_clocking must take its stroke through screw_ramp, not a single adm_cc.ramp -- a '
         'one-call ramp cuts the chord and drags the connector off its axis')
     # EVERY leg of the sweep, not just the first. The retry is now the REVERSAL -- the gripper
     # stays closed and rotates back -- so it is a rotation about the socket axis exactly like the
     # leg before it, and a move_l would cut the same chord with the part clamped in the fingers.
     # (This hid for a while in the old ratchet, whose label said 'realign', not 'rotate'.)
     assert 'move_l(' not in body, (
-        'no move_l inside cable_clocking: every leg is a rotation about the socket axis and must '
+        'no move_l inside connector_clocking: every leg is a rotation about the socket axis and must '
         'travel the arc (screw_ramp), not cut the chord between its endpoints')
     assert 'for k in range(1, cc_tries + 1):' in body and 'cc_legs[(k - 1) % len(cc_legs)]' in body, (
         'the sweep must WALK the sweep_deg positions, one per try, cycling when there are more '
@@ -4111,7 +4111,7 @@ def test_the_target_frame_and_the_in_hand_belief_name_the_same_point():
 
         frames[assembly.target_frame] == T_tool0_conn
 
-    WHY THE CLOCKING PASSES CARE MOST. cable_clocking resets its belief to the target and screws
+    WHY THE CLOCKING PASSES CARE MOST. connector_clocking resets its belief to the target and screws
     about THAT frame's +X:  ref_goal = (T_base_tconn @ screw @ inverse(T_base_tconn)) @ T_tool0.
     That is a rotation about an axis LINE through the target's origin. If the target is `d` off the
     true connector axis, a `theta` turn drags the connector origin through a chord of
@@ -4147,7 +4147,7 @@ def test_the_target_frame_and_the_in_hand_belief_name_the_same_point():
     assert lin * 1000.0 < 0.05 and np.degrees(ang) < 0.05, (
         f'assembly.target_frame {tname!r} sits {lin * 1000.0:.2f} mm / {np.degrees(ang):.2f} deg '
         f'from the believed in-hand connector, so the clocking screw axis is that far off the '
-        f'connector axis: the {np.degrees(theta):.0f} deg cable_clocking stroke would drag the '
+        f'connector axis: the {np.degrees(theta):.0f} deg connector_clocking stroke would drag the '
         f'connector through a {arc_mm:.1f} mm arc instead of spinning it in place, and '
         f'collar_clocking would inherit the same axis. Point target_frame at the same frame as '
         f'estimation.initial_connector_frame.')
@@ -4864,6 +4864,88 @@ def test_every_app_resolves_to_the_tuned_wiggle():
         wigmod.Wiggle.from_cfg(blk, app)          # and it must still validate
 
 
+def test_the_scan_heading_points_at_the_connector_not_the_cable():
+    """The grasp frame's +x must point TOWARD the connector, whichever way the detector labelled it.
+
+    A junction yaw is a LINE, not a ray: the detector cannot say which end of it the connector is
+    on, and frame_from_axis takes the vector as given, so whichever way it happens to point becomes
+    the grasp frame's +x. A parallel jaw is symmetric under a 180 deg roll about its approach axis,
+    so a REVERSED heading still produces a perfectly good grasp and nothing upstream notices.
+
+    The first thing that depends on the sign is the cable-grab reseat: GraspRecovery shifts
+    +cable_shift along the grasp frame's x, commented "toward connector end". With the heading
+    reversed that walks AWAY from the connector, and because the reseat ACCUMULATES into
+    T_base_grasp, every retry makes it worse -- the failure mode this pins.
+
+    The free end is what breaks the tie: the connector is on the far side of the junction from the
+    cable, so free-end -> junction points at the connector.
+    """
+    from urlab.skills.ground_pick import GroundPlaneScanner as G
+
+    sign = G._sign_toward_connector
+    Pj = np.array([1.0, 0.0, 0.0])          # junction
+    fe = np.array([0.0, 0.0, 0.0])          # cable's free end, 1 m away
+    toward = Pj - fe                        # the reference: points at the connector
+
+    # ---- a heading the detector labelled TOWARD THE CONNECTOR survives untouched ----
+    good = np.array([1.0, 0.0, 0.0])
+    assert np.allclose(sign(good.copy(), Pj, fe), good), 'a correct heading must not be flipped'
+    # ...including one that is merely mostly-right (a curved cable)
+    tilted = np.array([1.0, 0.6, 0.0])
+    assert float(np.dot(sign(tilted.copy(), Pj, fe), toward)) > 0
+
+    # ---- a heading labelled TOWARD THE CABLE is flipped ----
+    bad = np.array([-1.0, 0.0, 0.0])
+    assert np.allclose(sign(bad.copy(), Pj, fe), -bad), (
+        'a heading pointing at the free end must be flipped to point at the connector')
+    assert float(np.dot(sign(np.array([-1.0, 0.6, 0.0]), Pj, fe), toward)) > 0
+
+    # ---- THE RESULT IS WHAT MATTERS: +x lands on the connector side either way ----
+    # every case here is OUTSIDE the ambiguity band -- see the perpendicular case below for what
+    # deliberately is not resolved
+    for raw in ([1., 0, 0], [-1., 0, 0], [0.9, 0.4, 0], [-0.9, 0.4, 0], [-0.5, 0.5, 0]):
+        h = sign(np.array(raw, dtype=float), Pj, fe)
+        c = float(np.dot(h / np.linalg.norm(h), toward / np.linalg.norm(toward)))
+        assert c > -1e-9, f'heading {raw} ended up pointing {c:+.2f} at the connector'
+
+    # ---- AMBIGUOUS (a sharply curved cable) is LEFT ALONE, not guessed ----
+    # Near-perpendicular to the chord: which side the connector is on genuinely cannot be told
+    # from this image, so flipping would be a coin flip dressed as a correction.
+    perp = np.array([0.0, 1.0, 0.0])
+    assert np.allclose(sign(perp.copy(), Pj, fe), perp), (
+        'a heading perpendicular to the free-end chord must be left as detected')
+
+    # ---- DEGENERATE inputs must not raise or produce NaN ----
+    assert np.allclose(sign(good.copy(), Pj, None), good), 'no free end = nothing to test against'
+    assert np.allclose(sign(good.copy(), Pj, Pj.copy()), good), 'free end AT the junction'
+    z = np.zeros(3)
+    assert np.allclose(sign(z.copy(), Pj, fe), z), 'a zero heading must pass through'
+
+    # ---- WIRED IN: the sign test must run on the PRIMARY heading, not only the fallback -------
+    src = open(os.path.join(ROOT, 'urlab', 'skills', 'ground_pick.py'), encoding='utf-8').read()
+    body = src[src.index('def _project_all('):src.index('def _sign_toward_connector(')]
+    assert '_sign_toward_connector(heading, Pj, fe)' in body, (
+        'the detected heading must be signed before it becomes the grasp frame x -- the fallback '
+        'chord was already correctly signed, so fixing only that fixes nothing')
+    assert body.index('fe = max(') < body.index('_sign_toward_connector('), (
+        'the free end must be projected BEFORE the sign test, not only inside the fallback branch')
+
+    # ---- and the reseat it protects still shifts +x, with a POSITIVE shift ----
+    pick = open(os.path.join(ROOT, 'urlab', 'skills', 'pick.py'), encoding='utf-8').read()
+    assert 'translation_matrix([self.cable_shift, 0.0, 0.0])' in pick, (
+        'the cable-grab reseat must stay +x in the grasp frame; the SIGN belongs in the scan, '
+        'not smuggled into a negative cable_shift_fraction')
+    import yaml
+    for name in ('bnc_assembly', 'cable_pick_assemble', 'cable_pick_place'):
+        c = yaml.safe_load(open(os.path.join(ROOT, 'configs', f'{name}.yaml')))
+        frac = (c.get('grasp_check', {}).get('recovery', {}) or {}).get('cable_shift_fraction')
+        if frac is not None:
+            assert float(frac) > 0, (
+                f'{name}.yaml: cable_shift_fraction {frac} is negative -- that reverses the reseat '
+                f'to work around a heading sign the scan now fixes at the source. Put it back '
+                f'positive so the log line and the comment stay true.')
+
+
 def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
     """collar_clocking takes the ring with the fingers PARALLEL to the cable and twists the wrist.
 
@@ -5049,8 +5131,8 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
     assert float(ccl['liftoff_mm']) > 0 and float(ccl['retreat_mm']) > 0
 
 
-def test_the_cable_sweep_rocks_between_absolute_roll_positions():
-    """cable_clocking walks sweep_deg's roll positions, one leg per try, rocking across the slot.
+def test_the_connector_sweep_rocks_between_absolute_roll_positions():
+    """connector_clocking walks sweep_deg's roll positions, one leg per try, rocking across the slot.
 
     A bayonet pin that did not line up with its slot at the mate will not find it by turning
     harder in one direction -- it rides the rim and jams. It finds it by crossing back and forth
@@ -5075,7 +5157,7 @@ def test_the_cable_sweep_rocks_between_absolute_roll_positions():
     from urlab.transforms import inverse, xyzrpy_to_matrix
 
     asm = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))['assembly']
-    cc = asm['cable_clocking']
+    cc = asm['connector_clocking']
     eng = float(asm['engage_clock_deg'])
     sweep = [float(v) for v in cc['sweep_deg']]
     tries = int(cc['max_tries'])
@@ -5136,7 +5218,7 @@ def test_the_cable_sweep_rocks_between_absolute_roll_positions():
     # ---- SOURCE: the structure the arithmetic above assumes ----
     with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
         src = fh.read()
-    body = src[src.index('def cable_clocking('):src.index('def collar_clocking(')]
+    body = src[src.index('def connector_clocking('):src.index('def collar_clocking(')]
     assert 'res, f_done = screw_ramp(' in body and 'th_at = _a + turn * f_done' in body, (
         'a jammed leg must continue from the FRACTION screw_ramp reached, not from the endpoint '
         'it never got to -- restarting at the endpoint commands a jump across the arc the guard '
@@ -5162,7 +5244,7 @@ def test_engage_clock_angle_places_the_sweep_without_changing_the_insertion():
     """assembly.engage_clock_deg picks WHERE in the roll the whole sequence sits.
 
     A BNC is free about its own axis until the bayonet pins pick up, so the clock angle the
-    connector is ENGAGED at is a free parameter -- and cable_clocking.rotation_deg sweeps FROM it.
+    connector is ENGAGED at is a free parameter -- and connector_clocking.rotation_deg sweeps FROM it.
     A 180 deg screw started at the declared roll ends 180 deg past it, out where the fixture and
     the cable are; started at -90 the same stroke runs -90 -> +90, symmetric about the declared
     roll. That is the point of the key: it MOVES the band, it does not shorten the stroke.
@@ -5243,7 +5325,7 @@ def test_engage_clock_angle_places_the_sweep_without_changing_the_insertion():
     assert 'engage_clock_deg' in a, 'the key must be declared so the behaviour is discoverable'
     start = float(a['engage_clock_deg'])
     assert abs(start) <= 180.0, f'engage_clock_deg {start} is outside one turn'
-    stops = [start] + [float(v) for v in a['cable_clocking']['sweep_deg']]
+    stops = [start] + [float(v) for v in a['connector_clocking']['sweep_deg']]
     assert max(stops) - min(stops) <= 360.0, (
         f'the engaged roll and the sweep span {max(stops) - min(stops):.0f} deg -- more than one '
         f'turn, so a measured clock angle cannot be told from itself plus 360 and the app refuses')
@@ -5295,7 +5377,7 @@ def test_the_achieved_clock_angle_is_wrapped_onto_the_stroke_branch():
     # ---- and every place that reads an achieved angle must use it ----
     with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
         src = fh.read()
-    cable = src[src.index('def cable_clocking('):src.index('def collar_clocking(')]
+    cable = src[src.index('def connector_clocking('):src.index('def collar_clocking(')]
     assert '_wrap_near(float(got[1][0]), cc_mid)' in cable, (
         'the achieved-roll read-back must be wrapped onto the sweep band centre -- it is handed '
         'to collar clocking as the angle to UNWIND, so a sign that flipped at the band edge '

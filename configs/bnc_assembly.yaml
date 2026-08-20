@@ -217,7 +217,7 @@ speed:
     # moves inside a maneuver stay on standoff/retract like every other positioning move. A
     # non-null speed_translation_mm_s / speed_rotation_deg_s in the maneuver's own block
     # OVERRIDES its scale entirely -- they ship null, so these are what govern.
-    cable_clock: 0.10    # the bayonet sweep legs
+    connector_clock: 0.10    # the bayonet sweep legs
     collar_clock: 0.10   # the collar turn
     clock_retract: 1.0   # the shared two-leg escape (free space, gripper already clear)
     # The collar maneuver's FREE-SPACE approach: withdraw along the cable, lift the open fingers
@@ -276,7 +276,7 @@ assembly:
   # relationship to its own path is unchanged; only where about the axis the sequence sits moves.
   # 0.0 = the declared roll.
   #
-  # It does NOT place the sweep -- cable_clocking.sweep_deg is stated against the target frame.
+  # It does NOT place the sweep -- connector_clocking.sweep_deg is stated against the target frame.
   # This decides where the connector STARTS, and so which way leg 1 turns: at 0 with a [-75, +75]
   # sweep, leg 1 turns NEGATIVE. +X is unchanged by a roll about +X, so the insertion axis,
   # push_mm, the retract legs and every depth reading are identical at any value.
@@ -347,7 +347,7 @@ assembly:
     # ---- TERMINATION -------------------------------------------------------------------------
     # AXIAL force limit: the component along the CONNECTOR'S +X, i.e. the insertion reaction.
     # Reaching it ENDS THE ENGAGE, not the run -- meeting resistance partway is exactly what the
-    # bayonet search is for, so the sequence carries on to cable clocking.
+    # bayonet search is for, so the sequence carries on to connector clocking.
     #
     # AXIAL, not |f|, is what lets this be set low: a magnitude limit tight enough to catch real
     # resistance also stops on every lateral graze, which raises |f| without opposing the push.
@@ -374,7 +374,7 @@ assembly:
   #           belief, so none of the estimator's failure modes apply. Skips the attempt loop AND
   #           final_insertion.
   insertion_mode: engage
-  # FRAME FOR THE POST-ENGAGEMENT MANEUVERS -- cable clocking, collar clocking, the escape's
+  # FRAME FOR THE POST-ENGAGEMENT MANEUVERS -- connector clocking, collar clocking, the escape's
   # target-frame leg, and tug verification all build their axes and stations from this frame.
   #   target   = the recorded socket pose (the targets: entry of target_frame). The socket is
   #              bolted down and hand-measured, so this is the stable choice. DEFAULT.
@@ -526,24 +526,24 @@ assembly:
   # by one and the app WALKS the progression, so it cannot report LOCKED for a connector that was
   # never SEATED.
   #   ENGAGED    the initial assembly mated the connector -- where the estimate/insert loop ends
-  #   SEATED     cable clocking succeeded: the bayonet cams pulled the connector home
+  #   SEATED     connector clocking succeeded: the bayonet cams pulled the connector home
   #   LOCKED     collar clocking succeeded: the locking collar has been turned
   #   ASSEMBLED  all of the above; the connector/cable is done
   #
   # BOTH MANEUVERS ARE OPTIONAL -- the two `enabled:` switches are independent, and an absent
   # block or key means OFF:
   #
-  #   cable_clocking   collar_clocking   run ends at
+  #   connector_clocking   collar_clocking   run ends at
   #   false            false             ENGAGED
   #   true             false             SEATED (not 'assembled' -- an unlocked BNC can back out)
   #   true             true              LOCKED/ASSEMBLED
   #   false            true              REJECTED before the robot moves
   #
   # THE LAST ROW IS AN ERROR, not a silent skip: collar clocking places the collar frame against
-  # the connector pose cable clocking's belief reset establishes, and turning the collar on a
+  # the connector pose connector clocking's belief reset establishes, and turning the collar on a
   # connector still proud of the socket is worse than not turning it at all.
   #
-  # CABLE CLOCKING: the bayonet search. Rock between roll positions about the connector's +X while
+  # CONNECTOR CLOCKING: the bayonet search. Rock between roll positions about the connector's +X while
   # pushing along that same axis at a VIRTUAL target past where the connector can physically go,
   # so compliance follows whatever path the cams allow instead of fighting a pose the part cannot
   # reach. Its first act is the BELIEF RESET: the mate is made, so the connector's pose is known
@@ -556,7 +556,7 @@ assembly:
     # hardware. Add a `wiggle:` sub-block for a one-off override.
 
 
-  cable_clocking:
+  connector_clocking:
     enabled: true             # OPTIONAL -- false ends the run ENGAGED
     # ---- THE SWEEP: roll POSITIONS the screw rocks between, deg wrt the TARGET frame ---------
     # Not a rotation amount -- absolute angles about the socket +X. The arm visits them IN TURN,
@@ -612,7 +612,7 @@ assembly:
     # guard would only see force ADDED by the screw. The cost of leaving it off is that the spring
     # yields a little to the standing load during warm-up.
     tare_before: false
-    # PACING. null = speed.max_cartesian_* x speed.phase_scale.cable_clock, which is where this is
+    # PACING. null = speed.max_cartesian_* x speed.phase_scale.connector_clock, which is where this is
     # tuned (0.12 -> ~11 deg/s, ~3 mm/s). Set a number here only to break the two apart -- one
     # phase scale multiplies both caps, so an unusual rotation:translation ratio needs these.
     speed_rotation_deg_s: null
@@ -652,17 +652,17 @@ assembly:
   # space, and only then advances back down the axis. That advance THREADS THE CABLE between the
   # open fingers; it is guarded, but jog it once with the phase gate before trusting it.
   collar_clocking:
-    # OPTIONAL -- false ends the run SEATED. Requires cable_clocking
+    # OPTIONAL -- false ends the run SEATED. Requires connector_clocking
     # enabled: true with this true is REJECTED before the robot moves (see the table above).
     enabled: true
     # Ahead of the JUNCTION along the connector +X -- equally "ahead of the closed pads", since
     # junction_in_fingertip is the identity translation. NOT measured from the connector frame
     # origin, which is the mating-face reference ~45.7 mm further forward: measuring from there
     # overshot the advance by exactly that much.
-    collar_offset_mm: 25.0
+    collar_offset_mm: 30.0
     # COLLAR AXIS OFFSET, mm, in the SOCKET (target) frame's own axes. Shifts the LINE the whole
     # collar maneuver works about -- centring, unwind, advance, turn -- and the TUG VERIFICATION
-    # centres its re-grip on the same offset axis. Cable clocking is NOT affected. Y and Z move
+    # centres its re-grip on the same offset axis. Connector clocking is NOT affected. Y and Z move
     # the line; X only slides the reference point along it.
     #
     # WHY IT EXISTS: the declared connector frame origin is the mating-face reference, placed so
@@ -677,7 +677,7 @@ assembly:
     # Where the fingertip sits when the axial advance onto the ring begins, so with null/0 the
     # advance is exactly collar_offset_mm. Negative = start further back along the cable.
     approach_mm: null
-    # LIFT-OFF, mm along the GRIPPER's own -Z, before anything reorients. The cable sweep leaves
+    # LIFT-OFF, mm along the GRIPPER's own -Z, before anything reorients. The connector sweep leaves
     # the open fingers wrapped around the cable at the junction; the radial -> axial change is a
     # 90 deg pitch that would sweep them straight through it. This is the move that frees them.
     liftoff_mm: 150.0
@@ -713,12 +713,12 @@ assembly:
       persistence_s: 0.1
       max_travel_mm: 15.0
     # GRASP CLOCK ANGLE, deg: the ABSOLUTE roll about the socket +X to take the collar at, wrt
-    # the TARGET frame -- the same convention cable_clocking.sweep_deg uses. The turn then runs
+    # the TARGET frame -- the same convention connector_clocking.sweep_deg uses. The turn then runs
     # from here to here + rotation_deg.
     #
     # null = LAY TOOL0'S -Y ON THE CONNECTOR'S -Z, solved in closed form. The collar is a body of
     # revolution so this angle is free, and it is the only thing that sets how big the
-    # reorientation onto the axis is -- and the cable sweep leaves the wrist already near that
+    # reorientation onto the axis is -- and the connector sweep leaves the wrist already near that
     # attitude. It halves the swing: a constant 90 deg, against up to 180 deg at a clock angle of
     # 0. That matters because a 180 deg tool reorientation is where the analytic IK stops finding
     # a branch reachable from the seed, which shows up as "the axial retreat station is
@@ -746,7 +746,7 @@ assembly:
     #
     # WHAT IT CATCHES: a CONSTANT value run to run is an orientation error between the declared
     # frames (fingertip_grasp, the connector frame's rpy, target_frame's rpy); a VARIABLE one is
-    # tilt the cable screw left behind (5 Nm/rad about tool0 Rx with tare_before false makes
+    # tilt the connector screw left behind (5 Nm/rad about tool0 Rx with tare_before false makes
     # 0.1 Nm of out-of-axis moment already 1.15 deg, and a bayonet cam pushes sideways by design).
     #
     # NOT TIGHTER, because the centring move that follows goes to a pose which HAS the correct
@@ -755,8 +755,8 @@ assembly:
     # always logged, so loosening it hides nothing.
     max_offaxis_tilt_deg: 10.0
     settle_s: 0.5
-    tare_before: false            # see cable_clocking.tare_before -- same reasoning
-    # null = the global caps x speed.phase_scale.collar_clock (see cable_clocking for why).
+    tare_before: false            # see connector_clocking.tare_before -- same reasoning
+    # null = the global caps x speed.phase_scale.collar_clock (see connector_clocking for why).
     speed_rotation_deg_s: null
     speed_translation_mm_s: null
     # --- compliance overrides ---

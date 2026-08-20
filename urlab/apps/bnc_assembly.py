@@ -18,7 +18,7 @@ is estimator_eval's:
 STATE VOCABULARY -- the four words this app reports progress in, in order:
 
     ENGAGED     the initial assembly mated the connector. Where the estimate/insert loop ends.
-    SEATED      cable clocking succeeded: the bayonet cams pulled the connector home.
+    SEATED      connector clocking succeeded: the bayonet cams pulled the connector home.
     LOCKED      collar clocking succeeded: the locking collar has been turned.
     ASSEMBLED   all of the above -- the connector/cable is done.
 
@@ -31,10 +31,10 @@ state. The clocking code reads that return into a local named `stopped`.
 
 WHAT THIS APP ADDS BEYOND THE MATE -- two operations that run only once the connector is ENGAGED
 and the operator has called the assembly successful, each with its own compliance, force guard and
-speed scale (`assembly.cable_clocking`, `assembly.collar_clocking`; a failed screw and a finished
+speed scale (`assembly.connector_clocking`, `assembly.collar_clocking`; a failed screw and a finished
 collar turn share one escape, `assembly.clocking_retract`):
 
-  * CABLE CLOCKING. An OSCILLATING screw about the connector's +X -- rock between the roll
+  * CONNECTOR CLOCKING. An OSCILLATING screw about the connector's +X -- rock between the roll
     positions in `sweep_deg` while pushing along that same axis at a VIRTUAL target past where the
     connector can physically go, so compliance follows whatever path the bayonet cams allow. It
     rocks rather than turning further because a pin that missed its slot will not find it by
@@ -57,7 +57,7 @@ collar turn share one escape, `assembly.clocking_retract`):
 TWO KINDS OF ANGLE, and keeping them apart is most of the arithmetic:
 
   * ABSOLUTE roll about the socket +X, wrt the TARGET frame -- `assembly.engage_clock_deg` and
-    `cable_clocking.sweep_deg`. These are the angles obstacles and wrist limits live in.
+    `connector_clocking.sweep_deg`. These are the angles obstacles and wrist limits live in.
   * ROTATIONS from the pose the connector was ENGAGED at -- what every stroke is built from, and
     what `collar_clocking.rotation_deg` / `prewind_deg` are measured in.
 
@@ -71,7 +71,7 @@ property of the FIXTURE that stays put while the plug turns (see `axis_offset_ba
 contact manifold, collected at one clock angle and describing different contact at another -- so
 `insertion_mode: estimate` warns when the engage angle is non-zero.
 
-THE BELIEF RESET at the start of cable clocking is the load-bearing idea. Once the mate is made the
+THE BELIEF RESET at the start of connector clocking is the load-bearing idea. Once the mate is made the
 connector's pose is known from a PHYSICAL CONSTRAINT -- it is at the target -- so that replaces the
 estimate and the screw axis becomes the target's +X exactly instead of inheriting the accumulated
 in-hand error.
@@ -153,28 +153,28 @@ def _wrap_near(angle, centre):
     return float(angle) + 2.0 * np.pi * np.round((float(centre) - float(angle)) / (2.0 * np.pi))
 
 
-def _clocking_plan(cable, collar):
+def _clocking_plan(connector, collar):
     """Which post-mate maneuvers to run, from their `enabled` flags in configs/bnc_assembly.yaml.
 
-    Both are optional and independently switchable; an absent block or key means OFF. With cable
-    clocking off a run ends ENGAGED, with collar clocking off it ends SEATED.
+    Both are optional and independently switchable; an absent block or key means OFF. With
+    connector clocking off a run ends ENGAGED, with collar clocking off it ends SEATED.
 
-    ONE DEPENDENCY: collar clocking requires cable clocking, and the combination is REJECTED
+    ONE DEPENDENCY: collar clocking requires connector clocking, and the combination is REJECTED
     rather than silently reinterpreted -- without the belief reset it has no connector pose to
     place the collar against, and locking a connector still proud of the socket is worse than not
     locking it.
 
-    Returns (cable_on, collar_on); raises ValueError carrying the operator-facing reason. Pure, so
-    the rule is testable without a robot."""
-    cable_on = bool((cable or {}).get('enabled', False))
+    Returns (connector_on, collar_on); raises ValueError carrying the operator-facing reason.
+    Pure, so the rule is testable without a robot."""
+    connector_on = bool((connector or {}).get('enabled', False))
     collar_on = bool((collar or {}).get('enabled', False))
-    if collar_on and not cable_on:
+    if collar_on and not connector_on:
         raise ValueError(
-            'assembly.collar_clocking.enabled is true but assembly.cable_clocking.enabled is '
+            'assembly.collar_clocking.enabled is true but assembly.connector_clocking.enabled is '
             'false. Collar clocking only runs on a SEATED connector and takes the connector pose '
-            'it places the collar against from cable clocking. Enable cable clocking, or disable '
+            'it places the collar against from connector clocking. Enable connector clocking, or disable '
             'collar clocking.')
-    return cable_on, collar_on
+    return connector_on, collar_on
 
 
 def _advance_state(state, expected):
@@ -478,7 +478,7 @@ def build_and_run(cfg, robot, camera, args):
                         'trajectory no matter how hard it presses.')
 
     # ---- ENGAGE CLOCK ANGLE: the roll the connector is MATED at ------------------------------
-    # Parsed here, ahead of the clocking blocks, because the cable sweep is stated in ABSOLUTE
+    # Parsed here, ahead of the clocking blocks, because the connector sweep is stated in ABSOLUTE
     # roll positions about the socket +X and needs this to convert them into rotations from the
     # engaged pose. The frame it rolls (T_base_tconn) is built where the target is loaded.
     eng_clock = np.radians(_num(a, 'engage_clock_deg', 0.0))
@@ -488,18 +488,25 @@ def build_and_run(cfg, robot, camera, args):
     # Both run only after a mate the operator called successful, each with its OWN compliance and
     # force guard. The guard override is not optional in practice: force_guard: is tuned for a
     # light probing insertion (5 N) and a press-and-twist exceeds that on the first cycle.
-    cc = a.get('cable_clocking', {}) or {}
+    cc = a.get('connector_clocking', {}) or {}
     cl = a.get('collar_clocking', {}) or {}
+    if a.get('cable_clocking') is not None:
+        # NOT a warning: `enabled` defaults to False, so a config still on the old name would read
+        # as "the maneuver is off" and the run would end ENGAGED with nothing said about why.
+        log.error('assembly.cable_clocking has been renamed to assembly.connector_clocking. '
+                  'Rename the block -- leaving it under the old name would silently disable the '
+                  'maneuver and end the run ENGAGED.')
+        return False
 
     try:
         cc_on, cl_on = _clocking_plan(cc, cl)
     except ValueError as exc:
         log.error('%s', exc)
         return False
-    log.info('Post-mate clocking: cable clocking %s, collar clocking %s (a run therefore ends %s '
+    log.info('Post-mate clocking: connector clocking %s, collar clocking %s (a run therefore ends %s '
              'at best).', 'ON' if cc_on else 'off', 'ON' if cl_on else 'off',
              'LOCKED/ASSEMBLED' if cl_on else ('SEATED' if cc_on else 'ENGAGED'))
-    # ---- THE CABLE SWEEP: absolute roll POSITIONS, visited in turn, one per try ---------------
+    # ---- THE CONNECTOR SWEEP: absolute roll POSITIONS, visited in turn, one per try ---------------
     # `sweep_deg` is roll angles about the socket +X stated WRT THE TARGET FRAME, not wrt where
     # the connector was engaged -- the reachable band is a property of the FIXTURE, so stating it
     # absolutely means it does not have to be re-derived when engage_clock_deg moves.
@@ -513,11 +520,11 @@ def build_and_run(cfg, robot, camera, args):
         try:
             cc_sweep = [np.radians(float(v)) for v in _sw]
         except (TypeError, ValueError):
-            log.error('assembly.cable_clocking.sweep_deg must be a list of numbers (roll angles '
+            log.error('assembly.connector_clocking.sweep_deg must be a list of numbers (roll angles '
                       'in deg wrt the target frame), got %r.', _sw)
             return False
         if not cc_sweep:
-            log.error('assembly.cable_clocking.sweep_deg is empty -- give it at least one roll '
+            log.error('assembly.connector_clocking.sweep_deg is empty -- give it at least one roll '
                       'position, or delete it to use the legacy rotation_deg stroke.')
             return False
     # ROTATIONS FROM THE ENGAGED POSE -- what the strokes are built from. 0.0 joins the span
@@ -528,7 +535,7 @@ def build_and_run(cfg, robot, camera, args):
     # wider than a full turn has no unambiguous branch, so it is refused rather than read wrong.
     cc_mid = 0.5 * (cc_lo + cc_hi)
     if cc_hi - cc_lo > 2.0 * np.pi:
-        log.error('assembly.cable_clocking.sweep_deg spans %.0f deg from the engaged roll '
+        log.error('assembly.connector_clocking.sweep_deg spans %.0f deg from the engaged roll '
                   '(%+.1f deg) -- more than one turn, so a measured clock angle cannot be told '
                   'from itself plus 360. Narrow the sweep or move assembly.engage_clock_deg.',
                   np.degrees(cc_hi - cc_lo), np.degrees(eng_clock))
@@ -543,7 +550,7 @@ def build_and_run(cfg, robot, camera, args):
     cl_rot = np.radians(_num(cl, 'rotation_deg', 90.0))
     cl_push_m = _num(cl, 'push_mm', 0.0) / 1000.0
     # GRASP CLOCK ANGLE: the ABSOLUTE roll about the socket +X to take the collar at, wrt the
-    # TARGET frame -- the same convention cable_clocking.sweep_deg uses. null = the engaged roll.
+    # TARGET frame -- the same convention connector_clocking.sweep_deg uses. null = the engaged roll.
     # The turn then runs from here to here + rotation_deg. (Replaces prewind_deg, which existed
     # only because the old radial approach reached the ring by orbiting from wherever the sweep
     # left the arm; an axial approach is placed in free space, so the angle is simply stated.)
@@ -606,18 +613,18 @@ def build_and_run(cfg, robot, camera, args):
                                             max_force_n=sp_force,
                                             persistence_s=sp_persist)) if sp_on else None
     if cc_on and cl_on and not cc_open_after:
-        log.error('assembly.collar_clocking needs cable_clocking.open_gripper_after true: the '
+        log.error('assembly.collar_clocking needs connector_clocking.open_gripper_after true: the '
                   'collar is grasped by the same gripper, which must release the cable first.')
         return False
     if cc_on and cc_tries > 1 and len(cc_sweep) < 2:
         # Not fatal (one position is a legal legacy sweep) but the extra tries become
         # zero-rotation no-ops.
-        log.warning('assembly.cable_clocking: max_tries is %d but the sweep has only ONE roll '
+        log.warning('assembly.connector_clocking: max_tries is %d but the sweep has only ONE roll '
                     'position (%+.1f deg). Legs 2..%d have nothing to turn. Give sweep_deg a '
                     'second position to rock across the slot.',
                     cc_tries, np.degrees(cc_sweep[0]), cc_tries)
     if cc_on and cc_need_m <= 0.0:
-        log.error('assembly.cable_clocking.success_advance_mm must be > 0 (got %.2f) -- a zero '
+        log.error('assembly.connector_clocking.success_advance_mm must be > 0 (got %.2f) -- a zero '
                   'early-out threshold trips on the first servo cycle, ending the stroke before '
                   'it has turned anything.', cc_need_m * 1000.0)
         return False
@@ -644,7 +651,7 @@ def build_and_run(cfg, robot, camera, args):
 
     adm_cc = guard_cc = adm_cl = guard_cl = None
     if cc_on:
-        adm_cc, guard_cc = _clock_physics(cc, 'Cable clocking')
+        adm_cc, guard_cc = _clock_physics(cc, 'Connector clocking')
     if cl_on:
         adm_cl, guard_cl = _clock_physics(cl, 'Collar clocking')
     adm_en = guard_en = None
@@ -673,7 +680,7 @@ def build_and_run(cfg, robot, camera, args):
     # unchanged by a roll about +X, so the insertion axis, push, retract legs and every depth
     # reading are identical at any value.
     T_base_tconn = T_base_socket @ R_clock
-    log.info('Clock angles about the socket +X: engage at %+.1f deg, cable sweep visits %s deg '
+    log.info('Clock angles about the socket +X: engage at %+.1f deg, connector sweep visits %s deg '
              'in turn (up to %d leg%s) -- the run works the %+.1f .. %+.1f deg band about the '
              'declared roll of %r.',
              np.degrees(eng_clock), [round(float(np.degrees(t)), 1) for t in cc_sweep],
@@ -689,7 +696,7 @@ def build_and_run(cfg, robot, camera, args):
                         'the rolled frame but the CONTACT they describe is a different part of '
                         'the socket. Re-collect the map at this clock angle, or engage with '
                         'insertion_mode: engage (which matches nothing and is unaffected).')
-    # FRAME FOR THE POST-ENGAGEMENT MANEUVERS -- cable clocking, collar clocking, the escape's
+    # FRAME FOR THE POST-ENGAGEMENT MANEUVERS -- connector clocking, collar clocking, the escape's
     # target-frame leg and the tug all build their axes and stations from T_clk. 'target' binds it
     # to the recorded socket pose; 'believed' rebinds it, when clocking starts, to the
     # estimator-corrected in-hand belief. The ENGAGEMENT itself always uses the target frame.
@@ -919,7 +926,7 @@ def build_and_run(cfg, robot, camera, args):
 
         retract=False LEAVES THE ARM AT THE STOP. The insertion meant to SEAT must stay put: a
         retract here pulls the connector back out with it (the gripper holds the cable), and
-        cable clocking would then read the retracted pose as its "engaged pose" and anchor the
+        connector clocking would then read the retracted pose as its "engaged pose" and anchor the
         whole clocking sequence there. Only an attempt about to be RETRIED should back off, and
         that is the caller's decision (see retract_from).
 
@@ -1041,7 +1048,7 @@ def build_and_run(cfg, robot, camera, args):
         pull_force / stiffness, so the force is applied at zero displacement and DROPS as the
         connector comes out -- it can never exceed pull_force_n on a connector that holds.
 
-        T_grasp is the arm pose at the END of cable clocking, pads still closed on the SEATED
+        T_grasp is the arm pose at the END of connector clocking, pads still closed on the SEATED
         junction. Collar clocking turns only the collar, so the junction has not moved.
 
         Returns 'verified' (held; released and retracted), 'failed' (backed out; the cable has
@@ -1297,8 +1304,8 @@ def build_and_run(cfg, robot, camera, args):
             _save_observations(os.path.join(out_dir, 'engage_observations.csv'), obs)
         return status, last_ref, depth
 
-    def cable_clocking():
-        """CABLE CLOCKING -- the bayonet search, and the belief reset that makes it well posed.
+    def connector_clocking():
+        """CONNECTOR CLOCKING -- the bayonet search, and the belief reset that makes it well posed.
 
         THE BELIEF RESET: the mate is made, so the connector's pose is known from a PHYSICAL
         CONSTRAINT rather than estimated -- it is AT the target. That replaces the estimated
@@ -1337,7 +1344,7 @@ def build_and_run(cfg, robot, camera, args):
         T_tool0_engaged = robot.tool0()
         T_tool0_conn = inverse(T_tool0_engaged) @ T_clk
         moved = matrix_to_xyzrpy(inverse(robot.T_tool0_fingertip @ T_ftip_conn) @ T_tool0_conn)
-        log.info('--- CABLE CLOCKING --- belief reset: connector assumed AT the %s frame '
+        log.info('--- CONNECTOR CLOCKING --- belief reset: connector assumed AT the %s frame '
                  '(shifts the in-hand belief by %s mm, %s deg)', pe_frame,
                  np.round(moved[0] * 1000.0, 2).tolist(),
                  np.round(np.degrees(moved[1]), 2).tolist())
@@ -1387,10 +1394,10 @@ def build_and_run(cfg, robot, camera, args):
             else:
                 seed_scan = _q
         if bad:
-            log.warning('  CABLE CLOCKING: %d of 25 poses sampled across the %.0f deg band have '
+            log.warning('  CONNECTOR CLOCKING: %d of 25 poses sampled across the %.0f deg band have '
                         'no IK solution (first at %+.0f deg wrt the target frame). The sweep will '
                         'be attempted anyway, but it is likely to run out of wrist range there -- '
-                        'move assembly.cable_clocking.sweep_deg, or the engage angle, rather than '
+                        'move assembly.connector_clocking.sweep_deg, or the engage angle, rather than '
                         'letting a leg discover it mid-turn.',
                         len(bad), np.degrees(cc_hi - cc_lo), np.degrees(eng_clock + bad[0]))
 
@@ -1400,7 +1407,7 @@ def build_and_run(cfg, robot, camera, args):
         # calls, so resetting between legs would dump the axial deflection holding the connector
         # loaded and the press would rebuild on every reversal. Taring is once, here, for the same
         # reason.
-        phase('cable_clock')
+        phase('connector_clock')
         adm_cc.reset()
         adm_cc.warmup(ref_start, tare_fn=cc_tare)
 
@@ -1438,7 +1445,7 @@ def build_and_run(cfg, robot, camera, args):
             # and the next leg reverses from there, not from the endpoint it never reached.
             th_at = _a + turn * f_done
             push_at = _pa + (cc_push_m - _pa) * f_done
-            clock_rows.append({'maneuver': 'cable_clocking', 'try': k, 'ramp_result': res,
+            clock_rows.append({'maneuver': 'connector_clocking', 'try': k, 'ramp_result': res,
                                'target_deg': round(float(np.degrees(eng_clock + th_to)), 3),
                                'reached_deg': round(float(np.degrees(eng_clock + th_at)), 3),
                                'advance_mm': round(adv * 1000.0, 3),
@@ -1477,7 +1484,7 @@ def build_and_run(cfg, robot, camera, args):
         # ONE SUMMARY ROW on top of the per-leg rows: when the sweep seats by COMPLETION rather
         # than by the early-out, every per-leg row reads success=False and nothing else in the CSV
         # carries the verdict.
-        clock_rows.append({'maneuver': 'cable_sweep', 'try': ran, 'ramp_result': verdict,
+        clock_rows.append({'maneuver': 'connector_sweep', 'try': ran, 'ramp_result': verdict,
                            'reached_deg': round(float(np.degrees(eng_clock + th_at)), 3),
                            'advance_mm': round(det.advance_m() * 1000.0, 3),
                            'peak_advance_mm': round(det.peak_m * 1000.0, 3),
@@ -1521,8 +1528,8 @@ def build_and_run(cfg, robot, camera, args):
             ok = True
         if cc_open_after:
             phase('retract')
-            if not robot.gripper.open('release (post cable clocking)'):
-                log.error('Gripper did not open after cable clocking.')
+            if not robot.gripper.open('release (post connector clocking)'):
+                log.error('Gripper did not open after connector clocking.')
                 return False, T_tool0_conn_now, T_base_conn
         return ok, T_tool0_conn_now, T_base_conn, float(np.degrees(screw_rad))
 
@@ -1541,7 +1548,7 @@ def build_and_run(cfg, robot, camera, args):
         -158 mm and travels 0 mm for the same turn. Same grasp on the ring (the jaws still close
         across a diameter), 183 mm more wall clearance, and no lateral sweep at all.
 
-        WHAT IT COSTS: the approach is no longer a pure orbit from where the cable sweep left the
+        WHAT IT COSTS: the approach is no longer a pure orbit from where the connector sweep left the
         arm. Radial and axial differ by a 90 deg pitch about the jaw-closing axis, which cannot be
         done with the open fingers still around the cable -- so the sequence retreats along the
         connector -X first, reorients in clear space, and only then advances back down the axis.
@@ -1574,7 +1581,7 @@ def build_and_run(cfg, robot, camera, args):
         # COLLAR AXIS OFFSET (collar_clocking.axis_offset_mm, SOCKET-frame xyz). The declared
         # frame origin is the mating-face reference, not necessarily on the barrel centreline the
         # collar turns about. Shifts the LINE the whole maneuver works about; Y/Z move the line, X
-        # only slides the reference point along it. Scoped to collar clocking -- the cable sweep
+        # only slides the reference point along it. Scoped to collar clocking -- the connector sweep
         # still turns about the unoffset axis. Resolved in the ROLL-FREE basis, see
         # axis_offset_base.
         off_conn = np.asarray(cl_axis_off, dtype=float) / 1000.0
@@ -1633,7 +1640,7 @@ def build_and_run(cfg, robot, camera, args):
             return rotate_about_axis(T_nom, axis, point, clock_rad)
 
         # WHERE TO GRASP, as an ABSOLUTE roll about the socket +X (wrt the target frame), the same
-        # convention cable_clocking.sweep_deg uses. The collar is a body of revolution, so any
+        # convention connector_clocking.sweep_deg uses. The collar is a body of revolution, so any
         # angle grips the same ring -- what this decides is where the TURN starts and ends, and
         # therefore how much wrist range it needs. null = the engaged roll.
         #
@@ -1661,7 +1668,7 @@ def build_and_run(cfg, robot, camera, args):
         #
         # The collar is a body of revolution, so this angle is FREE: any of them grips the same
         # ring. So spend it. null = pick the cheapest angle that actually solves; a number pins it
-        # (absolute, wrt the target frame, like cable_clocking.sweep_deg).
+        # (absolute, wrt the target frame, like connector_clocking.sweep_deg).
         #
         # The tool0 station along the axis does NOT depend on the angle -- every candidate is a
         # rotation ABOUT the axis -- so this cannot trade wall clearance for reach.
@@ -1678,7 +1685,7 @@ def build_and_run(cfg, robot, camera, args):
             th_grasp = cl_grasp_clock - eng_clock
         else:
             # ---- THE DEFAULT RULE: tool0's -Y along the connector's -Z ------------------------
-            # Closed form, not a search. The cable sweep leaves the wrist in a particular
+            # Closed form, not a search. The connector sweep leaves the wrist in a particular
             # orientation, and of all the clock angles that grip the ring identically, the one
             # that lands tool0's -Y on the connector's -Z is the one the arm is already nearly
             # in -- it halves the reorientation onto the axis (measured on this fixture: 90 deg
@@ -2267,7 +2274,7 @@ def build_and_run(cfg, robot, camera, args):
     if not success:
         return False
 
-    # ---- POST-MATE: CABLE CLOCKING, then COLLAR CLOCKING, then the shared escape -------------
+    # ---- POST-MATE: CONNECTOR CLOCKING, then COLLAR CLOCKING, then the shared escape -------------
     # Both paths end in the same retract. The mate itself has already succeeded by here, so a
     # clocking failure is reported without undoing it.
     if cc_on:
@@ -2284,13 +2291,13 @@ def build_and_run(cfg, robot, camera, args):
         else:
             T_clk = T_base_tconn
             log.info('Post-engage frame: TARGET connector (recorded socket pose).')
-        if not phase_gate('CABLE CLOCKING (insert)',
+        if not phase_gate('CONNECTOR CLOCKING (insert)',
                           'The connector is ENGAGED. Next is the bayonet screw, which cams it '
                           'HOME -- check the engagement looks right first.'):
             robot.arm.servo_stop()
             return False
         try:
-            cc_ok, _T_tool0_conn, T_base_conn, cc_screw_deg = cable_clocking()
+            cc_ok, _T_tool0_conn, T_base_conn, cc_screw_deg = connector_clocking()
             if cc_ok:
                 state = _advance_state(state, 'engaged')          # -> seated
                 if cl_on and not phase_gate(
@@ -2304,7 +2311,7 @@ def build_and_run(cfg, robot, camera, args):
                 elif cl_on:
                     cc_ok = False
             else:
-                log.error('CABLE CLOCKING FAILED after %d tr%s (every stroke was stopped by the '
+                log.error('CONNECTOR CLOCKING FAILED after %d tr%s (every stroke was stopped by the '
                           'force guard) -- the connector is ENGAGED but NOT SEATED. The mate '
                           'itself succeeded; skipping collar clocking and retracting.',
                           cc_tries, 'y' if cc_tries == 1 else 'ies')

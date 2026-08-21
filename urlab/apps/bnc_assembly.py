@@ -2575,9 +2575,23 @@ def build_and_run(cfg, robot, camera, args):
                     tug_res = 'skipped'
                     log.warning('Tug verification skipped by the user -- the assembly is '
                                 'UNVERIFIED.')
-            if phase_gate('ESCAPE',
-                           'Clocking done. Next: RELEASE the gripper, then the two-leg retract '
-                           '(the gripper backs off its own -Z, then away along the target -X).'):
+            # ---- ESCAPE, ONLY IF THE TUG HAS NOT ALREADY DONE IT ----------------------------
+            # tug_verify_in_place ends both of its outcomes with the arm already clear: 'verified'
+            # releases and runs clocking_retract itself, 'failed' extracts the cable, drives HOME
+            # and releases there. Running the escape again on top of either put two more retract
+            # legs after a retract that had already happened -- and after a 'failed' it fired them
+            # from the home pose, nowhere near the socket. So the escape belongs to the paths that
+            # still have the arm at the connector: a skipped or disabled tug, or a run that never
+            # reached 'locked'.
+            if tug_res in ('verified', 'failed'):
+                ret_ok = True
+                log.info('Escape not needed -- the tug verification already left the arm clear '
+                         '(%s). Going straight home.',
+                         'released and retracted' if tug_res == 'verified'
+                         else 'cable extracted and carried home')
+            elif phase_gate('ESCAPE',
+                            'Clocking done. Next: RELEASE the gripper, then the two-leg retract '
+                            '(the gripper backs off its own -Z, then away along the target -X).'):
                 # RELEASE FIRST: the fingers are still CLOSED on the collar, and the retract's
                 # first leg is written for OPEN fingers. Idempotent where it is already open.
                 if robot.gripper.open('release before escape'):

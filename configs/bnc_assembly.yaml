@@ -218,7 +218,7 @@ speed:
     # non-null speed_translation_mm_s / speed_rotation_deg_s in the maneuver's own block
     # OVERRIDES its scale entirely -- they ship null, so these are what govern.
     connector_clock: 0.10    # the bayonet sweep legs
-    collar_clock: 0.10   # the collar turn
+    collar_clock: 0.5   # the collar turn
     clock_retract: 1.0   # the shared two-leg escape (free space, gripper already clear)
     # The collar maneuver's FREE-SPACE approach: withdraw along the cable, lift the open fingers
     # off, and the big reorient onto the axis. Nothing is being inserted, so this should not run
@@ -231,7 +231,7 @@ speed:
     # joint-velocity cap to 180 deg/s, which is already at a UR's own ceiling. Going higher only
     # commands speeds the controller clamps anyway, so raise the CARTESIAN caps in speed: if this
     # is still too slow rather than pushing this number up.
-    collar_approach: 2.0
+    collar_approach: 3.0
 
 # Per-MOVE limit for a guarded (async) move -- arm._await_move stops the arm and fails the move
 # when it expires. The collar reorient is the longest single move here; if it reports "did not
@@ -681,7 +681,7 @@ assembly:
     # NOT from the connector frame origin -- the opposite of what the code does. That comment
     # was a leftover from a reverted change; if the value is ever re-tuned on the bench, it is
     # the connector frame origin it is being measured from.
-    collar_offset_mm: -30
+    collar_offset_mm: -8
     # COLLAR AXIS OFFSET, mm, in the SOCKET (target) frame's own axes. Shifts the LINE the whole
     # collar maneuver works about -- centring, unwind, advance, turn -- and the TUG VERIFICATION
     # centres its re-grip on the same offset axis. Connector clocking is NOT affected. Y and Z move
@@ -710,7 +710,7 @@ assembly:
     # the old reorientation pivoted a long way from it. The pitch pivots ON THE FINGERTIP and its
     # axis IS the jaw-closing axis, so the jaw turns about its own gap with the cable at the
     # pivot: there is nothing left to clear.
-    retract_mm: 300.0
+    retract_mm: 150.0
     # LIFT-OFF, mm along the GRIPPER's own -Z, after the retract and before the reorientation.
     # The reorient is a GENERAL rotation onto the axis (a single-axis pitch about the jaw-closing
     # axis kept the cable in the gap at radius zero, but it could only reach the axial pose when

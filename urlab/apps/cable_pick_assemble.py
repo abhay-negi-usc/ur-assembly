@@ -19,6 +19,7 @@ import numpy as np
 
 from ..transforms import from_cfg, inverse, translation_matrix
 from ._cable import build_scanner, make_confirm
+from ._common import guarded as _guarded   # re-exported: sibling apps import it from here
 from ._runner import run_app
 
 log = urlog.get('cable-assemble')
@@ -179,20 +180,6 @@ def build_and_run(cfg, robot, camera, args):
 
     # RESET at the end: open the gripper and go home under admittance.
     return reset.reset_robot(robot, cfg, 'end reset')
-
-
-def _guarded(robot, guard, move_fn):
-    """Run a move with the force guard armed as a canceller (a trip = unexpected collision)."""
-    guard.reset()
-    robot.arm.add_guard(guard)
-    try:
-        ok = move_fn()
-    finally:
-        robot.arm.clear_guards()
-    if not ok and guard.tripped_by:
-        log.error('Force guard tripped during a free-space move (%s) -- hit something unexpected.',
-                  guard.tripped_by)
-    return ok
 
 
 def main():

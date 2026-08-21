@@ -62,6 +62,15 @@ require_all_markers: true
 view_joints_deg: null
 confirm_start: true
 
+# ---- SNAPSHOT (urlab.apps.marker_snapshot) --------------------------------------------------
+# The quick "can the camera see the markers?" check: capture, label, save. No motion. Reads the
+# camera/aruco/markers blocks above, so a snapshot solves the markers exactly as a run does.
+# Output goes to a gitignored folder (data/ is ignored wholesale).
+snapshot:
+  count: 1                         # captures per invocation
+  interval_s: 0.0                  # pause between captures (with count > 1)
+  out_dir: data/snapshots
+
 # ---- THE VIEW SWEEP -------------------------------------------------------------------------
 # Shared with bnc_assembly's visual localisation (urlab/skills/marker_localize.py). Offsets are
 # CAMERA-FRAME poses relative to wherever the sweep starts; the markers are assumed in view.

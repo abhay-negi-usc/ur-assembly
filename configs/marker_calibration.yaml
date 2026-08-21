@@ -104,7 +104,7 @@ marker_views:
   # the rig's PnP biases cancel between calibration and run only when both look the same way.
   servo:
     enabled: true
-    distance_m: 0.15
+    distance_m: 0.25
     max_iterations: 4
     pos_tol_mm: 0.5
     ang_tol_deg: 0.5

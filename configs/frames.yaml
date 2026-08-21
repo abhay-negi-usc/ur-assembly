@@ -124,6 +124,27 @@ targets:
     xyz_mm:  [47.62, 1086.10, -155.66]
     rpy_deg: [-1.02, 0.62, 94.17]
 
+marker_rigs:
+  bnc_connector_finger_holder:
+    dictionary: DICT_4X4_50
+    markers:
+      24:
+        size_mm: 19.70
+        xyz_mm:  [+245.54, -61.97, -1.29]
+        rpy_deg: [+106.75, +88.65, -163.06]
+        views: 5
+        residual_mm: 10.06
+        residual_deg: 7.61
+        measured: 2026-08-21
+      25:
+        size_mm: 19.70
+        xyz_mm:  [-226.13, -57.28, -7.97]
+        rpy_deg: [-114.65, +87.73, -24.02]
+        views: 5
+        residual_mm: 9.71
+        residual_deg: 10.05
+        measured: 2026-08-21
+
 # ============================================================================
 # MARKER RIGS -- the fiducials bolted around a target, each carrying the TARGET's pose in ITS OWN
 # frame (marker <- target). Produced by urlab.apps.marker_calibration; consumed by

@@ -37,7 +37,7 @@ camera:
 # This block is only the detector's dictionary + a fallback size for an undeclared id.
 aruco:
   dictionary: DICT_4X4_50
-  marker_size_m: 0.0203
+  marker_size_m: 0.0197
 
 # THE VIEW SWEEP, shared with urlab.apps.marker_calibration (urlab/skills/marker_localize.py).
 # Offsets are CAMERA-FRAME poses relative to the start pose; the markers must already be in
@@ -54,7 +54,7 @@ marker_views:
   max_view_spread_mm: 3.0          # spread ACROSS VIEWS of one marker -- warns
   max_view_spread_deg: 3.0
   max_disagreement_mm: 5.0         # spread ACROSS MARKERS -- REFUSES; null disables
-  max_disagreement_deg: 5.0
+  max_disagreement_deg: 10.0
   offsets: null                    # null = the built-in ring (centre, 40 mm x4, 25 mm closer)
   # CERTAINTY WEIGHTING: a view at distance d fuses with weight d^-power (closer views are
   # more accurate); each marker's accumulated weight also weighs its vote on the target.
@@ -69,7 +69,7 @@ marker_views:
   # markers.  MUST match the block marker_calibration ran with, so the biases cancel.
   servo:
     enabled: true
-    distance_m: 0.15
+    distance_m: 0.25
     max_iterations: 4
     pos_tol_mm: 0.5
     ang_tol_deg: 0.5
@@ -149,7 +149,7 @@ scan:
     - {xyz: [ 0.000, -0.040, 0.00], rpy: [-0.1722,  0.0000, 0.0]}
     - {xyz: [ 0.028, -0.028, 0.00], rpy: [-0.1224, -0.1224, 0.0]}
   refine:
-    enabled: true
+    enabled: false
     orbit_deg: [12.0, -12.0, 20.0, -20.0]
     max_orbit_deg: 25.0
     min_height_m: 0.12
@@ -333,6 +333,11 @@ assembly:
     # marker view pose (reset.home_joints_deg) -- set this only to sweep from somewhere
     # else, and then use the SAME value for marker_calibration's view_joints_deg.
     view_joints_deg: null
+    # Per-marker SERVO REFINEMENT at run time (see marker_views.servo for the parameters,
+    # which are shared with marker_calibration and must stay identical to it).  false = the
+    # plain sweep only -- faster, but the localization then views the markers differently
+    # from how the calibration did, so the PnP bias cancellation is partly given up.
+    servo_refine: true
     # Keep true: return to home after the sweep; the app then drives to pick_joints_deg,
     # where the scan, grasp geometry and retry offsets are written.
     return_home_after: true

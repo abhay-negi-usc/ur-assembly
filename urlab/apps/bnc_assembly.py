@@ -2304,6 +2304,13 @@ def build_and_run(cfg, robot, camera, args):
         except ValueError as exc:
             log.error('marker_views: %s', exc)
             return False
+        # The per-marker servo refinement is OPTIONAL at run time: visual_target.servo_refine
+        # switches it off WITHOUT touching the shared marker_views.servo parameters, which
+        # must stay identical to marker_calibration's for the runs where it is on.
+        if not bool(vt.get('servo_refine', True)):
+            plan.servo.enabled = False
+            log.info('VISUAL TARGET: servo refinement OFF (visual_target.servo_refine) -- '
+                     'sweep views only.')
         detector = ArucoDetector(cfg, sizes_m=tool_frames.marker_sizes(vt_rig))
 
         phase('visual_localize')

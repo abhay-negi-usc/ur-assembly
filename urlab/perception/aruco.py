@@ -61,6 +61,18 @@ class ArucoDetector:
         return np.array([[-h, h, 0.0], [h, h, 0.0], [h, -h, 0.0], [-h, -h, 0.0]],
                         dtype=np.float32)
 
+    def detect_corners(self, frame):
+        """{marker_id: (4, 2) float32 pixel corners, ArUco order TL, TR, BR, BL} -- the raw
+        detections, for solving several markers JOINTLY as one rigid object
+        (skills/marker_localize joint PnP). Same detection pass as detect(), no per-marker
+        solve."""
+        gray = cv2.cvtColor(frame.color, cv2.COLOR_BGR2GRAY)
+        corners, ids, _ = self._detector.detectMarkers(gray)
+        if ids is None:
+            return {}
+        return {int(i): c.reshape(4, 2).astype(np.float32)
+                for c, i in zip(corners, ids.flatten())}
+
     def detect(self, frame):
         """{marker_id: T_cam_marker (4x4)} for every marker in the frame."""
         gray = cv2.cvtColor(frame.color, cv2.COLOR_BGR2GRAY)

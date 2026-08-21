@@ -394,6 +394,134 @@ def test_servo_vantage_roll_snaps_to_the_nearest_quarter_turn():
         assert np.degrees(ang) <= 45.0 + 1e-6
 
 
+def test_rig_object_points_carries_the_aruco_corner_layout_into_the_target_frame():
+    """The joint-PnP object model: each marker's four corners (TL, TR, BR, BL, +Z out of the
+    face -- ArucoDetector.object_points' exact layout) expressed in the TARGET frame through
+    inverse(T_marker_target)."""
+    from urlab.skills.marker_localize import rig_object_points
+    from urlab.transforms import inverse, xyzrpy_to_matrix
+
+    s = 0.02
+    h = s / 2.0
+    layout = np.array([[-h, h, 0.0], [h, h, 0.0], [h, -h, 0.0], [-h, -h, 0.0]])
+    T_mt8 = xyzrpy_to_matrix([0.05, -0.02, 0.01], [0.0, 0.0, np.pi / 2])
+    rig = {'markers': {7: {'size_m': s, 'T_marker_target': np.eye(4)},
+                       8: {'size_m': s, 'T_marker_target': T_mt8}}}
+    pts = rig_object_points(rig)
+    # marker 7 sits AT the target (identity offset): corners are the raw layout;
+    # marker 8 is displaced + rotated: corners ride through the inverse offset.
+    assert np.allclose(pts[7], layout)
+    T_tm8 = inverse(T_mt8)
+    want8 = (T_tm8[:3, :3] @ layout.T).T + T_tm8[:3, 3]
+    assert np.allclose(pts[8], want8)
+    assert pts[8].shape == (4, 3)
+
+
+def test_capture_stops_log_joint_pnp_corner_views():
+    """The servo capture path must record, per stop, the corners + intrinsics + camera pose
+    the joint PnP solves from -- and skip detectors without corner support."""
+    from urlab.skills import marker_localize as mloc
+    from urlab.transforms import xyzrpy_to_matrix
+
+    truth = {5: xyzrpy_to_matrix([0.6, 0.0, 0.2], [0.0, np.pi / 2, 0.0])}
+    T_overview = xyzrpy_to_matrix([0.3, 0.0, 0.2], [0.0, np.pi / 2, 0.0])
+    K = np.array([[600.0, 0, 320], [0, 600.0, 240], [0, 0, 1]])
+
+    class FakeArm:
+        def __init__(self):
+            self.T_cam = np.array(T_overview)
+
+        def move_frame_to(self, T, T_tool0_frame, label):
+            self.T_cam = np.array(T)
+            return True
+
+    class FakeRobot:
+        def __init__(self):
+            self.arm = FakeArm()
+            self.T_tool0_cam = np.eye(4)
+
+        def camera(self):
+            return self.arm.T_cam
+
+    class FakeCamera:
+        def __init__(self, robot):
+            self.robot = robot
+
+        def capture(self):
+            class F:
+                T_base_cam = np.array(self.robot.arm.T_cam)
+            F.K, F.D = K, np.zeros(5)
+            return F()
+
+    class FakeDetector:
+        def detect_in_base(self, frame):
+            return dict(truth)
+
+        def detect(self, frame):
+            return {}
+
+        def detect_corners(self, frame):
+            return {5: np.arange(8, dtype=float).reshape(4, 2)}
+
+    plan = _MarkerPlan()
+    plan.servo = mloc.ServoPlan({'enabled': True, 'distance_m': 0.15, 'max_iterations': 2,
+                                 'ring_mm': 25.0, 'ring_views': 1})
+    robot = FakeRobot()
+    corner_views = []
+    refined = mloc.servo_refine(robot, FakeCamera(robot), FakeDetector(), plan,
+                                {5: [(truth[5], 0.35)]}, T_overview=T_overview,
+                                corner_log=corner_views)
+    assert 5 in refined
+    assert len(corner_views) == 2          # the vantage + one ring stop
+    for v in corner_views:
+        assert set(v['corners']) == {5} and v['corners'][5].shape == (4, 2)
+        assert v['K'] is K and v['T_base_cam'].shape == (4, 4)
+
+    class PlainDetector:                   # no detect_corners: logs nothing, still refines
+        detect_in_base = FakeDetector.detect_in_base
+        detect = FakeDetector.detect
+
+    corner_views = []
+    refined = mloc.servo_refine(robot, FakeCamera(robot), PlainDetector(), plan,
+                                {5: [(truth[5], 0.35)]}, T_overview=T_overview,
+                                corner_log=corner_views)
+    assert 5 in refined and corner_views == []
+
+
+def test_joint_pnp_recovers_the_target_from_synthetic_corners():
+    """End to end with real PnP (skipped where OpenCV is absent): project a 3-marker rig's
+    corners through a known camera, solve jointly, recover the target pose."""
+    import pytest
+    cv2 = pytest.importorskip('cv2')
+    from urlab.skills.marker_localize import joint_pnp_views, rig_object_points
+    from urlab.transforms import inverse, pose_error, xyzrpy_to_matrix
+
+    T_base_target = xyzrpy_to_matrix([0.6, 0.1, -0.1], np.radians([5.0, -3.0, 40.0]))
+    rig = {'markers': {}}
+    for mid, (off, rot) in {7: ([0.0, -0.06, 0.03], [90.0, 0.0, 0.0]),
+                            8: ([0.05, -0.06, -0.02], [90.0, 0.0, 25.0]),
+                            9: ([-0.05, -0.06, 0.01], [90.0, 0.0, -25.0])}.items():
+        T_tm = xyzrpy_to_matrix(off, np.radians(rot))
+        rig['markers'][mid] = {'size_m': 0.0203, 'T_marker_target': inverse(T_tm)}
+    K = np.array([[615.0, 0, 424], [0, 615.0, 240], [0, 0, 1]], dtype=float)
+    D = np.zeros(5)
+    T_base_cam = xyzrpy_to_matrix([0.45, 0.05, 0.05], np.radians([-90.0, 0.0, 30.0]))
+
+    T_cam_target = inverse(T_base_cam) @ T_base_target
+    objs = rig_object_points(rig)
+    corners = {}
+    rvec, _ = cv2.Rodrigues(T_cam_target[:3, :3])
+    for mid, pts in objs.items():
+        img, _ = cv2.projectPoints(pts.astype(np.float32), rvec, T_cam_target[:3, 3], K, D)
+        corners[mid] = img.reshape(4, 2)
+
+    est = joint_pnp_views(rig, [{'corners': corners, 'K': K, 'D': D,
+                                 'T_base_cam': T_base_cam}], _MarkerPlan())
+    assert len(est) == 1
+    lin, ang = pose_error(est[0][0], T_base_target)
+    assert lin * 1000.0 < 0.5 and np.degrees(ang) < 0.1, (lin * 1000.0, np.degrees(ang))
+
+
 def test_gripper_warmup_sequence():
     """The session warm-up strokes: open, full close, two partial cycles, end fully open."""
     from urlab.robot.gripper import Robotiq2F85

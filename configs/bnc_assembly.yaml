@@ -56,6 +56,12 @@ marker_views:
   max_disagreement_mm: 5.0         # spread ACROSS MARKERS -- REFUSES; null disables
   max_disagreement_deg: 10.0
   offsets: null                    # null = the built-in ring (centre, 40 mm x4, 25 mm closer)
+  # JOINT PnP (run time): every view's detected corners of ALL rig markers are solved as
+  # ONE rigid object -- the rig acting as a single large marker, the way one marker's four
+  # corners localize that marker -- so the effective baseline is the rig's extent, not one
+  # square's side.  The per-marker vote still runs first as the consistency gate (a moved
+  # marker refuses the run there) and is the fallback.  false = per-marker vote only.
+  joint_pnp: true
   # CERTAINTY WEIGHTING: a view at distance d fuses with weight d^-power (closer views are
   # more accurate); each marker's accumulated weight also weighs its vote on the target.
   view_weight_power: 2.0
@@ -69,7 +75,7 @@ marker_views:
   # markers.  MUST match the block marker_calibration ran with, so the biases cancel.
   servo:
     enabled: true
-    distance_m: 0.25
+    distance_m: 0.30
     max_iterations: 4
     pos_tol_mm: 0.5
     ang_tol_deg: 0.5
@@ -282,7 +288,7 @@ reset:
   # HOME = the MARKER VIEW pose: the reset drives here at the start and end of every run,
   # the visual localisation sweeps the markers from here, and the end-of-run image is
   # captured from here.  (The pick itself runs from pick_joints_deg below.)
-  home_joints_deg: [-80, -150, -131, 100, 85, 180]
+  home_joints_deg: [-80, -150, -131, 75, 85, 180]
   # (the home move is a guarded position moveJ, paced by the speed caps above)
   max_force_n: 50.0
   compliance:

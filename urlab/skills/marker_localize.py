@@ -32,10 +32,20 @@ superlinearly with range). Views beyond the `max_camera_distance_mm` standoff ca
 commanded and never fused. Each marker's accumulated view weight is its certainty, and the
 across-marker vote uses it.
 
-WHY MULTIPLE MARKERS. Each marker with a recorded pose is an INDEPENDENT vote on the fixture
--- independent because the errors that dominate (the marker's own printed size, how square it
-is glued, its detection geometry) do not correlate between two markers on different faces.
-The spread ACROSS markers is therefore a real accuracy estimate.
+JOINT PnP ESTIMATION (the default at run time). Rather than solving each marker's four
+corners for its own pose and averaging the per-marker answers, every view's detected corners
+of ALL rig markers are solved as ONE PnP over one rigid object -- the whole rig acting as a
+single large marker, exactly the way one marker's four corners localize that marker. The
+effective baseline becomes the rig's extent instead of one square's side, which is what
+collapses the small-marker depth/tilt ambiguity. Per-view estimates are then fused with the
+same closeness weighting single-marker views get.
+
+WHY THE PER-MARKER VOTE STILL RUNS. Each marker with a recorded pose is an INDEPENDENT vote
+on the fixture -- independent because the errors that dominate (printed size, how square it
+is glued) do not correlate between markers. The vote is the CONSISTENCY GATE: a moved or
+re-stuck marker stands out as a disagreeing vote and REFUSES the run, where a joint solve
+would quietly absorb it into a small bias. The gate must pass before the joint estimate is
+trusted (and it is the fallback when OpenCV or the corner data is unavailable).
 
 THE FAILURE THIS IS BUILT AROUND is a marker that is right about everything except which
 fixture it is on -- moved, re-stuck, re-printed at another size. It produces a confident pose
@@ -94,6 +104,9 @@ class ViewPlan:
         # and a detection captured from beyond it is never fused. null disables.
         cap = _opt_float(b.get('max_camera_distance_mm', 500.0))
         self.max_camera_distance_m = None if cap is None else cap / 1000.0
+        # JOINT PnP: solve every view's detected corners of ALL rig markers as one rigid
+        # object (run-time localization only; the per-marker vote stays as the gate).
+        self.joint_pnp = bool(b.get('joint_pnp', True))
         self.servo = ServoPlan(b.get('servo'))
         if (self.servo.enabled and self.max_camera_distance_m is not None
                 and self.servo.distance_m > self.max_camera_distance_m):
@@ -119,6 +132,8 @@ class ViewPlan:
         if self.servo.enabled:
             base += (', then servo-refined per marker at %.0f mm (+%d-view ring)'
                      % (self.servo.distance_m * 1000.0, self.servo.ring_views))
+        if self.joint_pnp:
+            base += ', joint-PnP estimate'
         if self.max_camera_distance_m is not None:
             base += ', standoff cap %.0f mm' % (self.max_camera_distance_m * 1000.0)
         return base
@@ -152,7 +167,7 @@ def _cam_position(frame, robot):
     return (T if T is not None else robot.camera())[:3, 3]
 
 
-def sweep(robot, camera, detector, plan, wanted=None, on_view=None):
+def sweep(robot, camera, detector, plan, wanted=None, on_view=None, corner_log=None):
     """Drive the configured views and detect at each.
     Returns {marker_id: [(T_base_marker, camera_distance_m), ...]}.
 
@@ -190,29 +205,20 @@ def sweep(robot, camera, detector, plan, wanted=None, on_view=None):
                 continue
         if plan.settle_s > 0:
             time.sleep(plan.settle_s)
-        hits = {}
-        frame = None
-        for _ in range(plan.frames_per_view):
-            frame = camera.capture()
-            for mid, T in detector.detect_in_base(frame).items():
-                if wanted is not None and int(mid) not in wanted:
-                    continue
-                hits.setdefault(int(mid), []).append(T)
+        poses, corners, frame = _capture_stop(camera, detector, plan.frames_per_view, wanted)
         if on_view is not None and frame is not None:
             on_view(k, frame, detector.detect(frame))
-        if not hits:
+        if not poses:
             log.warning('  view %d/%d: no markers detected.', k + 1, len(plan.offsets))
             continue
         cam_p = _cam_position(frame, robot)
-        for mid, mats in hits.items():
-            # The repeats at one stop measure sensor noise only, so they collapse to ONE view
-            # here -- otherwise frames_per_view would silently weight a view by how still it was.
-            T_m = average_pose(mats)[0]
+        for mid, T_m in poses.items():
             seen.setdefault(mid, []).append(
                 (T_m, float(np.linalg.norm(T_m[:3, 3] - cam_p))))
+        _log_corner_view(corner_log, corners, frame, robot)
         aim = np.mean([m[-1][0][:3, 3] for m in seen.values()], axis=0)
         log.info('  view %d/%d: marker%s %s.', k + 1, len(plan.offsets),
-                 '' if len(hits) == 1 else 's', ', '.join(str(m) for m in sorted(hits)))
+                 '' if len(poses) == 1 else 's', ', '.join(str(m) for m in sorted(poses)))
     return seen
 
 
@@ -238,18 +244,39 @@ def _quarter_roll(T_marker, distance_m, T_cam_now):
     return best_roll
 
 
-def _detect_one(camera, detector, mid, n_frames):
-    """(averaged T_base_marker over n frames, last frame); (None, frame) if never detected."""
-    mats, frame = [], None
+def _capture_stop(camera, detector, n_frames, wanted=None):
+    """Capture n frames at ONE stop: ({id: averaged T_base_marker}, {id: averaged (4,2)
+    pixel corners}, last frame). The repeats at a stop measure sensor noise only, so they
+    collapse to one view -- for the poses and for the corners alike. Corner collection is
+    skipped for detectors that do not expose detect_corners."""
+    poses, corners, frame = {}, {}, None
     for _ in range(n_frames):
         frame = camera.capture()
-        found = {int(m): T for m, T in detector.detect_in_base(frame).items()}
-        if int(mid) in found:
-            mats.append(found[int(mid)])
-    return (average_pose(mats)[0] if mats else None), frame
+        for mid, T in detector.detect_in_base(frame).items():
+            if wanted is not None and int(mid) not in wanted:
+                continue
+            poses.setdefault(int(mid), []).append(T)
+        if hasattr(detector, 'detect_corners'):
+            for mid, c in detector.detect_corners(frame).items():
+                if wanted is not None and int(mid) not in wanted:
+                    continue
+                corners.setdefault(int(mid), []).append(np.asarray(c, dtype=float))
+    return ({m: average_pose(ts)[0] for m, ts in poses.items()},
+            {m: np.mean(cs, axis=0) for m, cs in corners.items()}, frame)
 
 
-def servo_refine(robot, camera, detector, plan, seen, T_overview=None, on_view=None):
+def _log_corner_view(corner_log, corners, frame, robot):
+    """One joint-PnP input record per stop: the corners, the intrinsics, and the camera
+    pose the capture was made from."""
+    if corner_log is None or not corners:
+        return
+    T_cam = getattr(frame, 'T_base_cam', None)
+    corner_log.append({'corners': corners, 'K': frame.K, 'D': frame.D,
+                       'T_base_cam': T_cam if T_cam is not None else robot.camera()})
+
+
+def servo_refine(robot, camera, detector, plan, seen, T_overview=None, on_view=None,
+                 corner_log=None):
     """Per-marker VISUAL SERVOING refinement (ViewPlan.servo). One marker at a time:
 
         overview -> servo onto the marker's normal at distance_m (re-detect + re-centre
@@ -293,7 +320,7 @@ def servo_refine(robot, camera, detector, plan, seen, T_overview=None, on_view=N
                 break
             if plan.settle_s > 0:
                 time.sleep(plan.settle_s)
-            T_obs, _frame = _detect_one(camera, detector, mid, plan.frames_per_view)
+            T_obs = _capture_stop(camera, detector, plan.frames_per_view)[0].get(int(mid))
             if T_obs is None:
                 log.warning('  marker %d: not detected from the servo vantage -- keeping the '
                             'sweep views.', mid)
@@ -330,13 +357,15 @@ def servo_refine(robot, camera, detector, plan, seen, T_overview=None, on_view=N
                     continue
                 if plan.settle_s > 0:
                     time.sleep(plan.settle_s)
-            T_obs, frame = _detect_one(camera, detector, mid, plan.frames_per_view)
+            poses, corners, frame = _capture_stop(camera, detector, plan.frames_per_view)
             if on_view is not None and frame is not None:
                 on_view(mid, j, frame, detector.detect(frame))
+            T_obs = poses.get(int(mid))
             if T_obs is None:
                 continue
             d = float(np.linalg.norm(T_obs[:3, 3] - _cam_position(frame, robot)))
             views.append((T_obs, d))
+            _log_corner_view(corner_log, corners, frame, robot)
         if len(views) >= plan.min_views:
             refined[mid] = views
             log.info('  marker %d: REFINED -- %d servoed view%s at ~%.0f mm replace its %d '
@@ -457,21 +486,103 @@ def vote_target(rig, fused, plan):
     return T, votes
 
 
+def rig_object_points(rig):
+    """{marker_id: (4, 3) corner coordinates in the TARGET frame} -- the whole rig as ONE
+    rigid object.
+
+    The corner layout matches ArucoDetector.object_points exactly (TL, TR, BR, BL, centred,
+    +Z out of the printed face); each marker's corners are carried into the target frame
+    through inverse(T_marker_target). Pure, so the geometry is testable without OpenCV."""
+    out = {}
+    for mid, entry in rig['markers'].items():
+        h = float(entry['size_m']) / 2.0
+        local = np.array([[-h, h, 0.0], [h, h, 0.0], [h, -h, 0.0], [-h, -h, 0.0]])
+        T_tm = inverse(entry['T_marker_target'])
+        out[int(mid)] = (T_tm[:3, :3] @ local.T).T + T_tm[:3, 3]
+    return out
+
+
+def joint_pnp_views(rig, corner_views, plan):
+    """One TARGET-pose estimate per view, from ALL of that view's detected rig corners
+    solved as a single PnP -- the rig acting as one large marker. Returns
+    [(T_base_target, camera_distance_m), ...], ready for the same certainty-weighted fusion
+    single-marker views get. Views whose corners belong to no rig marker are skipped."""
+    import cv2
+    objs = rig_object_points(rig)
+    est = []
+    for v in corner_views:
+        obj_pts, img_pts, n_markers = [], [], 0
+        for mid, c in v['corners'].items():
+            o = objs.get(int(mid))
+            if o is None:
+                continue
+            obj_pts.append(o)
+            img_pts.append(np.asarray(c, dtype=float).reshape(4, 2))
+            n_markers += 1
+        if not n_markers:
+            continue
+        obj = np.concatenate(obj_pts).astype(np.float32)
+        img = np.concatenate(img_pts).astype(np.float32)
+        # SQPnP: a global solver, exact-ish for any point count and geometry -- the rig's
+        # corners are NOT coplanar in general (markers on different faces), so the planar
+        # solvers the single-marker path uses do not apply here.
+        ok, rvec, tvec = cv2.solvePnP(obj, img, v['K'], v['D'], flags=cv2.SOLVEPNP_SQPNP)
+        if not ok:
+            continue
+        T_cam_target = np.eye(4)
+        T_cam_target[:3, :3], _ = cv2.Rodrigues(rvec)
+        T_cam_target[:3, 3] = np.asarray(tvec, dtype=float).flatten()
+        est.append((v['T_base_cam'] @ T_cam_target, float(np.linalg.norm(tvec))))
+    return est
+
+
 def locate(robot, camera, detector, rig, plan, wanted=None):
-    """The whole run-time job: sweep -> (servo-refine) -> fuse per marker -> vote.
-    Returns T_base_target or None."""
+    """The whole run-time job: sweep -> (servo-refine) -> per-marker consistency GATE ->
+    JOINT-PnP estimate. Returns T_base_target or None.
+
+    The final number comes from solving every view's detected corners of ALL rig markers as
+    one rigid object (rig_object_points / joint_pnp_views), fused across views with the
+    closeness weighting. The per-marker vote still runs FIRST as the consistency gate -- a
+    moved or re-stuck marker refuses the run there, where the joint solve would quietly
+    absorb it -- and stands in as the answer when the joint solve is unavailable."""
     log.info('MARKER LOCALIZATION: %s; rig markers %s.', plan.describe(),
              ', '.join(str(m) for m in sorted(rig['markers'])))
     T_overview = robot.camera()
-    seen = sweep(robot, camera, detector, plan, wanted=wanted or set(rig['markers']))
+    corner_views = []
+    seen = sweep(robot, camera, detector, plan, wanted=wanted or set(rig['markers']),
+                 corner_log=corner_views)
     if not seen:
         log.error('MARKER LOCALIZATION: no rig marker was detected from any view.')
         return None
     if plan.servo.enabled:
         seen.update(servo_refine(robot, camera, detector, plan, seen,
-                                 T_overview=T_overview))
-    T, _votes = vote_target(rig, fuse_markers(seen, plan), plan)
-    return T
+                                 T_overview=T_overview, corner_log=corner_views))
+    T_vote, _votes = vote_target(rig, fuse_markers(seen, plan), plan)
+    if T_vote is None:
+        return None                       # the gate refused -- nothing overrides that
+    if not getattr(plan, 'joint_pnp', True) or not corner_views:
+        return T_vote
+    try:
+        est = joint_pnp_views(rig, corner_views, plan)
+    except Exception as exc:              # noqa: BLE001 -- cv2 absent / solver failure
+        log.warning('joint PnP unavailable (%s) -- using the per-marker vote.', exc)
+        return T_vote
+    if not est:
+        log.warning('joint PnP produced no view estimates -- using the per-marker vote.')
+        return T_vote
+    w = [_view_weight(d, plan.view_weight_power) for _T, d in est]
+    T_joint, lin, ang = average_pose([T for T, _d in est], weights=w)
+    d_lin, d_ang = pose_error(T_vote, T_joint)
+    log.info('  JOINT PnP: %d view%s, spread %.2f mm / %.2f deg; %.2f mm / %.2f deg from '
+             'the per-marker vote.', len(est), '' if len(est) == 1 else 's',
+             lin * 1000.0, np.degrees(ang), d_lin * 1000.0, np.degrees(d_ang))
+    if ((plan.max_disagreement_mm is not None and d_lin * 1000.0 > plan.max_disagreement_mm)
+            or (plan.max_disagreement_deg is not None
+                and np.degrees(d_ang) > plan.max_disagreement_deg)):
+        log.warning('  joint PnP and the per-marker vote disagree past the gate -- both come '
+                    'from the same detections, so suspect the rig geometry (a knocked '
+                    'marker) or the intrinsics. Using the JOINT estimate.')
+    return T_joint
 
 
 def solve_offsets(fused, T_base_target):

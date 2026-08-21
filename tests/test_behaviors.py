@@ -115,3 +115,147 @@ def test_calibration_check_retract_modes():
     assert _parse_retract(FakeCfg(retract=False)) == 'never'
     assert _parse_retract(FakeCfg(retract=' Prompt ')) == 'prompt'
     assert _parse_retract(FakeCfg(retract='sideways')) is None
+
+
+# ---- the Robot class: frame registry + motion primitives (dry-run arm, poses injected) ----
+
+def _dry_robot():
+    from urlab import config as urconfig
+    from urlab.robot import Robot
+    cfg = urconfig.load('cartesian')
+    cfg.set_path('robot.dry_run', True)
+    return Robot(cfg, with_gripper=False)
+
+
+def _pin_flange(robot, T):
+    """Pin the live base_link->tool0 edge (and tool0()) to a known pose for deterministic
+    math."""
+    robot.frames.set_live(robot.base_frame, robot.tip_frame, lambda: T)
+    robot.arm.tcp_pose = lambda: T
+
+
+def test_frame_registry_resolves_chains_in_any_reference():
+    from urlab.transforms import inverse, xyzrpy_to_matrix
+
+    r = _dry_robot()
+    try:
+        Tp = xyzrpy_to_matrix([0.4, 0.1, 0.3], [0.0, 0.0, np.pi / 2])
+        _pin_flange(r, Tp)
+        Tt = translation_matrix([0.0, 0.0, 0.1])
+        Tf = translation_matrix([1.0, 0.0, 0.0])
+        Ts = translation_matrix([0.0, 0.2, 0.0])
+        r.register_frame('tip2', Tt)                        # rides on the arm
+        r.register_frame('fixture', Tf, parent='base_link')  # bolted to the world
+        r.register_frame('slot', Ts, parent='fixture')       # chains recursively
+
+        assert np.allclose(r.pose('slot'), Tf @ Ts)
+        assert np.allclose(r.pose('tip2'), Tp @ Tt), 'live FK must be on the path'
+        assert np.allclose(r.pose('tip2', reference='fixture'), inverse(Tf) @ Tp @ Tt)
+        assert r.is_tool_attached('tip2') and not r.is_tool_attached('slot')
+
+        # 6-vector poses [xyz m, rpy rad] are accepted; targets live in their own registry
+        r.register_frame('six', [0.0, 0.0, 0.05, 0.0, 0.0, 0.0], parent='base_link')
+        assert np.allclose(r.pose('six'), translation_matrix([0.0, 0.0, 0.05]))
+        r.register_target('slot', translation_matrix([2.0, 0.0, 0.0]))
+        assert np.allclose(r.target('slot')[:3, 3], [2.0, 0.0, 0.0])
+
+        # built-in frames refuse re-registration (a tool0->tool0 entry once hung the walk)
+        for builtin in ('tool0', 'base_link'):
+            try:
+                r.register_frame(builtin, np.eye(4))
+            except ValueError:
+                continue
+            raise AssertionError(f'{builtin} must refuse registration')
+        try:
+            r.register_frame('orphan', np.eye(4), parent='never_registered')
+        except KeyError:
+            pass
+        else:
+            raise AssertionError('an unknown parent must be rejected')
+    finally:
+        r.close()
+
+
+def test_move_cartesian_back_solves_the_flange_pose():
+    from urlab.transforms import inverse
+
+    r = _dry_robot()
+    try:
+        Tp = translation_matrix([0.4, 0.0, 0.3])
+        _pin_flange(r, Tp)
+        Tt = translation_matrix([0.0, 0.0, 0.1])
+        Tf = translation_matrix([1.0, 0.0, 0.0])
+        r.register_frame('tip2', Tt)
+        r.register_frame('fixture', Tf, parent='base_link')
+        sent = []
+        r.arm.move_l = lambda T, label='': (sent.append(np.array(T)), True)[1]
+
+        target = translation_matrix([0.05, 0.0, 0.0])
+        assert r.move_cartesian(target, frame='tip2', reference='fixture',
+                                interpolation='lin')
+        assert np.allclose(sent[-1], Tf @ target @ inverse(Tt)), \
+            'T_base_tool0 = T_base_ref @ target @ inv(T_tool0_frame)'
+
+        # a world-fixed frame cannot be the MOVING frame
+        try:
+            r.move_cartesian(np.eye(4), frame='fixture', interpolation='lin')
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('moving a world-fixed frame must be refused')
+
+        # ptp seeds and re-seeds the IK branch
+        r.arm.ik = lambda T, qnear=None: [0.1, 0.2, 0.3, 0.4, 0.5, qnear is not None]
+        r.arm.move_j = lambda q, label='': True
+        seed = {}
+        assert r.move_cartesian(target, interpolation='ptp', seed=seed)
+        assert seed['q'][-1] is False        # first solve had no seed
+        assert r.move_cartesian(target, interpolation='ptp', seed=seed)
+        assert seed['q'][-1] is True         # second solve was seeded
+    finally:
+        r.close()
+
+
+def test_move_relative_expresses_the_delta_in_the_named_frame():
+    from urlab.transforms import inverse, xyzrpy_to_matrix
+
+    r = _dry_robot()
+    try:
+        Tp = xyzrpy_to_matrix([0.4, 0.0, 0.3], [np.pi, 0.0, 0.0])
+        _pin_flange(r, Tp)
+        Toff = translation_matrix([0.0, 0.0, 0.02])
+        Tf = xyzrpy_to_matrix([1.0, 0.0, 0.0], [0.0, 0.0, np.pi / 2])
+        r.register_frame('probe', Toff)
+        r.register_frame('fixture', Tf, parent='base_link')
+        sent = []
+        r.arm.move_l = lambda T, label='': (sent.append(np.array(T)), True)[1]
+        D = translation_matrix([0.0, 0.0, 0.03])
+
+        assert r.move_relative(D, expressed_in='probe')
+        assert np.allclose(sent[-1], Tp @ Toff @ D @ inverse(Toff)), \
+            'a tool-frame jog post-multiplies about that frame'
+        assert r.move_relative(D, expressed_in='fixture')
+        assert np.allclose(sent[-1], Tf @ D @ inverse(Tf) @ Tp), \
+            "a world-frame jog uses the reference frame's axes with the arm as the pivot"
+        assert r.move_relative(D, expressed_in='base_link')
+        assert np.allclose(sent[-1], D @ Tp)
+    finally:
+        r.close()
+
+
+def test_chain_builds_from_specs_and_nodes():
+    ran = []
+    root = bt.chain(
+        'mixed',
+        bt.Action('inline node', lambda: ran.append('node')),
+        ('say', 'plain spec'),
+        ('action', 'kwargs spec', lambda: ran.append('kw'), {}),
+    )
+    assert bt.run_tree(root)
+    assert ran == ['node', 'kw']
+    try:
+        bt.chain('bad', 42)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError('a non-spec step must be rejected')

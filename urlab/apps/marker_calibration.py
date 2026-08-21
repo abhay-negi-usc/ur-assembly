@@ -105,8 +105,8 @@ class _Calibration:
         if q_view is not None:
             log.info('Driving to the view pose %s deg.',
                      list(np.round(np.asarray(q_view, float), 1)))
-            if not self.robot.arm.move_j(list(np.radians(np.asarray(q_view, dtype=float))),
-                                         label='marker view pose'):
+            if not self.robot.move_joints(np.radians(np.asarray(q_view, dtype=float)),
+                                          label='marker view pose'):
                 log.error('Could not reach view_joints_deg.')
                 return False
             return True

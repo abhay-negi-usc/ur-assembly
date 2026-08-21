@@ -246,15 +246,15 @@ class _AssemblyTask:
                 T_up = translation_matrix([0.0, 0.0, self.check.slip_raise_m]) \
                     @ self.robot.tool0()
                 if not (self.robot.gripper.open('drop')
-                        and _guarded(self.robot, self.guard,
-                                     lambda: self.robot.arm.move_l(
-                                         T_up, label='slip recovery (up)'))):
+                        and self.robot.move_cartesian(T_up, interpolation='lin',
+                                                      label='slip recovery (up)',
+                                                      guard=self.guard)):
                     return False
                 self.scanner.reselect()
             else:
                 self.phase('reset')
                 if not (self.robot.gripper.open('drop')
-                        and self.robot.arm.move_j(self.q_home, label='home')):
+                        and self.robot.move_joints(self.q_home, label='home')):
                     return False
 
     def payload_check(self):
@@ -271,13 +271,9 @@ class _AssemblyTask:
         self.phase('standoff')
         self.seed['q'] = self.robot.arm.q()
         T_tool0_conn = self.robot.T_tool0_fingertip @ self.T_ftip_conn
-        q = self.robot.arm.ik(self.tool0_ref(self.T_standoff_row, T_tool0_conn),
-                              self.seed['q'])
-        if q is None or not _guarded(self.robot, self.guard,
-                                     lambda: self.robot.arm.move_j(q, label='stand-off')):
-            return False
-        self.seed['q'] = q
-        return True
+        return self.robot.move_cartesian(self.tool0_ref(self.T_standoff_row, T_tool0_conn),
+                                         label='stand-off', seed=self.seed,
+                                         guard=self.guard)
 
     # ---- the assemble / check / retract / estimate loop --------------------------------------
     def _attempt_refs(self, it, T_tool0_conn):
@@ -385,13 +381,10 @@ class _AssemblyTask:
                 # Realign with the START of the (re-estimated) trajectory -- stiff, free
                 # space, guarded.
                 self.phase('standoff')
-                q = self.robot.arm.ik(refs[0], self.seed['q'])
-                if q is None or not _guarded(
-                        self.robot, self.guard,
-                        lambda: self.robot.arm.move_j(q, label=f'align start {it}')):
+                if not self.robot.move_cartesian(refs[0], label=f'align start {it}',
+                                                 seed=self.seed, guard=self.guard):
                     log.error('Could not reach the trajectory start; aborting.')
                     return False
-                self.seed['q'] = q
 
                 # ASSEMBLE under admittance, collecting observations.
                 obs, cnt = [], [0]
@@ -474,8 +467,8 @@ class _AssemblyTask:
         T_conn_final = self.robot.tool0() @ T_tool0_conn
         back = -T_conn_final[:3, 0] * d_out              # connector -X, in base coordinates
         T_new = translation_matrix(back) @ self.robot.tool0()
-        return _guarded(self.robot, self.guard,
-                        lambda: self.robot.arm.move_l(T_new, label='retract (connector -X)'))
+        return self.robot.move_cartesian(T_new, interpolation='lin',
+                                         label='retract (connector -X)', guard=self.guard)
 
     def end_reset(self):
         self.phase('reset')

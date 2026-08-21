@@ -1,16 +1,18 @@
 """The behavior library -- the robot actions every app composes its tree from.
 
-Each class wraps one primitive the scripts kept re-implementing (a guarded joint move, an
-IK-then-moveJ to a pose, an admittance ramp, the operator gate, ...) as a py_trees leaf.
-Poses and joint targets are passed as CALLABLES so they are evaluated when the leaf runs,
-not when the tree is built -- most targets depend on state produced by earlier leaves.
+Each class is a py_trees leaf over ONE Robot motion primitive (robot/robot.py) or one shared
+skill: behaviors add sequencing, logging and the confirm gate; the robot class owns the
+frames and the motion math.  Poses and joint targets are passed as CALLABLES so they are
+evaluated when the leaf runs, not when the tree is built -- most targets depend on state
+produced by earlier leaves.
 
 `LIBRARY` maps short names to the classes so a tree can also be assembled from a plain
-dictionary lookup: `make('move_joints', robot, q_fn, label='home')`.
+dictionary lookup: `make('move_joints', robot, q_fn, label='home')` -- see
+urlab/behaviors/script.py for stringing a whole new app together this way.
 """
 
 from .. import log as urlog
-from ..apps._common import ask, guarded
+from ..apps._common import ask
 from ..skills import reset as reset_skill
 from .core import Action, Check
 
@@ -23,49 +25,52 @@ def _call(v):
 
 
 class MoveJoints(Action):
-    """moveJ to a joint vector (rad), optionally with the force guard armed as a canceller."""
+    """robot.move_joints: joint move, optionally with the force guard armed as a canceller."""
 
     def __init__(self, robot, q, label, guard=None):
         def fn():
             target = _call(q)
-            if target is None:
-                return False
-
-            def move():
-                return robot.arm.move_j(list(target), label=label)
-            return guarded(robot, guard, move) if guard is not None else move()
+            return False if target is None                 else robot.move_joints(target, label=label, guard=guard)
         super().__init__(label, fn)
 
 
 class MoveToPose(Action):
-    """IK + moveJ to a tool0 pose. `seed` is a mutable dict holding {'q': ...}; the solved
-    joints are written back so consecutive moves stay on the same IK branch."""
+    """robot.move_cartesian('ptp') to a tool0 pose. `seed` is a mutable dict holding
+    {'q': ...}; the solved joints are written back so consecutive moves stay on the same IK
+    branch."""
 
     def __init__(self, robot, pose, label, seed, guard=None):
-        def fn():
-            q = robot.arm.ik(_call(pose), seed.get('q'))
-            if q is None:
-                log.error('IK failed for %r.', label)
-                return False
-
-            def move():
-                return robot.arm.move_j(q, label=label)
-            ok = guarded(robot, guard, move) if guard is not None else move()
-            if ok:
-                seed['q'] = q
-            return ok
-        super().__init__(label, fn)
+        super().__init__(label, lambda: robot.move_cartesian(
+            _call(pose), interpolation='ptp', label=label, seed=seed, guard=guard))
 
 
 class MoveLinear(Action):
-    """Straight-line (moveL) tool0 move, optionally guarded."""
+    """robot.move_cartesian('lin'): straight-line tool0 move, optionally guarded."""
 
     def __init__(self, robot, pose, label, guard=None):
-        def fn():
-            def move():
-                return robot.arm.move_l(_call(pose), label=label)
-            return guarded(robot, guard, move) if guard is not None else move()
-        super().__init__(label, fn)
+        super().__init__(label, lambda: robot.move_cartesian(
+            _call(pose), interpolation='lin', label=label, guard=guard))
+
+
+class MoveFrame(Action):
+    """The fully general primitive: put any robot-attached frame ON a target pose expressed
+    in any registered frame (robot.move_cartesian with frame/reference)."""
+
+    def __init__(self, robot, target, label, frame=None, reference=None,
+                 interpolation='ptp', seed=None, guard=None):
+        super().__init__(label, lambda: robot.move_cartesian(
+            _call(target), frame=frame, reference=reference, interpolation=interpolation,
+            label=label, seed=seed, guard=guard))
+
+
+class MoveRelative(Action):
+    """robot.move_relative: jog by a delta expressed in any registered frame."""
+
+    def __init__(self, robot, delta, label, expressed_in=None, interpolation='lin',
+                 guard=None):
+        super().__init__(label, lambda: robot.move_relative(
+            _call(delta), expressed_in=expressed_in, interpolation=interpolation,
+            label=label, guard=guard))
 
 
 class OpenGripper(Action):
@@ -176,6 +181,8 @@ LIBRARY = {
     'move_joints': MoveJoints,
     'move_to_pose': MoveToPose,
     'move_linear': MoveLinear,
+    'move_frame': MoveFrame,
+    'move_relative': MoveRelative,
     'open_gripper': OpenGripper,
     'close_gripper': CloseGripper,
     'reset': ResetRobot,

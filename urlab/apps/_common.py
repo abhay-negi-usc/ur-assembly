@@ -37,20 +37,10 @@ def tare_fn(robot, cfg_section, key='tare_before', default=True):
 
 
 def guarded(robot, guard, move_fn):
-    """Run a free-space move with the force guard armed as a canceller.
-
-    A trip here means the arm hit something UNEXPECTED (contact phases read the guard
-    themselves, where a trip means 'seated')."""
-    guard.reset()
-    robot.arm.add_guard(guard)
-    try:
-        ok = move_fn()
-    finally:
-        robot.arm.clear_guards()
-    if not ok and guard.tripped_by:
-        log.error('Force guard tripped during a free-space move (%s) -- hit something '
-                  'unexpected.', guard.tripped_by)
-    return ok
+    """Run a free-space move with the force guard armed as a canceller (the canonical
+    implementation lives next to ForceGuard in robot/guard.py)."""
+    from ..robot.guard import guarded_move
+    return guarded_move(robot, guard, move_fn)
 
 
 def ask(prompt, abort_answers=('q', 'quit', 'n', 'no'), on_eof=True):

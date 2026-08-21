@@ -10,13 +10,14 @@ Import the package and everything useful is at the top level:
 """
 
 from .core import Action, Check, retry, run_tree, selector, sequence
-from .library import (LIBRARY, AdmittanceRamp, CloseGripper, Hold, MoveJoints, MoveLinear,
-                      MoveToPose, OpenGripper, OperatorGate, ResetRobot, Say, ServoStop,
-                      VerifyHeld, Warmup, make)
+from .library import (LIBRARY, AdmittanceRamp, CloseGripper, Hold, MoveFrame, MoveJoints,
+                      MoveLinear, MoveRelative, MoveToPose, OpenGripper, OperatorGate,
+                      ResetRobot, Say, ServoStop, VerifyHeld, Warmup, make)
+from .script import app, chain
 
 __all__ = [
-    'Action', 'Check', 'sequence', 'selector', 'retry', 'run_tree',
-    'LIBRARY', 'make', 'MoveJoints', 'MoveToPose', 'MoveLinear', 'OpenGripper',
-    'CloseGripper', 'ResetRobot', 'OperatorGate', 'VerifyHeld', 'Warmup',
-    'AdmittanceRamp', 'Hold', 'ServoStop', 'Say',
+    'Action', 'Check', 'sequence', 'selector', 'retry', 'run_tree', 'chain', 'app',
+    'LIBRARY', 'make', 'MoveJoints', 'MoveToPose', 'MoveLinear', 'MoveFrame',
+    'MoveRelative', 'OpenGripper', 'CloseGripper', 'ResetRobot', 'OperatorGate',
+    'VerifyHeld', 'Warmup', 'AdmittanceRamp', 'Hold', 'ServoStop', 'Say',
 ]

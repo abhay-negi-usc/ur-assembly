@@ -64,7 +64,7 @@ from ..robot import AdmittanceController, ForceGuard
 from ..skills import trajectory as traj
 from ..skills import wiggle as wigmod
 from ..transforms import inverse, pose_error, slerp_matrix, translation_matrix, xyzrpy_to_matrix
-from ._common import ask, eta_clock, fmt_dur, guarded, pose_fields_mm, run_dir, tare_fn
+from ._common import ask, eta_clock, fmt_dur, pose_fields_mm, run_dir, tare_fn
 from ._runner import run_app
 
 log = urlog.get('wiggle-sampling')
@@ -463,8 +463,8 @@ class _BurstRunner:
         self.stats = {}                         # segment -> list of (f_ax, |f|, |tau|, |f_lat|)
         self._cnt = 0
 
-        self.seed_q = robot.arm.q()
-        self.q_home = self.seed_q
+        self.seed = {'q': robot.arm.q()}
+        self.q_home = self.seed['q']
         self.burst_no = 0
         self.t_run = time.time()
         self.plan_len = 0
@@ -642,15 +642,12 @@ class _BurstRunner:
             T_appr = self.ref_of(st, pre, depth_mm=st['depth_mm'] - self.standoff_mm)
             # The free-space hop IS guarded at the tight limit -- the one move in the burst
             # where contact is a surprise rather than the objective.
-            q = self.robot.arm.ik(T_appr, self.seed_q)
-            if q is None or not guarded(self.robot, self.guard,
-                                        lambda _q=q: self.robot.arm.move_j(
-                                            _q, label='standoff')):
+            if not self.robot.move_cartesian(T_appr, label='standoff', seed=self.seed,
+                                             guard=self.guard):
                 log.warning('  could not reach the standoff for %s -- skipping this burst.',
                             st['name'])
                 self.cur_ref, self.cur_key = None, None
                 return False
-            self.seed_q = q
             self.adm.reset()
             self.adm.warmup(T_appr, tare_fn=self.tare)
             # TOUCH, THEN PRESS -- two ramps, so `approach` labels free travel + first contact
@@ -768,11 +765,8 @@ class _BurstRunner:
             _station_pose(r['depth_mm'] / 1000.0, [v / 1000.0 for v in r['lat_mm']],
                           np.eye(4), 0.0, np.zeros(6)),
             self.T_tool0_held)
-        q = self.robot.arm.ik(T_ref_pose, self.seed_q)
-        if q is not None and guarded(self.robot, self.guard,
-                                     lambda _q=q: self.robot.arm.move_j(
-                                         _q, label='reference pose')):
-            self.seed_q = q
+        if self.robot.move_cartesian(T_ref_pose, label='reference pose', seed=self.seed,
+                                     guard=self.guard):
             self.adm.reset()
             self.adm.warmup(T_ref_pose, tare_fn=None)      # NO tare: the reading IS the check
             self.enter('datum', T_ref_pose)
@@ -1007,7 +1001,7 @@ def build_and_run(cfg, robot, camera, args):
         runner.escape()
         runner.close()
     if ok:
-        robot.arm.move_j(runner.q_home, label='home')
+        robot.move_joints(runner.q_home, label='home')
         log.info('Done: %d bursts in %s -> %s', runner.burst_no,
                  fmt_dur(time.time() - runner.t_run), out_dir)
     return ok

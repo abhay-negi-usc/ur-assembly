@@ -25,6 +25,23 @@ from .. import log as urlog
 log = urlog.get('guard')
 
 
+def guarded_move(robot, guard, move_fn):
+    """Run a free-space move with the force guard armed as a canceller.
+
+    A trip here means the arm hit something UNEXPECTED; contact phases read the guard
+    themselves, where a trip means 'seated'."""
+    guard.reset()
+    robot.arm.add_guard(guard)
+    try:
+        ok = move_fn()
+    finally:
+        robot.arm.clear_guards()
+    if not ok and guard.tripped_by:
+        log.error('Force guard tripped during a free-space move (%s) -- hit something '
+                  'unexpected.', guard.tripped_by)
+    return ok
+
+
 class ForceGuard:
     """Trips when the tared contact wrench exceeds a limit. Callable, so it plugs straight into
     `arm.add_guard(guard)`."""

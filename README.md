@@ -180,7 +180,11 @@ urlab/
                      base_link<->UR-base bridge live
   frames.py          FrameGraph — the tf2 replacement, staleness is a caller concern
   config.py, log.py  config loading + logging/step-runner
-  robot/             URArm (RTDE), Robotiq2F85 (Modbus), Robot facade, ForceGuard
+  robot/             URArm (RTDE), Robotiq2F85 (Modbus), ForceGuard, and the Robot class:
+                     registers the gripper/camera, holds the FRAME REGISTRY
+                     (register_frame with parent chains, resolved through live FK), and the
+                     MOTION PRIMITIVES (move_joints / move_cartesian / move_relative) every
+                     behavior builds on
   perception/        RealSenseCamera, ArUco, SAM3 adapter, ConnectorEstimator (multi-view fusion)
   skills/            reusable behaviours: servo, scan, pick, touch, insert, trajectory
   behaviors/         py_trees behavior-tree layer: a library of common robot behaviors
@@ -195,7 +199,24 @@ A demo is a short script that **composes skills** — they hold no references to
 two combine (scan + touch + insert) without one being a base class of the other. The refactored
 demos (calibration_check, wiggle_sampling, marker_calibration, cable_pick_estimate_assemble)
 express their run sequence as a **py_trees behavior tree** built from `urlab/behaviors` — the
-tree is logged at `--debug` before the arm moves, so the whole procedure is visible up front. This is the
+tree is logged at `--debug` before the arm moves, so the whole procedure is visible up front.
+
+The layering is: **Robot motion primitives → behaviors → scripts**. A new script is a Robot,
+some registered frames, and a chain of behaviors — see `urlab/apps/behavior_demo.py` for the
+complete worked example (safe to run: `python -m urlab.apps.behavior_demo --dry-run`):
+
+```python
+def build(cfg, robot, camera, args):
+    robot.load_frame_catalogue()                       # everything in configs/frames.yaml
+    robot.register_frame('probe', T, parent='fingertip')
+    return bt.chain('demo',
+        ('reset', robot, cfg),
+        ('open_gripper', robot),
+        ('move_relative', robot, delta, 'advance', {'expressed_in': 'probe'}),
+        ('close_gripper', robot))
+
+main = bt.app('Demo', 'my_config', build)
+``` This is the
 "modules and skills abstracted into common functions" the refactor was for; the ROS version
 expressed the same sharing through a four-deep inheritance chain
 (`PickPlace → CablePickPlace → CableTouchPickPlace / CablePickAssemble`).

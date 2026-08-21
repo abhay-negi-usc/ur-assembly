@@ -3684,6 +3684,7 @@ def test_a_null_speed_override_is_resolved_before_it_reaches_the_arithmetic():
     assert src.count('_path_time(') >= 3, 'seg_time and screw_ramp must share the arithmetic'
     assert 'def caps(' in src, 'the null-override resolver is gone'
     body = src[src.index('def screw_ramp('):src.index('\n    retract_m =')]
+    body = src[src.index('def screw_ramp('):src.index('\n    retract_m =')]
     assert 'caps(v, w)' in body, (
         'screw_ramp must resolve its caps before computing a duration -- it ships with null '
         'overrides from both clocking blocks')
@@ -3764,18 +3765,25 @@ def test_the_seat_push_can_reach_its_force_and_keeps_the_gripper_logic_straight(
     # The push now runs FIRST -- the pads are already around the cable at the junction where it
     # wants them -- and everything after it needs OPEN fingers: the retract slides along the
     # cable, the pitch turns the jaw about its own gap, the advance threads the cable into it.
+    # wants them -- and everything after it needs OPEN fingers: the retract slides along the
+    # cable, the pitch turns the jaw about its own gap, the advance threads the cable into it.
     # NO close/verify any more: connector_clocking hands the part over STILL HELD
     # (open_gripper_after false), so the push presses with the pads already on it.
     order = ["guard_push.reset()",                                     # the push guard, not global
              "'release (seat push)'",                                  # reopen...
              "label='collar retract (connector -X)'",                  # ...BEFORE anything moves
              "label='collar pitch onto the axis'",
+             "label='collar retract (connector -X)'",                  # ...BEFORE anything moves
+             "label='collar pitch onto the axis'",
              "gripper.close('grasp collar')"]                          # then the collar bite
     idx = [body.index(t) for t in order]
     assert idx == sorted(idx), (
         'the seat push must run close -> verify -> press -> RELEASE before the retract; a '
+        'the seat push must run close -> verify -> press -> RELEASE before the retract; a '
         'release after it would drag the clamped junction along the cable')
     assert 'return False' in body[body.index("'release (seat push)'"):
+                                  body.index("label='collar retract (connector -X)'")], (
+        'a failed release must abort before the retract')
                                   body.index("label='collar retract (connector -X)'")], (
         'a failed release must abort before the retract')
     # the connector moves with the press, so the collar poses must ride it
@@ -4983,6 +4991,7 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
 
     # ---- THE APPROACH IS A PURE AXIAL TRANSLATION ----
     retreat_m = float(cl['retract_mm']) / 1000.0
+    retreat_m = float(cl['retract_mm']) / 1000.0
     T_retreat = T.translation_matrix(-(retreat_m + collar_x) * axn) @ T_grip
     d = T_grip[:3, 3] - T_retreat[:3, 3]
     lat = float(np.linalg.norm(d - np.dot(d, axn) * axn)) * 1000.0
@@ -4994,6 +5003,8 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
     # ---- ORDER, and every leg guarded ----
     src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8').read()
     body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
+    order = ["label='collar retract (connector -X)'",     # back off ALONG the cable first...
+             "label='collar pitch onto the axis'",         # ...then pitch, pivoting on the fingertip
     order = ["label='collar retract (connector -X)'",     # back off ALONG the cable first...
              "label='collar pitch onto the axis'",         # ...then pitch, pivoting on the fingertip
              "adm_cl.ramp(T_retreat, T_grip",              # ...then advance down the axis
@@ -5062,7 +5073,17 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
     assert 'th_want = 0.0' in body, (
         'the roll must be INHERITED from the pitch -- that is the minimum wrist_3 travel, and '
         'solving for a fixed attitude instead spends joint 6 to reach it')
+    # THE ROLL IS INHERITED, not solved for. The pitch carries whatever roll the connector sweep
+    # left the wrist in, which is the minimum-wrist_3-travel attitude by construction: any other
+    # roll grips the same ring and costs joint 6 exactly that much more to reach. So the wanted
+    # roll is 0 and the prewind window moves it only when the 120 deg turn needs the headroom.
+    assert 'th_want = 0.0' in body, (
+        'the roll must be INHERITED from the pitch -- that is the minimum wrist_3 travel, and '
+        'solving for a fixed attitude instead spends joint 6 to reach it')
     assert 'range(0, 360, 15)' not in body, (
+        'the 24-candidate clock-angle scan is RETIRED. The roll is exactly a wrist_3 offset '
+        '(tool0 on the axis, Z collinear), so it is chosen by the prewind window rather than '
+        'searched for -- and a 15 deg grid can miss a feasible window narrower than itself')
         'the 24-candidate clock-angle scan is RETIRED. The roll is exactly a wrist_3 offset '
         '(tool0 on the axis, Z collinear), so it is chosen by the prewind window rather than '
         'searched for -- and a 15 deg grid can miss a feasible window narrower than itself')
@@ -5080,7 +5101,12 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
     ccl = c['assembly']['collar_clocking']
     assert 'prewind_deg' not in ccl, 'prewind_deg is gone with the radial approach'
     for k in ('grasp_clock_deg', 'retract_mm', 'wall_standoff_mm'):
+    for k in ('grasp_clock_deg', 'retract_mm', 'wall_standoff_mm'):
         assert k in ccl, f'collar_clocking must declare {k} so the axial approach is tunable'
+    assert float(ccl['retract_mm']) > 0
+    for gone in ('liftoff_mm', 'retreat_mm'):
+        assert gone not in ccl, (
+            f'{gone} belonged to the lift-off-and-orbit approach; retract_mm replaces both')
     assert float(ccl['retract_mm']) > 0
     for gone in ('liftoff_mm', 'retreat_mm'):
         assert gone not in ccl, (

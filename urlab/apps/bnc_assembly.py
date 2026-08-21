@@ -615,6 +615,11 @@ def build_and_run(cfg, robot, camera, args):
     # retreat_mm, which measured the reorient station BACKWARD FROM THE COLLAR and so moved
     # with collar_offset_mm; this is a plain relative back-off from the pose we are in.
     cl_retract_m = _num(cl, 'retract_mm', 300.0) / 1000.0
+    # RETRACT: how far to back straight off along the TARGET connector -X, from wherever the
+    # seat push left the arm, before the gripper is pitched onto the axis. Replaces
+    # retreat_mm, which measured the reorient station BACKWARD FROM THE COLLAR and so moved
+    # with collar_offset_mm; this is a plain relative back-off from the pose we are in.
+    cl_retract_m = _num(cl, 'retract_mm', 300.0) / 1000.0
     # RETREAT: how far BEHIND the approach station, along the connector -X, to reorient. Away
     # from the wall, and the furthest-from-it station in the whole maneuver.
     cl_retreat_m = _num(cl, 'retreat_mm', 100.0) / 1000.0
@@ -1775,17 +1780,31 @@ def build_and_run(cfg, robot, camera, args):
             this is the one freedom the pitch leaves and the only thing the prewind spends."""
             return rotate_about_axis(T, axis, point, th)
 
+        def roll(T, th):
+            """`T` rolled `th` about the connector axis. The collar is a body of revolution, so
+            this is the one freedom the pitch leaves and the only thing the prewind spends."""
+            return rotate_about_axis(T, axis, point, th)
+
         def _reachable(th):
             """True when the reorient, grasp and turn-end all IK-solve at roll `th`."""
             _grip = roll(T_grip0, th)
+            """True when the reorient, grasp and turn-end all IK-solve at roll `th`."""
+            _grip = roll(T_grip0, th)
             return all(robot.arm.ik(_T, seed_c) is not None for _T in (
+                roll(T_reorient, th), _grip,
                 roll(T_reorient, th), _grip,
                 translation_matrix(cl_push_m * axn)
                 @ rotate_about_axis(_grip, axis, point, cl_rot)))
 
         seed_c = robot.arm.ik(T_withdraw, robot.arm.q()) or robot.arm.q()
+        seed_c = robot.arm.ik(T_withdraw, robot.arm.q()) or robot.arm.q()
 
         # ---- THE CLOCK ANGLE IS A WRIST-3 OFFSET, EXACTLY -------------------------------------
+        # After the pitch, tool0 stands ON the collar axis with its Z collinear (the fingertip
+        # frame is a pure 183 mm translation along tool0 Z, so nothing puts the flange off the
+        # line). Rolling the grasp about that axis therefore leaves the FLANGE ORIGIN fixed and
+        # turns it about its own Z, which is the joint-6 axis. Checked numerically across the
+        # band: the tool0 origin stays 0.0000 mm off the line and tool0_Z . axis = 1.000000.
         # After the pitch, tool0 stands ON the collar axis with its Z collinear (the fingertip
         # frame is a pure 183 mm translation along tool0 Z, so nothing puts the flange off the
         # line). Rolling the grasp about that axis therefore leaves the FLANGE ORIGIN fixed and
@@ -1804,6 +1823,7 @@ def build_and_run(cfg, robot, camera, args):
         # (The old code scanned 24 candidate angles at 3 IK calls each -- 72 calls to explore a
         # family that is one joint. Two calls answer it, and a 15 deg grid could miss a feasible
         # window narrower than its own step.)
+        q_grip0 = robot.arm.ik(T_grip0, seed_c)
         q_grip0 = robot.arm.ik(T_grip0, seed_c)
         if q_grip0 is None:
             log.error('COLLAR CLOCKING: the collar grasp station does not IK-solve at all. That '
@@ -1836,11 +1856,24 @@ def build_and_run(cfg, robot, camera, args):
         # left the wrist in. That is the minimum-wrist_3-travel choice by construction: rolling to
         # any other angle grips the same ring and costs joint 6 exactly that much more to reach.
         # So the wanted roll is 0, and the window below moves it only when the turn needs headroom.
+        # ---- THE ROLL WE WOULD LIKE: NONE -----------------------------------------------------
+        # The pitch already produced an attitude, and it INHERITED the roll the connector sweep
+        # left the wrist in. That is the minimum-wrist_3-travel choice by construction: rolling to
+        # any other angle grips the same ring and costs joint 6 exactly that much more to reach.
+        # So the wanted roll is 0, and the window below moves it only when the turn needs headroom.
         #
         # A pinned collar_clocking.grasp_clock_deg still overrides, stated as an ABSOLUTE roll
         # about the socket +X wrt the target frame (the convention connector_clocking.sweep_deg
         # uses), for when the attitude must be fixed rather than inherited.
+        # A pinned collar_clocking.grasp_clock_deg still overrides, stated as an ABSOLUTE roll
+        # about the socket +X wrt the target frame (the convention connector_clocking.sweep_deg
+        # uses), for when the attitude must be fixed rather than inherited.
         pinned = cl_grasp_clock is not None
+        th_want = 0.0
+        if pinned:
+            # _fit_turn already shifts by whole turns, so no branch-wrapping is needed here.
+            th_now = float(matrix_to_xyzrpy(inverse(T_clk) @ T_reorient)[1][0])
+            th_want = cl_grasp_clock - eng_clock - th_now
         th_want = 0.0
         if pinned:
             # _fit_turn already shifts by whole turns, so no branch-wrapping is needed here.
@@ -1857,11 +1890,17 @@ def build_and_run(cfg, robot, camera, args):
                  np.degrees(w_lo), np.degrees(w_hi), np.degrees(cl_w3_margin))
         if clamped:
             log.warning('  the %s roll (%+.1f deg) leaves no room for the turn on ANY whole-turn '
+            log.warning('  the %s roll (%+.1f deg) leaves no room for the turn on ANY whole-turn '
                         'branch, so it was CLAMPED to %+.1f deg. The ring gripped is the same; '
                         'the approach attitude is not -- check the reorientation looks sane.',
                         'pinned collar_clocking.grasp_clock_deg' if pinned else 'inherited',
                         np.degrees(th_want), np.degrees(th_grasp))
+                        'pinned collar_clocking.grasp_clock_deg' if pinned else 'inherited',
+                        np.degrees(th_want), np.degrees(th_grasp))
         elif abs(th_grasp - th_want) > np.radians(0.5):
+            log.info('  (rolled %+.0f deg off the pitched attitude onto a wrist_3 branch with '
+                     'room -- the collar is a body of revolution, so the grasp on the ring is '
+                     'identical.)', np.degrees(th_grasp - th_want))
             log.info('  (rolled %+.0f deg off the pitched attitude onto a wrist_3 branch with '
                      'room -- the collar is a body of revolution, so the grasp on the ring is '
                      'identical.)', np.degrees(th_grasp - th_want))
@@ -1874,12 +1913,24 @@ def build_and_run(cfg, robot, camera, args):
                       'REACH, not wrist range -- so the knob is collar_clocking.retract_mm (now '
                       '%.0f mm) or the fixture position, NOT the roll.',
                       np.degrees(th_grasp), cl_retract_m * 1000.0)
+            log.error('COLLAR CLOCKING: wrist_3 has room at a %+.1f deg roll, but the reorient, '
+                      'grasp or turn-end pose does not IK-solve there. That is joints 1-5 -- '
+                      'REACH, not wrist range -- so the knob is collar_clocking.retract_mm (now '
+                      '%.0f mm) or the fixture position, NOT the roll.',
+                      np.degrees(th_grasp), cl_retract_m * 1000.0)
             return False
+        T_retreat = roll(T_reorient, th_grasp)      # backed off, already pitched onto the axis
+        T_grip = roll(T_grip0, th_grasp)            # fingertip ON the collar
         T_retreat = roll(T_reorient, th_grasp)      # backed off, already pitched onto the axis
         T_grip = roll(T_grip0, th_grasp)            # fingertip ON the collar
         T_end = translation_matrix(cl_push_m * axn) @ rotate_about_axis(
             T_grip, axis, point, cl_rot)
         log.info('--- COLLAR CLOCKING (axial) --- collar %.1f mm along the connector +X from the '
+                 'ORIGIN, on the axis. Retract %.0f mm along the connector -X, pitch onto the '
+                 'axis about the fingertip, advance %+.1f mm down the axis onto the ring (the '
+                 'fingertip lands at the %+.1f mm station), grasp, then TWIST the wrist %+.1f deg '
+                 'while pushing %+.1f mm.',
+                 cl_off_m * 1000.0, cl_retract_m * 1000.0, adv_m * 1000.0, ftip_x * 1000.0,
                  'ORIGIN, on the axis. Retract %.0f mm along the connector -X, pitch onto the '
                  'axis about the fingertip, advance %+.1f mm down the axis onto the ring (the '
                  'fingertip lands at the %+.1f mm station), grasp, then TWIST the wrist %+.1f deg '
@@ -1892,6 +1943,7 @@ def build_and_run(cfg, robot, camera, args):
         # the FLANGE gets: +X points into the wall, and tool0 is the bulkiest thing on the arm.
         # Every pose below is a planned station on the axis, so the whole maneuver's approach to
         # the wall is known up front rather than discovered by driving into it.
+        stations = (('withdraw', T_withdraw), ('reorient', T_retreat),
         stations = (('withdraw', T_withdraw), ('reorient', T_retreat),
                     ('collar grasp', T_grip), ('turn end', T_end))
         x_tool = {lab: float((inverse(T_clk) @ T)[0, 3]) * 1000.0 for lab, T in stations}
@@ -1983,6 +2035,7 @@ def build_and_run(cfg, robot, camera, args):
                     T_end = translation_matrix(d_push * axn) @ T_end
 
         # PACED BY ITS OWN PHASE SCALE. The two legs below are FREE SPACE -- the fingers are
+        # PACED BY ITS OWN PHASE SCALE. The two legs below are FREE SPACE -- the fingers are
         # open and clear, nothing is being inserted -- but they used to run at the `standoff`
         # scale, which is contact-approach pacing (the global 25 mm/s / 30 deg/s at 1.0x). The
         # reorient is the longest single move in the app: a ~90 deg swing plus a few hundred mm of
@@ -1991,12 +2044,18 @@ def build_and_run(cfg, robot, camera, args):
         # below deliberately does NOT use it -- that one threads the cable and stays slow.
         phase('collar_approach')
         # ---- 1. RETRACT ALONG THE CABLE, straight away from the wall --------------------------
+        # ---- 1. RETRACT ALONG THE CABLE, straight away from the wall --------------------------
         # A pure translation along the connector -X with the open fingers still around the cable:
         # they slide ALONG it rather than across it, so nothing is swept, and every millimetre is
         # away from the wall. It also puts the pitch that follows as far from the wall as the
         # maneuver ever gets.
         if cl_retract_m > 1e-6:
+        # away from the wall. It also puts the pitch that follows as far from the wall as the
+        # maneuver ever gets.
+        if cl_retract_m > 1e-6:
             if not _guarded(robot, guard_shared, lambda: robot.arm.move_l(
+                    T_withdraw, label='collar retract (connector -X)')):
+                log.error('Could not retract %.0f mm along the cable.', cl_retract_m * 1000.0)
                     T_withdraw, label='collar retract (connector -X)')):
                 log.error('Could not retract %.0f mm along the cable.', cl_retract_m * 1000.0)
                 return False
@@ -2041,11 +2100,32 @@ def build_and_run(cfg, robot, camera, args):
                       'back. %s',
                       ftip_x * 1000.0, x_tool['reorient'], cl_retract_m * 1000.0,
                       ('Retract distances that DO solve from here: %s mm.'
+            # UNREACHABLE. Say so, and say which retract distances DO solve -- that turns a dead
+            # end into a number to put in the config. (IK is seeded from the current joints, so
+            # this also catches a branch the arm cannot get to from where it stands.)
+            ok_mm = [d for d in (100.0, 150.0, 200.0, 250.0, 300.0, 350.0, 400.0, 500.0)
+                     if robot.arm.ik(
+                         translation_matrix((cl_retract_m - d / 1000.0) * axn) @ T_retreat,
+                         robot.arm.q()) is not None]
+            log.error('COLLAR CLOCKING: the pitched (axial) pose is UNREACHABLE -- no IK solution '
+                      'with the fingertip at %+.1f mm along the connector +X (tool0 %+.1f mm, on '
+                      'the axis, pointing at the socket). This is REACH or a joint limit, not '
+                      'speed: collar_clocking.retract_mm (%.0f) is what puts the flange that far '
+                      'back. %s',
+                      ftip_x * 1000.0, x_tool['reorient'], cl_retract_m * 1000.0,
+                      ('Retract distances that DO solve from here: %s mm.'
                        % ', '.join('%.0f' % d for d in ok_mm)) if ok_mm else
+                      'NO retract distance from 100 to 500 mm solves -- the axial orientation '
                       'NO retract distance from 100 to 500 mm solves -- the axial orientation '
                       'itself is out of reach at this fixture pose, not just the distance.')
             return False
         if not _guarded(robot, guard_shared, lambda: robot.arm.move_j(
+                q_ret, label='collar pitch onto the axis')):
+            log.error('COLLAR CLOCKING: the pitch onto the axis did not finish. The pose IS '
+                      'reachable (IK solved), so this is the force guard tripping on the way, the '
+                      'controller rejecting the move, or arm.move_timeout_s (%.0f s) running out '
+                      '-- raise speed.phase_scale.collar_approach (now %.2fx) or move_timeout_s.',
+                      robot.arm.move_timeout, float(scales.get('collar_approach', 1.0)))
                 q_ret, label='collar pitch onto the axis')):
             log.error('COLLAR CLOCKING: the pitch onto the axis did not finish. The pose IS '
                       'reachable (IK solved), so this is the force guard tripping on the way, the '
@@ -2075,6 +2155,7 @@ def build_and_run(cfg, robot, camera, args):
                       'jaw -- the fingers are still clear of the ring, so nothing is clamped.',
                       guard_shared.tripped_by or 'unknown',
                       float(np.dot(robot.tool0()[:3, 3] - T_retreat[:3, 3], axn)) * 1000.0,
+                      adv_m * 1000.0)
                       adv_m * 1000.0)
             return False
 

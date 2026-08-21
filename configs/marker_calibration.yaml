@@ -40,7 +40,7 @@ aruco:
 
 # WHICH TARGET THE MARKERS ARE ATTACHED TO -- a `targets:` name in configs/frames.yaml. Its
 # recorded base_link pose is what gets transferred onto the markers.
-target_frame: bnc_connector_in_fingerpads
+target_frame: bnc_connector_finger_holder
 
 # THE MARKERS AND THEIR SIZES. `<id>: <side length in mm>`, or `<id>: {size_mm: ...}`. Sizes are
 # REQUIRED per id and never defaulted. Measure the printed BLACK SQUARE edge to edge -- the white

@@ -4115,30 +4115,30 @@ def test_a_clocking_stroke_follows_the_arc_and_not_the_chord():
         f'advance); found {direct!r} -- any ramp spanning a rotation cuts the chord')
 
 
-def test_the_target_frame_and_the_in_hand_belief_name_the_same_point():
-    """The clocking screw axis IS the target frame, so it must be the connector, not a neighbour.
+def test_the_target_and_the_belief_describe_the_same_connector_datum():
+    """The RECORD-WITH-HOLDER / RUN-WITH-FINGERPADS workflow (2026-08-21), pinned.
 
-    THE BUG THIS EXISTS TO CATCH, because it is silent and it wrecks the clocking strokes.
-    `assembly.target_frame` names a point on the tool; so does the believed in-hand connector pose.
-    Nothing forces them to be the SAME point, and when they drifted apart the failure showed up
-    nowhere in the logs -- every pose printed looked self-consistent.
+    HOW THE MATE IS RECORDED: the operator clamps the cable in the FINGER HOLDER, jogs the
+    arm to a good mate, and reads `base_link <- bnc_connector_finger_holder` off the monitor
+    into frames.yaml targets:. So `assembly.target_frame` names the HOLDER frame, and its
+    target is a WORLD pose of the connector datum at the mate.
 
-    THE INVARIANT. Engage commands tool0 to `target @ inverse(T_tool0_conn)`. At that arm pose the
-    frame named by target_frame sits at `target @ inverse(T_tool0_conn) @ frames[target_frame]`.
-    For that to actually BE the target -- a real mate -- the tail has to vanish:
+    HOW THE RUN USES IT: the part is PICKED and sits in the FINGERPADS, so the in-hand
+    belief (`estimation.initial_connector_frame`) names the fingerpads frame. The engage
+    commands  tool0 = targets[holder] @ inverse(T_tool0_fingerpads_conn),  which lands the
+    physical connector exactly AT the recorded world pose -- the two config keys are
+    DELIBERATELY different frames, and requiring them equal (as this test once did) would
+    force the run to plan as if the picked part sat where the fixtured one does.
 
-        frames[assembly.target_frame] == T_tool0_conn
-
-    WHY THE CLOCKING PASSES CARE MOST. connector_clocking resets its belief to the target and screws
-    about THAT frame's +X:  ref_goal = (T_base_tconn @ screw @ inverse(T_base_tconn)) @ T_tool0.
-    That is a rotation about an axis LINE through the target's origin. If the target is `d` off the
-    true connector axis, a `theta` turn drags the connector origin through a chord of
-    `2 d sin(theta/2)` instead of spinning it in place -- 19 mm of offset on a 90 deg stroke is a
-    27 mm arc, which scrubs the connector sideways through the socket rather than clocking it.
-    collar_clocking then inherits the same axis through T_base_conn, so one drift breaks both.
-
-    Checked GEOMETRICALLY rather than by comparing the two config strings, so that an alias frame
-    with the same pose passes and a same-named frame that someone later moves does not."""
+    What DOES have to hold for that algebra to be sound is that both frames describe the
+    SAME CONNECTOR DATUM in two grips:
+      * identical ORIENTATION -- a rotated datum would rotate the whole mate;
+      * identical LATERAL position -- the two grips may only differ in how DEEP the part
+        sits along the tool axis (tool0 z, the grip-depth direction);
+    and the recorded target must exist for the target frame. The inline
+    initial_connector_in_fingertip duplicate must also not go stale: the frame wins at
+    runtime, so a gap changes no motion, but it warns every run and misleads readers.
+    """
     import numpy as np
 
     from urlab import config as urconfig, tool_frames
@@ -4146,47 +4146,45 @@ def test_the_target_frame_and_the_in_hand_belief_name_the_same_point():
 
     cfg = urconfig.load('bnc_assembly')
     frames = tool_frames.load_frames(cfg)
+    targets = tool_frames.load_targets(cfg)
     tname = cfg['assembly']['target_frame']
-    assert tname in frames, f'assembly.target_frame {tname!r} is not a declared frame'
-    # RESOLVED THE WAY THE APP DOES: estimation.initial_connector_frame names a frame in the
-    # shared catalogue and WINS; the inline pose is only an override for when no frame is named.
-    # Comparing against the inline pose instead would fail whenever the frame is re-measured and
-    # the stale duplicate has not caught up -- which is a real problem, but a different one, and
-    # it is checked separately below.
     iname = cfg.get_path('estimation.initial_connector_frame')
-    inline = (from_cfg(cfg['fingertip_grasp'])
-              @ from_cfg(cfg['estimation']['initial_connector_in_fingertip']))
-    belief = frames[iname] if iname else inline
-    lin, ang = pose_error(frames[tname], belief)
-    # Report the consequence in the units the operator cares about: the arc the connector would be
-    # dragged through by the ACTUAL clocking stroke, chord = 2 d sin(theta / 2).
-    theta = widest_cable_leg(cfg['assembly'])
-    arc_mm = 2.0 * lin * 1000.0 * abs(np.sin(theta / 2.0))
-    assert lin * 1000.0 < 0.05 and np.degrees(ang) < 0.05, (
-        f'assembly.target_frame {tname!r} sits {lin * 1000.0:.2f} mm / {np.degrees(ang):.2f} deg '
-        f'from the believed in-hand connector, so the clocking screw axis is that far off the '
-        f'connector axis: the {np.degrees(theta):.0f} deg connector_clocking stroke would drag the '
-        f'connector through a {arc_mm:.1f} mm arc instead of spinning it in place, and '
-        f'collar_clocking would inherit the same axis. Point target_frame at the same frame as '
-        f'estimation.initial_connector_frame.')
+    assert tname in frames, f'assembly.target_frame {tname!r} is not a declared frame'
+    assert tname in targets, (
+        f'assembly.target_frame {tname!r} has no recorded targets: entry -- the mate must be '
+        'recorded (holder clamped, jog to the mate, read the monitor) before the run can aim')
+    assert iname in frames, f'estimation.initial_connector_frame {iname!r} is not declared'
 
-    # THE STALE-DUPLICATE CHECK. The inline override must not drift from the frame it duplicates.
-    # It loses at runtime, so a gap changes no motion -- it just makes the app warn every run and
-    # leaves a wrong number where a reader would trust it. The threshold is the app's own.
+    # ---- SAME DATUM, DIFFERENT GRIP DEPTH ----
+    T_t, T_i = frames[tname], frames[iname]
+    _lin, ang = pose_error(T_t, T_i)
+    assert np.degrees(ang) < 0.05, (
+        f'{tname!r} and {iname!r} disagree by {np.degrees(ang):.2f} deg -- the two grips must '
+        'hold the connector datum in the SAME orientation, or the recorded mate is rotated '
+        'relative to what the run drives')
+    d = T_i[:3, 3] - T_t[:3, 3]
+    assert abs(d[0]) * 1000.0 < 0.05 and abs(d[1]) * 1000.0 < 0.05, (
+        f'{tname!r} and {iname!r} differ laterally by ({d[0] * 1000:.2f}, {d[1] * 1000:.2f}) mm '
+        'in tool0 x/y -- the two grips may only differ in DEPTH along the tool axis; a lateral '
+        'gap means one of the frames does not describe the connector datum')
+    # the depth gap itself is a physical measurement (holder vs pads), not an invariant --
+    # just sanity-bound it so a typo cannot hide as "grip depth"
+    assert abs(d[2]) * 1000.0 < 60.0, (
+        f'grip-depth gap {d[2] * 1000:.1f} mm between {tname!r} and {iname!r} is not a '
+        'plausible holder-vs-pads difference -- check the frames: entries')
+
+    # ---- THE STALE-DUPLICATE CHECK. The inline override must not drift from the frame it
+    # duplicates. It loses at runtime, so a gap changes no motion -- it just makes the app warn
+    # every run and leaves a wrong number where a reader would trust it. ----
     if iname:
+        inline = (from_cfg(cfg['fingertip_grasp'])
+                  @ from_cfg(cfg['estimation']['initial_connector_in_fingertip']))
         d_lin, d_ang = pose_error(inline, frames[iname])
         assert d_lin * 1000.0 <= 0.5 and np.degrees(d_ang) <= 0.2, (
             f'estimation.initial_connector_in_fingertip is {d_lin * 1000.0:.2f} mm / '
-            f'{np.degrees(d_ang):.2f} deg from frame {iname!r} that it duplicates. The frame wins, '
-            f'so nothing moves wrong -- but the app warns every run and the stale pose misleads. '
-            f'Set it to inverse(fingertip_grasp) @ frames[{iname!r}], or delete it.')
-
-    # And the two config keys should AGREE BY NAME as well, since that is how a reader checks it.
-    if iname:
-        assert iname == tname, (
-            f'estimation.initial_connector_frame {iname!r} and assembly.target_frame {tname!r} '
-            f'name different frames; they happen to be geometrically equal today, but nothing '
-            f'keeps them that way')
+            f'{np.degrees(d_ang):.2f} deg from frame {iname!r} that it duplicates. The frame '
+            f'wins, so nothing moves wrong -- but the app warns every run and the stale pose '
+            f'misleads. Set it to inverse(fingertip_grasp) @ frames[{iname!r}], or delete it.')
 
 
 def test_wiggle_station_grid_and_the_retuned_excitation_stay_runnable():
@@ -6109,12 +6107,23 @@ def test_visual_target_reanchors_every_frame_the_run_plans_from():
         'a visual pose wildly far from the recorded mate is a stale rig or a marker on the wrong '
         'fixture; driving an insertion trajectory at it is the expensive way to find out')
 
-    # THE SHIPPED DEFAULT stays kinematic -- the rig has to be calibrated before it can be trusted.
+    # THE SHIPPED SOURCE is VISUAL (2026-08-21, operator decision -- the marker rig is the
+    # primary targeting path now). The app still refuses at startup until a marker_rigs:
+    # entry exists for the target, so the failure mode the old kinematic default guarded
+    # against is loud, not silent: calibrate with urlab.apps.marker_calibration first.
     from urlab import config as urconfig
     a = urconfig.load('bnc_assembly').section('assembly')
-    assert str(a.get('target_source')).lower() == 'kinematic', (
-        'ship the kinematic path: target_source: visual with no marker_rigs: entry would fail '
-        'every run until someone calibrates one')
+    assert str(a.get('target_source')).lower() in ('kinematic', 'visual')
+    # CALIBRATION <-> RUNTIME PARITY: the rig's PnP biases cancel only when both runs look at
+    # the markers the same way, so the capture/servo/weighting settings must not drift apart.
+    mv_run = urconfig.load('bnc_assembly').section('marker_views')
+    mv_cal = urconfig.load('marker_calibration').section('marker_views')
+    for k in ('servo', 'view_weight_power', 'max_camera_distance_mm', 'frames_per_view',
+              'offsets'):
+        assert mv_run.get(k) == mv_cal.get(k), (
+            f'marker_views.{k} differs between bnc_assembly and marker_calibration -- the '
+            'calibration and the runtime localization must capture the same way or the '
+            'biases the rig relies on cancelling stop cancelling')
     vt = a.get('visual_target') or {}
     assert vt.get('return_home_after') is True, (
         'the scan, the grasp geometry and every retry offset are written from the home pose')

@@ -2363,6 +2363,9 @@ def build_and_run(cfg, robot, camera, args):
     phase('reset')
     if not reset.reset_robot(robot, cfg, 'start reset'):
         return False
+    # GRIPPER WARM-UP instead of a plain open: full stroke, two partial cycles, end open.
+    if not robot.gripper.warmup():
+        return False
     q_home = robot.arm.q()
     if tgt_source == 'visual' and not locate_target_visually(q_home):
         return False

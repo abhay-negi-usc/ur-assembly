@@ -19,7 +19,10 @@ re-detecting and re-centring until two successive detections agree, then capture
 refinement views (the vantage plus an aimed parallax ring) that REPLACE that marker's sweep
 views. Centred, close, fixed-distance viewing removes the vantage-dependent part of the PnP
 bias, and doing it identically for every marker -- and identically at calibration and at run
-time -- is what lets the remaining bias cancel. Servoing to one marker takes the others out
+time -- is what lets the remaining bias cancel. The vantage ROLL is aligned to the marker
+only up to the nearest 90 deg about the view axis: pose estimation is invariant to that
+rotation, so the closest quarter turn is commanded and the wrist never winds further for
+nothing. Servoing to one marker takes the others out
 of frame by design: the routine returns to the OVERVIEW pose (where the sweep started, all
 markers in frame) between markers to reset the view.
 
@@ -218,6 +221,23 @@ def _at(T_a, T_b, tol_m=1e-3, tol_rad=np.radians(0.2)):
     return lin <= tol_m and ang <= tol_rad
 
 
+def _quarter_roll(T_marker, distance_m, T_cam_now):
+    """The vantage's in-plane roll: the multiple of 90 deg about the view axis that brings
+    the camera-on-marker pose closest to the camera's CURRENT attitude. ArUco pose
+    estimation is invariant to rotation about the view axis, so only alignment up to the
+    nearest quarter turn is worth commanding -- anything tighter is wrist travel for
+    nothing. All four candidates share the same position, so the comparison is purely
+    angular."""
+    best_roll, best_ang = 0.0, None
+    for k in range(4):
+        yaw = k * np.pi / 2.0
+        _lin, ang = pose_error(
+            T_cam_now, camera_on_marker(T_marker, distance_m, [np.pi, 0.0, yaw]))
+        if best_ang is None or ang < best_ang:
+            best_roll, best_ang = yaw, ang
+    return best_roll
+
+
 def _detect_one(camera, detector, mid, n_frames):
     """(averaged T_base_marker over n frames, last frame); (None, frame) if never detected."""
     mats, frame = [], None
@@ -256,11 +276,15 @@ def servo_refine(robot, camera, detector, plan, seen, T_overview=None, on_view=N
                         'the remaining markers keep their sweep views.')
             break
         T_est = average_pose([T for T, _d in obs])[0]
+        # The roll about the view axis is chosen ONCE per marker -- the nearest quarter turn
+        # to the camera's current attitude -- and held for the whole servo + ring, so the
+        # views stay mutually consistent and the wrist never unwinds mid-marker.
+        roll = _quarter_roll(T_est, sv.distance_m, robot.camera())
 
         # ---- servo: centre + square + fix the distance until the detection stops moving ----
         detected = False
         for it in range(1, sv.max_iterations + 1):
-            T_cam = camera_on_marker(T_est, sv.distance_m, [np.pi, 0.0, 0.0])
+            T_cam = camera_on_marker(T_est, sv.distance_m, [np.pi, 0.0, roll])
             if not robot.arm.move_frame_to(T_cam, robot.T_tool0_cam,
                                            f'servo marker {mid} ({it}/{sv.max_iterations})'):
                 log.warning('  marker %d: servo move did not finish -- keeping the sweep '
@@ -291,7 +315,7 @@ def servo_refine(robot, camera, detector, plan, seen, T_overview=None, on_view=N
         # ---- refinement views: the vantage + an aimed ring around it. The centred vantage
         # kills the lateral perspective bias; the ring restores the parallax that
         # disambiguates the planar-pose tilt a centred view alone cannot. ----
-        vantage = camera_on_marker(T_est, sv.distance_m, [np.pi, 0.0, 0.0])
+        vantage = camera_on_marker(T_est, sv.distance_m, [np.pi, 0.0, roll])
         stops = [vantage]
         for j in range(sv.ring_views):
             a = 2.0 * np.pi * j / sv.ring_views

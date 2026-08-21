@@ -307,9 +307,15 @@ assembly:
   # The KNOWN target (where the CONNECTOR must end up, base_link): names a configs/frames.yaml
   # frame whose `targets:` entry is the recorded mate.  MEASURE: hand-guide to a good mate,
   # read `base_link <- <frame>` off the monitor, paste it under targets: (mm/deg).
-  # Must name the SAME physical point as estimation.initial_connector_frame -- the target is
-  # one side of the pose algebra and the belief is the other, so naming different points puts
-  # the connector off by exactly their difference.
+  # RECORDED THROUGH THE HOLDER, DRIVEN WITH THE FINGERPADS -- deliberately DIFFERENT
+  # frames.  The mate is recorded with the cable clamped in the FINGER HOLDER (jog to a good
+  # mate, read `base_link <- bnc_connector_finger_holder` off the monitor), so targets[
+  # finger_holder] is a WORLD pose of the connector datum at the mate.  At run time the
+  # PICKED part sits in the fingerpads (estimation.initial_connector_frame), and the engage
+  # drives that believed connector onto this recorded world pose -- landing the physical
+  # connector exactly where the mate was recorded.  The two frames must describe the SAME
+  # connector datum (same orientation, differing only in grip depth along tool0 z); the
+  # smoke suite pins that.
   target_frame: bnc_connector_finger_holder
 
   # ---- WHERE THE TARGET POSE COMES FROM ------------------------------------------------------
@@ -767,13 +773,15 @@ estimation:
   #   The `commit` column in trials.csv records what was used.
   commit: argmin
   # ---- THE IN-HAND BELIEF, decoupled from the grasp -----------------------------------------
-  # fingertip -> CONNECTOR (the frame assembly.target_frame is recorded through, so the
-  # two sides of the pose algebra name the same physical point).  Without this key the app
-  # falls back to cables.yaml
-  # junction_in_fingertip -- which is tuned for the PICKUP and only coincides when the
-  # connector frame sits exactly at the junction (it does not here; the two differ by 180 deg
-  # and 45.7 mm).  Declared ONCE in configs/frames.yaml, parented to `fingertip`; the inline
-  # pose below is an override + documentation, and the app warns if the two disagree.
+  # fingertip -> CONNECTOR as held in the FINGER PADS after a pick.  DELIBERATELY a
+  # different frame from assembly.target_frame: the target was recorded with the part
+  # clamped in the HOLDER, but a picked part sits ~17.5 mm shallower, at the pads -- the
+  # engage cancels the difference by driving THIS believed pose onto the recorded target.
+  # Without this key the app falls back to cables.yaml junction_in_fingertip -- which is
+  # tuned for the PICKUP and only coincides when the connector frame sits exactly at the
+  # junction (it does not here; the two differ by 180 deg and 45.7 mm).  Declared ONCE in
+  # configs/frames.yaml, parented to `fingertip`; the inline pose below is an override +
+  # documentation, and the app warns if the two disagree.
   # UNITS: m / rad (NOT xyz_mm/rpy_deg -- mm/deg keys here are silently ignored).
   initial_connector_frame: bnc_connector_in_fingerpads
   initial_connector_in_fingertip:

@@ -373,3 +373,49 @@ def test_servo_refine_centres_each_marker_and_returns_to_the_overview():
     assert len(overview_hops) == 3, robot.arm.labels
     order = [l for l in robot.arm.labels if 'marker 6' in l or 'before marker' in l]
     assert order[0].startswith('overview (before marker 5)'.split(' 5')[0]), robot.arm.labels
+
+
+def test_servo_vantage_roll_snaps_to_the_nearest_quarter_turn():
+    """Pose estimation is invariant to rotation about the view axis, so the servo aligns the
+    camera to the marker only up to the nearest 90 deg -- never winding the wrist further."""
+    from urlab.skills.marker_localize import _quarter_roll
+    from urlab.skills.servo import camera_on_marker
+    from urlab.transforms import pose_error, xyzrpy_to_matrix
+
+    T_marker = xyzrpy_to_matrix([0.6, 0.0, 0.2], [0.0, np.pi / 2, 0.0])
+    for cur_roll_deg, want_deg in ((10.0, 0.0), (85.0, 90.0), (170.0, 180.0),
+                                   (-100.0, -90.0), (44.0, 0.0), (46.0, 90.0)):
+        T_now = camera_on_marker(T_marker, 0.15, [np.pi, 0.0, np.radians(cur_roll_deg)])
+        roll = _quarter_roll(T_marker, 0.15, T_now)
+        got = np.degrees(roll) % 360.0
+        assert got == want_deg % 360.0, (cur_roll_deg, got, want_deg)
+        # ...and the commanded vantage is then within 45 deg of the current attitude
+        _l, ang = pose_error(T_now, camera_on_marker(T_marker, 0.15, [np.pi, 0.0, roll]))
+        assert np.degrees(ang) <= 45.0 + 1e-6
+
+
+def test_gripper_warmup_sequence():
+    """The session warm-up strokes: open, full close, two partial cycles, end fully open."""
+    from urlab.robot.gripper import Robotiq2F85
+
+    calls = []
+
+    class G(Robotiq2F85):
+        def __init__(self):                 # no hardware -- warmup only needs go_to
+            pass
+
+        def go_to(self, counts, label='', wait=True):
+            calls.append(counts)
+            return True
+
+    assert G().warmup()
+    assert calls == [0, 255, 150, 255, 150, 255, 0]
+    calls.clear()
+
+    class GFail(G):
+        def go_to(self, counts, label='', wait=True):
+            calls.append(counts)
+            return counts != 150            # stall on the first partial open
+
+    assert not GFail().warmup()
+    assert calls == [0, 255, 150], 'the warm-up must stop at the failing stroke'

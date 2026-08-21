@@ -234,6 +234,19 @@ class Robotiq2F85:
         log.error('Gripper did not settle within %.1f s.', self.timeout_s)
         return False
 
+    def warmup(self, label='gripper warmup'):
+        """Exercise the fingers through a full-stroke WARM-UP before the first grasp of a
+        session: open (0), close (255), two partial cycles (150 -> 255), and end fully open.
+        The first strokes after an idle period are where the mechanism runs stiff and stalls
+        early -- which the counts-based grasp check would misread as a held object."""
+        seq = [0, 255, 150, 255, 150, 255, 0]
+        log.info('Gripper warm-up: %s counts.', ' -> '.join(str(c) for c in seq))
+        for c in seq:
+            if not self.go_to(c, f'{label} -> {c}'):
+                log.error('Gripper warm-up failed at %d counts.', c)
+                return False
+        return True
+
     def open(self, label='open'):
         return self.go_to(self.open_counts, label)
 

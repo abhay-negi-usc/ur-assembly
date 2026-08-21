@@ -5918,9 +5918,10 @@ def test_a_marker_rig_round_trips_calibration_into_localization():
                 9: T.xyzrpy_to_matrix([-0.05, -0.06, 0.01], np.radians([90.0, 0.0, -25.0]))}
 
     def views(truth, n=5):
-        """n noisy sightings of each marker, as the sweep would return them."""
-        return {mid: [Tm @ T.xyzrpy_to_matrix(rng.normal(0, 0.0006, 3),
-                                              rng.normal(0, np.radians(0.4), 3))
+        """n noisy sightings of each marker, as the sweep would return them --
+        (pose, camera_distance_m) pairs, all from ~0.2 m."""
+        return {mid: [(Tm @ T.xyzrpy_to_matrix(rng.normal(0, 0.0006, 3),
+                                               rng.normal(0, np.radians(0.4), 3)), 0.2)
                       for _ in range(n)]
                 for mid, Tm in truth.items()}
 

@@ -259,3 +259,117 @@ def test_chain_builds_from_specs_and_nodes():
         pass
     else:
         raise AssertionError('a non-spec step must be rejected')
+
+
+# ---- marker localization: certainty weighting, the standoff cap, and the servo loop ----
+
+class _MarkerPlan:
+    """The ViewPlan fields the pure fusion functions read."""
+    min_views, min_markers, require_all = 2, 1, False
+    max_view_spread_mm = max_view_spread_deg = None
+    max_disagreement_mm = max_disagreement_deg = None
+    view_weight_power = 2.0
+    max_camera_distance_m = 0.5
+    settle_s = 0.0
+    frames_per_view = 1
+
+
+def test_fusion_weights_closer_views_more():
+    """A close view must dominate a far one (weight d^-2), and a view beyond the 500 mm
+    standoff cap must be dropped outright."""
+    from urlab.skills import marker_localize as mloc
+
+    T_true = translation_matrix([1.0, 0.0, 0.0])
+    T_off = translation_matrix([1.0, 0.010, 0.0])           # a 10 mm-wrong far view
+    fused = mloc.fuse_markers({7: [(T_true, 0.1), (T_off, 0.4)]}, _MarkerPlan)
+    err_mm = abs(fused[7][0][1, 3]) * 1000.0
+    # weights 100 : 6.25 -> the wrong far view contributes ~0.6 mm, not the unweighted 5 mm
+    assert err_mm < 1.0, f'closer views must dominate; got {err_mm:.2f} mm of pull'
+    assert fused[7][3] == 2 and fused[7][4] > 0
+
+    # beyond the cap: dropped -- and min_views then bites
+    fused = mloc.fuse_markers({7: [(T_true, 0.1), (T_off, 0.6)]}, _MarkerPlan)
+    assert 7 not in fused, 'a single surviving view (min_views 2) must not fuse'
+
+
+def test_vote_weighs_markers_by_their_certainty():
+    from urlab.skills import marker_localize as mloc
+
+    rig = {'markers': {7: {'T_marker_target': np.eye(4)},
+                       8: {'T_marker_target': np.eye(4)}}}
+    # marker 7: heavy (close views); marker 8: light (far views), 10 mm disagreeing
+    fused = {7: (translation_matrix([1.0, 0.0, 0.0]), 0.0, 0.0, 3, 300.0),
+             8: (translation_matrix([1.0, 0.010, 0.0]), 0.0, 0.0, 3, 6.0)}
+    T, votes = mloc.vote_target(rig, fused, _MarkerPlan)
+    assert len(votes) == 2
+    pull_mm = abs(T[1, 3]) * 1000.0
+    assert pull_mm < 0.5, (
+        f'the light marker must barely move the vote; got {pull_mm:.2f} mm (unweighted = 5)')
+
+
+def test_servo_refine_centres_each_marker_and_returns_to_the_overview():
+    """The servo loop: overview -> per-marker vantage at the canonical distance -> ring ->
+    overview. The fake detector reports a fixed truth, so one servo step centres it and the
+    refinement views land on the truth at ~distance_m."""
+    from urlab.skills import marker_localize as mloc
+    from urlab.transforms import xyzrpy_to_matrix
+
+    truth = {5: xyzrpy_to_matrix([0.6, 0.0, 0.2], [0.0, np.pi / 2, 0.0]),
+             6: xyzrpy_to_matrix([0.6, 0.1, 0.2], [0.0, np.pi / 2, 0.0])}
+    T_overview = xyzrpy_to_matrix([0.3, 0.05, 0.2], [0.0, np.pi / 2, 0.0])
+
+    class FakeArm:
+        def __init__(self):
+            self.T_cam = np.array(T_overview)
+            self.labels = []
+
+        def move_frame_to(self, T, T_tool0_frame, label):
+            self.T_cam = np.array(T)
+            self.labels.append(label)
+            return True
+
+    class FakeRobot:
+        def __init__(self):
+            self.arm = FakeArm()
+            self.T_tool0_cam = np.eye(4)
+
+        def camera(self):
+            return self.arm.T_cam
+
+    class FakeCamera:
+        def __init__(self, robot):
+            self.robot = robot
+
+        def capture(self):
+            class F:
+                T_base_cam = np.array(self.robot.arm.T_cam)
+            return F()
+
+    class FakeDetector:
+        def detect_in_base(self, frame):
+            return dict(truth)
+
+        def detect(self, frame):
+            return {}
+
+    plan = _MarkerPlan()
+    plan.servo = mloc.ServoPlan({'enabled': True, 'distance_m': 0.15, 'max_iterations': 3,
+                                 'pos_tol_mm': 0.5, 'ang_tol_deg': 0.5,
+                                 'ring_mm': 25.0, 'ring_views': 2})
+    robot = FakeRobot()
+    seen = {mid: [(Tm @ translation_matrix([0.002, 0.001, 0.0]), 0.35)]
+            for mid, Tm in truth.items()}
+    refined = mloc.servo_refine(robot, FakeCamera(robot), FakeDetector(), plan, seen,
+                                T_overview=T_overview)
+
+    assert sorted(refined) == [5, 6]
+    for mid, views in refined.items():
+        assert len(views) == 3                      # vantage + 2 ring stops
+        for T_v, d in views:
+            assert np.allclose(T_v, truth[mid])
+            assert 0.10 <= d <= 0.20, f'refinement views must sit near distance_m, got {d}'
+    # the overview reset: before EACH marker and once at the end
+    overview_hops = [l for l in robot.arm.labels if l.startswith('overview')]
+    assert len(overview_hops) == 3, robot.arm.labels
+    order = [l for l in robot.arm.labels if 'marker 6' in l or 'before marker' in l]
+    assert order[0].startswith('overview (before marker 5)'.split(' 5')[0]), robot.arm.labels

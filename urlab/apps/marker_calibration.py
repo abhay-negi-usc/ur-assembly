@@ -13,7 +13,11 @@ moved afterwards and the markers travel with it.
 
 Run it with the markers ALREADY IN VIEW (hand-guide the camera, or set view_joints_deg).  The
 sweep is a small local ring of camera translations around wherever it starts; it is not a
-search.
+search.  With `marker_views.servo.enabled` the camera then VISUALLY SERVOS to each marker in
+turn -- centred on it at a canonical standoff, returning to the overview between markers so
+the whole rig comes back into frame -- and those close, centred views replace the sweep's in
+a certainty-weighted fusion (closer views weigh more; nothing beyond the
+max_camera_distance_mm standoff cap is used).
 
 Output: data/experiments/marker_calibration_<stamp>/ -- the yaml block, per-marker fits, and
 annotated images from every view.
@@ -92,6 +96,8 @@ class _Calibration:
         self.tname = tname
         self.T_base_target = T_base_target
         self.out_dir = out_dir
+        self.seen = {}
+        self.T_overview = None
         self.fused = {}
         self.offsets = {}
         self.missing = []
@@ -109,9 +115,11 @@ class _Calibration:
                                           label='marker view pose'):
                 log.error('Could not reach view_joints_deg.')
                 return False
-            return True
-        if self.cfg.get('confirm_start', True) and not self.robot.arm.dry_run:
+        elif self.cfg.get('confirm_start', True) and not self.robot.arm.dry_run:
             input('Hand-guide the camera so ALL markers are in view, then press Enter: ')
+        # The OVERVIEW: the one pose with every marker in frame. The sweep starts here, and
+        # the servo refinement returns here between markers.
+        self.T_overview = self.robot.camera()
         return True
 
     # ---- sweep + fuse ------------------------------------------------------------------------
@@ -124,11 +132,19 @@ class _Calibration:
         except Exception as exc:               # noqa: BLE001 -- never fail a run on a jpg
             log.debug('could not save the view image: %s', exc)
 
-    def sweep_and_fuse(self):
+    def _save_servo_view(self, mid, j, frame, poses):
+        try:
+            import cv2
+            cv2.imwrite(os.path.join(self.out_dir, 'servo_m%d_%02d.jpg' % (mid, j)),
+                        self.detector.draw(frame, poses))
+        except Exception as exc:               # noqa: BLE001 -- never fail a run on a jpg
+            log.debug('could not save the servo view image: %s', exc)
+
+    def sweep(self):
         log.info('MARKER SWEEP: %s.', self.plan.describe())
-        seen = mloc.sweep(self.robot, self.camera, self.detector, self.plan,
-                          wanted=set(self.sizes), on_view=self._save_view)
-        self.missing = sorted(set(self.sizes) - set(seen))
+        self.seen = mloc.sweep(self.robot, self.camera, self.detector, self.plan,
+                               wanted=set(self.sizes), on_view=self._save_view)
+        self.missing = sorted(set(self.sizes) - set(self.seen))
         if self.missing:
             log.error('Marker(s) %s were never detected. They are declared in markers: but '
                       'nothing saw them -- check the ids, the dictionary (%s) and that they '
@@ -136,7 +152,21 @@ class _Calibration:
                       self.cfg.get_path('aruco.dictionary'))
             if self.cfg.get('require_all_markers', True):
                 return False
-        self.fused = mloc.fuse_markers(seen, self.plan)
+        return bool(self.seen)
+
+    def servo_refine(self):
+        """Visual-servo each swept marker (see skills/marker_localize.servo_refine); the
+        refined views replace that marker's sweep views in the fusion."""
+        if not self.plan.servo.enabled:
+            log.info('Servo refinement disabled (marker_views.servo.enabled: false).')
+            return True
+        self.seen.update(mloc.servo_refine(self.robot, self.camera, self.detector, self.plan,
+                                           self.seen, T_overview=self.T_overview,
+                                           on_view=self._save_servo_view))
+        return True
+
+    def fuse(self):
+        self.fused = mloc.fuse_markers(self.seen, self.plan)
         if not self.fused:
             log.error('No marker was seen from enough views (min_views %d) to fuse.',
                       self.plan.min_views)
@@ -191,7 +221,7 @@ class _Calibration:
             w = _csv.writer(fh)
             w.writerow(_CSV_HEADER)
             for mid in sorted(self.offsets):
-                T_m, lin, ang, n = self.fused[mid]
+                T_m, lin, ang, n = self.fused[mid][:4]
                 mxyz, mrpy = matrix_to_xyzrpy(T_m)
                 oxyz, orpy = matrix_to_xyzrpy(self.offsets[mid])
                 w.writerow([mid, round(self.sizes[mid] * 1000.0, 3), n,
@@ -241,10 +271,16 @@ def build_and_run(cfg, robot, camera, args):
 
     cal = _Calibration(cfg, robot, camera, detector, sizes, plan, tname, targets[tname],
                        out_dir)
+    # One speed factor for the whole visual-localization behavior (sweep + servo moves) --
+    # the same knob bnc_assembly's runtime localization uses.
+    robot.arm.set_speed_scale(float(cfg.get_path('speed.phase_scale.visual_localize', 1.0)),
+                              'visual_localize')
     root = bt.sequence(
         'marker-calibration',
         bt.Action('get the markers in view', cal.move_to_view),
-        bt.Action('sweep + fuse', cal.sweep_and_fuse),
+        bt.Action('sweep the views', cal.sweep),
+        bt.Action('servo-refine each marker', cal.servo_refine),
+        bt.Action('fuse per marker', cal.fuse),
         bt.Action('solve target-in-marker offsets', cal.solve),
         bt.Action('cross-check the rig geometry', cal.cross_check),
         bt.Action('write yaml + csv', cal.write_outputs))

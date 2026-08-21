@@ -56,6 +56,25 @@ marker_views:
   max_disagreement_mm: 5.0         # spread ACROSS MARKERS -- REFUSES; null disables
   max_disagreement_deg: 5.0
   offsets: null                    # null = the built-in ring (centre, 40 mm x4, 25 mm closer)
+  # CERTAINTY WEIGHTING: a view at distance d fuses with weight d^-power (closer views are
+  # more accurate); each marker's accumulated weight also weighs its vote on the target.
+  view_weight_power: 2.0
+  # STANDOFF CAP: the camera never plans a view farther than this from the markers, and a
+  # detection captured beyond it is never fused.  null disables.
+  max_camera_distance_mm: 500.0
+  # VISUAL SERVOING: after the sweep, servo to each marker in turn -- centred on it at
+  # distance_m along its normal, re-detecting until two successive detections agree within
+  # the tolerances -- then capture the vantage + an aimed parallax ring, which REPLACE that
+  # marker's sweep views.  The camera returns to the overview (all markers in frame) between
+  # markers.  MUST match the block marker_calibration ran with, so the biases cancel.
+  servo:
+    enabled: true
+    distance_m: 0.15
+    max_iterations: 4
+    pos_tol_mm: 0.5
+    ang_tol_deg: 0.5
+    ring_mm: 25.0
+    ring_views: 4
 
 sam3:
   repo_path: /abhay_ws/sam3-abhay
@@ -240,6 +259,7 @@ speed:
     # POST-MATE CLOCKING, one scale per maneuver.  These pace the CONTACT ramps; free-space
     # moves inside a maneuver stay on standoff/retract.  A non-null speed_translation_mm_s /
     # speed_rotation_deg_s in the maneuver's own block overrides its scale entirely.
+    visual_localize: 0.5     # the marker sweep + per-marker servo moves (camera near the fixture)
     connector_clock: 0.10    # the bayonet sweep legs
     collar_clock: 0.5   # the collar turn
     clock_retract: 1.0   # the shared two-leg escape (free space, gripper already clear)
@@ -290,7 +310,7 @@ assembly:
   # Must name the SAME physical point as estimation.initial_connector_frame -- the target is
   # one side of the pose algebra and the belief is the other, so naming different points puts
   # the connector off by exactly their difference.
-  target_frame: bnc_connector_in_fingerpads
+  target_frame: bnc_connector_finger_holder
 
   # ---- WHERE THE TARGET POSE COMES FROM ------------------------------------------------------
   # kinematic  the recorded `targets:` entry above.  True only while nothing moves (fixture,
@@ -301,7 +321,7 @@ assembly:
   #            fixture, and disagreeing markers / a large shift are visible cross-checks.
   # The sweep runs ONCE, after the start reset and BEFORE the pick (gripper empty, arm at
   # home, clear view -- after the mate the socket is behind a connector and a gripper).
-  target_source: kinematic
+  target_source: visual
   visual_target:
     # Joint degrees for the sweep's start pose.  null = sweep from HOME, which IS the
     # marker view pose (reset.home_joints_deg) -- set this only to sweep from somewhere

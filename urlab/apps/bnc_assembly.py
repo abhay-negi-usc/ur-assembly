@@ -2306,7 +2306,7 @@ def build_and_run(cfg, robot, camera, args):
             return False
         detector = ArucoDetector(cfg, sizes_m=tool_frames.marker_sizes(vt_rig))
 
-        phase('scan')
+        phase('visual_localize')
         q_view = vt.get('view_joints_deg')
         if q_view is not None:
             log.info('VISUAL TARGET: driving to the view pose %s deg.',

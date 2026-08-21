@@ -36,7 +36,7 @@ aruco:
   # named there instead -- solvePnP scales a marker's distance linearly with the size it is given,
   # so a marker solved at the wrong size lands at the wrong DEPTH with a perfect reprojection
   # behind it. There is nothing in the image to catch that.
-  marker_size_m: 0.0203
+  marker_size_m: 0.0197
 
 # WHICH TARGET THE MARKERS ARE ATTACHED TO -- a `targets:` name in configs/frames.yaml. Its
 # recorded base_link pose is what gets transferred onto the markers.
@@ -47,9 +47,8 @@ target_frame: bnc_connector_in_fingerpads
 # quiet zone is not part of the marker, and including it inflates the size by ~14% on a typical
 # print, which is a ~14% depth error.
 markers:
-  7:  20.3
-  8:  20.3
-  9:  20.3
+  24:  19.7
+  25:  19.7
 
 # Every declared marker must be seen, or the run fails. Set false to calibrate a partial rig (the
 # missing ids simply do not appear in the block, and the existing frames.yaml entries stand).
@@ -91,13 +90,38 @@ marker_views:
   # null = the built-in ring (centre, 40 mm at four bearings, 25 mm closer). Widen it for a large
   # rig; a marker that leaves the frame at an offset is simply skipped for that view.
   offsets: null
+  # CERTAINTY WEIGHTING: a view at distance d fuses with weight d^-power (closer views are
+  # more accurate).
+  view_weight_power: 2.0
+  # STANDOFF CAP: the camera never plans a view farther than this from the markers, and a
+  # detection captured beyond it is never fused.  null disables.
+  max_camera_distance_mm: 500.0
+  # VISUAL SERVOING: after the sweep, servo to each marker in turn -- centred on it at
+  # distance_m along its normal, re-detecting until two successive detections agree within
+  # the tolerances -- then capture the vantage + an aimed parallax ring, which REPLACE that
+  # marker's sweep views in the fusion.  The camera returns to the overview (all markers in
+  # frame) between markers.  Keep this block IDENTICAL to bnc_assembly's marker_views.servo:
+  # the rig's PnP biases cancel between calibration and run only when both look the same way.
+  servo:
+    enabled: true
+    distance_m: 0.15
+    max_iterations: 4
+    pos_tol_mm: 0.5
+    ang_tol_deg: 0.5
+    ring_mm: 25.0
+    ring_views: 4
 
 # ---- Motion --------------------------------------------------------------------------------
 # Free space with nothing in the fingers, but the arm is carrying a camera near a fixture.
-max_joint_velocity_deg_s: 30.0
-max_joint_acceleration_deg_s2: 30.0
-max_cartesian_velocity_m_s: 0.10
-max_cartesian_acceleration_m_s2: 0.5
+speed:
+  max_joint_velocity_deg_s: 30.0
+  max_joint_acceleration_deg_s2: 30.0
+  max_cartesian_translation_mm_s: 25.0
+  max_cartesian_rotation_deg_s: 30.0
+  # One factor for the whole visual-localization behavior (the sweep + servo moves) --
+  # the same knob bnc_assembly's speed.phase_scale.visual_localize turns.
+  phase_scale:
+    visual_localize: 0.5
 move_timeout_s: 60.0
 
 force_guard:

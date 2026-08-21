@@ -3719,12 +3719,18 @@ def test_tug_verification_defaults_on_and_its_spring_can_exceed_the_threshold():
     with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
         src = fh.read()
     body = src[src.index('def tug_verify_in_place('):src.index('def engage_insertion(')]
-    order = ["gripper.close('tug grasp')", "verify_cable_held(robot, check, 'tug regrasp')",
-             'tare_fn=tare', 'adm_tug.hold(T_pull', "'release (tug verified)'"]
+    # NO close and NO re-grip: the collar turn leaves the fingers on the ring, so the pull
+    # happens from that pose. A release/retract/re-approach/re-grasp between the lock and the
+    # test is four chances to disturb what it is measuring, and the re-grasp could miss.
+    order = ['T_grasp = robot.tool0()', 'tare_fn=tare', 'adm_tug.hold(T_pull',
+             "'release (tug verified)'"]
     idx = [body.index(t) for t in order]
     assert idx == sorted(idx), (
-        'the tug must close, verify the grasp, tare while gripping, pull, and only release '
-        'after a verified hold -- in that order')
+        'the tug must pull from the pose the turn left, tare while gripping, hold, and only '
+        'release after a verified hold -- in that order')
+    for banned in ("gripper.close('tug grasp')", "'tug approach (standoff)'"):
+        assert banned not in body, (
+            f'{banned} is the old reposition-and-regrip tug; the pull now happens in place')
     assert "'terminated'" in body and 'tv_extract_m' in body and 'guard_shared' in body, (
         'the failure path must extract by extraction_distance_mm under the GLOBAL guard, and a '
         'guard trip must terminate the script')
@@ -3885,12 +3891,12 @@ def test_the_collar_axis_offset_is_read_from_config_in_the_connector_frame():
             and 'axis_offset_base' not in cable), (
         'the offset is scoped to the collar maneuver and the tug; connector clocking keeps the '
         'unoffset axis')
-    # the tug centres its RE-GRIP on the same offset axis -- the pull direction cannot carry a
-    # line offset, so the grasp position is where the correction lands. SAME helper, so the two
-    # cannot disagree about where the collar's axis is.
+    # The tug no longer re-grips, so it no longer needs the offset LINE -- only the axis
+    # DIRECTION, which an offset cannot change. It must still take that direction from T_clk, so
+    # the pull and the collar turn cannot disagree about which way the connector points.
     tug = src[src.index('def tug_verify_in_place('):src.index('def engage_insertion(')]
-    assert 'axis_offset_base()' in tug and 'T_grasp = translation_matrix(-d_r) @ T_grasp' in tug, (
-        'tug verification must centre its re-grip on the same offset connector axis')
+    assert 'axn_t = T_clk[:3, 0]' in tug, (
+        'the tug must take its pull direction from the shared post-engage frame')
 
 
 def test_the_escape_releases_the_collar_before_retracting():

@@ -1922,13 +1922,30 @@ def build_and_run(cfg, robot, camera, args):
                       (collar_x - x_retreat) * 1000.0)
             return False
 
+        # ---- TARE BEFORE THE GRASP -------------------------------------------------------
+        # The arm is standing at the collar station with the fingers still OPEN and clear of the
+        # ring: the only genuinely unloaded moment in the maneuver. The tare used to happen
+        # inside the warmup BELOW, i.e. after the close, which folds in whatever the jaws
+        # preload against the captive ring -- jaw-on-jaw force cancels at the wrist, but an
+        # off-centre close reacts through the connector into the socket and does not. At
+        # max_torque_nm 1.0 that offset is a large fraction of the whole limit, so the turn could
+        # trip on the grasp rather than on the lock.
+        #
+        # An IDLE tare (settle=True), unlike the servo-active one warmup performs: the gripper
+        # close blocks for ~1 s, and streaming servoL around a blocking call is exactly what
+        # warmup's mid-hold tare exists to avoid. What that trades away is the idle-vs-servo
+        # offset, which is the uncompensated tool weight -- and robot.payload IS configured here,
+        # so it is already subtracted. settle=True also re-checks the residual and warns if it
+        # is not.
+        if cl_tare is not None:
+            robot.arm.zero_ft(settle=True)
         if not robot.gripper.close('grasp collar'):
             log.error('Gripper did not close on the collar.')
             return False
         phase('collar_clock')
         start = robot.tool0()
         adm_cl.reset()
-        adm_cl.warmup(start, tare_fn=cl_tare)
+        adm_cl.warmup(start)          # NOT tare_fn=cl_tare -- zeroed above, with open fingers
         guard_cl.reset()
         # THE TWIST. Still written as a rotation about the connector axis LINE, unchanged from the
         # radial version -- but tool0 now sits ON that line, so it resolves to a rotation about

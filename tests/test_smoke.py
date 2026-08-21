@@ -3684,6 +3684,7 @@ def test_a_null_speed_override_is_resolved_before_it_reaches_the_arithmetic():
     assert src.count('_path_time(') >= 3, 'seg_time and screw_ramp must share the arithmetic'
     assert 'def caps(' in src, 'the null-override resolver is gone'
     body = src[src.index('def screw_ramp('):src.index('\n    retract_m =')]
+    body = src[src.index('def screw_ramp('):src.index('\n    retract_m =')]
     assert 'caps(v, w)' in body, (
         'screw_ramp must resolve its caps before computing a duration -- it ships with null '
         'overrides from both clocking blocks')
@@ -3773,6 +3774,7 @@ def test_the_seat_push_can_reach_its_force_and_keeps_the_gripper_logic_straight(
              "gripper.close('grasp collar')"]                          # then the collar bite
     idx = [body.index(t) for t in order]
     assert idx == sorted(idx), (
+        'the seat push must run close -> verify -> press -> RELEASE before the retract; a '
         'the seat push must run close -> verify -> press -> RELEASE before the retract; a '
         'release after it would drag the clamped junction along the cable')
     assert 'return False' in body[body.index("'release (seat push)'"):
@@ -4983,6 +4985,7 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
 
     # ---- THE APPROACH IS A PURE AXIAL TRANSLATION ----
     retreat_m = float(cl['retract_mm']) / 1000.0
+    retreat_m = float(cl['retract_mm']) / 1000.0
     T_retreat = T.translation_matrix(-(retreat_m + collar_x) * axn) @ T_grip
     d = T_grip[:3, 3] - T_retreat[:3, 3]
     lat = float(np.linalg.norm(d - np.dot(d, axn) * axn)) * 1000.0
@@ -5082,9 +5085,12 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
     for k in ('grasp_clock_deg', 'retract_mm', 'wall_standoff_mm'):
         assert k in ccl, f'collar_clocking must declare {k} so the axial approach is tunable'
     assert float(ccl['retract_mm']) > 0
-    for gone in ('liftoff_mm', 'retreat_mm'):
-        assert gone not in ccl, (
-            f'{gone} belonged to the lift-off-and-orbit approach; retract_mm replaces both')
+    # liftoff_mm is BACK: the general reorientation sweeps the fingers, so they have to be clear
+    # of the cable first. Only the single-axis pitch could skip it, and that could not reach the
+    # axial pose.
+    assert 'liftoff_mm' in ccl and float(ccl['liftoff_mm']) > 0, (
+        'a general reorientation needs the fingers lifted off the cable first')
+    assert 'retreat_mm' not in ccl, 'retreat_mm was renamed retract_mm'
 
 
 def test_the_connector_sweep_rocks_between_absolute_roll_positions():

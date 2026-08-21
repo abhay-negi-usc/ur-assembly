@@ -1993,7 +1993,7 @@ def build_and_run(cfg, robot, camera, args):
         # ---- 1. RETRACT ALONG THE CABLE, straight away from the wall --------------------------
         # A pure translation along the connector -X with the open fingers still around the cable:
         # they slide ALONG it rather than across it, so nothing is swept, and every millimetre is
-        # away from the wall. It also puts the pitch that follows as far from the wall as the
+        # away from the wall. It also puts the reorient that follows as far from the wall as the
         # maneuver ever gets.
         if cl_retract_m > 1e-6:
             if not _guarded(robot, guard_shared, lambda: robot.arm.move_l(
@@ -2122,7 +2122,6 @@ def build_and_run(cfg, robot, camera, args):
         phase('collar_clock')
         start = robot.tool0()
         adm_cl.reset()
-        adm_cl.warmup(start)          # NOT tare_fn=cl_tare -- zeroed above, with open fingers
         adm_cl.warmup(start)          # NOT tare_fn=cl_tare -- zeroed above, with open fingers
         guard_cl.reset()
         # THE TWIST. Still written as a rotation about the connector axis LINE, unchanged from the

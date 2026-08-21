@@ -711,6 +711,13 @@ assembly:
     # axis IS the jaw-closing axis, so the jaw turns about its own gap with the cable at the
     # pivot: there is nothing left to clear.
     retract_mm: 300.0
+    # LIFT-OFF, mm along the GRIPPER's own -Z, after the retract and before the reorientation.
+    # The reorient is a GENERAL rotation onto the axis (a single-axis pitch about the jaw-closing
+    # axis kept the cable in the gap at radius zero, but it could only reach the axial pose when
+    # the held attitude happened to be square to the connector Y -- which it is not, so it failed
+    # with tens of degrees of residual). A general rotation sweeps the fingers, so they have to be
+    # off the cable first. 0 disables, but only do that if the reorientation is small.
+    liftoff_mm: 150.0
     # WALL STANDOFF, mm: the largest tool0 station along the connector +X that any planned pose
     # may take, measured in the TARGET frame (+X points INTO the wall, 0 = the mating face). Every
     # station is on the axis and known before the arm moves, so the whole maneuver's closest

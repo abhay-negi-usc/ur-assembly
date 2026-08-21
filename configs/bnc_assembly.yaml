@@ -206,7 +206,7 @@ speed:
   # Per-PHASE scaling of ALL FOUR limits above (1.0 = the global limit itself), one entry per
   # phase of cable_pick_estimate_assemble. An absent phase runs at 1.0.
   phase_scale:
-    reset: 3.0       # start/end home moves (and the between-retry homes)
+    reset: 1.5       # start/end home moves (and the between-retry homes)
     scan: 1.0        # the multi-view scan + grasp-align + reseat moves
     pickup: 1.5      # the compliant grasp descent
     lift: 0.8        # the compliant lift (including the slip-check partial lift)
@@ -604,7 +604,11 @@ assembly:
     # sweep_deg position, so 3 with a two-entry sweep is -75, +75, -75. A retry is the REVERSAL,
     # not a regrasp -- the gripper stays CLOSED for the whole sweep.
     max_tries: 3
-    open_gripper_after: true      # the FINAL release, after success or max tries -- then the escape
+    # FALSE: hand the connector over STILL HELD. The collar maneuver's seat push presses with
+    # the pads already closed on it, so releasing here would only let go of a part that is
+    # already gripped and force a blind re-grasp. The release happens after the push, before the
+    # retreat -- which is the first leg that genuinely needs open fingers.
+    open_gripper_after: false
     settle_s: 0.5                 # compliant settle at whatever pose the sweep reached
     hold_after_s: 0.0             # extra un-guarded dwell on top of settle_s
     # TARE at warm-up. OFF here, unlike the insertion: the arm stands in a MATED, LOADED pose
@@ -659,7 +663,7 @@ assembly:
     # junction_in_fingertip is the identity translation. NOT measured from the connector frame
     # origin, which is the mating-face reference ~45.7 mm further forward: measuring from there
     # overshot the advance by exactly that much.
-    collar_offset_mm: 0.0
+    collar_offset_mm: -5.0
     # COLLAR AXIS OFFSET, mm, in the SOCKET (target) frame's own axes. Shifts the LINE the whole
     # collar maneuver works about -- centring, unwind, advance, turn -- and the TUG VERIFICATION
     # centres its re-grip on the same offset axis. Connector clocking is NOT affected. Y and Z move

@@ -611,9 +611,11 @@ def build_and_run(cfg, robot, camera, args):
     guard_push = ForceGuard(robot.arm, dict(cfg.section('force_guard'),
                                             max_force_n=sp_force,
                                             persistence_s=sp_persist)) if sp_on else None
-    if cc_on and cl_on and not cc_open_after:
-        log.error('assembly.collar_clocking needs connector_clocking.open_gripper_after true: the '
-                  'collar is grasped by the same gripper, which must release the cable first.')
+    if cc_on and cl_on and cc_open_after:
+        log.error('assembly.collar_clocking needs connector_clocking.open_gripper_after FALSE: '
+                  'the seat push presses with the pads still closed on the connector, so the '
+                  'sweep must hand it over held. The release happens after the push, before the '
+                  'retreat.')
         return False
     if cc_on and cc_tries > 1 and len(cc_sweep) < 2:
         # Not fatal (one position is a legal legacy sweep) but the extra tries become
@@ -1039,54 +1041,28 @@ def build_and_run(cfg, robot, camera, args):
                 and leg(r.get('target_axis', [-1.0, 0.0, 0.0]),
                         r.get('target_distance_m', 0.100), True))
 
-    def tug_verify(T_grasp):
-        """TUG VERIFICATION -- re-grip the seated connector and pull along its -X.
+    def tug_verify_in_place():
+        """TUG VERIFICATION, from wherever the collar turn ended, WITHOUT letting go.
+
+        collar_clocking returns with the fingers still closed on the locked collar. That is
+        already a grip on the assembly, and already on the connector axis -- so the pull happens
+        here rather than after a release, a retract, a drive back to the historical engaged pose
+        and a blind re-grasp. Each of those was a chance to disturb the very thing being measured,
+        and the re-grasp could miss the connector outright.
 
         A LOCKED bayonet holds the pull; an unlocked one backs out and the displacement says so.
-        The pull is a SPRING pull, not a position ramp: the reference is offset along -X by
-        pull_force / stiffness, so the force is applied at zero displacement and DROPS as the
-        connector comes out -- it can never exceed pull_force_n on a connector that holds.
-
-        T_grasp is the arm pose at the END of connector clocking, pads still closed on the SEATED
-        junction. Collar clocking turns only the collar, so the junction has not moved.
+        The pull is a SPRING pull, not a position ramp: the reference is offset along the
+        connector -X by pull_force / stiffness, so the force is applied at zero displacement and
+        DROPS as the connector comes out -- it can never exceed pull_force_n on one that holds.
 
         Returns 'verified' (held; released and retracted), 'failed' (backed out; the cable has
-        been EXTRACTED, carried home, and released), 'terminated' (the GLOBAL force guard tripped
-        mid-pull -- stop where we are, move nothing further), or 'error' (could not run the test;
-        nothing was pulled)."""
+        been EXTRACTED, carried home and released), 'terminated' (the GLOBAL guard tripped
+        mid-pull -- stop where we are), or 'error'."""
         axn_t = T_clk[:3, 0] / float(np.linalg.norm(T_clk[:3, 0]))
-        # THE SAME AXIS CORRECTION AS THE COLLAR MANEUVERS (collar_clocking.axis_offset_mm). It
-        # cannot change the pull DIRECTION, only the RE-GRIP: T_grasp is the historical arm pose
-        # and rides whatever eccentricity the original pick closed with. Centring the fingertip
-        # onto the offset axis (radial only; station and orientation kept) loads the connector
-        # along its bench-measured centreline.
-        p_axis = T_clk[:3, 3] + axis_offset_base()
-        d_r = (T_grasp @ robot.T_tool0_fingertip)[:3, 3] - p_axis
-        d_r = d_r - np.dot(d_r, axn_t) * axn_t              # radial part only
-        if float(np.linalg.norm(d_r)) > 1e-6:
-            log.info('TUG VERIFY: centring the re-grip %.2f mm onto the offset connector axis '
-                     '(collar_clocking.axis_offset_mm = %s).',
-                     float(np.linalg.norm(d_r)) * 1000.0, np.round(cl_axis_off, 2).tolist())
-            T_grasp = translation_matrix(-d_r) @ T_grasp
-        phase('standoff')
-        # Approach by retracing the escape: stand off along the gripper -Z (where the retract
-        # went), then straight in. Both guarded; the fingers are open.
-        r = a.get('clocking_retract', {}) or {}
-        staging = T_grasp @ translation_matrix([0.0, 0.0,
-                                                -abs(float(r.get('gripper_distance_m', 0.100)))])
-        if not (_guarded(robot, guard_shared, lambda: robot.arm.move_l(
-                    staging, label='tug approach (standoff)'))
-                and _guarded(robot, guard_shared, lambda: robot.arm.move_l(
-                    T_grasp, label='tug approach (engaged pose)'))):
-            log.error('TUG VERIFY: could not re-align to the engaged pose -- the tug did not run.')
-            return 'error'
-        if not robot.gripper.close('tug grasp'):
-            log.error('TUG VERIFY: gripper did not close -- the tug did not run.')
-            return 'error'
-        if not verify_cable_held(robot, check, 'tug regrasp'):
-            log.error('TUG VERIFY: the regrasp missed the connector -- the tug did not run.')
-            robot.gripper.open('release (tug missed)')
-            return 'error'
+        # NO re-approach and NO re-grip: pull from the pose the turn left, on the collar it is
+        # already holding. The axis is still the socket's, so the pull direction is unchanged.
+        T_grasp = robot.tool0()
+        phase('assemble')
         # THE PULL. Effective axial stiffness of the (diagonal, tool0-frame) spring along the
         # base-frame pull direction: compliances add, 1/S_eff = sum(u_i^2 / S_i).
         u = T_grasp[:3, :3].T @ axn_t
@@ -1802,17 +1778,13 @@ def build_and_run(cfg, robot, camera, args):
         # measured travel afterwards: the ring rides the connector.
         d_push = 0.0
         if sp_on:
-            grabbed = robot.gripper.close('seat-push grasp')
-            if grabbed and not verify_cable_held(robot, check, 'seat-push grasp'):
-                log.warning('SEAT PUSH: the grasp missed the connector -- skipping the push.')
-                grabbed = False
-            if not grabbed:
-                # Whatever happened, the retreat and the advance NEED open fingers.
-                if not robot.gripper.open('release (seat push skipped)'):
-                    log.error('SEAT PUSH: gripper state unknown after a failed grasp -- not '
-                              'retreating with possibly-closed fingers around the cable.')
-                    return False
-            else:
+            # NO RE-GRIP. The sweep left the pads closed on the connector at the junction --
+            # exactly where the push wants them -- so opening and re-closing here would only
+            # release a part that is already held, risk a worse bite, and cost the grasp check
+            # a chance to abort a run that is going fine. connector_clocking.open_gripper_after
+            # must therefore be FALSE; the release happens after the push instead, because the
+            # retreat and the advance are the legs that genuinely need open fingers.
+            if True:
                 T_a = robot.tool0()
                 # The spring must STRETCH force/S to apply force_n, so the reference travel has
                 # to cover that stretch on top of any real seating motion.
@@ -2319,12 +2291,30 @@ def build_and_run(cfg, robot, camera, args):
                           'force guard) -- the connector is ENGAGED but NOT SEATED. The mate '
                           'itself succeeded; skipping collar clocking and retracting.',
                           cc_tries, 'y' if cc_tries == 1 else 'ies')
+            # ---- TUG VERIFICATION, IN PLACE and BEFORE the escape ---------------------------
+            # collar_clocking returns with the fingers still CLOSED on the locked collar, which is
+            # already a grip on the assembly and already on the connector axis -- so the pull can
+            # happen right here. The old order released, retracted, drove back to the historical
+            # engaged pose and re-gripped, which put three free-space moves and a blind re-grasp
+            # between the lock and the test, every one of them a chance to disturb what it was
+            # meant to measure (and the re-grip could miss entirely).
+            if tv_on and state == 'locked':
+                if phase_gate('TUG VERIFY',
+                              'The collar is LOCKED and still HELD. Next: pull %.1f N along the '
+                              'connector -X for %.1f s without letting go -- a locked bayonet '
+                              'holds, an unlocked one backs out.' % (tv_force, tv_time)):
+                    tug_res = tug_verify_in_place()
+                    if tug_res == 'terminated':
+                        return False              # the finally still writes clocking.csv
+                else:
+                    tug_res = 'skipped'
+                    log.warning('Tug verification skipped by the user -- the assembly is '
+                                'UNVERIFIED.')
             if phase_gate('ESCAPE',
                            'Clocking done. Next: RELEASE the gripper, then the two-leg retract '
                            '(the gripper backs off its own -Z, then away along the target -X).'):
-                # RELEASE FIRST: collar_clocking returns with the fingers CLOSED on the locked
-                # collar, and the retract's first leg is written for OPEN fingers. Idempotent
-                # where the gripper is already open.
+                # RELEASE FIRST: the fingers are still CLOSED on the collar, and the retract's
+                # first leg is written for OPEN fingers. Idempotent where it is already open.
                 if robot.gripper.open('release before escape'):
                     ret_ok = clocking_retract()
                 else:
@@ -2334,20 +2324,6 @@ def build_and_run(cfg, robot, camera, args):
             else:
                 log.warning('Escape skipped by the user -- the arm is still at the connector '
                             'with the gripper in whatever state clocking left it.')
-            # ---- TUG VERIFICATION: only after a LOCKED collar and a completed escape --------
-            if tv_on and state == 'locked' and ret_ok:
-                if phase_gate('TUG VERIFY',
-                              'The collar is LOCKED and the arm has retracted. Next: re-grip the '
-                              'connector at the engaged pose and pull %.1f N along its -X for '
-                              '%.1f s -- a locked bayonet holds, an unlocked one backs out.'
-                              % (tv_force, tv_time)):
-                    tug_res = tug_verify(T_base_conn @ inverse(_T_tool0_conn))
-                    if tug_res == 'terminated':
-                        return False              # the finally still writes clocking.csv
-                else:
-                    tug_res = 'skipped'
-                    log.warning('Tug verification skipped by the user -- the assembly is '
-                                'UNVERIFIED.')
         finally:
             robot.arm.servo_stop()
             if clock_rows:

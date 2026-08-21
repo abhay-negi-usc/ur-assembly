@@ -3329,7 +3329,10 @@ def test_bnc_clocking_config():
     # >= 0, not > 0: this is measured from the connector frame ORIGIN (the mating face), so zero
     # is a legitimate reading -- the ring sitting at the face. It was > 0 only while the offset
     # was measured from the JUNCTION, ~45.7 mm behind the origin, where zero could not happen.
-    assert float(cl['collar_offset_mm']) >= 0
+    # ANY SIGN: measured from the connector frame ORIGIN (the mating face), so negative means the
+    # ring sits behind the face -- a real reading, not an error. It was > 0 only while the offset
+    # was measured from the JUNCTION, ~45.7 mm behind the origin.
+    assert isinstance(float(cl['collar_offset_mm']), float)
     if cl.get('enabled'):
         assert cc.get('enabled'), 'collar clocking depends on connector clocking'
     r = a['clocking_retract']
@@ -3715,7 +3718,7 @@ def test_tug_verification_defaults_on_and_its_spring_can_exceed_the_threshold():
 
     with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
         src = fh.read()
-    body = src[src.index('def tug_verify('):src.index('def engage_insertion(')]
+    body = src[src.index('def tug_verify_in_place('):src.index('def engage_insertion(')]
     order = ["gripper.close('tug grasp')", "verify_cable_held(robot, check, 'tug regrasp')",
              'tare_fn=tare', 'adm_tug.hold(T_pull', "'release (tug verified)'"]
     idx = [body.index(t) for t in order]
@@ -3755,9 +3758,9 @@ def test_the_seat_push_can_reach_its_force_and_keeps_the_gripper_logic_straight(
     # The push now runs FIRST -- the pads are already around the cable at the junction where it
     # wants them -- and everything after it needs OPEN fingers: the withdraw slides along the
     # cable, the lift-off frees the fingers, the advance threads the cable into the jaw.
-    order = ["gripper.close('seat-push grasp')",                       # close on the junction
-             "verify_cable_held(robot, check, 'seat-push grasp')",     # ...and verify the bite
-             "guard_push.reset()",                                     # the push guard, not global
+    # NO close/verify any more: connector_clocking hands the part over STILL HELD
+    # (open_gripper_after false), so the push presses with the pads already on it.
+    order = ["guard_push.reset()",                                     # the push guard, not global
              "'release (seat push)'",                                  # reopen...
              "label='collar withdraw (connector -X)'",                 # ...BEFORE anything moves
              "label='collar lift-off (gripper -Z)'",
@@ -3794,7 +3797,7 @@ def test_post_engage_frame_is_a_config_choice_defaulting_to_target():
     # every post-engage maneuver goes through the shared frame
     checks = (('def connector_clocking(', 'inverse(T_clk)) @ ref_start'),
               ('def collar_clocking(', 'axis = T_clk[:3, 0]'),
-              ('def tug_verify(', 'axn_t = T_clk[:3, 0]'),
+              ('def tug_verify_in_place(', 'axn_t = T_clk[:3, 0]'),
               ('def clocking_retract(', 'T_clk[:3, :3] @ step'))
     for fn, frag in checks:
         body = src[src.index(fn):]
@@ -3885,7 +3888,7 @@ def test_the_collar_axis_offset_is_read_from_config_in_the_connector_frame():
     # the tug centres its RE-GRIP on the same offset axis -- the pull direction cannot carry a
     # line offset, so the grasp position is where the correction lands. SAME helper, so the two
     # cannot disagree about where the collar's axis is.
-    tug = src[src.index('def tug_verify('):src.index('def engage_insertion(')]
+    tug = src[src.index('def tug_verify_in_place('):src.index('def engage_insertion(')]
     assert 'axis_offset_base()' in tug and 'T_grasp = translation_matrix(-d_r) @ T_grasp' in tug, (
         'tug verification must centre its re-grip on the same offset connector axis')
 

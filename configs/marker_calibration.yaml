@@ -85,31 +85,39 @@ marker_views:
   # by construction against the target it was solved from); they bite at RUN time, where a marker
   # that has been knocked or reprinted disagrees with its neighbours. Kept here so both apps read
   # the same block.
-  max_disagreement_mm: 5.0
-  max_disagreement_deg: 5.0
+  max_disagreement_mm: 1.0
+  max_disagreement_deg: 1.0
   # null = the built-in ring (centre, 40 mm at four bearings, 25 mm closer). Widen it for a large
   # rig; a marker that leaves the frame at an offset is simply skipped for that view.
-  offsets: null
+  offsets:
+    - {xyz_mm: [0, 0, 0], rpy_deg: [0, 0, 0]}
+  # MULTI-VIEW JOINT SOLVE (the default): after fusion, each marker's pose is re-solved
+  # over ALL of its corner observations at once -- pixel-space least squares with the camera
+  # poses known from FK.  The same corners-solved-together principle as bnc_assembly's
+  # run-time rig PnP, applied per marker (at calibration the rig geometry IS the unknown, so
+  # there is no rig-level solve to share corners across).  A refined pose is kept only when
+  # it reduces the reprojection error.  false = certainty-weighted pose averaging only.
+  multiview_refine: true
   # CERTAINTY WEIGHTING: a view at distance d fuses with weight d^-power (closer views are
   # more accurate).
   view_weight_power: 2.0
   # STANDOFF CAP: the camera never plans a view farther than this from the markers, and a
   # detection captured beyond it is never fused.  null disables.
-  max_camera_distance_mm: 500.0
+  max_camera_distance_mm: 1000.0
   # VISUAL SERVOING: after the sweep, servo to each marker in turn -- centred on it at
   # distance_m along its normal, re-detecting until two successive detections agree within
-  # the tolerances -- then capture the vantage + an aimed parallax ring, which REPLACE that
-  # marker's sweep views in the fusion.  The camera returns to the overview (all markers in
+  # the tolerances -- then capture the vantage + an aimed parallax ring, which JOIN that
+  # marker's sweep views in the fusion (the closeness weighting makes them dominate).  The camera returns to the overview (all markers in
   # frame) between markers.  Keep this block IDENTICAL to bnc_assembly's marker_views.servo:
   # the rig's PnP biases cancel between calibration and run only when both look the same way.
   servo:
     enabled: true
     distance_m: 0.30
     max_iterations: 4
-    pos_tol_mm: 0.5
-    ang_tol_deg: 0.5
-    ring_mm: 25.0
-    ring_views: 4
+    pos_tol_mm: 5.0
+    ang_tol_deg: 5.0
+    ring_mm: 20.0
+    ring_views: 1
 
 # ---- Motion --------------------------------------------------------------------------------
 # Free space with nothing in the fingers, but the arm is carrying a camera near a fixture.

@@ -16,8 +16,8 @@ geometric bias untouched.
 VISUAL SERVOING (ViewPlan.servo, opt-in). After the coarse sweep the camera SERVOS to a
 canonical vantage per marker -- centred on the marker at `distance_m` along its normal --
 re-detecting and re-centring until two successive detections agree, then captures the
-refinement views (the vantage plus an aimed parallax ring) that REPLACE that marker's sweep
-views. Centred, close, fixed-distance viewing removes the vantage-dependent part of the PnP
+refinement views (the vantage plus an aimed parallax ring) that JOIN that marker's sweep
+views in the fusion; the closeness weighting is what makes them dominate. Centred, close, fixed-distance viewing removes the vantage-dependent part of the PnP
 bias, and doing it identically for every marker -- and identically at calibration and at run
 time -- is what lets the remaining bias cancel. The vantage ROLL is aligned to the marker
 only up to the nearest 90 deg about the view axis: pose estimation is invariant to that
@@ -107,6 +107,9 @@ class ViewPlan:
         # JOINT PnP: solve every view's detected corners of ALL rig markers as one rigid
         # object (run-time localization only; the per-marker vote stays as the gate).
         self.joint_pnp = bool(b.get('joint_pnp', True))
+        # MULTI-VIEW REFINEMENT (calibration): re-solve each marker's pose over ALL of its
+        # corner observations at once, minimized in pixel space.
+        self.multiview_refine = bool(b.get('multiview_refine', True))
         self.servo = ServoPlan(b.get('servo'))
         if (self.servo.enabled and self.max_camera_distance_m is not None
                 and self.servo.distance_m > self.max_camera_distance_m):
@@ -287,9 +290,11 @@ def servo_refine(robot, camera, detector, plan, seen, T_overview=None, on_view=N
     frame by design, and returning to the pose the sweep ran from is what brings the whole
     rig back into view before the next marker's servo starts.
 
-    Returns {marker_id: [(T_base_marker, distance_m), ...]} -- REPLACEMENT views for every
-    marker that refined. A marker that will not detect from its vantage, or that keeps fewer
-    than min_views refinement views, is left out and its sweep views stand.
+    Returns {marker_id: [(T_base_marker, distance_m), ...]} -- ADDITIONAL views for every
+    marker that refined (merge with merge_refined: they POOL with the sweep views, and the
+    closeness weighting makes them dominate; replacing outright would let a small ring fall
+    under min_views and silently discard the marker). A marker that will not detect from its
+    vantage is left out and its sweep views stand alone.
     `on_view(marker_id, stop_index, frame, poses_in_camera)` is called per capture."""
     sv = plan.servo
     if T_overview is None:
@@ -366,18 +371,26 @@ def servo_refine(robot, camera, detector, plan, seen, T_overview=None, on_view=N
             d = float(np.linalg.norm(T_obs[:3, 3] - _cam_position(frame, robot)))
             views.append((T_obs, d))
             _log_corner_view(corner_log, corners, frame, robot)
-        if len(views) >= plan.min_views:
+        if views:
             refined[mid] = views
-            log.info('  marker %d: REFINED -- %d servoed view%s at ~%.0f mm replace its %d '
+            log.info('  marker %d: REFINED -- %d servoed view%s at ~%.0f mm join its %d '
                      'sweep view%s.', mid, len(views), '' if len(views) == 1 else 's',
                      sv.distance_m * 1000.0, len(obs), '' if len(obs) == 1 else 's')
         else:
-            log.warning('  marker %d: only %d servoed view%s (min_views %d) -- keeping the '
-                        'sweep views.', mid, len(views), '' if len(views) == 1 else 's',
-                        plan.min_views)
+            log.warning('  marker %d: no refinement view detected -- sweep views only.', mid)
     # Leave the arm at the overview, ready for whatever comes next.
     robot.arm.move_frame_to(T_overview, robot.T_tool0_cam, 'overview (refinement done)')
     return refined
+
+
+def merge_refined(seen, refined):
+    """Pool the servoed views WITH the sweep views. The certainty weighting (d^-power)
+    already makes the close views dominate the fusion; replacing the sweep views instead
+    would let a small refinement ring fall under min_views and silently discard the
+    marker."""
+    for mid, views in refined.items():
+        seen.setdefault(mid, []).extend(views)
+    return seen
 
 
 def fuse_markers(seen, plan):
@@ -486,19 +499,92 @@ def vote_target(rig, fused, plan):
     return T, votes
 
 
+def _corner_layout(size_m):
+    """The four corners in the marker's own frame -- ArucoDetector.object_points' exact
+    layout (TL, TR, BR, BL, centred, +Z out of the printed face)."""
+    h = float(size_m) / 2.0
+    return np.array([[-h, h, 0.0], [h, h, 0.0], [h, -h, 0.0], [-h, -h, 0.0]])
+
+
 def rig_object_points(rig):
     """{marker_id: (4, 3) corner coordinates in the TARGET frame} -- the whole rig as ONE
-    rigid object.
-
-    The corner layout matches ArucoDetector.object_points exactly (TL, TR, BR, BL, centred,
-    +Z out of the printed face); each marker's corners are carried into the target frame
-    through inverse(T_marker_target). Pure, so the geometry is testable without OpenCV."""
+    rigid object, corners carried through inverse(T_marker_target). Pure, so the geometry is
+    testable without OpenCV."""
     out = {}
     for mid, entry in rig['markers'].items():
-        h = float(entry['size_m']) / 2.0
-        local = np.array([[-h, h, 0.0], [h, h, 0.0], [h, -h, 0.0], [-h, -h, 0.0]])
+        local = _corner_layout(entry['size_m'])
         T_tm = inverse(entry['T_marker_target'])
         out[int(mid)] = (T_tm[:3, :3] @ local.T).T + T_tm[:3, 3]
+    return out
+
+
+def refine_markers_multiview(fused, corner_views, sizes_m, plan):
+    """Per-marker MULTI-VIEW joint solve: every view's four corners of ONE marker, solved
+    together for that marker's pose with the camera poses known from FK.
+
+    This is the calibration-side counterpart of the run-time rig PnP. The rig-as-one-object
+    solve cannot apply here (the rig geometry IS the unknown being measured), but the same
+    corners-solved-jointly principle does: instead of averaging per-view PnP poses in pose
+    space with a heuristic distance weight, minimize the REPROJECTION error in pixel space
+    across all of a marker's observations at once. Pixel-space minimization weighs closer
+    views more automatically (they subtend more pixels) and lets parallax resolve the
+    single-view planar tilt ambiguity instead of averaging over it.
+
+    Returns {marker_id: (T_refined, rms_px, n_views)} for markers whose solve CONVERGED AND
+    reduced the reprojection error; everything else keeps its fused pose. Needs OpenCV +
+    scipy; unavailable = empty dict, callers carry on with the fused poses."""
+    try:
+        import cv2
+        from scipy.optimize import least_squares
+        from scipy.spatial.transform import Rotation
+    except Exception as exc:                       # noqa: BLE001
+        log.warning('multi-view refinement unavailable (%s) -- keeping the fused poses.', exc)
+        return {}
+
+    out = {}
+    for mid, entry in sorted(fused.items()):
+        obs = [(np.asarray(v['corners'][mid], dtype=float), v['K'], v['D'], v['T_base_cam'])
+               for v in corner_views if mid in v['corners']]
+        if len(obs) < 2:
+            continue                               # one view is just PnP again -- no gain
+        layout = _corner_layout(sizes_m[mid]).astype(np.float32)
+
+        def residuals(T, _obs=obs, _layout=layout):
+            errs = []
+            for c, K, D, T_bc in _obs:
+                T_cm = inverse(T_bc) @ T
+                img, _ = cv2.projectPoints(
+                    _layout, Rotation.from_matrix(T_cm[:3, :3]).as_rotvec(),
+                    T_cm[:3, 3], K, D)
+                errs.append((img.reshape(4, 2) - c).ravel())
+            return np.concatenate(errs)
+
+        def unpack(x):
+            T = np.eye(4)
+            T[:3, :3] = Rotation.from_rotvec(x[:3]).as_matrix()
+            T[:3, 3] = x[3:]
+            return T
+
+        T0 = entry[0]
+        x0 = np.concatenate([Rotation.from_matrix(T0[:3, :3]).as_rotvec(), T0[:3, 3]])
+        try:
+            res = least_squares(lambda x: residuals(unpack(x)), x0, method='lm')
+        except Exception as exc:                   # noqa: BLE001 -- a solver failure keeps fused
+            log.warning('  marker %d: multi-view solve failed (%s) -- keeping the fused '
+                        'pose.', mid, exc)
+            continue
+        T_ref = unpack(res.x)
+        rms0 = float(np.sqrt(np.mean(residuals(T0) ** 2)))
+        rms1 = float(np.sqrt(np.mean(residuals(T_ref) ** 2)))
+        if not np.isfinite(rms1) or rms1 > rms0 + 1e-9:
+            log.warning('  marker %d: multi-view solve did not improve (%.2f -> %.2f px RMS) '
+                        '-- keeping the fused pose.', mid, rms0, rms1)
+            continue
+        d_lin, d_ang = pose_error(T0, T_ref)
+        log.info('  marker %d: multi-view joint solve over %d views moved the pose '
+                 '%.2f mm / %.2f deg (reprojection %.2f -> %.2f px RMS).',
+                 mid, len(obs), d_lin * 1000.0, np.degrees(d_ang), rms0, rms1)
+        out[mid] = (T_ref, rms1, len(obs))
     return out
 
 
@@ -555,8 +641,8 @@ def locate(robot, camera, detector, rig, plan, wanted=None):
         log.error('MARKER LOCALIZATION: no rig marker was detected from any view.')
         return None
     if plan.servo.enabled:
-        seen.update(servo_refine(robot, camera, detector, plan, seen,
-                                 T_overview=T_overview, corner_log=corner_views))
+        merge_refined(seen, servo_refine(robot, camera, detector, plan, seen,
+                                         T_overview=T_overview, corner_log=corner_views))
     T_vote, _votes = vote_target(rig, fuse_markers(seen, plan), plan)
     if T_vote is None:
         return None                       # the gate refused -- nothing overrides that

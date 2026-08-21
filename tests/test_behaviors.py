@@ -522,6 +522,53 @@ def test_joint_pnp_recovers_the_target_from_synthetic_corners():
     assert lin * 1000.0 < 0.5 and np.degrees(ang) < 0.1, (lin * 1000.0, np.degrees(ang))
 
 
+def test_multiview_refine_keeps_fused_poses_without_enough_corner_data():
+    """A marker with fewer than two corner observations (or no cv2/scipy) must be left on
+    its fused pose -- an empty result, never an exception."""
+    from urlab.skills.marker_localize import refine_markers_multiview
+
+    fused = {7: (np.eye(4), 0.001, 0.001, 3, 100.0)}
+    assert refine_markers_multiview(fused, [], {7: 0.02}, _MarkerPlan()) == {}
+    one_view = [{'corners': {7: np.zeros((4, 2))}, 'K': np.eye(3), 'D': np.zeros(5),
+                 'T_base_cam': np.eye(4)}]
+    assert refine_markers_multiview(fused, one_view, {7: 0.02}, _MarkerPlan()) == {}
+
+
+def test_multiview_refine_recovers_the_marker_from_synthetic_corners():
+    """End to end with the real solver (skipped where OpenCV is absent): project one
+    marker's corners through three known cameras, start from a deliberately wrong fused
+    pose, and the joint pixel-space solve must land back on the truth."""
+    import pytest
+    cv2 = pytest.importorskip('cv2')
+    from urlab.skills.marker_localize import _corner_layout, refine_markers_multiview
+    from urlab.transforms import inverse, pose_error, xyzrpy_to_matrix
+
+    T_true = xyzrpy_to_matrix([0.55, 0.05, 0.02], np.radians([88.0, 2.0, 15.0]))
+    K = np.array([[615.0, 0, 424], [0, 615.0, 240], [0, 0, 1]], dtype=float)
+    D = np.zeros(5)
+    size = 0.0203
+    cams = [xyzrpy_to_matrix([0.40, 0.05 + dy, 0.05], np.radians([-90.0, 0.0, 20.0]))
+            for dy in (-0.04, 0.0, 0.05)]
+    layout = _corner_layout(size).astype(np.float32)
+    views = []
+    for T_bc in cams:
+        T_cm = inverse(T_bc) @ T_true
+        rvec, _ = cv2.Rodrigues(T_cm[:3, :3])
+        img, _ = cv2.projectPoints(layout, rvec, T_cm[:3, 3], K, D)
+        views.append({'corners': {7: img.reshape(4, 2)}, 'K': K, 'D': D, 'T_base_cam': T_bc})
+
+    T_init = T_true @ xyzrpy_to_matrix([0.003, -0.002, 0.004], np.radians([1.5, -1.0, 2.0]))
+    fused = {7: (T_init, 0.001, 0.001, 3, 100.0)}
+    refined = refine_markers_multiview(fused, views, {7: size}, _MarkerPlan())
+    assert 7 in refined
+    T_ref, rms_px, n = refined[7]
+    assert n == 3 and rms_px < 0.1
+    lin, ang = pose_error(T_ref, T_true)
+    init_lin, _ = pose_error(T_init, T_true)
+    assert lin * 1000.0 < 0.1 and np.degrees(ang) < 0.05, (lin * 1000.0, np.degrees(ang))
+    assert lin < init_lin / 10.0, 'the joint solve must land far closer than the wrong start'
+
+
 def test_gripper_warmup_sequence():
     """The session warm-up strokes: open, full close, two partial cycles, end fully open."""
     from urlab.robot.gripper import Robotiq2F85

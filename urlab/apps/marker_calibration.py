@@ -15,9 +15,13 @@ Run it with the markers ALREADY IN VIEW (hand-guide the camera, or set view_join
 sweep is a small local ring of camera translations around wherever it starts; it is not a
 search.  With `marker_views.servo.enabled` the camera then VISUALLY SERVOS to each marker in
 turn -- centred on it at a canonical standoff, returning to the overview between markers so
-the whole rig comes back into frame -- and those close, centred views replace the sweep's in
-a certainty-weighted fusion (closer views weigh more; nothing beyond the
-max_camera_distance_mm standoff cap is used).
+the whole rig comes back into frame -- and those close, centred views join the sweep's in a
+certainty-weighted fusion (closer views weigh more; nothing beyond the
+max_camera_distance_mm standoff cap is used).  With `marker_views.multiview_refine` (the
+default) each marker's pose is then RE-SOLVED jointly over all of its corner observations at
+once, minimized in pixel space -- the same corners-solved-together principle as the run-time
+rig PnP, applied where calibration can validly use it -- and the refined pose is kept only
+when it reduces the reprojection error.
 
 Output: data/experiments/marker_calibration_<stamp>/ -- the yaml block, per-marker fits, and
 annotated images from every view.
@@ -97,6 +101,7 @@ class _Calibration:
         self.T_base_target = T_base_target
         self.out_dir = out_dir
         self.seen = {}
+        self.corner_views = []
         self.T_overview = None
         self.fused = {}
         self.offsets = {}
@@ -143,7 +148,8 @@ class _Calibration:
     def sweep(self):
         log.info('MARKER SWEEP: %s.', self.plan.describe())
         self.seen = mloc.sweep(self.robot, self.camera, self.detector, self.plan,
-                               wanted=set(self.sizes), on_view=self._save_view)
+                               wanted=set(self.sizes), on_view=self._save_view,
+                               corner_log=self.corner_views)
         self.missing = sorted(set(self.sizes) - set(self.seen))
         if self.missing:
             log.error('Marker(s) %s were never detected. They are declared in markers: but '
@@ -160,9 +166,11 @@ class _Calibration:
         if not self.plan.servo.enabled:
             log.info('Servo refinement disabled (marker_views.servo.enabled: false).')
             return True
-        self.seen.update(mloc.servo_refine(self.robot, self.camera, self.detector, self.plan,
-                                           self.seen, T_overview=self.T_overview,
-                                           on_view=self._save_servo_view))
+        mloc.merge_refined(
+            self.seen, mloc.servo_refine(self.robot, self.camera, self.detector, self.plan,
+                                         self.seen, T_overview=self.T_overview,
+                                         on_view=self._save_servo_view,
+                                         corner_log=self.corner_views))
         return True
 
     def fuse(self):
@@ -171,6 +179,22 @@ class _Calibration:
             log.error('No marker was seen from enough views (min_views %d) to fuse.',
                       self.plan.min_views)
             return False
+        return True
+
+    def multiview_refine(self):
+        """Re-solve each marker jointly over ALL its corner observations (pixel-space
+        least squares, camera poses from FK); a refined pose is kept only when it reduces
+        the reprojection error. Optional, default ON (marker_views.multiview_refine)."""
+        if not getattr(self.plan, 'multiview_refine', True):
+            log.info('Multi-view refinement disabled (marker_views.multiview_refine: false).')
+            return True
+        refined = mloc.refine_markers_multiview(self.fused, self.corner_views, self.sizes,
+                                                self.plan)
+        for mid, (T_ref, _rms_px, _n) in refined.items():
+            T, lin, ang, nv, w = self.fused[mid]
+            self.fused[mid] = (T_ref, lin, ang, nv, w)
+        if not refined:
+            log.info('Multi-view refinement changed nothing -- fused poses stand.')
         return True
 
     # ---- solve + cross-check -----------------------------------------------------------------
@@ -281,6 +305,7 @@ def build_and_run(cfg, robot, camera, args):
         bt.Action('sweep the views', cal.sweep),
         bt.Action('servo-refine each marker', cal.servo_refine),
         bt.Action('fuse per marker', cal.fuse),
+        bt.Action('multi-view joint solve per marker', cal.multiview_refine),
         bt.Action('solve target-in-marker offsets', cal.solve),
         bt.Action('cross-check the rig geometry', cal.cross_check),
         bt.Action('write yaml + csv', cal.write_outputs))

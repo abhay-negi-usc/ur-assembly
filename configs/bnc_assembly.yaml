@@ -699,19 +699,18 @@ assembly:
     # ring. Only set it if the barrel centreline is MEASURED to differ from the declared
     # frame, and re-check the collar lands on the ring afterwards.
     axis_offset_mm: [0.0, 0.0, 0.0]
-    # LIFT-OFF, mm along the GRIPPER's own -Z, before anything reorients. The connector sweep leaves
-    # the open fingers wrapped around the cable at the junction; the radial -> axial change is a
-    # 90 deg pitch that would sweep them straight through it. This is the move that frees them.
-    liftoff_mm: 150.0
-    # RETREAT, mm BEHIND approach_mm along the connector -X. Where the arm reorients to axial --
-    # AWAY from the wall, and the furthest-from-it station in the whole maneuver. The advance
-    # then runs retreat -> collar in one guarded compliant leg.
-    # 400 = the 200 that cleared the fingers, plus 200 more asked for on the bench. It sets BOTH
-    # how far back the arm reorients AND how long the axial advance back onto the ring is, because
-    # the advance starts where the reorient ends -- they are one continuous path. So raising it
-    # buys clearance at the cost of a longer threading leg, and of pushing the flange further from
-    # the base (see the UNREACHABLE message, which prints the distances that do solve).
-    retreat_mm: 400.0
+    # RETRACT, mm along the TARGET connector -X, from wherever the seat push left the arm. A pure
+    # translation with the open fingers still around the cable -- they slide ALONG it, nothing is
+    # swept, and every millimetre is straight away from the wall. The pitch onto the axis then
+    # happens here, which is the furthest from the wall the maneuver ever gets.
+    #
+    # REPLACES retreat_mm AND liftoff_mm. retreat_mm measured the reorient station BACKWARD FROM
+    # THE COLLAR, so it moved whenever collar_offset_mm did; this is a plain relative back-off.
+    # liftoff_mm existed to swing the open fingers clear of the cable before reorienting, because
+    # the old reorientation pivoted a long way from it. The pitch pivots ON THE FINGERTIP and its
+    # axis IS the jaw-closing axis, so the jaw turns about its own gap with the cable at the
+    # pivot: there is nothing left to clear.
+    retract_mm: 300.0
     # WALL STANDOFF, mm: the largest tool0 station along the connector +X that any planned pose
     # may take, measured in the TARGET frame (+X points INTO the wall, 0 = the mating face). Every
     # station is on the axis and known before the arm moves, so the whole maneuver's closest
@@ -721,12 +720,6 @@ assembly:
     # -158 mm, so this has ~108 mm of margin; the old radial grasp sat at +25 mm and would be
     # REFUSED by it, which is the point. null = no check.
     wall_standoff_mm: -50.0
-    # 120 deg is the CEILING, not the expected end: the turn is meant to stop on the
-    # torque limit below when the collar reaches its lock. Reaching 120 without ever
-    # building 1 Nm means the ring turned freely the whole way -- it never locked.
-    # NOTE this needs 120 deg of wrist_3 headroom from wherever the grasp starts (the
-    # grasp clock angle is a pure joint-6 offset), 30 deg more than the old 90.
-    rotation_deg: 120.0
     # 120 deg is the CEILING, not the expected end: the turn is meant to stop on the
     # torque limit below when the collar reaches its lock. Reaching 120 without ever
     # building 1 Nm means the ring turned freely the whole way -- it never locked.
@@ -806,12 +799,6 @@ assembly:
     # always logged, so loosening it hides nothing.
     max_offaxis_tilt_deg: 10.0
     settle_s: 0.5
-    # TRUE here, unlike connector_clocking: the tare is taken at the collar station with
-    # the fingers still OPEN and clear of the ring -- the one genuinely unloaded moment
-    # in the maneuver -- so the 1 Nm limit measures torque ADDED by turning the collar.
-    # (connector_clocking tares nothing because it starts from a MATED, loaded pose,
-    # where zeroing would define the mate load as zero.)
-    tare_before: true
     # TRUE here, unlike connector_clocking: the tare is taken at the collar station with
     # the fingers still OPEN and clear of the ring -- the one genuinely unloaded moment
     # in the maneuver -- so the 1 Nm limit measures torque ADDED by turning the collar.

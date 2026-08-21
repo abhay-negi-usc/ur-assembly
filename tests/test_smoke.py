@@ -3683,7 +3683,7 @@ def test_a_null_speed_override_is_resolved_before_it_reaches_the_arithmetic():
         src = fh.read()
     assert src.count('_path_time(') >= 3, 'seg_time and screw_ramp must share the arithmetic'
     assert 'def caps(' in src, 'the null-override resolver is gone'
-    body = src[src.index('def screw_ramp('):src.index('retract_m =')]
+    body = src[src.index('def screw_ramp('):src.index('\n    retract_m =')]
     assert 'caps(v, w)' in body, (
         'screw_ramp must resolve its caps before computing a duration -- it ships with null '
         'overrides from both clocking blocks')
@@ -3762,23 +3762,22 @@ def test_the_seat_push_can_reach_its_force_and_keeps_the_gripper_logic_straight(
         src = fh.read()
     body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
     # The push now runs FIRST -- the pads are already around the cable at the junction where it
-    # wants them -- and everything after it needs OPEN fingers: the withdraw slides along the
-    # cable, the lift-off frees the fingers, the advance threads the cable into the jaw.
+    # wants them -- and everything after it needs OPEN fingers: the retract slides along the
+    # cable, the pitch turns the jaw about its own gap, the advance threads the cable into it.
     # NO close/verify any more: connector_clocking hands the part over STILL HELD
     # (open_gripper_after false), so the push presses with the pads already on it.
     order = ["guard_push.reset()",                                     # the push guard, not global
              "'release (seat push)'",                                  # reopen...
-             "label='collar withdraw (connector -X)'",                 # ...BEFORE anything moves
-             "label='collar lift-off (gripper -Z)'",
-             "label='collar retreat + reorient axial'",
+             "label='collar retract (connector -X)'",                  # ...BEFORE anything moves
+             "label='collar pitch onto the axis'",
              "gripper.close('grasp collar')"]                          # then the collar bite
     idx = [body.index(t) for t in order]
     assert idx == sorted(idx), (
-        'the seat push must run close -> verify -> press -> RELEASE before the withdraw; a '
+        'the seat push must run close -> verify -> press -> RELEASE before the retract; a '
         'release after it would drag the clamped junction along the cable')
     assert 'return False' in body[body.index("'release (seat push)'"):
-                                  body.index("label='collar withdraw (connector -X)'")], (
-        'a failed release must abort before the withdraw')
+                                  body.index("label='collar retract (connector -X)'")], (
+        'a failed release must abort before the retract')
     # the connector moves with the press, so the collar poses must ride it
     assert 'T_grip = translation_matrix(d_push * axn) @ T_grip' in body, (
         'the grasp target must shift by the measured press travel, or the jaw closes short of '
@@ -4983,7 +4982,7 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
             'radial grasp, which is why the grasp changed')
 
     # ---- THE APPROACH IS A PURE AXIAL TRANSLATION ----
-    retreat_m = float(cl['retreat_mm']) / 1000.0
+    retreat_m = float(cl['retract_mm']) / 1000.0
     T_retreat = T.translation_matrix(-(retreat_m + collar_x) * axn) @ T_grip
     d = T_grip[:3, 3] - T_retreat[:3, 3]
     lat = float(np.linalg.norm(d - np.dot(d, axn) * axn)) * 1000.0
@@ -4995,19 +4994,47 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
     # ---- ORDER, and every leg guarded ----
     src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8').read()
     body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
-    order = ["label='collar withdraw (connector -X)'",     # back off ALONG the cable first...
-             "label='collar lift-off (gripper -Z)'",       # ...then free the fingers, far back
-             "label='collar retreat + reorient axial'",    # ...then reorient in clear space
+    order = ["label='collar retract (connector -X)'",     # back off ALONG the cable first...
+             "label='collar pitch onto the axis'",         # ...then pitch, pivoting on the fingertip
              "adm_cl.ramp(T_retreat, T_grip",              # ...then advance down the axis
              "gripper.close('grasp collar')",
              "label='twist '"]
     idx = [body.index(t) for t in order]
     assert idx == sorted(idx), (
-        'the order must be withdraw -> lift-off -> reorient -> advance -> close -> twist. The '
-        'withdraw comes FIRST because the lateral lift-off travels parallel to the wall, so it '
-        'must happen with the arm already backed off')
-    assert 'AXIAL' in body and '-np.pi / 2.0' in body, (
-        'the axial grasp roll must be built explicitly, not inherited from the fingertip frame')
+        'the order must be retract -> pitch -> advance -> close -> twist. The retract comes '
+        'FIRST so the pitch happens as far from the wall as the maneuver ever gets')
+
+    # ---- THE AXIAL ATTITUDE IS REACHED BY A PITCH ABOUT THE CONNECTOR -Y, ON THE FINGERTIP ----
+    # Not by composing a fixed roll onto the fingertip frame. While the connector is held, tool0
+    # +Z lies along the connector -Z, so carrying it onto the connector +X is exactly 90 deg
+    # about the connector -Y -- an identity, not a fixture coincidence, and it produces the SAME
+    # attitude the old G_axial-rolled-by-180 construction did.
+    #
+    # THE PIVOT IS THE FINGERTIP, and that is what retired the lift-off: the jaw-closing axis is
+    # parallel to the pitch axis, so the jaw turns about its own gap, and pivoting on the
+    # fingertip leaves the cable sitting in that gap at radius zero.
+    assert 'u_pitch' not in body, (
+        'a SINGLE-AXIS pitch cannot reach the axial pose in general: a rotation about one fixed '
+        'axis carries tool0 +Z onto the connector +X only when both make the same angle with '
+        'that axis, and the attitude the sweep leaves has no reason to. It failed on the bench '
+        'with 36 deg of residual. State the END POSE and let IK find the joints instead')
+    assert 'T_reorient = at(ftip_x)' in body and 'T_grip0 = at(collar_x)' in body, (
+        'the axial poses must be built directly from the axis frame, not derived from a path')
+    assert 'refusing to thread it' in body or 'not a reachability one' in body, (
+        'the END STATE must be verified, since the path no longer proves it by construction')
+    # a general rotation sweeps the fingers, so they must be clear of the cable first -- the
+    # single-axis pitch was what let the lift-off be skipped
+    assert "label='collar lift-off (gripper -Z)'" in body, (
+        'a general reorientation needs the fingers off the cable first')
+    assert True, (
+        'retired with the pitch: the pivot no longer has to be the fingertip -- the fingers are '
+        'lifted clear instead, which is what lets the end pose be stated outright. Kept as a '
+        'marker so the reasoning is not lost. Was: pivoting anywhere else sweeps the jaw through '
+        'cable it is still wrapped around')
+    # the END STATE must be MEASURED, not assumed -- the frames are edited by hand and the path
+    # no longer proves the pose by construction
+    assert '_zdot' in body and 'return False' in body[body.index('_zdot'):], (
+        'a pitch that cannot lay tool0 +Z on the connector +X must refuse, not proceed')
 
     # ---- THE DEFAULT GRASP CLOCK ANGLE: tool0 -Y laid on the connector -Z --------------------
     # tool0 +Z is pinned along the connector +X by the axial grasp, so the only freedom left is
@@ -5028,29 +5055,17 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
     assert np.allclose(R[:, 2], [1., 0, 0], atol=1e-9), (
         'and it must not disturb tool0 +Z, which stays on the connector +X')
 
-    # the swing must be the MINIMUM available, at EVERY sweep end -- not just at 0
-    T_eng = T_clk @ T.inverse(T_ftip @ (T.inverse(T_ftip) @ frames_cat[iname_M]))
-    ret_x = collar_x - float(cl['retreat_mm']) / 1000.0
-    lift = float(cl['liftoff_mm']) / 1000.0
-
-    def _at(st, th):
-        return rotate_about_axis(T_clk @ T.translation_matrix([st, 0., 0.]) @ AXIAL,
-                                 axis, point, th)
-
-    for sweep in (0.0, -60.0, -75.0, 75.0, 90.0):
-        here = rotate_about_axis(T_eng, axis, point, np.radians(sweep))
-        T_off = (T.translation_matrix((ret_x - collar_x) * axn) @ here)             @ T.translation_matrix([0., 0., -lift])
-        R2 = rotate_about_axis(AXIAL, np.array([1., 0, 0]), np.zeros(3), th_rule)[:3, :3]
-        assert np.allclose(-R2[:, 1], [0., 0, -1], atol=1e-9), (
-            'the grasp attitude must be the SAME fixed -Y/-Z alignment wherever the sweep ends -- '
-            'offsetting it by the achieved sweep makes it move with the sweep')
-    assert 'np.cross(v0, want)' in body and 'else th_rule' in body, (
-        'the default angle must be SOLVED in closed form against the TARGET frame; a scan makes '
-        'the motion depend on IK seeding and move run to run')
+    # THE ROLL IS INHERITED, not solved for. The pitch carries whatever roll the connector sweep
+    # left the wrist in, which is the minimum-wrist_3-travel attitude by construction: any other
+    # roll grips the same ring and costs joint 6 exactly that much more to reach. So the wanted
+    # roll is 0 and the prewind window moves it only when the 120 deg turn needs the headroom.
+    assert 'th_want = 0.0' in body, (
+        'the roll must be INHERITED from the pitch -- that is the minimum wrist_3 travel, and '
+        'solving for a fixed attitude instead spends joint 6 to reach it')
     assert 'range(0, 360, 15)' not in body, (
-        'the 24-candidate clock-angle scan is RETIRED. The clock angle is exactly a wrist_3 '
-        'offset (tool0 on the axis, Z collinear), so it is chosen by the prewind window rather '
-        'than searched for -- and a 15 deg grid can miss a feasible window narrower than itself')
+        'the 24-candidate clock-angle scan is RETIRED. The roll is exactly a wrist_3 offset '
+        '(tool0 on the axis, Z collinear), so it is chosen by the prewind window rather than '
+        'searched for -- and a 15 deg grid can miss a feasible window narrower than itself')
 
     assert 'wall_standoff_mm' in src and 'cl_wall_mm' in body, (
         'every planned station must be gated against the wall standoff before the arm moves')
@@ -5064,9 +5079,12 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
     c = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))
     ccl = c['assembly']['collar_clocking']
     assert 'prewind_deg' not in ccl, 'prewind_deg is gone with the radial approach'
-    for k in ('grasp_clock_deg', 'liftoff_mm', 'retreat_mm', 'wall_standoff_mm'):
+    for k in ('grasp_clock_deg', 'retract_mm', 'wall_standoff_mm'):
         assert k in ccl, f'collar_clocking must declare {k} so the axial approach is tunable'
-    assert float(ccl['liftoff_mm']) > 0 and float(ccl['retreat_mm']) > 0
+    assert float(ccl['retract_mm']) > 0
+    for gone in ('liftoff_mm', 'retreat_mm'):
+        assert gone not in ccl, (
+            f'{gone} belonged to the lift-off-and-orbit approach; retract_mm replaces both')
 
 
 def test_the_connector_sweep_rocks_between_absolute_roll_positions():

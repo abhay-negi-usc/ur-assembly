@@ -681,7 +681,7 @@ assembly:
     # NOT from the connector frame origin -- the opposite of what the code does. That comment
     # was a leftover from a reverted change; if the value is ever re-tuned on the bench, it is
     # the connector frame origin it is being measured from.
-    collar_offset_mm: -15.7
+    collar_offset_mm: -20
     # COLLAR AXIS OFFSET, mm, in the SOCKET (target) frame's own axes. Shifts the LINE the whole
     # collar maneuver works about -- centring, unwind, advance, turn -- and the TUG VERIFICATION
     # centres its re-grip on the same offset axis. Connector clocking is NOT affected. Y and Z move

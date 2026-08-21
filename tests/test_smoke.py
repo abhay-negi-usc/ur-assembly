@@ -4994,15 +4994,34 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
     # ---- ORDER, and every leg guarded ----
     src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8').read()
     body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
-    order = ["label='collar retract (connector -X)'",     # back off ALONG the cable first...
-             "label='collar pitch onto the axis'",         # ...then pitch, pivoting on the fingertip
-             "adm_cl.ramp(T_retreat, T_grip",              # ...then advance down the axis
+    order = ["label='realign with the engagement pose '",  # undo the sweep first...
+             "label='collar retract (connector -X)'",       # ...back off ALONG the cable...
+             "label='collar lift-off (gripper -Z)'",        # ...free the fingers...
+             "label='collar pitch onto the axis'",          # ...reorient onto the axis...
+             "adm_cl.ramp(T_retreat, T_grip",               # ...then advance down it
              "gripper.close('grasp collar')",
              "label='twist '"]
     idx = [body.index(t) for t in order]
     assert idx == sorted(idx), (
-        'the order must be retract -> pitch -> advance -> close -> twist. The retract comes '
-        'FIRST so the pitch happens as far from the wall as the maneuver ever gets')
+        'the order must be realign -> retract -> lift-off -> reorient -> advance -> close -> '
+        'twist. The realign comes FIRST so every station below is measured from where the '
+        'connector actually MATED rather than from wherever the oscillating sweep stopped')
+
+    # THE RETRACT IS MEASURED FROM THE ENGAGEMENT POSE, which is reconstructed rather than stored:
+    # connector_clocking captured the in-hand belief at engagement, and T_clk is that connector in
+    # base, so the flange pose that produced it is T_clk @ inverse(belief).
+    assert 'T_engaged = T_clk @ inverse(_T_tool0_conn)' in body, (
+        'the engagement pose must come from the belief captured AT engagement')
+    assert 'T_withdraw = translation_matrix(-cl_retract_m * axn) @ T_engaged' in body, (
+        'retract_mm must be measured from the ENGAGEMENT pose, not from robot.tool0() -- the '
+        'latter carries the sweep roll and whatever the compliant stroke yielded, so the retract '
+        'would mean something slightly different on every run')
+    # ...and the realign has to walk the FINGERTIP, not the flange: the two poses differ by a roll
+    # about the axis with tool0 183 mm off it, so a straight flange path swings the open jaw ~25 mm
+    # sideways through the cable it is still wrapped around.
+    assert 'slerp_matrix(_now, T_engaged, f)' in body and '_p0 + f * (_p1 - _p0)' in body, (
+        'the realign must be parametrised by the fingertip so the open jaw slides along the cable '
+        'instead of swiping across it')
 
     # ---- THE AXIAL ATTITUDE IS REACHED BY A PITCH ABOUT THE CONNECTOR -Y, ON THE FINGERTIP ----
     # Not by composing a fixed roll onto the fingertip frame. While the connector is held, tool0
@@ -5055,13 +5074,17 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
     assert np.allclose(R[:, 2], [1., 0, 0], atol=1e-9), (
         'and it must not disturb tool0 +Z, which stays on the connector +X')
 
-    # THE ROLL IS INHERITED, not solved for. The pitch carries whatever roll the connector sweep
-    # left the wrist in, which is the minimum-wrist_3-travel attitude by construction: any other
-    # roll grips the same ring and costs joint 6 exactly that much more to reach. So the wanted
-    # roll is 0 and the prewind window moves it only when the 120 deg turn needs the headroom.
-    assert 'th_want = 0.0' in body, (
-        'the roll must be INHERITED from the pitch -- that is the minimum wrist_3 travel, and '
-        'solving for a fixed attitude instead spends joint 6 to reach it')
+    # THE APP MUST SOLVE THE SAME RULE, in the same closed form. Inheriting the roll the sweep
+    # left the wrist in is the minimum-wrist_3-travel choice, but it is not a STATED attitude: the
+    # gripper then arrives at the ring rolled by however far the last sweep leg happened to go, and
+    # on the shipped frames that is the 180 deg reorientation the analytic IK cannot branch to.
+    assert "v0 = G_axial[:3, 1]" in body and 'np.arctan2' in body[body.index('v0 = G_axial'):], (
+        'the roll must be SOLVED from the -Y/-Z rule, not inherited from wherever the sweep left '
+        'the wrist -- the rule is one atan2 because tool0 +Y at zero roll is perpendicular to the '
+        'axis by construction')
+    assert 'th_want = 0.0' not in body, (
+        'a zero wanted roll is the INHERITED attitude, which is the one that made the reorient '
+        '180 deg')
     assert 'range(0, 360, 15)' not in body, (
         'the 24-candidate clock-angle scan is RETIRED. The roll is exactly a wrist_3 offset '
         '(tool0 on the axis, Z collinear), so it is chosen by the prewind window rather than '

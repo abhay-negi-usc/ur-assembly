@@ -142,6 +142,9 @@ save_raw_images: true
 overlay_debug: true
 save_last_camera_image: true
 save_junction_plot: true
+# One image from the HOME (marker view) pose after the end reset, saved to the run's
+# experiment folder as end_view.jpg -- the as-left record of the assembled fixture.
+end_view_image: true
 
 approach_distance_m: 0.10
 approach_axis: [0.0, 0.0, 1.0]
@@ -256,7 +259,10 @@ confirm_each_step: true
 debug: false
 
 reset:
-  home_joints_deg: [-80, -155, -120, 5, 90, 190]
+  # HOME = the MARKER VIEW pose: the reset drives here at the start and end of every run,
+  # the visual localisation sweeps the markers from here, and the end-of-run image is
+  # captured from here.  (The pick itself runs from pick_joints_deg below.)
+  home_joints_deg: [-80, -150, -131, 100, 85, 180]
   # (the home move is a guarded position moveJ, paced by the speed caps above)
   max_force_n: 50.0
   compliance:
@@ -268,6 +274,11 @@ reset:
     reference_rate_hz: 125.0
     max_delta_m: 0.05
     max_delta_rad: 0.5
+
+# THE PICK POSE, driven to after the start reset (and after the marker sweep, when
+# target_source is visual).  The scan, the grasp geometry and every retry offset are written
+# from HERE -- home above is only the marker view pose.  null = pick from home.
+pick_joints_deg: [-80, -155, -120, 5, 90, 190]
 
 # ===================================================================================================
 # ASSEMBLY -- the estimate-while-assemble loop
@@ -292,12 +303,12 @@ assembly:
   # home, clear view -- after the mate the socket is behind a connector and a gripper).
   target_source: kinematic
   visual_target:
-    # Joint degrees for the sweep's start pose.  PIN IT, and use the SAME value for
-    # marker_calibration's view_joints_deg; null sweeps from home, which only works if the
-    # markers happen to be in frame there.
+    # Joint degrees for the sweep's start pose.  null = sweep from HOME, which IS the
+    # marker view pose (reset.home_joints_deg) -- set this only to sweep from somewhere
+    # else, and then use the SAME value for marker_calibration's view_joints_deg.
     view_joints_deg: null
-    # Keep true: the scan, grasp geometry and retry offsets are written from home, so parking
-    # at a view pose would silently move the pick.
+    # Keep true: return to home after the sweep; the app then drives to pick_joints_deg,
+    # where the scan, grasp geometry and retry offsets are written.
     return_home_after: true
     # SANITY GATE on how far the visual answer may sit from the recorded mate.  The fixture
     # is allowed to move -- that is the point -- but a metre-scale shift is a stale rig or a

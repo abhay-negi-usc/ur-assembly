@@ -1001,6 +1001,22 @@ def build_and_run(cfg, robot, camera, args):
     os.makedirs(out_dir, exist_ok=True)
     log.info('Experiment folder: %s', out_dir)
 
+    def end_reset_with_snapshot(label='end reset'):
+        """The end-of-run bookend: home (the marker VIEW pose) + one image from that view,
+        saved to the experiment folder. The capture is best-effort -- it never fails a run
+        that already finished."""
+        ok = reset.reset_robot(robot, cfg, label)
+        if ok and camera is not None and not robot.arm.dry_run                 and bool(cfg.get('end_view_image', True)):
+            try:
+                import cv2
+                frame = camera.capture()
+                path = os.path.join(out_dir, 'end_view.jpg')
+                cv2.imwrite(path, frame.color)
+                log.info('End-of-run image from the home view: %s', path)
+            except Exception as exc:           # noqa: BLE001 -- never fail a finished run
+                log.warning('end-of-run image skipped (%s)', exc)
+        return ok
+
     gates_on = cfg.get('confirm_each_step', True) is not False
 
     def phase_gate(name, ahead):
@@ -2301,9 +2317,9 @@ def build_and_run(cfg, robot, camera, args):
                           'assembly.visual_target.view_joints_deg.')
                 return False
         else:
-            log.warning('VISUAL TARGET: no view_joints_deg -- sweeping from the HOME pose. Pin a '
-                        'view pose that sees the markers the way the calibration did; home is '
-                        'only where the arm happens to be.')
+            log.info('VISUAL TARGET: sweeping from the HOME pose (reset.home_joints_deg IS the '
+                     'marker view pose; set visual_target.view_joints_deg to sweep from '
+                     'somewhere else).')
 
         T_vis = mloc.locate(robot, camera, detector, vt_rig, plan)
         if q_return is not None and vt.get('return_home_after', True):
@@ -2350,6 +2366,16 @@ def build_and_run(cfg, robot, camera, args):
     q_home = robot.arm.q()
     if tgt_source == 'visual' and not locate_target_visually(q_home):
         return False
+    # THE PICK POSE. Home is the marker VIEW pose (the sweep above, and the end-of-run
+    # image); the scan, the grasp geometry and every retry offset are written from HERE.
+    q_pick = q_home
+    _pick_deg = cfg.get('pick_joints_deg')
+    if _pick_deg is not None:
+        q_pick = list(np.radians(np.asarray(_pick_deg, dtype=float)))
+        phase('reset')
+        if not robot.arm.move_j(q_pick, label='pick pose'):
+            log.error('Could not reach pick_joints_deg.')
+            return False
     attempt = 0
     runner = StepRunner(log, confirm=confirm is not None)
     while True:
@@ -2388,7 +2414,8 @@ def build_and_run(cfg, robot, camera, args):
             scanner.reselect()
         else:
             phase('reset')
-            if not (robot.gripper.open('drop') and robot.arm.move_j(q_home, label='home')):
+            if not (robot.gripper.open('drop')
+                    and robot.arm.move_j(q_pick, label='pick pose')):
                 return False
 
     # ---- Stand-off, held check, and the unconditional human gate before contact ----
@@ -2742,7 +2769,7 @@ def build_and_run(cfg, robot, camera, args):
         else:
             log.error('Connector ENGAGED only -- neither seated nor locked.')
         phase('reset')
-        rst = reset.reset_robot(robot, cfg, 'end reset')      # always, even after a failed screw
+        rst = end_reset_with_snapshot()                       # always, even after a failed screw
         return bool(cc_ok and ret_ok and rst and tug_res in (None, 'skipped', 'verified'))
 
     d_out = float(a.get('release_retract_distance_m', 0.08))
@@ -2757,7 +2784,7 @@ def build_and_run(cfg, robot, camera, args):
     ok = runner.run([('open gripper (release)', robot.gripper.open),
                      ('retract (connector -X)', release_escape)])
     phase('reset')
-    return ok and reset.reset_robot(robot, cfg, 'end reset')
+    return ok and end_reset_with_snapshot()
 
 
 def main():

@@ -2061,6 +2061,7 @@ def build_and_run(cfg, robot, camera, args):
         start = robot.tool0()
         adm_cl.reset()
         adm_cl.warmup(start)          # NOT tare_fn=cl_tare -- zeroed above, with open fingers
+        adm_cl.warmup(start)          # NOT tare_fn=cl_tare -- zeroed above, with open fingers
         guard_cl.reset()
         # THE TWIST. Still written as a rotation about the connector axis LINE, unchanged from the
         # radial version -- but tool0 now sits ON that line, so it resolves to a rotation about

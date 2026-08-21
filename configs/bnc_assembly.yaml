@@ -727,6 +727,12 @@ assembly:
     # NOTE this needs 120 deg of wrist_3 headroom from wherever the grasp starts (the
     # grasp clock angle is a pure joint-6 offset), 30 deg more than the old 90.
     rotation_deg: 120.0
+    # 120 deg is the CEILING, not the expected end: the turn is meant to stop on the
+    # torque limit below when the collar reaches its lock. Reaching 120 without ever
+    # building 1 Nm means the ring turned freely the whole way -- it never locked.
+    # NOTE this needs 120 deg of wrist_3 headroom from wherever the grasp starts (the
+    # grasp clock angle is a pure joint-6 offset), 30 deg more than the old 90.
+    rotation_deg: 120.0
     # PUSH while turning, mm along the connector +X, making the turn a SCREW: the axial press
     # keeps the collar's lugs engaged with their ramps instead of letting them cam back and skip.
     # The reference leads the ring by at most this much, so under this block's spring the press
@@ -800,6 +806,12 @@ assembly:
     # always logged, so loosening it hides nothing.
     max_offaxis_tilt_deg: 10.0
     settle_s: 0.5
+    # TRUE here, unlike connector_clocking: the tare is taken at the collar station with
+    # the fingers still OPEN and clear of the ring -- the one genuinely unloaded moment
+    # in the maneuver -- so the 1 Nm limit measures torque ADDED by turning the collar.
+    # (connector_clocking tares nothing because it starts from a MATED, loaded pose,
+    # where zeroing would define the mate load as zero.)
+    tare_before: true
     # TRUE here, unlike connector_clocking: the tare is taken at the collar station with
     # the fingers still OPEN and clear of the ring -- the one genuinely unloaded moment
     # in the maneuver -- so the 1 Nm limit measures torque ADDED by turning the collar.

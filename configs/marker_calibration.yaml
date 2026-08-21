@@ -91,6 +91,11 @@ marker_views:
   # rig; a marker that leaves the frame at an offset is simply skipped for that view.
   offsets:
     - {xyz_mm: [0, 0, 0], rpy_deg: [0, 0, 0]}
+  # SAVE THE IMAGES the estimate was computed from, annotated with the marker detections
+  # and the pose read from each, into <output dir>/marker_images/ -- plus index.csv (which
+  # image contributed which marker, at what range) and summary.txt (the final estimates).
+  # A view that saw NOTHING is saved too: it is the only record of why a marker was missed.
+  save_images: true
   # MULTI-VIEW JOINT SOLVE (the default): after fusion, each marker's pose is re-solved
   # over ALL of its corner observations at once -- pixel-space least squares with the camera
   # poses known from FK.  The same corners-solved-together principle as bnc_assembly's

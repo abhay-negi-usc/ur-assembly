@@ -57,6 +57,11 @@ marker_views:
   max_disagreement_deg: 10.0
   offsets:                     # null = the built-in ring (centre, 40 mm x4, 25 mm closer)
     - {xyz_mm: [0,0,0], rpy_deg: [0,0,0]}
+  # SAVE THE IMAGES the estimate was computed from, annotated with the marker detections
+  # and the pose read from each, into <output dir>/marker_images/ -- plus index.csv (which
+  # image contributed which marker, at what range) and summary.txt (the final estimates).
+  # A view that saw NOTHING is saved too: it is the only record of why a marker was missed.
+  save_images: true
   # JOINT PnP (run time): every view's detected corners of ALL rig markers are solved as
   # ONE rigid object -- the rig acting as a single large marker, the way one marker's four
   # corners localize that marker -- so the effective baseline is the rig's extent, not one

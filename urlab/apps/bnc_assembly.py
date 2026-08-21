@@ -2328,7 +2328,21 @@ def build_and_run(cfg, robot, camera, args):
                      'marker view pose; set visual_target.view_joints_deg to sweep from '
                      'somewhere else).')
 
-        T_vis = mloc.locate(robot, camera, detector, vt_rig, plan)
+        # Every image the localization estimated from, annotated + indexed under
+        # <experiment>/marker_images/ -- the only record of what the run actually saw.
+        images = mloc.MarkerImageWriter(out_dir, detector,
+                                        enabled=getattr(plan, 'save_images', True))
+        T_vis = mloc.locate(robot, camera, detector, vt_rig, plan,
+                            on_view=images.sweep_view, on_servo_view=images.servo_view)
+        _vis_xyz, _vis_rpy = ((None, None) if T_vis is None else matrix_to_xyzrpy(T_vis))
+        images.finish(
+            ['visual target localization -- rig %r' % tname, '']
+            + (['NO TARGET POSE -- the markers did not produce a fused answer.']
+               if T_vis is None else
+               ['located target in base_link:',
+                '  xyz %+8.2f %+8.2f %+8.2f mm' % tuple(v * 1000.0 for v in _vis_xyz),
+                '  rpy %+7.2f %+7.2f %+7.2f deg'
+                % tuple(float(np.degrees(v)) for v in _vis_rpy)]))
         if q_return is not None and vt.get('return_home_after', True):
             # BACK TO HOME BEFORE THE PICK, whatever the localisation decided: the scan, the grasp
             # geometry and every retry offset are written from the home pose, and leaving the arm

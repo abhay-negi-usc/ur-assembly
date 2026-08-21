@@ -24,7 +24,9 @@ rig PnP, applied where calibration can validly use it -- and the refined pose is
 when it reduces the reprojection error.
 
 Output: data/experiments/marker_calibration_<stamp>/ -- the yaml block, per-marker fits, and
-annotated images from every view.
+marker_images/, which holds EVERY image the fit was computed from, annotated with the marker
+detections and the pose read from each, plus an index.csv tying each image to what it
+contributed and a summary.txt of the final estimates.
 Run:  python -m urlab.apps.marker_calibration --config configs/marker_calibration.yaml
 """
 
@@ -100,6 +102,9 @@ class _Calibration:
         self.tname = tname
         self.T_base_target = T_base_target
         self.out_dir = out_dir
+        # Every image the fit is computed from, annotated + indexed under marker_images/.
+        self.images = mloc.MarkerImageWriter(out_dir, detector,
+                                             enabled=getattr(plan, 'save_images', True))
         self.seen = {}
         self.corner_views = []
         self.T_overview = None
@@ -128,27 +133,10 @@ class _Calibration:
         return True
 
     # ---- sweep + fuse ------------------------------------------------------------------------
-    def _save_view(self, k, frame, poses):
-        """One annotated image per view -- the only record of WHY a marker was missed."""
-        try:
-            import cv2
-            cv2.imwrite(os.path.join(self.out_dir, 'view_%02d.jpg' % (k + 1)),
-                        self.detector.draw(frame, poses))
-        except Exception as exc:               # noqa: BLE001 -- never fail a run on a jpg
-            log.debug('could not save the view image: %s', exc)
-
-    def _save_servo_view(self, mid, j, frame, poses):
-        try:
-            import cv2
-            cv2.imwrite(os.path.join(self.out_dir, 'servo_m%d_%02d.jpg' % (mid, j)),
-                        self.detector.draw(frame, poses))
-        except Exception as exc:               # noqa: BLE001 -- never fail a run on a jpg
-            log.debug('could not save the servo view image: %s', exc)
-
     def sweep(self):
         log.info('MARKER SWEEP: %s.', self.plan.describe())
         self.seen = mloc.sweep(self.robot, self.camera, self.detector, self.plan,
-                               wanted=set(self.sizes), on_view=self._save_view,
+                               wanted=set(self.sizes), on_view=self.images.sweep_view,
                                corner_log=self.corner_views)
         self.missing = sorted(set(self.sizes) - set(self.seen))
         if self.missing:
@@ -169,7 +157,7 @@ class _Calibration:
         mloc.merge_refined(
             self.seen, mloc.servo_refine(self.robot, self.camera, self.detector, self.plan,
                                          self.seen, T_overview=self.T_overview,
-                                         on_view=self._save_servo_view,
+                                         on_view=self.images.servo_view,
                                          corner_log=self.corner_views))
         return True
 
@@ -254,6 +242,28 @@ class _Calibration:
                            + [round(float(np.degrees(v)), 3) for v in mrpy]
                            + [round(float(v) * 1000.0, 3) for v in oxyz]
                            + [round(float(np.degrees(v)), 3) for v in orpy])
+        # The images keep a copy of what they produced, so a folder of pictures can be
+        # read on its own without the yaml.
+        summary = ['marker calibration %s -- target %r' % (stamp, self.tname), '']
+        for mid in sorted(self.offsets):
+            T_m, lin, ang, n = self.fused[mid][:4]
+            mxyz, mrpy = matrix_to_xyzrpy(T_m)
+            oxyz, orpy = matrix_to_xyzrpy(self.offsets[mid])
+            summary += [
+                'marker %d  (%.1f mm, %d views, spread %.2f mm / %.2f deg)'
+                % (mid, self.sizes[mid] * 1000.0, n, lin * 1000.0, np.degrees(ang)),
+                '  marker in base_link : xyz %+8.2f %+8.2f %+8.2f mm   rpy %+7.2f %+7.2f '
+                '%+7.2f deg' % (mxyz[0] * 1000.0, mxyz[1] * 1000.0, mxyz[2] * 1000.0,
+                                np.degrees(mrpy[0]), np.degrees(mrpy[1]),
+                                np.degrees(mrpy[2])),
+                '  target in marker    : xyz %+8.2f %+8.2f %+8.2f mm   rpy %+7.2f %+7.2f '
+                '%+7.2f deg' % (oxyz[0] * 1000.0, oxyz[1] * 1000.0, oxyz[2] * 1000.0,
+                                np.degrees(orpy[0]), np.degrees(orpy[1]),
+                                np.degrees(orpy[2]))]
+        if self.missing:
+            summary += ['', 'NEVER DETECTED: %s'
+                        % ', '.join(str(m) for m in self.missing)]
+        self.images.finish(summary)
         log.info('CALIBRATED %d marker%s. Paste this into configs/frames.yaml:\n\n%s\n',
                  len(self.offsets), '' if len(self.offsets) == 1 else 's', block)
         log.info('Also written to %s', os.path.join(self.out_dir, 'marker_rigs.yaml'))

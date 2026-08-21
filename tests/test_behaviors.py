@@ -1,6 +1,8 @@
 """Offline tests for the behavior-tree layer (urlab/behaviors) and the shared app helpers
 (urlab/apps/_common).  No robot, no camera -- pure control-flow and math."""
 
+import os
+
 import numpy as np
 
 from urlab import behaviors as bt
@@ -520,6 +522,63 @@ def test_joint_pnp_recovers_the_target_from_synthetic_corners():
     assert len(est) == 1
     lin, ang = pose_error(est[0][0], T_base_target)
     assert lin * 1000.0 < 0.5 and np.degrees(ang) < 0.1, (lin * 1000.0, np.degrees(ang))
+
+
+class _FakeFrame:
+    def __init__(self, T_base_cam):
+        self.color = np.zeros((60, 80, 3), dtype=np.uint8)
+        self.K = np.array([[100.0, 0, 40], [0, 100.0, 30], [0, 0, 1]])
+        self.D = np.zeros(5)
+        self.T_base_cam = T_base_cam
+
+
+class _FakeDrawDetector:
+    """Enough of ArucoDetector for the image writer: draw() + detect_corners()."""
+
+    def draw(self, frame, poses=None):
+        return frame.color.copy()
+
+    def detect_corners(self, frame):
+        return {7: np.array([[10.0, 10.0], [20.0, 10.0], [20.0, 20.0], [10.0, 20.0]])}
+
+
+def test_marker_image_writer_indexes_every_capture(tmp_path):
+    """The writer records one index row per marker per image (and a row for a view that saw
+    nothing), and is a silent no-op when disabled or when OpenCV is missing."""
+    from urlab.skills.marker_localize import MarkerImageWriter
+    from urlab.transforms import translation_matrix
+
+    out = str(tmp_path)
+    w = MarkerImageWriter(out, _FakeDrawDetector(), enabled=True)
+    assert os.path.isdir(os.path.join(out, 'marker_images'))
+    frame = _FakeFrame(translation_matrix([1.0, 0.0, 0.0]))
+    w.sweep_view(0, frame, {7: translation_matrix([0.0, 0.0, 0.3])})
+    w.servo_view(7, 0, frame, {7: translation_matrix([0.0, 0.0, 0.25])})
+    w.servo_view(7, 1, frame, {})                  # a view that detected nothing
+    w.finish(['done'])
+
+    try:
+        import cv2                                 # noqa: F401
+    except ImportError:
+        assert w.n == 0 and w.rows == [], 'without OpenCV the writer must no-op silently'
+        return
+    assert w.n == 3
+    names = [r[0] for r in w.rows]
+    assert names == ['sweep_01.jpg', 'servo_m07_00.jpg', 'servo_m07_01.jpg']
+    assert [r[1] for r in w.rows] == ['sweep', 'servo', 'servo']
+    assert w.rows[0][3] == 7 and abs(w.rows[0][4] - 300.0) < 1e-6, 'id + range in mm'
+    assert w.rows[2][3] == '', 'a view that saw nothing still gets a row'
+    # base_link position = T_base_cam @ T_cam_marker, in mm
+    assert abs(w.rows[0][11] - 1000.0) < 1e-6 and abs(w.rows[0][13] - 300.0) < 1e-6
+    d = os.path.join(out, 'marker_images')
+    for f in ('sweep_01.jpg', 'servo_m07_00.jpg', 'index.csv', 'summary.txt'):
+        assert os.path.exists(os.path.join(d, f)), f
+
+    # disabled: no directory, no rows, no exception
+    w2 = MarkerImageWriter(str(tmp_path / 'off'), _FakeDrawDetector(), enabled=False)
+    w2.sweep_view(0, frame, {7: np.eye(4)})
+    w2.finish()
+    assert not os.path.exists(str(tmp_path / 'off')) and w2.n == 0
 
 
 def test_multiview_refine_keeps_fused_poses_without_enough_corner_data():

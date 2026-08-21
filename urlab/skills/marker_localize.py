@@ -54,6 +54,8 @@ that disagrees with its neighbours, so every vote is reported individually and
 marker.
 """
 
+import csv as _csv
+import os
 import time
 
 import numpy as np
@@ -110,6 +112,9 @@ class ViewPlan:
         # MULTI-VIEW REFINEMENT (calibration): re-solve each marker's pose over ALL of its
         # corner observations at once, minimized in pixel space.
         self.multiview_refine = bool(b.get('multiview_refine', True))
+        # Save every image the estimate was computed from, annotated + indexed, into a
+        # marker_images/ subdirectory of the run's output folder.
+        self.save_images = bool(b.get('save_images', True))
         self.servo = ServoPlan(b.get('servo'))
         if (self.servo.enabled and self.max_camera_distance_m is not None
                 and self.servo.distance_m > self.max_camera_distance_m):
@@ -383,6 +388,128 @@ def servo_refine(robot, camera, detector, plan, seen, T_overview=None, on_view=N
     return refined
 
 
+# =================================================================================================
+# annotated image capture -- what the estimate was actually computed from
+# =================================================================================================
+
+_INDEX_HEADER = ['image', 'stage', 'view', 'marker_id', 'range_mm',
+                 'cam_x_mm', 'cam_y_mm', 'cam_z_mm',
+                 'cam_roll_deg', 'cam_pitch_deg', 'cam_yaw_deg',
+                 'base_x_mm', 'base_y_mm', 'base_z_mm']
+
+
+def annotate(detector, frame, poses, header='', notes=()):
+    """An annotated copy of `frame`: the detector's own outlines + axes, plus a text label
+    per marker (id, range, camera-frame pose) and a header. `poses` are CAMERA-frame -- what
+    the on_view hooks hand over. Returns None if OpenCV is unavailable."""
+    try:
+        import cv2
+    except Exception:                              # noqa: BLE001
+        return None
+    img = detector.draw(frame, poses)
+    corners = (detector.detect_corners(frame) if hasattr(detector, 'detect_corners') else {})
+    font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1
+
+    def put(text, x, y, colour):
+        # drawn twice: a dark stroke under a bright fill, so the label survives whatever the
+        # marker or the background happens to be
+        cv2.putText(img, text, (int(x), int(y)), font, scale, (0, 0, 0), thick + 2,
+                    cv2.LINE_AA)
+        cv2.putText(img, text, (int(x), int(y)), font, scale, colour, thick, cv2.LINE_AA)
+
+    for i, line in enumerate([header] + list(notes)):
+        if line:
+            put(str(line), 8, 20 + 18 * i, (255, 255, 255))
+    for mid, T_cm in sorted(poses.items()):
+        xyz, rpy = matrix_to_xyzrpy(T_cm)
+        rng = float(np.linalg.norm(T_cm[:3, 3])) * 1000.0
+        c = corners.get(int(mid))
+        if c is not None:
+            x, y = np.asarray(c, dtype=float).mean(axis=0)
+            y -= 10.0
+        else:                                      # no corner data: stack the labels instead
+            x, y = 8.0, img.shape[0] - 24.0 - 34.0 * len(poses)
+        put('id %d  %.0f mm' % (int(mid), rng), x, y, (0, 255, 255))
+        put('xyz %+.1f %+.1f %+.1f  rpy %+.1f %+.1f %+.1f'
+            % (xyz[0] * 1000.0, xyz[1] * 1000.0, xyz[2] * 1000.0,
+               np.degrees(rpy[0]), np.degrees(rpy[1]), np.degrees(rpy[2])),
+            x, y + 16.0, (0, 255, 255))
+    return img
+
+
+class MarkerImageWriter:
+    """Saves every image the localization estimated from, annotated and indexed.
+
+    Images land in <out_dir>/<subdir>/ and index.csv lists, per image, each marker it
+    contributed and the pose read from it -- so a suspect fit can be traced back to the
+    picture it came from, and a missed marker to the view that missed it. Best-effort
+    throughout: an imaging problem never fails a run."""
+
+    def __init__(self, out_dir, detector, subdir='marker_images', enabled=True):
+        self.detector = detector
+        self.enabled = bool(enabled) and out_dir is not None
+        self.dir = os.path.join(out_dir, subdir) if self.enabled else None
+        self.rows = []
+        self.n = 0
+        if self.enabled:
+            os.makedirs(self.dir, exist_ok=True)
+
+    def _write(self, name, stage, view, frame, poses, header, notes=()):
+        if not self.enabled:
+            return
+        try:
+            import cv2
+            img = annotate(self.detector, frame, poses, header, notes)
+            if img is None:
+                return
+            cv2.imwrite(os.path.join(self.dir, name), img)
+            self.n += 1
+            T_bc = getattr(frame, 'T_base_cam', None)
+            if not poses:                          # a view that saw nothing is still evidence
+                self.rows.append([name, stage, view, '', '', '', '', '', '', '', '',
+                                  '', '', ''])
+            for mid, T_cm in sorted(poses.items()):
+                xyz, rpy = matrix_to_xyzrpy(T_cm)
+                base = ((T_bc @ T_cm)[:3, 3] * 1000.0) if T_bc is not None else [None] * 3
+                self.rows.append(
+                    [name, stage, view, int(mid),
+                     round(float(np.linalg.norm(T_cm[:3, 3])) * 1000.0, 2)]
+                    + [round(float(v) * 1000.0, 2) for v in xyz]
+                    + [round(float(np.degrees(v)), 2) for v in rpy]
+                    + [None if v is None else round(float(v), 2) for v in base])
+        except Exception as exc:                   # noqa: BLE001 -- imaging is never fatal
+            log.debug('could not save the marker image %s: %s', name, exc)
+
+    def sweep_view(self, k, frame, poses):
+        """on_view for sweep(): the coarse overview captures."""
+        self._write('sweep_%02d.jpg' % (k + 1), 'sweep', k + 1, frame, poses,
+                    'SWEEP view %d -- %d marker(s)' % (k + 1, len(poses)))
+
+    def servo_view(self, mid, j, frame, poses):
+        """on_view for servo_refine(): the close, centred per-marker captures."""
+        kind = 'vantage' if j == 0 else 'ring %d' % j
+        self._write('servo_m%02d_%02d.jpg' % (int(mid), j), 'servo', j, frame, poses,
+                    'SERVO marker %d -- %s -- %d marker(s)' % (int(mid), kind, len(poses)))
+
+    def finish(self, summary=()):
+        """Write index.csv (+ summary.txt when the caller has final estimates) and report
+        where the images went."""
+        if not self.enabled or not self.n:
+            return
+        try:
+            with open(os.path.join(self.dir, 'index.csv'), 'w', newline='') as fh:
+                w = _csv.writer(fh)
+                w.writerow(_INDEX_HEADER)
+                w.writerows(self.rows)
+            if summary:
+                with open(os.path.join(self.dir, 'summary.txt'), 'w') as fh:
+                    fh.write(chr(10).join(str(s) for s in summary) + chr(10))
+            log.info('  %d annotated marker image%s -> %s (index.csv lists what each one '
+                     'contributed).', self.n, '' if self.n == 1 else 's', self.dir)
+        except Exception as exc:                   # noqa: BLE001
+            log.debug('could not write the marker image index: %s', exc)
+
+
 def merge_refined(seen, refined):
     """Pool the servoed views WITH the sweep views. The certainty weighting (d^-power)
     already makes the close views dominate the fusion; replacing the sweep views instead
@@ -622,7 +749,8 @@ def joint_pnp_views(rig, corner_views, plan):
     return est
 
 
-def locate(robot, camera, detector, rig, plan, wanted=None):
+def locate(robot, camera, detector, rig, plan, wanted=None, on_view=None,
+           on_servo_view=None):
     """The whole run-time job: sweep -> (servo-refine) -> per-marker consistency GATE ->
     JOINT-PnP estimate. Returns T_base_target or None.
 
@@ -636,13 +764,14 @@ def locate(robot, camera, detector, rig, plan, wanted=None):
     T_overview = robot.camera()
     corner_views = []
     seen = sweep(robot, camera, detector, plan, wanted=wanted or set(rig['markers']),
-                 corner_log=corner_views)
+                 on_view=on_view, corner_log=corner_views)
     if not seen:
         log.error('MARKER LOCALIZATION: no rig marker was detected from any view.')
         return None
     if plan.servo.enabled:
         merge_refined(seen, servo_refine(robot, camera, detector, plan, seen,
-                                         T_overview=T_overview, corner_log=corner_views))
+                                         T_overview=T_overview, on_view=on_servo_view,
+                                         corner_log=corner_views))
     T_vote, _votes = vote_target(rig, fuse_markers(seen, plan), plan)
     if T_vote is None:
         return None                       # the gate refused -- nothing overrides that

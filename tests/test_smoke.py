@@ -3326,7 +3326,10 @@ def test_bnc_clocking_config():
         if blk.get('speed_rotation_deg_s') is None:
             assert float(ps[nm]) * float(shared['speed']['max_cartesian_rotation_deg_s']) > 0
     assert len(cc['stiffness']) == 6 and len(cl['stiffness']) == 6
-    assert float(cl['collar_offset_mm']) > 0
+    # >= 0, not > 0: this is measured from the connector frame ORIGIN (the mating face), so zero
+    # is a legitimate reading -- the ring sitting at the face. It was > 0 only while the offset
+    # was measured from the JUNCTION, ~45.7 mm behind the origin, where zero could not happen.
+    assert float(cl['collar_offset_mm']) >= 0
     if cl.get('enabled'):
         assert cc.get('enabled'), 'collar clocking depends on connector clocking'
     r = a['clocking_retract']

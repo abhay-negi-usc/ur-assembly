@@ -81,6 +81,14 @@ def run_dir(cfg, path, per_cable=True):
     return os.path.join(path, f'run_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
 
 
+def pose_fields_mm(T):
+    """skills.trajectory.pose_fields with the translation in MILLIMETRES (matching the _mm
+    column names the sampling CSVs use)."""
+    from ..skills import trajectory as traj
+    f = traj.pose_fields(T)
+    return [f[0] * 1000.0, f[1] * 1000.0, f[2] * 1000.0] + f[3:]
+
+
 def fmt_dur(seconds):
     """'h:mm:ss' (or 'm:ss' under an hour) for log lines."""
     seconds = int(max(0.0, seconds))

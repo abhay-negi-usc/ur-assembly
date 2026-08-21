@@ -178,6 +178,19 @@ class URArm:
             return None
         return list(q)
 
+    def joints_ok(self, q):
+        """True if `q` sits inside the controller's JOINT safety limits.
+
+        Distinct from `isPoseWithinSafetyLimits`, which ik() already calls: a pose can be legal
+        while the joints that reach it are not, and wrist_3 in particular is usually limited by
+        the INSTALLATION safety configuration rather than by the robot model. Asking the
+        controller means a restricted wrist reports itself here instead of mid-motion.
+
+        Dry runs have no controller to ask and accept anything."""
+        if self.dry_run:
+            return True
+        return bool(self.rtde_c.isJointsWithinSafetyLimits(list(q)))
+
     # ------------------------------------------------------------------ guards
     def add_guard(self, guard):
         """Arm a callable checked DURING every move; returning True cancels the motion.

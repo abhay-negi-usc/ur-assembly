@@ -3719,12 +3719,18 @@ def test_tug_verification_defaults_on_and_its_spring_can_exceed_the_threshold():
     with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
         src = fh.read()
     body = src[src.index('def tug_verify_in_place('):src.index('def engage_insertion(')]
-    order = ["gripper.close('tug grasp')", "verify_cable_held(robot, check, 'tug regrasp')",
-             'tare_fn=tare', 'adm_tug.hold(T_pull', "'release (tug verified)'"]
+    # NO close and NO re-grip: the collar turn leaves the fingers on the ring, so the pull
+    # happens from that pose. A release/retract/re-approach/re-grasp between the lock and the
+    # test is four chances to disturb what it is measuring, and the re-grasp could miss.
+    order = ['T_grasp = robot.tool0()', 'tare_fn=tare', 'adm_tug.hold(T_pull',
+             "'release (tug verified)'"]
     idx = [body.index(t) for t in order]
     assert idx == sorted(idx), (
-        'the tug must close, verify the grasp, tare while gripping, pull, and only release '
-        'after a verified hold -- in that order')
+        'the tug must pull from the pose the turn left, tare while gripping, hold, and only '
+        'release after a verified hold -- in that order')
+    for banned in ("gripper.close('tug grasp')", "'tug approach (standoff)'"):
+        assert banned not in body, (
+            f'{banned} is the old reposition-and-regrip tug; the pull now happens in place')
     assert "'terminated'" in body and 'tv_extract_m' in body and 'guard_shared' in body, (
         'the failure path must extract by extraction_distance_mm under the GLOBAL guard, and a '
         'guard trip must terminate the script')
@@ -3885,12 +3891,12 @@ def test_the_collar_axis_offset_is_read_from_config_in_the_connector_frame():
             and 'axis_offset_base' not in cable), (
         'the offset is scoped to the collar maneuver and the tug; connector clocking keeps the '
         'unoffset axis')
-    # the tug centres its RE-GRIP on the same offset axis -- the pull direction cannot carry a
-    # line offset, so the grasp position is where the correction lands. SAME helper, so the two
-    # cannot disagree about where the collar's axis is.
+    # The tug no longer re-grips, so it no longer needs the offset LINE -- only the axis
+    # DIRECTION, which an offset cannot change. It must still take that direction from T_clk, so
+    # the pull and the collar turn cannot disagree about which way the connector points.
     tug = src[src.index('def tug_verify_in_place('):src.index('def engage_insertion(')]
-    assert 'axis_offset_base()' in tug and 'T_grasp = translation_matrix(-d_r) @ T_grasp' in tug, (
-        'tug verification must centre its re-grip on the same offset connector axis')
+    assert 'axn_t = T_clk[:3, 0]' in tug, (
+        'the tug must take its pull direction from the shared post-engage frame')
 
 
 def test_the_escape_releases_the_collar_before_retracting():
@@ -5038,9 +5044,13 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
         assert np.allclose(-R2[:, 1], [0., 0, -1], atol=1e-9), (
             'the grasp attitude must be the SAME fixed -Y/-Z alignment wherever the sweep ends -- '
             'offsetting it by the achieved sweep makes it move with the sweep')
-    assert 'np.cross(v0, want)' in body and 'th_grasp = th_rule' in body, (
+    assert 'np.cross(v0, want)' in body and 'else th_rule' in body, (
         'the default angle must be SOLVED in closed form against the TARGET frame; a scan makes '
         'the motion depend on IK seeding and move run to run')
+    assert 'range(0, 360, 15)' not in body, (
+        'the 24-candidate clock-angle scan is RETIRED. The clock angle is exactly a wrist_3 '
+        'offset (tool0 on the axis, Z collinear), so it is chosen by the prewind window rather '
+        'than searched for -- and a 15 deg grid can miss a feasible window narrower than itself')
 
     assert 'wall_standoff_mm' in src and 'cl_wall_mm' in body, (
         'every planned station must be gated against the wall standoff before the arm moves')
@@ -5702,3 +5712,84 @@ if __name__ == '__main__':
             print(f'FAIL {fn.__name__}: {exc}')
     print(f'\n{len(fns) - failed}/{len(fns)} passed')
     sys.exit(1 if failed else 0)
+
+
+def test_the_collar_turn_is_prewound_into_the_wrist_3_window():
+    """The grasp clock angle is spent on wrist_3 RANGE, before the arm threads down the axis.
+
+    The angle is exactly a joint-6 offset -- tool0 sits on the collar axis with its Z collinear,
+    so rolling the grasp about the axis moves the flange origin not at all and rotates it about
+    its own Z. That is what makes a PREWIND possible: the app can place wrist_3 so the whole
+    rotation_deg fits, instead of finding out mid-turn with the collar clamped in the fingers.
+
+    _fit_turn is the arithmetic that does it, and it is pure, so the window logic is testable
+    without a robot. Two properties:
+      * A WHOLE-TURN SHIFT IS FREE. The collar is a body of revolution, so theta and theta +/- 360
+        grip the same ring; if the wanted angle does not fit, a whole turn that does must be used
+        in preference to moving the grasp attitude.
+      * CLAMPING IS THE FALLBACK, and is REPORTED, because it does move the attitude.
+    """
+    from urlab import config as urconfig
+    from urlab.apps.bnc_assembly import _fit_turn
+
+    TAU = 2.0 * np.pi
+
+    # inside the window: untouched, and not reported as clamped
+    th, clamped = _fit_turn(np.radians(30.0), np.radians(0.0), np.radians(90.0))
+    assert abs(th - np.radians(30.0)) < 1e-12 and not clamped
+
+    # outside by a whole turn: shifted back in, still the same grasp on the ring
+    th, clamped = _fit_turn(np.radians(30.0) + TAU, np.radians(0.0), np.radians(90.0))
+    assert abs(th - np.radians(30.0)) < 1e-9, (
+        'a whole-turn shift grips the identical ring and must be preferred to clamping')
+    assert not clamped
+
+    th, clamped = _fit_turn(np.radians(30.0) - TAU, np.radians(0.0), np.radians(90.0))
+    assert abs(th - np.radians(30.0)) < 1e-9 and not clamped
+
+    # genuinely unreachable on any branch: clamped to the nearest edge, and SAID so
+    th, clamped = _fit_turn(np.radians(200.0), np.radians(0.0), np.radians(90.0))
+    assert clamped, 'an angle no whole-turn shift can fit must be reported as clamped'
+    assert np.radians(0.0) - 1e-12 <= th <= np.radians(90.0) + 1e-12
+
+    # the window arithmetic itself: the START must leave a full rotation inside the far end,
+    # in whichever direction the turn travels.
+    cfg = urconfig.load('bnc_assembly')
+    cl = cfg.section('assembly')['collar_clocking']
+    rot = np.radians(float(cl['rotation_deg']))
+    margin = np.radians(float(cl.get('wrist3_margin_deg', 5.0)))
+    w_lo, w_hi = -TAU, TAU                        # the UR nominal range
+    q6_grip0 = 0.0
+    th_lo = (w_lo + margin) - q6_grip0 + max(0.0, -rot)
+    th_hi = (w_hi - margin) - q6_grip0 - max(0.0, rot)
+    assert th_hi > th_lo, 'the shipped rotation_deg must fit in the nominal wrist_3 range'
+    for probe in (th_lo, 0.5 * (th_lo + th_hi), th_hi):
+        start = q6_grip0 + probe
+        lo, hi = sorted((start, start + rot))
+        assert lo >= w_lo + margin - 1e-9 and hi <= w_hi - margin + 1e-9, (
+            f'a clock angle inside the window must keep the whole turn inside the range: '
+            f'{np.degrees(lo):+.1f}..{np.degrees(hi):+.1f} vs '
+            f'{np.degrees(w_lo + margin):+.1f}..{np.degrees(w_hi - margin):+.1f}')
+
+
+def test_the_prewind_is_verified_from_measured_joints_before_the_collar_is_clamped():
+    """The plan is checked against REALITY at the last moment a refusal is free.
+
+    The prewind is computed at the PLANNED grip pose, but the arm reaches the real one through a
+    compliant advance that yields to contact -- so wrist_3 ends up where the servo left it. The
+    re-check therefore reads robot.arm.q(), and it must sit BEFORE the gripper closes: refusing
+    with open fingers costs nothing, refusing with the collar clamped strands the run.
+    """
+    src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8').read()
+    body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
+
+    order = ["adm_cl.ramp(T_retreat, T_grip",          # the compliant advance...
+             "q6_now = float(robot.arm.q()[5])",       # ...then re-read wrist_3 from the ARM...
+             "gripper.close('grasp collar')",          # ...and only then clamp the ring
+             "label='twist '"]
+    idx = [body.index(t) for t in order]
+    assert idx == sorted(idx), (
+        'the wrist_3 re-check must read the MEASURED joints after the advance and BEFORE the '
+        'gripper closes -- a refusal with open fingers is free, one with the collar clamped is not')
+    assert 'w_lo + cl_w3_margin' in body and 'w_hi - cl_w3_margin' in body, (
+        'the re-check must test the whole turn against the same window the prewind used')

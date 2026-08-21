@@ -186,6 +186,56 @@ def _advance_state(state, expected):
     return CLOCK_STATES[CLOCK_STATES.index(state) + 1]
 
 
+def _wrist3_window(arm, q_ref, span=2.0 * np.pi, tol=np.radians(0.25)):
+    """The contiguous wrist_3 interval, in rad, the controller will accept around `q_ref[5]`.
+
+    BISECTED against the controller's own joint-limit check rather than assuming the model's
+    nominal +/-360: the usable wrist range is an INSTALLATION SAFETY SETTING, so an arm whose
+    wrist has been restricted says so here instead of stalling part-way through a turn. Joints
+    1..5 are held at `q_ref` -- exactly the configuration the turn runs in.
+
+    Dry runs have no controller to ask, so they get the nominal +/-`span`."""
+    q6 = float(q_ref[5])
+    if arm.dry_run:
+        return q6 - span, q6 + span
+
+    def ok(v):
+        q = list(q_ref)
+        q[5] = float(v)
+        return arm.joints_ok(q)
+
+    def edge(direction):
+        if not ok(q6 + direction * tol):
+            return q6                                  # already at the limit
+        if ok(q6 + direction * span):
+            return q6 + direction * span               # nothing within a full turn
+        good, bad = tol, span                          # good is inside, bad is outside
+        while bad - good > tol:
+            mid = 0.5 * (good + bad)
+            if ok(q6 + direction * mid):
+                good = mid
+            else:
+                bad = mid
+        return q6 + direction * good
+
+    return edge(-1.0), edge(+1.0)
+
+
+def _fit_turn(theta, lo, hi):
+    """`theta` shifted by whole turns into [lo, hi]. Returns (angle, clamped).
+
+    A whole-turn shift is FREE: the collar is a body of revolution, so theta and theta +/- 360
+    grip the same ring and differ only in which wrist_3 branch the turn then runs on. Clamping
+    is the fallback and DOES move the grasp attitude, so it is reported separately.
+
+    Pure, so the window arithmetic is testable without a robot."""
+    theta = float(theta) + 2.0 * np.pi * np.round((0.5 * (lo + hi) - float(theta))
+                                                  / (2.0 * np.pi))
+    if lo <= theta <= hi:
+        return float(theta), False
+    return float(np.clip(theta, lo, hi)), True
+
+
 class _ScrewAdvance:
     """Progress detector for a clocking screw, shaped like ForceGuard so that
     AdmittanceController.ramp can terminate on it (ramp returns 'seated' the cycle check() first
@@ -582,6 +632,11 @@ def build_and_run(cfg, robot, camera, args):
     cc_tare = tare if bool(cc.get('tare_before', False)) else None
     cl_tare = tare if bool(cl.get('tare_before', False)) else None
     cl_tilt_deg = _num(cl, 'max_offaxis_tilt_deg', 5.0)
+    # WRIST-3 MARGIN: how far inside each end of the usable wrist_3 range the collar
+    # turn must stay. The turn is servoed under admittance, so the arm does not track
+    # the reference exactly and a start placed hard against the limit can still walk
+    # into it.
+    cl_w3_margin = np.radians(_num(cl, 'wrist3_margin_deg', 5.0))
     cl_axis_off = [float(v) for v in (cl.get('axis_offset_mm') or [0.0, 0.0, 0.0])]
     if len(cl_axis_off) != 3:
         log.error('assembly.collar_clocking.axis_offset_mm must have 3 entries (connector-frame '
@@ -1663,62 +1718,101 @@ def build_and_run(cfg, robot, camera, args):
                 @ rotate_about_axis(_grip, axis, point, cl_rot)))
 
         seed_c = robot.arm.ik(T_off, robot.arm.q()) or robot.arm.q()
-        if cl_grasp_clock is not None:
-            th_grasp = cl_grasp_clock - eng_clock
-        else:
-            # ---- THE DEFAULT RULE: tool0's -Y along the connector's -Z ------------------------
-            # Closed form, not a search. The connector sweep leaves the wrist in a particular
-            # orientation, and of all the clock angles that grip the ring identically, the one
-            # that lands tool0's -Y on the connector's -Z is the one the arm is already nearly
-            # in -- it halves the reorientation onto the axis (measured on this fixture: 90 deg
-            # against 180 deg at a clock angle of 0). A 180 deg tool reorientation is where the
-            # analytic IK stops finding a branch reachable from the seed, which is what "the
-            # axial retreat station is unreachable" looks like.
-            #
-            # tool0 +Z is already pinned along the connector +X by G_axial, so the only freedom
-            # left is the roll about that axis, and tool0's +Y is perpendicular to it. Rotating
-            # that onto the connector +Z is therefore a plain 2-D angle in the plane normal to
-            # the axis: atan2(x . (v x w), v . w).
-            v0 = G_axial[:3, 1]                      # tool0 +Y at zero clock, connector frame
-            want = np.array([0.0, 0.0, 1.0])         # connector +Z
-            th_rule = float(np.arctan2(float(np.dot([1.0, 0.0, 0.0], np.cross(v0, want))),
-                                       float(np.dot(v0, want))))
-            # ...AND THE CONNECTOR'S -Z IS WHERE THE SWEEP LEFT IT, not where the target frame
-            # declares it. The gripper turned the connector, so its own Z came with it: reading
-            # the rule against the target frame only lands the minimum when the sweep happens to
-            # end at 0. Adding the achieved sweep makes the swing a constant 90 deg wherever it
-            # ends -- measured 90.0 at every sweep end, against 90..120 for the target-frame
-            # reading.
-            # AGAINST THE TARGET FRAME, not the swept connector. Offsetting by the achieved sweep
-            # buys a smaller reorientation, but then the grasp attitude moves with wherever the
-            # sweep happened to stop; stated against the target frame it is ONE fixed, inspectable
-            # attitude, which is what the rule is for.
-            th_grasp = th_rule
-            log.info('  grasp clock angle %+.0f deg wrt the target frame: tool0 -Y laid on the '
-                     'connector -Z. A %.0f deg reorientation from the lift-off pose.',
-                     np.degrees(eng_clock + th_grasp),
-                     np.degrees(pose_error(T_off, at(x_retreat, th_grasp))[1]))
-            if not _reachable(th_grasp):
-                # The rule is a good default, not a guarantee. Fall back to whatever angle IS
-                # reachable, cheapest reorientation first -- the collar is a body of revolution,
-                # so every candidate grips the same ring. arm.ik logs 'No IK solution' at ERROR
-                # per rejected pose; those belong to this scan, nothing has moved.
-                log.warning('  ...but that angle is NOT reachable here. Scanning for one that is '
-                            '(arm.ik errors below belong to the scan).')
-                cands = [(pose_error(T_off, at(x_retreat, np.radians(float(d))))[1],
-                          np.radians(float(d)), d)
-                         for d in range(0, 360, 15) if _reachable(np.radians(float(d)))]
-                if not cands:
-                    log.error('COLLAR CLOCKING: NO grasp clock angle from 0 to 345 deg gives a '
-                              'reachable retreat, grasp and turn end. The axial orientation '
-                              'itself is out of reach at this fixture pose -- reduce '
-                              'collar_clocking.retreat_mm (now %.0f mm, which sets how far back '
-                              'the flange goes) or move the fixture.', cl_retreat_m * 1000.0)
-                    return False
-                _swing, th_grasp, _deg = min(cands, key=lambda c: c[0])
-                log.warning('  falling back to %+.0f deg (%d of 24 reachable, %.0f deg of '
-                            'reorientation). Pin it with collar_clocking.grasp_clock_deg.',
-                            np.degrees(eng_clock) + _deg, len(cands), np.degrees(_swing))
+
+        # ---- THE CLOCK ANGLE IS A WRIST-3 OFFSET, EXACTLY -------------------------------------
+        # tool0 sits ON the collar axis with its Z collinear -- G_axial's translation is
+        # [-183, 0, 0] mm, purely ALONG the axis, because the fingertip frame carries no lateral
+        # offset. So rotating the grasp about that axis leaves the FLANGE ORIGIN fixed and rolls
+        # it about its own Z, which is the joint-6 axis. Checked numerically across the band: the
+        # tool0 origin stays 0.0000 mm off the line and tool0_Z . axis = 1.000000 at every angle.
+        #
+        # Therefore JOINTS 1..5 ARE IDENTICAL AT EVERY CLOCK ANGLE, and q6(th) = q6(0) + th. The
+        # station picks the first five joints; the clock angle picks the sixth and nothing else.
+        #
+        # That turns the angle from something to search for into something to CALCULATE -- and
+        # into a PREWIND, because what the turn actually needs is wrist_3 range: rotation_deg of
+        # it, from wherever the grasp starts. Spending that range is the whole job of this angle,
+        # and it has to be spent BEFORE the arm threads itself down the axis. Discovering it
+        # afterwards means finding out with the collar clamped in the fingers.
+        #
+        # (The old code scanned 24 candidate angles at 3 IK calls each -- 72 calls to explore a
+        # family that is one joint. Two calls answer it, and a 15 deg grid could miss a feasible
+        # window narrower than its own step.)
+        q_grip0 = robot.arm.ik(at(collar_x, 0.0), seed_c)
+        if q_grip0 is None:
+            log.error('COLLAR CLOCKING: the collar grasp station does not IK-solve at all. That '
+                      'is joints 1-5, i.e. REACH -- no clock angle can help, because the angle '
+                      'only moves wrist_3. Reduce collar_clocking.retreat_mm (now %.0f mm) or '
+                      'move the fixture.', cl_retreat_m * 1000.0)
+            return False
+
+        # THE USABLE WRIST-3 RANGE, asked of the CONTROLLER at that exact configuration rather
+        # than assumed to be the model's +/-360 (see _wrist3_window).
+        w_lo, w_hi = _wrist3_window(robot.arm, q_grip0)
+        need = abs(cl_rot) + 2.0 * cl_w3_margin
+        if (w_hi - w_lo) < need:
+            log.error('COLLAR CLOCKING: wrist_3 has %.0f deg of range in this configuration '
+                      '(%+.0f .. %+.0f deg) but the turn needs %.0f (rotation_deg %.0f plus '
+                      '2 x %.1f deg of margin). NO grasp angle can fit it -- lower '
+                      'collar_clocking.rotation_deg.',
+                      np.degrees(w_hi - w_lo), np.degrees(w_lo), np.degrees(w_hi),
+                      np.degrees(need), np.degrees(cl_rot), np.degrees(cl_w3_margin))
+            return False
+
+        # THE FEASIBLE CLOCK-ANGLE WINDOW. The turn runs q6 -> q6 + rotation_deg, so the START
+        # must sit a full rotation inside whichever end it travels toward -- which is what makes
+        # this a prewind rather than a reachability check.
+        th_lo = (w_lo + cl_w3_margin) - q_grip0[5] + max(0.0, -cl_rot)
+        th_hi = (w_hi - cl_w3_margin) - q_grip0[5] - max(0.0, cl_rot)
+
+        # ---- THE ANGLE WE WOULD LIKE, before the window has its say ---------------------------
+        # THE DEFAULT RULE: tool0's -Y along the connector's -Z. Closed form. Of all the clock
+        # angles that grip the ring identically, this is the one the wrist is already nearly in
+        # when the connector sweep lets go, so it roughly halves the reorientation onto the axis
+        # (measured on this fixture: 90 deg against 180 at a clock angle of 0).
+        #
+        # AGAINST THE TARGET FRAME, not the swept connector. Offsetting by the achieved sweep
+        # buys a smaller reorientation, but then the grasp attitude moves with wherever the sweep
+        # happened to stop; stated against the target frame it is ONE fixed, inspectable attitude.
+        #
+        # tool0 +Z is already pinned along the connector +X by G_axial, so the only freedom left
+        # is the roll about that axis, and tool0's +Y is perpendicular to it. Rotating that onto
+        # the connector +Z is a plain 2-D angle in the plane normal to the axis.
+        v0 = G_axial[:3, 1]                      # tool0 +Y at zero clock, connector frame
+        want = np.array([0.0, 0.0, 1.0])         # connector +Z
+        th_rule = float(np.arctan2(float(np.dot([1.0, 0.0, 0.0], np.cross(v0, want))),
+                                   float(np.dot(v0, want))))
+        pinned = cl_grasp_clock is not None
+        th_want = (cl_grasp_clock - eng_clock) if pinned else th_rule
+        th_grasp, clamped = _fit_turn(th_want, th_lo, th_hi)
+
+        q6_start = q_grip0[5] + th_grasp
+        log.info('--- WRIST-3 PREWIND --- grasp at %+.1f deg wrt the target frame puts wrist_3 at '
+                 '%+.1f deg, ending at %+.1f after the %+.1f deg turn. The controller allows '
+                 '%+.1f .. %+.1f deg; margin %.1f deg at each end.',
+                 np.degrees(eng_clock + th_grasp), np.degrees(q6_start),
+                 np.degrees(q6_start + cl_rot), np.degrees(cl_rot),
+                 np.degrees(w_lo), np.degrees(w_hi), np.degrees(cl_w3_margin))
+        if clamped:
+            log.warning('  the %s angle (%+.1f deg) leaves no room for the turn on ANY whole-turn '
+                        'branch, so it was CLAMPED to %+.1f deg. The ring gripped is the same; '
+                        'the approach attitude is not -- check the reorientation looks sane.',
+                        'pinned collar_clocking.grasp_clock_deg' if pinned else 'default-rule',
+                        np.degrees(eng_clock + th_want), np.degrees(eng_clock + th_grasp))
+        elif abs(th_grasp - th_want) > np.radians(0.5):
+            log.info('  (shifted %+.0f deg by whole turns onto a wrist_3 branch with room -- the '
+                     'collar is a body of revolution, so the grasp on the ring is identical.)',
+                     np.degrees(th_grasp - th_want))
+
+        # WRIST_3 now has room. Whether the STATIONS solve in joints 1..5 is a different question,
+        # and the only one left -- so a failure here names the knob that actually moves it.
+        if not _reachable(th_grasp):
+            log.error('COLLAR CLOCKING: wrist_3 has room at %+.1f deg, but the retreat, grasp or '
+                      'turn-end pose does not IK-solve there. That is joints 1-5 -- REACH, not '
+                      'wrist range -- so the knob is collar_clocking.retreat_mm (now %.0f mm) or '
+                      'the fixture position, NOT the clock angle.',
+                      np.degrees(eng_clock + th_grasp), cl_retreat_m * 1000.0)
+            return False
         T_retreat = at(x_retreat, th_grasp)         # on the axis, clear, already axial
         T_grip = at(collar_x, th_grasp)             # fingertip ON the collar, ON the axis
         T_end = translation_matrix(cl_push_m * axn) @ rotate_about_axis(
@@ -1922,13 +2016,51 @@ def build_and_run(cfg, robot, camera, args):
                       (collar_x - x_retreat) * 1000.0)
             return False
 
+        # ---- DID THE PREWIND SURVIVE? --------------------------------------------------
+        # The prewind was computed at the PLANNED grip pose; the arm reached the real one through
+        # a compliant advance that yields to contact, so wrist_3 is where the servo left it, not
+        # necessarily where the plan put it. Checked HERE, with the fingers still open and the
+        # collar not yet clamped, because this is the last moment a refusal is free.
+        q6_now = float(robot.arm.q()[5])
+        turn_lo, turn_hi = sorted((q6_now, q6_now + cl_rot))
+        if turn_lo < w_lo + cl_w3_margin or turn_hi > w_hi - cl_w3_margin:
+            log.error('COLLAR CLOCKING: wrist_3 is at %+.1f deg after the advance, so the %+.1f '
+                      'deg turn would run %+.1f .. %+.1f and leave the usable range '
+                      '%+.1f .. %+.1f (margin %.1f). The prewind aimed for %+.1f. Refusing to '
+                      'turn -- the fingers are still OPEN, so nothing is clamped.',
+                      np.degrees(q6_now), np.degrees(cl_rot), np.degrees(turn_lo),
+                      np.degrees(turn_hi), np.degrees(w_lo), np.degrees(w_hi),
+                      np.degrees(cl_w3_margin), np.degrees(q6_start))
+            return False
+        log.info('  wrist_3 at %+.1f deg after the advance (prewound to %+.1f) -- the %+.1f deg '
+                 'turn fits with %.1f deg to spare.', np.degrees(q6_now), np.degrees(q6_start),
+                 np.degrees(cl_rot),
+                 min(turn_lo - w_lo, w_hi - turn_hi) * 180.0 / 3.141592653589793)
+
+        # ---- TARE BEFORE THE GRASP -------------------------------------------------------
+        # The arm is standing at the collar station with the fingers still OPEN and clear of the
+        # ring: the only genuinely unloaded moment in the maneuver. The tare used to happen
+        # inside the warmup BELOW, i.e. after the close, which folds in whatever the jaws
+        # preload against the captive ring -- jaw-on-jaw force cancels at the wrist, but an
+        # off-centre close reacts through the connector into the socket and does not. At
+        # max_torque_nm 1.0 that offset is a large fraction of the whole limit, so the turn could
+        # trip on the grasp rather than on the lock.
+        #
+        # An IDLE tare (settle=True), unlike the servo-active one warmup performs: the gripper
+        # close blocks for ~1 s, and streaming servoL around a blocking call is exactly what
+        # warmup's mid-hold tare exists to avoid. What that trades away is the idle-vs-servo
+        # offset, which is the uncompensated tool weight -- and robot.payload IS configured here,
+        # so it is already subtracted. settle=True also re-checks the residual and warns if it
+        # is not.
+        if cl_tare is not None:
+            robot.arm.zero_ft(settle=True)
         if not robot.gripper.close('grasp collar'):
             log.error('Gripper did not close on the collar.')
             return False
         phase('collar_clock')
         start = robot.tool0()
         adm_cl.reset()
-        adm_cl.warmup(start, tare_fn=cl_tare)
+        adm_cl.warmup(start)          # NOT tare_fn=cl_tare -- zeroed above, with open fingers
         guard_cl.reset()
         # THE TWIST. Still written as a rotation about the connector axis LINE, unchanged from the
         # radial version -- but tool0 now sits ON that line, so it resolves to a rotation about

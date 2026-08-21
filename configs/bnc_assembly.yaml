@@ -659,11 +659,29 @@ assembly:
     # OPTIONAL -- false ends the run SEATED. Requires connector_clocking
     # enabled: true with this true is REJECTED before the robot moves (see the table above).
     enabled: true
-    # Ahead of the JUNCTION along the connector +X -- equally "ahead of the closed pads", since
-    # junction_in_fingertip is the identity translation. NOT measured from the connector frame
-    # origin, which is the mating-face reference ~45.7 mm further forward: measuring from there
-    # overshot the advance by exactly that much.
-    collar_offset_mm: -5.0
+    # WHERE THE COLLAR RING SITS, mm along the connector +X, measured FROM THE CONNECTOR FRAME
+    # ORIGIN -- the same origin targets: declares, not from the junction or the pads. The app
+    # applies it to T_base_axis, whose origin IS that frame origin (plus whatever the bayonet
+    # sweep cammed the connector in), so nothing here is back-calculated from how the part sits
+    # in the fingers.
+    #
+    # DERIVED, not tuned. The bench measurement is the one that can actually be taken on the
+    # part: the ring stands 30 mm from the JUNCTION along the connector +X. The junction is
+    # where the pads close, and frames.yaml puts it at -45.7 mm on this axis (fingertip vs
+    # bnc_connector_finger_holder, with cables.yaml bnc junction_in_fingertip at zero
+    # translation). So:
+    #
+    #     collar = junction + 30 = -45.7 + 30 = -15.7 mm
+    #
+    # which is the "-15 mm behind the connector frame" reading of the same measurement, to
+    # within the 0.7 mm of rounding in the 45.7.
+    #
+    # WAS -2.0, which put the fingertip 13.7 mm PAST the ring toward the mating face. The
+    # comment that stood here claimed the number was measured from the JUNCTION and explicitly
+    # NOT from the connector frame origin -- the opposite of what the code does. That comment
+    # was a leftover from a reverted change; if the value is ever re-tuned on the bench, it is
+    # the connector frame origin it is being measured from.
+    collar_offset_mm: -15.7
     # COLLAR AXIS OFFSET, mm, in the SOCKET (target) frame's own axes. Shifts the LINE the whole
     # collar maneuver works about -- centring, unwind, advance, turn -- and the TUG VERIFICATION
     # centres its re-grip on the same offset axis. Connector clocking is NOT affected. Y and Z move
@@ -703,7 +721,12 @@ assembly:
     # -158 mm, so this has ~108 mm of margin; the old radial grasp sat at +25 mm and would be
     # REFUSED by it, which is the point. null = no check.
     wall_standoff_mm: -50.0
-    rotation_deg: 90.0
+    # 120 deg is the CEILING, not the expected end: the turn is meant to stop on the
+    # torque limit below when the collar reaches its lock. Reaching 120 without ever
+    # building 1 Nm means the ring turned freely the whole way -- it never locked.
+    # NOTE this needs 120 deg of wrist_3 headroom from wherever the grasp starts (the
+    # grasp clock angle is a pure joint-6 offset), 30 deg more than the old 90.
+    rotation_deg: 120.0
     # PUSH while turning, mm along the connector +X, making the turn a SCREW: the axial press
     # keeps the collar's lugs engaged with their ramps instead of letting them cam back and skip.
     # The reference leads the ring by at most this much, so under this block's spring the press
@@ -749,6 +772,19 @@ assembly:
     # wherever the sweep left the arm. An axial approach is placed in free space, so the start
     # angle is simply stated rather than derived from the sweep.
     grasp_clock_deg: null
+    # WRIST-3 MARGIN, deg: how far inside each end of the usable wrist_3 range the turn must
+    # stay. The grasp clock angle is EXACTLY a wrist_3 offset (tool0 sits on the collar axis
+    # with its Z collinear, so the angle rolls the flange about its own Z and moves no other
+    # joint), which is what lets the app PREWIND the wrist before threading itself down the
+    # axis: it picks the angle that leaves rotation_deg of range, rather than discovering
+    # part-way through the turn that it has run out with the collar clamped in the fingers.
+    #
+    # The margin exists because the turn is servoed under admittance: the arm yields to the
+    # collar rather than tracking the reference exactly, so a start placed hard against the
+    # limit can still walk into it. It is checked TWICE -- when the angle is chosen, and
+    # again from the MEASURED joints after the compliant advance, while the fingers are
+    # still open and a refusal is free.
+    wrist3_margin_deg: 5.0
     # OUT-OF-AXIS TILT GATE, deg. Before the unwind, the arm's orientation is compared against the
     # collar-frame family and the part that NO rotation about the connector axis can explain is
     # measured. Above this, the maneuver refuses to orbit rather than swinging blindly.
@@ -764,7 +800,12 @@ assembly:
     # always logged, so loosening it hides nothing.
     max_offaxis_tilt_deg: 10.0
     settle_s: 0.5
-    tare_before: false            # see connector_clocking.tare_before -- same reasoning
+    # TRUE here, unlike connector_clocking: the tare is taken at the collar station with
+    # the fingers still OPEN and clear of the ring -- the one genuinely unloaded moment
+    # in the maneuver -- so the 1 Nm limit measures torque ADDED by turning the collar.
+    # (connector_clocking tares nothing because it starts from a MATED, loaded pose,
+    # where zeroing would define the mate load as zero.)
+    tare_before: true
     # null = the global caps x speed.phase_scale.collar_clock (see connector_clocking for why).
     speed_rotation_deg_s: null
     speed_translation_mm_s: null
@@ -779,7 +820,12 @@ assembly:
     # as often as it is a jam -- the app logs the achieved angle and does not call it a failure.
     force_guard_enabled: true
     max_force_n: 30.0
-    max_torque_nm: 8.0
+    # 1.0 Nm: this is now the INTENDED TERMINATION, not a safety backstop -- the collar
+    # reaching its lock stops turning and the torque builds, which is what ends the
+    # stroke before rotation_deg. It only means anything against a tare taken with the
+    # fingers OPEN (tare_before below), since a clamping preload of the same order
+    # would otherwise sit in the reading before the turn starts.
+    max_torque_nm: 5.0
     persistence_s: 1.0
     # TODO: grasp verification + failure recovery on the close (agreed, not yet implemented) --
     # a missed collar currently turns an empty gripper.

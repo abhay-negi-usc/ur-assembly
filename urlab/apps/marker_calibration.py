@@ -1,25 +1,21 @@
 """MARKER CALIBRATION -- measure where a target sits in the frame of each fiducial around it.
 
-WHAT IT PRODUCES is one `marker_rigs:` block for configs/frames.yaml: for every marker glued
-around the fixture, the TARGET's pose in THAT MARKER's own frame. Once that exists,
-bnc_assembly's `target_source: visual` can find the fixture by looking at it -- the markers are
-detected, each one votes T_base_marker @ T_marker_target, and the votes are averaged -- instead of
-trusting a mate recorded by hand-guiding weeks ago.
+Produces one `marker_rigs:` block for configs/frames.yaml: for every marker glued around the
+fixture, the TARGET's pose in THAT MARKER's own frame.  With that block in place,
+bnc_assembly's `target_source: visual` can find the fixture by looking at it (each detected
+marker votes T_base_marker @ T_marker_target and the votes are averaged).
 
-WHERE THE TARGET'S POSE COMES FROM DURING CALIBRATION: the recorded `targets:` entry. That is the
-whole trade. This script does not measure the fixture; it TRANSFERS a kinematic measurement onto
-the markers, so the rig is exactly as accurate as the target reading it was calibrated from --
-and every visual localisation afterwards inherits that. Re-record the target (hand-guide to a good
-mate, read `base_link <- <frame>` off urlab.apps.monitor) BEFORE calibrating, not after.
+The target's pose during calibration comes from the recorded `targets:` entry -- this script
+does not measure the fixture, it TRANSFERS a kinematic measurement onto the markers.  The rig
+is therefore exactly as accurate as that recorded mate, so re-record the target BEFORE
+calibrating.  What the rig buys is INVARIANCE, not accuracy: the fixture may be unbolted and
+moved afterwards and the markers travel with it.
 
-WHAT IT BUYS, given that, is not accuracy but INVARIANCE: after the calibration the fixture may be
-unbolted and moved, and the rig still finds it, because the markers travel with it. A recorded
-kinematic mate cannot survive that.
+Run it with the markers ALREADY IN VIEW (hand-guide the camera, or set view_joints_deg).  The
+sweep is a small local ring of camera translations around wherever it starts; it is not a
+search.
 
-Run it with the markers ALREADY IN VIEW (hand-guide the camera, or set view_joints_deg). The
-sweep is a small local ring of camera translations around wherever it starts; it is not a search.
-
-Output: data/experiments/marker_calibration_<stamp>/ -- the yaml block, the per-marker fits, and
+Output: data/experiments/marker_calibration_<stamp>/ -- the yaml block, per-marker fits, and
 annotated images from every view.
 Run:  python -m urlab.apps.marker_calibration --config configs/marker_calibration.yaml
 """
@@ -30,13 +26,22 @@ from datetime import datetime
 
 import numpy as np
 
+from .. import behaviors as bt
 from .. import log as urlog
 from .. import tool_frames
+from ..apps._common import experiment_dir
 from ..skills import marker_localize as mloc
 from ..transforms import matrix_to_xyzrpy, pose_error
 from ._runner import run_app
 
 log = urlog.get('marker-calib')
+
+_CSV_HEADER = ['marker_id', 'size_mm', 'views', 'view_spread_mm', 'view_spread_deg',
+               'marker_x_mm', 'marker_y_mm', 'marker_z_mm',
+               'marker_roll_deg', 'marker_pitch_deg', 'marker_yaw_deg',
+               'target_in_marker_x_mm', 'target_in_marker_y_mm', 'target_in_marker_z_mm',
+               'target_in_marker_roll_deg', 'target_in_marker_pitch_deg',
+               'target_in_marker_yaw_deg']
 
 
 def parse_markers(block, where='markers'):
@@ -72,19 +77,150 @@ def parse_markers(block, where='markers'):
     return out
 
 
+class _Calibration:
+    """One calibration run: sweep the camera, fuse each marker, solve the target-in-marker
+    offsets, and write the frames.yaml block + diagnostics."""
+
+    def __init__(self, cfg, robot, camera, detector, sizes, plan, tname, T_base_target,
+                 out_dir):
+        self.cfg = cfg
+        self.robot = robot
+        self.camera = camera
+        self.detector = detector
+        self.sizes = sizes
+        self.plan = plan
+        self.tname = tname
+        self.T_base_target = T_base_target
+        self.out_dir = out_dir
+        self.fused = {}
+        self.offsets = {}
+        self.missing = []
+
+    # ---- get the markers in view -------------------------------------------------------------
+    def move_to_view(self):
+        """Drive to view_joints_deg when configured (pin the SAME pose into bnc_assembly's
+        visual localisation so both runs see the same marker faces); otherwise let the operator
+        hand-guide the camera."""
+        q_view = self.cfg.get('view_joints_deg')
+        if q_view is not None:
+            log.info('Driving to the view pose %s deg.',
+                     list(np.round(np.asarray(q_view, float), 1)))
+            if not self.robot.arm.move_j(list(np.radians(np.asarray(q_view, dtype=float))),
+                                         label='marker view pose'):
+                log.error('Could not reach view_joints_deg.')
+                return False
+            return True
+        if self.cfg.get('confirm_start', True) and not self.robot.arm.dry_run:
+            input('Hand-guide the camera so ALL markers are in view, then press Enter: ')
+        return True
+
+    # ---- sweep + fuse ------------------------------------------------------------------------
+    def _save_view(self, k, frame, poses):
+        """One annotated image per view -- the only record of WHY a marker was missed."""
+        try:
+            import cv2
+            cv2.imwrite(os.path.join(self.out_dir, 'view_%02d.jpg' % (k + 1)),
+                        self.detector.draw(frame, poses))
+        except Exception as exc:               # noqa: BLE001 -- never fail a run on a jpg
+            log.debug('could not save the view image: %s', exc)
+
+    def sweep_and_fuse(self):
+        log.info('MARKER SWEEP: %s.', self.plan.describe())
+        seen = mloc.sweep(self.robot, self.camera, self.detector, self.plan,
+                          wanted=set(self.sizes), on_view=self._save_view)
+        self.missing = sorted(set(self.sizes) - set(seen))
+        if self.missing:
+            log.error('Marker(s) %s were never detected. They are declared in markers: but '
+                      'nothing saw them -- check the ids, the dictionary (%s) and that they '
+                      'are in frame.', ', '.join(str(m) for m in self.missing),
+                      self.cfg.get_path('aruco.dictionary'))
+            if self.cfg.get('require_all_markers', True):
+                return False
+        self.fused = mloc.fuse_markers(seen, self.plan)
+        if not self.fused:
+            log.error('No marker was seen from enough views (min_views %d) to fuse.',
+                      self.plan.min_views)
+            return False
+        return True
+
+    # ---- solve + cross-check -----------------------------------------------------------------
+    def solve(self):
+        self.offsets = mloc.solve_offsets(self.fused, self.T_base_target)
+        return True
+
+    def cross_check(self):
+        """Each offset is exact BY CONSTRUCTION against the target it was solved from, so what
+        carries information is the rig's internal geometry (marker-to-marker distances) and --
+        when a previous rig exists -- how far each marker has moved since. A knocked marker
+        shows up here and nowhere else."""
+        if len(self.fused) > 1:
+            log.info('Rig geometry (marker centre distances, mm):')
+            ids = sorted(self.fused)
+            for i, a in enumerate(ids):
+                for b in ids[i + 1:]:
+                    d = float(np.linalg.norm(self.fused[a][0][:3, 3]
+                                             - self.fused[b][0][:3, 3])) * 1000.0
+                    log.info('    %d <-> %d: %8.2f', a, b, d)
+        try:
+            prior = tool_frames.load_marker_rigs(self.cfg).get(self.tname)
+        except ValueError:
+            prior = None
+        if prior:
+            log.info('Change since the rig already in %s:', tool_frames.frames_path(self.cfg))
+            for mid in sorted(self.offsets):
+                old = prior['markers'].get(mid)
+                if old is None:
+                    log.info('    %d: NEW.', mid)
+                    continue
+                lin, ang = pose_error(old['T_marker_target'], self.offsets[mid])
+                (log.warning if lin > 0.005 else log.info)(
+                    '    %d: %+.2f mm / %+.2f deg%s.', mid, lin * 1000.0, np.degrees(ang),
+                    '  <-- moved' if lin > 0.005 else '')
+        return True
+
+    # ---- write -------------------------------------------------------------------------------
+    def write_outputs(self):
+        stamp = f'{datetime.now():%Y-%m-%d}'
+        block = mloc.yaml_block(self.tname, self.offsets, self.fused, self.sizes,
+                                dictionary=self.cfg.get_path('aruco.dictionary'), stamp=stamp)
+        with open(os.path.join(self.out_dir, 'marker_rigs.yaml'), 'w') as fh:
+            fh.write('# Paste into configs/frames.yaml (merge under an existing marker_rigs:).\n'
+                     f'# Calibrated {stamp} against the recorded target {self.tname!r}.\n'
+                     f'{block}\n')
+        with open(os.path.join(self.out_dir, 'markers.csv'), 'w', newline='') as fh:
+            w = _csv.writer(fh)
+            w.writerow(_CSV_HEADER)
+            for mid in sorted(self.offsets):
+                T_m, lin, ang, n = self.fused[mid]
+                mxyz, mrpy = matrix_to_xyzrpy(T_m)
+                oxyz, orpy = matrix_to_xyzrpy(self.offsets[mid])
+                w.writerow([mid, round(self.sizes[mid] * 1000.0, 3), n,
+                            round(lin * 1000.0, 4), round(float(np.degrees(ang)), 4)]
+                           + [round(float(v) * 1000.0, 3) for v in mxyz]
+                           + [round(float(np.degrees(v)), 3) for v in mrpy]
+                           + [round(float(v) * 1000.0, 3) for v in oxyz]
+                           + [round(float(np.degrees(v)), 3) for v in orpy])
+        log.info('CALIBRATED %d marker%s. Paste this into configs/frames.yaml:\n\n%s\n',
+                 len(self.offsets), '' if len(self.offsets) == 1 else 's', block)
+        log.info('Also written to %s', os.path.join(self.out_dir, 'marker_rigs.yaml'))
+        if self.missing:
+            log.warning('Marker(s) %s are NOT in the block -- they were never detected.',
+                        ', '.join(str(m) for m in self.missing))
+        return True
+
+
 def build_and_run(cfg, robot, camera, args):
     tname = cfg.get('target_frame')
     frames = tool_frames.load_frames(cfg)
     targets = tool_frames.load_targets(cfg)
     if not tname or tname not in targets:
-        log.error('target_frame %r needs a targets: entry in %s -- the calibration transfers THAT '
-                  'recorded pose onto the markers, so it cannot run without one.',
+        log.error('target_frame %r needs a targets: entry in %s -- the calibration transfers '
+                  'THAT recorded pose onto the markers, so it cannot run without one.',
                   tname, tool_frames.frames_path(cfg))
         return False
     if tname not in frames:
         log.error('target_frame %r has a targets: entry but no frames: entry.', tname)
         return False
-    T_base_target = targets[tname]
 
     try:
         sizes = parse_markers(cfg.get('markers'))
@@ -92,122 +228,28 @@ def build_and_run(cfg, robot, camera, args):
     except ValueError as exc:
         log.error('%s', exc)
         return False
-    # IMPORTED HERE, not at module load: perception pulls in cv2, and parse_markers / the config
-    # schema are worth testing on a machine that has no OpenCV.
+    # IMPORTED HERE, not at module load: perception pulls in cv2, and parse_markers / the
+    # config schema are worth testing on a machine that has no OpenCV.
     from ..perception import ArucoDetector
     detector = ArucoDetector(cfg, sizes_m=sizes)
 
-    out_dir = os.path.join(cfg.get('data_dir', 'data'), 'experiments',
-                           f'marker_calibration_{datetime.now():%Y%m%d_%H%M%S}')
-    os.makedirs(out_dir, exist_ok=True)
+    out_dir = experiment_dir(cfg, 'marker_calibration')
     log.info('Output: %s', out_dir)
     log.info('Calibrating %d marker%s (%s mm) against the recorded target %r.',
              len(sizes), '' if len(sizes) == 1 else 's',
              ', '.join('%d:%.1f' % (m, s * 1000.0) for m, s in sorted(sizes.items())), tname)
 
-    # ---- GET THE MARKERS IN VIEW ------------------------------------------------------------
-    # view_joints_deg is optional and exists so the SAME pose can be pinned into bnc_assembly's
-    # visual localisation -- calibrating from one viewpoint and localising from a wildly different
-    # one is legal but wastes the rig's best property, that both runs see the same faces.
-    q_view = cfg.get('view_joints_deg')
-    if q_view is not None:
-        log.info('Driving to the view pose %s deg.', list(np.round(np.asarray(q_view, float), 1)))
-        if not robot.arm.move_j(list(np.radians(np.asarray(q_view, dtype=float))),
-                                label='marker view pose'):
-            log.error('Could not reach view_joints_deg.')
-            return False
-    elif cfg.get('confirm_start', True) and not robot.arm.dry_run:
-        input('Hand-guide the camera so ALL markers are in view, then press Enter: ')
-
-    # ---- SWEEP + FUSE ------------------------------------------------------------------------
-    log.info('MARKER SWEEP: %s.', plan.describe())
-
-    def save_view(k, frame, poses):
-        """One annotated image per view -- the only record of WHY a marker was missed."""
-        try:
-            import cv2
-            cv2.imwrite(os.path.join(out_dir, 'view_%02d.jpg' % (k + 1)),
-                        detector.draw(frame, poses))
-        except Exception as exc:                       # noqa: BLE001 -- never fail a run on a jpg
-            log.debug('could not save the view image: %s', exc)
-
-    seen = mloc.sweep(robot, camera, detector, plan, wanted=set(sizes), on_view=save_view)
-    missing = sorted(set(sizes) - set(seen))
-    if missing:
-        log.error('Marker(s) %s were never detected. They are declared in markers: but nothing '
-                  'saw them -- check the ids, the dictionary (%s) and that they are in frame.',
-                  ', '.join(str(m) for m in missing), cfg.get_path('aruco.dictionary'))
-        if cfg.get('require_all_markers', True):
-            return False
-    fused = mloc.fuse_markers(seen, plan)
-    if not fused:
-        log.error('No marker was seen from enough views (min_views %d) to fuse.', plan.min_views)
-        return False
-
-    # ---- SOLVE: the target in each marker's frame ---------------------------------------------
-    offsets = mloc.solve_offsets(fused, T_base_target)
-
-    # THE CROSS-CHECK. Each marker's offset is exact BY CONSTRUCTION against the target it was
-    # solved from, so re-deriving the target proves nothing. What DOES carry information is the
-    # rig's internal geometry: the marker-to-marker distances, which no single fit can fake, and
-    # -- when a previous rig exists -- how far each marker has moved since. A marker that has been
-    # knocked shows up here as a metre-scale outlier or a step change, and nowhere else.
-    if len(fused) > 1:
-        log.info('Rig geometry (marker centre distances, mm):')
-        ids = sorted(fused)
-        for i, a in enumerate(ids):
-            for b in ids[i + 1:]:
-                d = float(np.linalg.norm(fused[a][0][:3, 3] - fused[b][0][:3, 3])) * 1000.0
-                log.info('    %d <-> %d: %8.2f', a, b, d)
-    try:
-        prior = tool_frames.load_marker_rigs(cfg).get(tname)
-    except ValueError:
-        prior = None
-    if prior:
-        log.info('Change since the rig already in %s:', tool_frames.frames_path(cfg))
-        for mid in sorted(offsets):
-            old = prior['markers'].get(mid)
-            if old is None:
-                log.info('    %d: NEW.', mid)
-                continue
-            lin, ang = pose_error(old['T_marker_target'], offsets[mid])
-            (log.warning if lin > 0.005 else log.info)(
-                '    %d: %+.2f mm / %+.2f deg%s.', mid, lin * 1000.0, np.degrees(ang),
-                '  <-- moved' if lin > 0.005 else '')
-
-    # ---- WRITE ---------------------------------------------------------------------------------
-    stamp = f'{datetime.now():%Y-%m-%d}'
-    block = mloc.yaml_block(tname, offsets, fused, sizes,
-                            dictionary=cfg.get_path('aruco.dictionary'), stamp=stamp)
-    with open(os.path.join(out_dir, 'marker_rigs.yaml'), 'w') as fh:
-        fh.write('# Paste into configs/frames.yaml (merge under an existing marker_rigs:).\n'
-                 f'# Calibrated {stamp} against the recorded target {tname!r}.\n{block}\n')
-    with open(os.path.join(out_dir, 'markers.csv'), 'w', newline='') as fh:
-        w = _csv.writer(fh)
-        w.writerow(['marker_id', 'size_mm', 'views', 'view_spread_mm', 'view_spread_deg',
-                    'marker_x_mm', 'marker_y_mm', 'marker_z_mm',
-                    'marker_roll_deg', 'marker_pitch_deg', 'marker_yaw_deg',
-                    'target_in_marker_x_mm', 'target_in_marker_y_mm', 'target_in_marker_z_mm',
-                    'target_in_marker_roll_deg', 'target_in_marker_pitch_deg',
-                    'target_in_marker_yaw_deg'])
-        for mid in sorted(offsets):
-            T_m, lin, ang, n = fused[mid]
-            mxyz, mrpy = matrix_to_xyzrpy(T_m)
-            oxyz, orpy = matrix_to_xyzrpy(offsets[mid])
-            w.writerow([mid, round(sizes[mid] * 1000.0, 3), n, round(lin * 1000.0, 4),
-                        round(float(np.degrees(ang)), 4)]
-                       + [round(float(v) * 1000.0, 3) for v in mxyz]
-                       + [round(float(np.degrees(v)), 3) for v in mrpy]
-                       + [round(float(v) * 1000.0, 3) for v in oxyz]
-                       + [round(float(np.degrees(v)), 3) for v in orpy])
-
-    log.info('CALIBRATED %d marker%s. Paste this into configs/frames.yaml:\n\n%s\n',
-             len(offsets), '' if len(offsets) == 1 else 's', block)
-    log.info('Also written to %s', os.path.join(out_dir, 'marker_rigs.yaml'))
-    if missing:
-        log.warning('Marker(s) %s are NOT in the block -- they were never detected.',
-                    ', '.join(str(m) for m in missing))
-    return not (missing and cfg.get('require_all_markers', True))
+    cal = _Calibration(cfg, robot, camera, detector, sizes, plan, tname, targets[tname],
+                       out_dir)
+    root = bt.sequence(
+        'marker-calibration',
+        bt.Action('get the markers in view', cal.move_to_view),
+        bt.Action('sweep + fuse', cal.sweep_and_fuse),
+        bt.Action('solve target-in-marker offsets', cal.solve),
+        bt.Action('cross-check the rig geometry', cal.cross_check),
+        bt.Action('write yaml + csv', cal.write_outputs))
+    ok = bt.run_tree(root, log)
+    return ok and not (cal.missing and cfg.get('require_all_markers', True))
 
 
 def main():

@@ -86,16 +86,10 @@ def _parse_traj_noise(a):
     """assembly.trajectory_noise -> a normalised dict (enabled/std/window/decays), or None on
     a malformed std vector.  Same semantics as estimator_eval's eval.trajectory_noise."""
     tn = a.get('trajectory_noise', {}) or {}
-    std = tn.get('std')
-    if std is None:
-        std = [float(tn.get('translation_m', 0.0005))] * 3 \
-            + [float(tn.get('rotation_deg', 0.5))] * 3
-    std = [float(v) for v in std]
+    std = [float(v) for v in (tn.get('std') or [0.0005] * 3 + [0.5] * 3)]
     if len(std) != 6:
         log.error('assembly.trajectory_noise.std must have 6 entries [x,y,z (m), r,p,y (deg)].')
         return None
-    if tn.get('alternate_pitch_deg'):
-        log.warning('trajectory_noise.alternate_pitch_deg was REMOVED (2026-08-13). Ignored.')
     return {'enabled': bool(tn.get('enabled', False)), 'std': std,
             'window': max(1, int(tn.get('smooth_window', 25))),
             'decay_attempt': float(tn.get('noise_decay_attempt', 0.0)),
@@ -508,11 +502,6 @@ def build_and_run(cfg, robot, camera, args):
         log.error('assembly.target_frame %r has no targets: entry in %s.',
                   tname, tool_frames.frames_path(cfg))
         return False
-    if a.get('target_connector') or cfg.get('connector_holder_target'):
-        log.warning('assembly.target_connector / connector_holder_target are IGNORED -- the '
-                    'target now comes from the frames catalogue (targets: %r). Remove the old '
-                    'keys.', tname)
-
     task = _AssemblyTask(cfg, robot, camera, estimator)
     task.T_base_tconn = targets[tname]
     task.noise = _parse_traj_noise(a)

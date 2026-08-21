@@ -412,23 +412,24 @@ eval:
   final_insertion:
     enabled: true
     # --- compliance overrides (else compliance:) ---
-    stiffness: [500.0, 3000.0, 500.0, 10.0, 10.0, 10.0]
+    stiffness: [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
     mass: null
     damping_ratio: null
     settle_s: null               # logged settle at the stop; feeds no estimate here
-    hold_after_insertion_s: null # UN-GUARDED dwell -- the knob for pressing an irreversible
+    hold_after_insertion_s: 1.0  # UN-GUARDED dwell -- the knob for pressing an irreversible
                                  # mate home, or holding it while a force reading settles
     # --- force guard overrides (else force_guard:) ---
-    # The commit is where a HIGHER limit belongs: measured 2026-08-15, depth is the strongest
-    # predictor of a well-behaved estimate (deepest row > +3.9 mm -> 0.25 deg median error vs
-    # 1.62 deg below +2.1 mm), and the guard is what stops the part short.
-    max_force_n: null
-    max_torque_nm: null
-    persistence_s: null
+    # A deliberately LIGHT commit guard: the commit ends at first sustained contact and the
+    # press is bought with preload_mm + hold_after_insertion_s, not by pushing through.
+    max_force_n: 1.0
+    max_torque_nm: 8.0
+    persistence_s: 1.0
     # --- pacing, pause and noise for the commit ---
-    # SPEED: the probing passes are paced for gathering contact; the commit can go slower (a
-    # gentler seat, crisper stop) or faster. null = speed.max_cartesian_* x phase_scale.
-    speed_translation_mm_s: null
+    # SPEED: the probing passes are paced for gathering contact; the commit runs at an
+    # EXPLICIT 30 mm/s (null = speed.max_cartesian_* x phase_scale): the whole commit ramp is
+    # then shorter than the guard's persistence_s, so the light 1 N guard above provably
+    # cannot end the press mid-ramp -- it can only trip in the settle.
+    speed_translation_mm_s: 30.0
     speed_rotation_deg_s: null
     # PAUSE at the seat once the insertion finishes -- servo RELEASED, so the arm simply stands
     # still and presses with nothing. That is the difference from hold_after_insertion_s above,
@@ -458,7 +459,7 @@ eval:
     # trajectory with nothing like that left.
     #
     # 10.0 = exactly what the CSV's extra row was driving, so the commit is unchanged. 0 = off.
-    preload_mm: 5.0
+    preload_mm: 10.0
     # NOISE on the commit trajectory. OFF by default and deliberately so: the jitter exists to
     # gather varied contact while PROBING and has no place in the attempt meant to seat.
     # Enable it only to characterise the seat itself (e.g. how repeatably it mates under
@@ -492,7 +493,7 @@ estimation:
   # bnc_connector_finger_holder with the wrong y sign, which is a +91.4 mm offset along the
   # connector's own +x -- invisible straight-in, an 8 mm z lever arm at 5 deg of pitch. Anything
   # paired with this file must be in the same frame (see analysis/bnc_tuning/fix_obs_frame.py).
-  manifold_csv: ./configs/data/bnc_manifold_wiggle_prime_1M.csv
+  manifold_csv: ./configs/data/bnc_manifold_v6.csv
   # WRENCH REPRESENTATION: unit | rawcap | raw.
   #   unit    direction only -- magnitude discarded entirely.
   #   rawcap  direction x magnitude, SATURATED (see rawcap_* below).
@@ -565,7 +566,7 @@ estimation:
   # For the BNC maps, s_force 0.11 / s_torque 0.20 reproduces `unit`'s block loudness. The
   # "Metric block balance" line logged at startup reports what the metric actually weights,
   # so this does not have to be guessed.
-  wrench_representation: raw
+  wrench_representation: rawcap
   # rawcap SATURATION: the wrench feature is unit(f) x min(|f| / rawcap_force_ref_n,
   # rawcap_cap) -- magnitude in units of the reference, CAPPED at rawcap_cap. Saturation
   # therefore sits at ref x cap: 10 N x 3.0 = 30 N force, 1 Nm x 3.0 = 3 Nm torque. Above
@@ -579,7 +580,7 @@ estimation:
   # correction writes pitch into z at 1.60 mm/deg (the 91.4 mm lever arm, README section 13), so
   # the rotation channel is now partly carried by a translation channel and its explicit weight
   # has to come DOWN to keep the balance. Measured 1.00 -> 0.75 deg median with uniform weights.
-  scaling_constant_deg_to_mm: 1.0
+  scaling_constant_deg_to_mm: 0.25
   # PER-DIMENSION pose weights, ON TOP of the unit scaling above: the scaling constant stays
   # the mm <-> deg CONVERSION, dim_weights say how much each dimension MATTERS relative to the
   # others in the match (partial dicts fill with 1.0; delete the block for the uniform metric).
@@ -611,7 +612,7 @@ estimation:
   # (5.00 deg = no correction). Torque weight only hurt here: every s_torque > 0 variant
   # scored at or below its s_torque 0 sibling.
   scaling_constant_unit_force_to_mm: 1.0
-  scaling_constant_unit_torque_to_mm: 0.1
+  scaling_constant_unit_torque_to_mm: 1.0
   # PER-AXIS wrench weights -- the exact counterpart of dim_weights above, for the six wrench
   # feature columns. The two scalars above stay the BLOCK-level unit conversion; these say how
   # much each individual axis matters, so the metric has one weight per channel across all
@@ -634,7 +635,7 @@ estimation:
   # pitch-only correction has a CEILING OF 0% -- it cannot move z at all, and after the
   # connector-frame fix the true error carries a median 4.78 mm of z (README section 15). No
   # amount of tuning reaches the target from [pitch_deg]; measured 0% -> 20% by adding z_mm.
-  estimate_dims: [pitch_deg]
+  estimate_dims: [z_mm, pitch_deg]
   icp_iterations: 20
   num_initial_guesses: 1000
   # z_mm must span the true correction or the landscape is clipped: _landscape uses
@@ -642,9 +643,9 @@ estimation:
   init_guess_range:
     x_mm: 0.0
     y_mm: 0.0
-    z_mm: 0.0
+    z_mm: 10.0
     roll_deg: 0.0
-    pitch_deg: 10.0
+    pitch_deg: 5.0
     yaw_deg: 0.0
   step_gain: 1.0
   ransac_iters: 100
@@ -662,7 +663,7 @@ estimation:
   # all give 0.75 deg -- but it decides PRECISION: the fraction within 0.5 deg is 34% at k=128
   # and 44-46% at k=8. Large k smooths the energy curve (median local minima 6 -> 2), which is
   # real but was never the binding constraint; see README section 14.
-  interp_neighbors: 10
+  interp_neighbors: 8
   # ROWS the dense landscape is built from. With `commit: argmin` this curve IS the estimate, so
   # it is an ACCURACY setting: it was a hard-coded 120 in _landscape() justified as "the shape is
   # unaffected", which measurement contradicts -- 120 gives a 1.00 deg median that a fixed
@@ -685,7 +686,7 @@ estimation:
   # map changes the picture. NOTE per-block bandwidths shape the ENERGY paths (grid,
   # landscape, commit: argmin) while the multi-start ICP keeps the joint blend, so the two
   # stop agreeing exactly; the estimator logs a warning when a dict is set.
-  interp_softness: 1.0
+  interp_softness: 10.0
   # The logged wrench lives in the BELIEVED connector frame, so a candidate correction moves
   # it exactly as it moves the pose -- the same re-basing applied when a correction is
   # COMMITTED. Evaluating candidates without it scored every non-zero theta with its wrench in

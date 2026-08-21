@@ -70,5 +70,5 @@ force_guard:
   enabled: true
   max_force_n: 15.0              # a probe should FEEL the face, not press it
   max_torque_nm: 4.0
-  persistence_s: 1.0             # instant: the trip point IS the measurement here -- a
+  persistence_s: 0.0             # instant: the trip point IS the measurement here -- a
                                  # debounce would smear the contact pose by the extra travel

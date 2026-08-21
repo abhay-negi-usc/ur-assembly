@@ -239,7 +239,6 @@ assembly:
   # frame whose `targets:` entry is the recorded mate -- the same catalogue record
   # uncertain_sampling and estimator_eval assemble to, one per socket. MEASURE: hand-guide to a
   # good mate, read `base_link <- <frame>` off the monitor, paste it under targets: (mm/deg).
-  # (The old assembly.target_connector / connector_holder_target keys are IGNORED with a warning.)
   target_frame: banana_connector_finger_holder
 
   # The ideal insertion path: CONNECTOR w.r.t. the TARGET connector, last row = identity (the mate).

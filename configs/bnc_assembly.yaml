@@ -220,7 +220,7 @@ grasp_check:
 # equivalent joint bound for moveJ, and pacing the compliant reference ramps + moveL directly).
 speed:
   max_joint_velocity_deg_s: 90.0
-  max_joint_acceleration_deg_s2: 60.0
+  max_joint_acceleration_deg_s2: 30.0
   max_cartesian_translation_mm_s: 25.0
   max_cartesian_rotation_deg_s: 30.0
   retract_rotation_deg_s: 50.0
@@ -279,7 +279,7 @@ assembly:
   # Must name the SAME physical point as estimation.initial_connector_frame -- the target is
   # one side of the pose algebra and the belief is the other, so naming different points puts
   # the connector off by exactly their difference.
-  target_frame: bnc_connector_finger_holder
+  target_frame: bnc_connector_in_fingerpads
 
   # ---- WHERE THE TARGET POSE COMES FROM ------------------------------------------------------
   # kinematic  the recorded `targets:` entry above.  True only while nothing moves (fixture,
@@ -474,14 +474,16 @@ assembly:
     settle_s: null               # logged settle at the stop; feeds no estimate here
     hold_after_insertion_s: 1.0  # UN-GUARDED dwell -- for pressing an irreversible mate home
     # --- force guard overrides (else force_guard:) ---
-    # The commit is where a higher limit belongs: depth is the strongest predictor of a
-    # well-behaved estimate, and the guard is what stops the part short.
+    # A deliberately LIGHT commit guard: the commit ends at first sustained contact and the
+    # press is bought with preload_mm + hold_after_insertion_s, not by pushing through.
     max_force_n: 1.0
     max_torque_nm: 8.0
     persistence_s: 1.0
     # --- pacing, pause and noise for the commit ---
-    # null = speed.max_cartesian_* x phase_scale.
-    speed_translation_mm_s: null
+    # EXPLICIT commit speed (null = speed.max_cartesian_* x phase_scale.assemble): at 30 mm/s
+    # the whole commit ramp is shorter than the guard's persistence_s, so the light 1 N guard
+    # above provably cannot end the press mid-ramp -- it can only trip in the settle.
+    speed_translation_mm_s: 30.0
     speed_rotation_deg_s: null
     # PAUSE at the seat once the insertion finishes -- servo RELEASED (inspection time),
     # unlike hold_after_insertion_s which keeps pressing under admittance.  0 = off.
@@ -738,8 +740,9 @@ estimation:
   #   The `commit` column in trials.csv records what was used.
   commit: argmin
   # ---- THE IN-HAND BELIEF, decoupled from the grasp -----------------------------------------
-  # fingertip -> CONNECTOR (the same physical thing frames.yaml calls
-  # bnc_connector_finger_holder).  Without this key the app falls back to cables.yaml
+  # fingertip -> CONNECTOR (the frame assembly.target_frame is recorded through, so the
+  # two sides of the pose algebra name the same physical point).  Without this key the app
+  # falls back to cables.yaml
   # junction_in_fingertip -- which is tuned for the PICKUP and only coincides when the
   # connector frame sits exactly at the junction (it does not here; the two differ by 180 deg
   # and 45.7 mm).  Declared ONCE in configs/frames.yaml, parented to `fingertip`; the inline
@@ -875,10 +878,10 @@ compliance:
   enabled: true
   tare_before: true
   mass:          [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
-  # Unified across the map/eval/assembly chain: stiffness decides what force a given pose
-  # produces, so the app that BUILDS the map and every app matched against it must agree, or
-  # the observations sit off the map by construction.
-  stiffness:     [1500.0, 1500.0, 1500.0, 10.0, 10.0, 10.0]
+  # ONE stiffness across the map/eval/assembly chain: stiffness decides what force a given
+  # pose produces, so the app that BUILDS the map and every app matched against it must
+  # agree, or the observations sit off the map by construction.
+  stiffness:     [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
   damping_ratio: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0

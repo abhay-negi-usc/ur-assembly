@@ -32,6 +32,40 @@ camera:
   height: 720
   fps: 15                          # D405 max at 1280x720 is 15 fps
 
+# ---- FIDUCIALS (only used when assembly.target_source is `visual`) --------------------------
+# The rig itself -- which markers, their sizes, and the target's pose in each one -- lives in
+# configs/frames.yaml under marker_rigs:, keyed by assembly.target_frame, and is produced by
+# urlab.apps.marker_calibration. This block is only the detector's dictionary and the fallback
+# size for an id the rig does not declare (it should never need to use it).
+aruco:
+  dictionary: DICT_4X4_50
+  marker_size_m: 0.0203
+
+# THE VIEW SWEEP, shared with urlab.apps.marker_calibration (urlab/skills/marker_localize.py).
+# Offsets are CAMERA-FRAME poses relative to the view pose the sweep starts at; the markers are
+# assumed to be in view already.
+#
+# ONLY CAMERA TRANSLATION ADDS INFORMATION. A single ArUco pose is a four-point PnP on a small
+# planar square, and its weak direction -- rotation about an axis IN the marker plane -- trades
+# against depth. Moving a few centimetres sideways sees that trade-off from a different angle;
+# capturing more frames without moving averages sensor noise and leaves the bias exactly where it
+# was. That is why frames_per_view collapses to ONE view and the offsets are a ring.
+#
+# USE THE SAME BLOCK THE CALIBRATION USED. The rig's PnP biases cancel between calibration and run
+# only to the extent both see the same faces at the same obliquity.
+marker_views:
+  settle_s: 0.4
+  frames_per_view: 3               # captures averaged at each stop (sensor noise only)
+  min_views: 3                     # a marker seen from fewer viewpoints is DROPPED, not fused
+  min_markers: 2                   # at run time, refuse a single-marker answer: it has no check
+  require_all_markers: false       # a rig marker out of frame is tolerated if min_markers is met
+  aim_at_markers: true
+  max_view_spread_mm: 3.0          # spread ACROSS VIEWS of one marker -- warns
+  max_view_spread_deg: 3.0
+  max_disagreement_mm: 5.0         # spread ACROSS MARKERS -- REFUSES; null disables
+  max_disagreement_deg: 5.0
+  offsets: null                    # null = the built-in ring (centre, 40 mm x4, 25 mm closer)
+
 sam3:
   repo_path: /abhay_ws/sam3-abhay
   mode: junction
@@ -268,6 +302,38 @@ assembly:
   # estimation.initial_connector_frame -- the target is one side of
   # `T_base_targetobj @ row @ inverse(T_tool0_conn)` and the belief is the other, so
   # naming different points there puts the connector off by exactly their difference.
+
+  # ---- WHERE THE TARGET POSE COMES FROM ------------------------------------------------------
+  # kinematic  the recorded `targets:` entry above. True only while nothing moves -- the fixture,
+  #            the robot base, the calibration. The 2026-08 hose campaign lost a full estimator
+  #            session to exactly that drift, and nothing in the run could tell.
+  # visual     the fiducials bolted around the socket, calibrated once by
+  #            urlab.apps.marker_calibration into configs/frames.yaml marker_rigs:. Each marker
+  #            carries the target in ITS OWN frame, so the rig travels WITH the fixture: unbolt
+  #            it, move it, and the run still finds it.
+  #
+  # IT IS NOT MORE ACCURATE. The rig was solved against this same targets: entry, so it inherits
+  # every error that reading carried. What it adds is INVARIANCE plus a live cross-check: markers
+  # that disagree with each other, and a fixture that has moved further than max_shift_mm, are
+  # both things the kinematic path cannot notice at all.
+  #
+  # The sweep runs ONCE, after the start reset and BEFORE the pick -- gripper empty, arm at home,
+  # clear view of the socket. After the mate the socket is behind a connector and a gripper.
+  target_source: kinematic
+  visual_target:
+    # Joint degrees for the pose the sweep starts from. PIN IT, and use the SAME value for
+    # marker_calibration's view_joints_deg. null sweeps from HOME, which is wherever home happens
+    # to point -- it works only if the markers are already in frame there.
+    view_joints_deg: null
+    # Return to the home pose after the sweep. Keep true: the scan, the grasp geometry and every
+    # retry offset are written from home, so parking at a view pose silently moves the pick.
+    return_home_after: true
+    # SANITY GATE on how far the visual answer may sit from the recorded mate. The fixture is
+    # ALLOWED to move -- that is the point -- but a shift of the wrong ORDER (a metre, a quarter
+    # turn) is a stale calibration or a marker on the wrong fixture, and an insertion trajectory
+    # is an expensive way to discover that. null on either disables it.
+    max_shift_mm: 25.0
+    max_shift_deg: 10.0
 
   # ENGAGE CLOCK ANGLE, deg about the socket frame's own +X -- the roll the connector is MATED
   # at. A BNC is free about that axis until the bayonet pins pick up, so this is a free choice.

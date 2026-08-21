@@ -133,6 +133,44 @@ def pose_error(T_cur, T_des):
     return lin, float(2.0 * np.arccos(dot))
 
 
+def average_pose(mats, weights=None):
+    """Mean of several rigid poses, plus the SPREAD that says whether the mean means anything.
+
+    Returns (T_mean, lin_rms_m, ang_rms_rad).
+
+    Averaging rotation MATRICES element-wise gives back something that is not a rotation, and
+    averaging Euler angles is discontinuous at the wrap -- both silently wrong in exactly the
+    regime multi-view fusion lives in. The rotation mean here is Markley's: the eigenvector of
+    sum(w_i q_i q_i^T) for the largest eigenvalue, which is the rotation minimising the weighted
+    sum of squared chordal distances. The quaternion double cover (q and -q are the same
+    rotation) falls out of the outer product, so no sign alignment is needed and no view can be
+    flipped into the mean backwards.
+
+    THE SPREAD IS THE POINT. A fused marker pose from views that disagree by 5 mm is not a 5 mm
+    measurement averaged down -- it is a warning that the marker size, the hand-eye calibration
+    or the detection is wrong. Callers gate on these, so they are returned rather than logged."""
+    mats = [np.asarray(T, dtype=float) for T in mats]
+    if not mats:
+        raise ValueError('average_pose needs at least one pose')
+    w = np.ones(len(mats)) if weights is None else np.asarray(weights, dtype=float)
+    if w.shape != (len(mats),):
+        raise ValueError(f'weights must have one entry per pose ({len(mats)}), got {w.shape}')
+    if float(np.sum(w)) <= 0.0:
+        raise ValueError('weights must sum to something positive')
+    w = w / float(np.sum(w))
+
+    T = np.eye(4)
+    T[:3, 3] = np.sum([wi * M[:3, 3] for wi, M in zip(w, mats)], axis=0)
+    q = np.array([matrix_to_quat(M) for M in mats])
+    M = sum(wi * np.outer(qi, qi) for wi, qi in zip(w, q))
+    T[:3, :3] = Rotation.from_quat(np.linalg.eigh(M)[1][:, -1]).as_matrix()
+
+    errs = [pose_error(T, Mi) for Mi in mats]
+    lin = float(np.sqrt(np.sum(w * np.array([e[0] for e in errs]) ** 2)))
+    ang = float(np.sqrt(np.sum(w * np.array([e[1] for e in errs]) ** 2)))
+    return T, lin, ang
+
+
 def slerp_matrix(T0, T1, alpha):
     """Interpolate between two poses: LERP the translation, SLERP the rotation."""
     key = Rotation.from_quat([matrix_to_quat(T0), matrix_to_quat(T1)])

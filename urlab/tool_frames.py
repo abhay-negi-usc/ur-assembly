@@ -44,6 +44,10 @@ log = urlog.get('tool-frames')
 DEFAULT_PATH = os.path.join(CONFIG_DIR, 'frames.yaml')
 ROOT = 'tool0'
 POSE_KEYS = {'xyz', 'rpy', 'xyz_mm', 'rpy_deg'}
+# marker_rigs: entries carry a pose PLUS provenance. Sizes are load-bearing (solvePnP scales the
+# translation linearly with the side length it is told); the rest is for the operator.
+MARKER_SIZE_KEYS = {'size_mm', 'size_m'}
+MARKER_META_KEYS = {'views', 'residual_mm', 'residual_deg', 'measured', 'note'}
 
 # frames.yaml name -> the legacy per-config section that still feeds the Robot facade.
 LEGACY_SECTIONS = {'fingertip': 'fingertip_grasp', 'camera': 'hand_eye',
@@ -129,6 +133,78 @@ def load_targets(cfg=None, path=None):
             raise ValueError(f'{p}: target {name!r} has no matching frames: entry')
         targets[name] = _pose(dict(entry or {}), f'{p}: target {name!r}')
     return targets
+
+
+def load_marker_rigs(cfg=None, path=None):
+    """{target_name: rig} from the frames yaml `marker_rigs:` section.
+
+    A RIG is the fiducials bolted around one fixture, each carrying the TARGET's pose in ITS OWN
+    frame (marker <- target). That direction is the useful one: at run time the camera measures
+    T_base_marker, and T_base_marker @ T_marker_target is the target, so every marker in view is
+    an independent vote on where the fixture is and they can simply be averaged. Storing
+    target <- marker instead would need an inverse per marker per run and would read as if the
+    markers were being located, which is backwards -- the fixture is the unknown.
+
+    Shape:
+
+        marker_rigs:
+          bnc_connector_in_fingerpads:      # a frames: name -- what the rig locates
+            dictionary: DICT_4X4_50         # optional; absent = the app's aruco.dictionary
+            markers:
+              7:
+                size_mm: 20.3               # REQUIRED -- see ArucoDetector on why
+                xyz_mm:  [...]              # the target, expressed in marker 7's frame
+                rpy_deg: [...]
+
+    Returns {name: {'dictionary': str|None,
+                    'markers': {id: {'size_m': float, 'T_marker_target': 4x4, 'meta': {...}}}}}.
+
+    Fails LOUDLY on a rig for an undeclared frame, a non-integer id, a missing or non-positive
+    size, and unknown keys -- the same rule the rest of this file follows, because a marker typo
+    would otherwise put the whole fixture somewhere plausible and wrong."""
+    p = path or frames_path(cfg)
+    doc = _read(p)
+    declared = set(doc.get('frames') or {}) | {ROOT}
+    rigs = {}
+    for name, entry in (doc.get('marker_rigs') or {}).items():
+        if name not in declared:
+            raise ValueError(f'{p}: marker_rigs {name!r} has no matching frames: entry')
+        e = dict(entry or {})
+        dictionary = e.pop('dictionary', None)
+        raw_markers = e.pop('markers', None)
+        if e:
+            raise ValueError(f'{p}: marker_rigs {name!r} has unknown key(s) {sorted(e)} -- '
+                             "allowed: ['dictionary', 'markers']")
+        if not raw_markers:
+            raise ValueError(f'{p}: marker_rigs {name!r} declares no markers')
+        markers = {}
+        for raw_id, m_entry in raw_markers.items():
+            try:
+                mid = int(raw_id)
+            except (TypeError, ValueError):
+                raise ValueError(f'{p}: marker_rigs {name!r} has non-integer marker id '
+                                 f'{raw_id!r}') from None
+            m = dict(m_entry or {})
+            where = f'{p}: marker_rigs {name!r} marker {mid}'
+            sizes = MARKER_SIZE_KEYS & set(m)
+            if not sizes:
+                raise ValueError(f'{where} has no size_mm -- solvePnP scales the marker\'s '
+                                 'distance linearly with the side length, so an undeclared size '
+                                 'is a silent depth error, not a missing default')
+            if len(sizes) > 1:
+                raise ValueError(f'{where} sets both size_mm and size_m; use one unit')
+            size_m = float(m.pop('size_m')) if 'size_m' in m else float(m.pop('size_mm')) / 1000.0
+            if not size_m > 0.0:
+                raise ValueError(f'{where} has a non-positive size')
+            meta = {k: m.pop(k) for k in list(m) if k in MARKER_META_KEYS}
+            markers[mid] = {'size_m': size_m, 'T_marker_target': _pose(m, where), 'meta': meta}
+        rigs[name] = {'dictionary': dictionary, 'markers': markers}
+    return rigs
+
+
+def marker_sizes(rig):
+    """{marker_id: size_m} for a rig -- what ArucoDetector(sizes_m=) wants."""
+    return {mid: m['size_m'] for mid, m in rig['markers'].items()}
 
 
 def resolve_held_and_target(frames, targets, held_name, target_name=None, path=None):

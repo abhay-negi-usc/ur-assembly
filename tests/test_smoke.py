@@ -9,6 +9,7 @@ config loader, and the connector-fusion geometry against a synthetic ground trut
 
 import math
 import os
+import re
 import sys
 
 import numpy as np
@@ -5293,9 +5294,17 @@ def test_engage_clock_angle_places_the_sweep_without_changing_the_insertion():
         'caller downstream can forget it or apply it twice')
     assert 'T_base_targetobj = T_base_tconn @ inverse(mats[-1])' in src, \
         'the trajectory must be anchored on the ROLLED frame'
-    assert src.count('T_base_socket') == 2, (
-        'the raw socket frame exists only to build the rolled one -- anything else reading it '
-        'would be working at a different clock angle from the rest of the app')
+    # THE RAW SOCKET FRAME IS WRITE-ONCE-READ-ONCE. Anything else READING it would be working at
+    # a different clock angle from the rest of the app. Checked as a rule rather than a count,
+    # because target_source: visual legitimately re-anchors the run on a measured socket pose --
+    # which assigns it again and rebuilds the rolled frame from it, exactly as the rule intends.
+    uses = [ln.strip() for ln in src.splitlines() if 'T_base_socket' in ln
+            and not ln.strip().startswith('#')]
+    reads = [ln for ln in uses
+             if not re.match(r'^(nonlocal .*|T_base_socket = )', ln)]
+    assert reads == ['T_base_tconn = T_base_socket @ R_clock'] * len(reads) and reads, (
+        'the raw socket frame exists only to build the rolled one; found other reads: '
+        f'{[ln for ln in reads if ln != "T_base_tconn = T_base_socket @ R_clock"]}')
     # the estimator matches a map collected at ONE clock angle, so a non-zero roll must say so
     tail = src[src.index('T_base_tconn = T_base_socket @ R_clock'):]
     assert "ins_mode == 'estimate'" in tail[:2500] and 'manifold' in tail[:2500], (
@@ -5837,3 +5846,273 @@ def test_the_prewind_is_verified_from_measured_joints_before_the_collar_is_clamp
         'gripper closes -- a refusal with open fingers is free, one with the collar clamped is not')
     assert 'w_lo + cl_w3_margin' in body and 'w_hi - cl_w3_margin' in body, (
         'the re-check must test the whole turn against the same window the prewind used')
+
+
+# ===================================================================================================
+# MARKER RIGS -- locating the fixture by looking at the fiducials bolted around it.
+# ===================================================================================================
+
+def test_average_pose_is_a_rotation_mean_not_an_elementwise_one():
+    """Fusing views means averaging SE(3), and the two obvious ways of doing it are both wrong.
+
+    Averaging rotation MATRICES element-wise gives back something that is not a rotation at all;
+    averaging Euler angles is discontinuous at the wrap, so two views either side of +/-180 average
+    to the pose exactly opposite the right one. Markley's quaternion mean has neither failure, and
+    the double cover (q and -q name the same rotation) falls out of the outer product rather than
+    needing a sign pass -- which is the part a hand-rolled version gets wrong.
+    """
+    from urlab.transforms import average_pose
+
+    rng = np.random.default_rng(11)
+    T0 = T.xyzrpy_to_matrix([0.3, 0.4, 0.5], np.radians([10.0, 20.0, 30.0]))
+    views = [T0 @ T.xyzrpy_to_matrix(rng.normal(0, 0.001, 3),
+                                     rng.normal(0, np.radians(0.5), 3)) for _ in range(40)]
+    T_avg, lin, ang = average_pose(views)
+
+    R = T_avg[:3, :3]
+    assert np.allclose(R @ R.T, np.eye(3), atol=1e-12), 'the mean must BE a rotation'
+    assert abs(float(np.linalg.det(R)) - 1.0) < 1e-12, 'and a proper one'
+    l0, a0 = T.pose_error(T_avg, T0)
+    assert l0 * 1000.0 < 0.5 and np.degrees(a0) < 0.5, (
+        f'40 noisy views must recover the truth, got {l0 * 1000:.3f} mm / {np.degrees(a0):.3f} deg')
+    assert lin > 0 and ang > 0, 'the spread is what says whether the mean means anything'
+
+    # THE WRAP. Two poses either side of the +/-180 branch: an Euler mean lands 180 deg away.
+    a = T.xyzrpy_to_matrix([0, 0, 0], np.radians([0.0, 0.0, +179.0]))
+    b = T.xyzrpy_to_matrix([0, 0, 0], np.radians([0.0, 0.0, -179.0]))
+    mid, _l, _a = average_pose([a, b])
+    assert T.pose_error(mid, T.xyzrpy_to_matrix([0, 0, 0], np.radians([0, 0, 180.0])))[1] < 1e-9, (
+        'the mean of +179 and -179 deg is 180, not 0 -- averaging Euler angles gives 0')
+    # ...and averaging the MATRICES elementwise would not even be a rotation
+    naive = (a[:3, :3] + b[:3, :3]) / 2.0
+    assert not np.allclose(naive @ naive.T, np.eye(3), atol=1e-6), (
+        'this test has lost its subject: an elementwise matrix mean is supposed to leave the '
+        'orthogonality behind, which is why it cannot be used')
+
+    # ONE POSE IS ITS OWN MEAN, with zero spread -- the degenerate case a fold can get wrong.
+    only, l1, a1 = average_pose([T0])
+    assert np.allclose(only, T0) and l1 == 0.0 and a1 == 0.0
+
+
+def test_a_marker_rig_round_trips_calibration_into_localization():
+    """Calibrate -> paste -> localise must return the fixture, including after it MOVES.
+
+    This is the whole feature in one arc, and it is worth pinning end to end because the two halves
+    are written as inverses of each other: the calibration solves inverse(T_base_marker) @ target
+    and the run-time solves T_base_marker @ that. Flip either and every number still looks
+    plausible -- the poses stay well-formed, the residuals stay small, and the fixture lands
+    somewhere confidently wrong.
+    """
+    from urlab.skills import marker_localize as mloc
+
+    class Plan:                       # the ViewPlan fields the pure functions read
+        min_views, min_markers, require_all = 3, 2, False
+        max_view_spread_mm = max_view_spread_deg = 3.0
+        max_disagreement_mm = max_disagreement_deg = 5.0
+
+    rng = np.random.default_rng(7)
+    T_target = T.xyzrpy_to_matrix([0.048, 1.087, -0.155], np.radians([-0.93, -0.41, 94.28]))
+    rig_geom = {7: T.xyzrpy_to_matrix([0.00, -0.06, 0.03], np.radians([90.0, 0.0, 0.0])),
+                8: T.xyzrpy_to_matrix([0.05, -0.06, -0.02], np.radians([90.0, 0.0, 25.0])),
+                9: T.xyzrpy_to_matrix([-0.05, -0.06, 0.01], np.radians([90.0, 0.0, -25.0]))}
+
+    def views(truth, n=5):
+        """n noisy sightings of each marker, as the sweep would return them."""
+        return {mid: [Tm @ T.xyzrpy_to_matrix(rng.normal(0, 0.0006, 3),
+                                              rng.normal(0, np.radians(0.4), 3))
+                      for _ in range(n)]
+                for mid, Tm in truth.items()}
+
+    truth = {mid: T_target @ rel for mid, rel in rig_geom.items()}
+    offsets = mloc.solve_offsets(mloc.fuse_markers(views(truth), Plan), T_target)
+    assert set(offsets) == set(rig_geom)
+    for mid, rel in rig_geom.items():
+        # the solved offset is the target in the MARKER's frame -- i.e. the inverse of the geometry
+        lin, ang = T.pose_error(T.inverse(rel), offsets[mid])
+        assert lin * 1000.0 < 1.0 and np.degrees(ang) < 1.0, (
+            f'marker {mid} solved {lin * 1000:.2f} mm / {np.degrees(ang):.2f} deg from its true '
+            'offset -- the calibration direction is marker <- target')
+
+    rig = {'dictionary': None,
+           'markers': {m: {'size_m': 0.0203, 'T_marker_target': o, 'meta': {}}
+                       for m, o in offsets.items()}}
+
+    # ---- THE FIXTURE MOVES, which is the only thing the rig buys over a recorded mate ----
+    moved = T.xyzrpy_to_matrix([0.012, -0.007, 0.004], np.radians([0.5, -0.3, 1.2]))
+    truth = {mid: moved @ Tm for mid, Tm in truth.items()}
+    T_est, votes = mloc.vote_target(rig, mloc.fuse_markers(views(truth), Plan), Plan)
+    assert T_est is not None and len(votes) == 3
+    lin, ang = T.pose_error(moved @ T_target, T_est)
+    assert lin * 1000.0 < 2.0 and np.degrees(ang) < 1.0, (
+        f'the rig must follow the fixture, got {lin * 1000:.2f} mm / {np.degrees(ang):.2f} deg')
+
+    # ---- A STALE MARKER IS REFUSED, NOT AVERAGED ----
+    # This is the failure the whole design is built around: a marker knocked or re-stuck still
+    # produces a confident pose, and averaging it into two good ones splits the difference and
+    # drives the insertion at a fixture that is not there.
+    truth[8] = truth[8] @ T.xyzrpy_to_matrix([0.015, 0.0, 0.0], [0.0, 0.0, 0.0])
+    T_bad, bad_votes = mloc.vote_target(rig, mloc.fuse_markers(views(truth), Plan), Plan)
+    assert len(bad_votes) == 3, 'all three still VOTE -- the point is what happens next'
+    assert T_bad is None, (
+        'markers that disagree past max_disagreement_mm must REFUSE, not average: a 15 mm stale '
+        'marker averaged with two good ones is a 5 mm error with no symptom')
+
+    # ---- A MARKER SEEN TOO FEW TIMES IS DROPPED, and min_markers then bites ----
+    thin = views(truth, n=5)
+    thin[9] = thin[9][:2]
+    assert 9 not in mloc.fuse_markers(thin, Plan), (
+        'a marker seen from fewer than min_views viewpoints carries the full PnP depth/tilt '
+        'ambiguity -- letting it vote spends the rig on its worst member')
+
+
+def test_marker_rig_yaml_round_trips_through_the_loader():
+    """What marker_calibration PRINTS must be what frames.yaml can LOAD -- it is pasted by hand."""
+    import tempfile
+
+    from urlab import tool_frames
+    from urlab.skills import marker_localize as mloc
+
+    offsets = {7: T.xyzrpy_to_matrix([0.01, -0.03, 0.05], np.radians([-89.9, 0.2, 0.1])),
+               8: T.xyzrpy_to_matrix([-0.02, 0.02, -0.07], np.radians([-89.7, -25.0, 3.0]))}
+    fused = {m: (np.eye(4), 0.0009, np.radians(0.4), 5) for m in offsets}
+    block = mloc.yaml_block('bnc_connector_in_fingerpads', offsets, fused,
+                            {m: 0.0203 for m in offsets}, 'DICT_4X4_50', '2026-08-21')
+    doc = ('frames:\n  bnc_connector_in_fingerpads:\n    xyz_mm: [0, 0, 0]\n'
+           '    rpy_deg: [0, 0, 0]\n' + block + '\n')
+
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, 'frames.yaml')
+        with open(p, 'w') as fh:
+            fh.write(doc)
+        rig = tool_frames.load_marker_rigs(path=p)['bnc_connector_in_fingerpads']
+        assert rig['dictionary'] == 'DICT_4X4_50'
+        got = tool_frames.marker_sizes(rig)
+        assert sorted(got) == [7, 8] and all(abs(v - 0.0203) < 1e-12 for v in got.values())
+        for mid, want in offsets.items():
+            lin, ang = T.pose_error(want, rig['markers'][mid]['T_marker_target'])
+            # the block prints monitor units at 2 dp, like the rest of frames.yaml
+            assert lin * 1000.0 < 0.02 and np.degrees(ang) < 0.02, (
+                f'marker {mid} did not survive the print/parse round trip')
+
+        # ---- THE LOUD FAILURES. A marker typo must stop the run, never misplace the fixture. ----
+        def rig_doc(markers):
+            return ('frames:\n  fix:\n    xyz_mm: [0, 0, 0]\n    rpy_deg: [0, 0, 0]\n'
+                    'marker_rigs:\n  fix:\n    markers:\n' + markers)
+
+        good = '      7:\n        size_mm: 20.3\n        xyz_mm: [0, 0, 0]\n' \
+               '        rpy_deg: [0, 0, 0]\n'
+        cases = {
+            'no size': '      7:\n        xyz_mm: [0, 0, 0]\n        rpy_deg: [0, 0, 0]\n',
+            'both units': '      7:\n        size_mm: 20.3\n        size_m: 0.0203\n'
+                          '        xyz_mm: [0, 0, 0]\n        rpy_deg: [0, 0, 0]\n',
+            'no pose': '      7:\n        size_mm: 20.3\n',
+            'pose typo': '      7:\n        size_mm: 20.3\n        xyz_m: [0, 0, 0]\n',
+        }
+        for why, markers in cases.items():
+            with open(p, 'w') as fh:
+                fh.write(rig_doc(markers))
+            try:
+                tool_frames.load_marker_rigs(path=p)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f'{why!r} must be rejected -- a marker typo would otherwise '
+                                     'put the whole fixture somewhere plausible and wrong')
+
+        # a rig for a frame that is not declared is a typo, not a definition
+        with open(p, 'w') as fh:
+            fh.write(rig_doc(good).replace('marker_rigs:\n  fix:', 'marker_rigs:\n  nope:'))
+        try:
+            tool_frames.load_marker_rigs(path=p)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('a rig for an undeclared frames: entry must be rejected')
+
+        # ...and the good one still loads, so the cases above are rejecting the RIGHT thing
+        with open(p, 'w') as fh:
+            fh.write(rig_doc(good))
+        assert 7 in tool_frames.load_marker_rigs(path=p)['fix']['markers']
+
+
+def test_marker_sizes_are_per_id_and_never_defaulted():
+    """solvePnP scales a marker's DISTANCE linearly with the side length it is told.
+
+    So a marker solved at the wrong size lands at the wrong depth -- a 20 mm marker solved as 30 mm
+    sits 1.5x too far away -- while the reprojection error stays perfect, because the shape in the
+    image is still a square. There is nothing in the picture to catch it, which is why the size is
+    required per id rather than defaulted from one detector-wide number.
+    """
+    from urlab.apps.marker_calibration import parse_markers
+
+    got = parse_markers({7: 20.3, 8: {'size_mm': 30.0}})
+    assert sorted(got) == [7, 8]
+    assert abs(got[7] - 0.0203) < 1e-12 and abs(got[8] - 0.030) < 1e-12
+    assert abs(parse_markers({'9': 20.3})[9] - 0.0203) < 1e-12, (
+        'yaml keys may arrive as strings')
+    for bad, why in (({}, 'an empty block'),
+                     ({7: None}, 'an id with no size'),
+                     ({7: 0}, 'a non-positive size'),
+                     ({'x': 20.3}, 'a non-integer id'),
+                     ({7: {'size_mm': 20.3, 'size_m': 0.0203}}, 'two units at once'),
+                     ({7: {'size_mm': 20.3, 'colour': 'red'}}, 'an unknown key')):
+        try:
+            parse_markers(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f'{why} must be rejected')
+
+    # the detector must ASK per id rather than carrying one size
+    src = open(os.path.join(ROOT, 'urlab', 'perception', 'aruco.py'), encoding='utf-8').read()
+    assert 'def size_of(self, marker_id)' in src and 'self.size_of(marker_id)' in src, (
+        'solvePnP must be given the size of the marker it is solving, not the detector default')
+    assert 'self.obj_points, img_points' not in src, (
+        'the shared obj_points buffer is what made every marker the same size')
+
+
+def test_visual_target_reanchors_every_frame_the_run_plans_from():
+    """`target_source: visual` must move the WHOLE run onto the measured socket, not part of it.
+
+    The target has exactly four parse-time products -- the rolled connector frame, the clocking
+    frame, the trajectory anchor and the commit pose -- and every maneuver reads one of them
+    through the closure. Re-anchoring a subset would put the insertion trajectory at one place and
+    the clocking axes at another, which no single log line would reveal.
+    """
+    src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8').read()
+    body = src[src.index('def _anchor_target('):src.index('_sh_m, _sh_r = pose_error(')]
+    for name in ('T_base_socket', 'T_base_tconn', 'T_clk', 'T_base_targetobj', 'T_base_commit'):
+        assert f'{name} = ' in body, f'_anchor_target must rebind {name}'
+    assert 'nonlocal' in body, (
+        'the maneuvers read these through the closure, so they must be REBOUND in the enclosing '
+        'scope -- a local copy would leave every nested function on the kinematic pose')
+
+    # THE ORDER: validated at parse, run after the reset, before the pick.
+    assert (src.index("tgt_source = str(a.get('target_source')")
+            < src.index('def _anchor_target(')), (
+        'the source must be validated while the config is being read')
+    assert (src.index("log.error('assembly.target_source is visual but %s has no marker_rigs:")
+            < src.index("reset.reset_robot(robot, cfg, 'start reset')")), (
+        'a missing rig is a config typo -- it must fail before the arm homes and drives to a view '
+        'pose, not three moves in')
+    i_reset = src.index("reset.reset_robot(robot, cfg, 'start reset')")
+    i_call = src.index("tgt_source == 'visual' and not locate_target_visually(q_home)")
+    i_pick = src.index('result = _pick(cfg, robot, scanner')
+    assert i_reset < i_call < i_pick, (
+        'the sweep runs with the gripper EMPTY and the arm at home -- after the mate the socket is '
+        'behind a connector and a gripper, so this is the only moment the markers are visible')
+
+    # THE SANITY GATE. The fixture may move -- that is the point -- but not by a metre.
+    loc = src[i_call - 6000:i_pick]
+    assert 'max_shift_mm' in loc and 'Refusing to plan an insertion at it' in loc, (
+        'a visual pose wildly far from the recorded mate is a stale rig or a marker on the wrong '
+        'fixture; driving an insertion trajectory at it is the expensive way to find out')
+
+    # THE SHIPPED DEFAULT stays kinematic -- the rig has to be calibrated before it can be trusted.
+    from urlab import config as urconfig
+    a = urconfig.load('bnc_assembly').section('assembly')
+    assert str(a.get('target_source')).lower() == 'kinematic', (
+        'ship the kinematic path: target_source: visual with no marker_rigs: entry would fail '
+        'every run until someone calibrates one')
+    vt = a.get('visual_target') or {}
+    assert vt.get('return_home_after') is True, (
+        'the scan, the grasp geometry and every retry offset are written from the home pose')

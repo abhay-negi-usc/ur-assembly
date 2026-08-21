@@ -123,3 +123,46 @@ targets:
   bnc_connector_in_fingerpads:
     xyz_mm:  [48.07, 1086.94, -155.50]
     rpy_deg: [-0.93, -0.41, 94.28]
+
+# ============================================================================
+# MARKER RIGS -- the fiducials bolted around a target, each carrying the TARGET's pose in ITS OWN
+# frame (marker <- target). Produced by urlab.apps.marker_calibration; consumed by
+# bnc_assembly's `assembly.target_source: visual`, which detects the markers, lets each vote
+# T_base_marker @ T_marker_target, and averages the votes.
+#
+# WHY THIS DIRECTION. The fixture is the unknown; the markers are what the camera measures. Storing
+# marker <- target means a run-time localisation is one multiply per marker and reads the way it
+# works. target <- marker would need an inverse per marker per run and would read as if the markers
+# were being located, which is backwards.
+#
+# WHY IT LIVES HERE and not in cables.yaml: a rig belongs to a FIXTURE, not to a cable. The same
+# socket is approached with whatever connector the run is carrying, and cables.yaml is per-cable
+# gripper endpoints and grasp geometry. The rig key is a `targets:` name.
+#
+# ACCURACY. A rig is calibrated by TRANSFERRING the recorded `targets:` pose above onto the
+# markers, so it is exactly as accurate as that reading was -- re-record the target BEFORE
+# calibrating. What the rig buys is INVARIANCE: the fixture can be unbolted and moved and still be
+# found, which a recorded kinematic mate cannot survive.
+#
+# SIZES ARE REQUIRED PER MARKER and are load-bearing. solvePnP scales a marker's distance LINEARLY
+# with the side length it is told, so a marker solved at the wrong size lands at the wrong depth
+# with a perfect reprojection behind it -- there is nothing in the image to catch it. Measure the
+# printed BLACK SQUARE edge to edge; the white quiet zone is not part of the marker.
+#
+#   marker_rigs:
+#     bnc_connector_in_fingerpads:     # a frames: name -- the frame this rig locates
+#       dictionary: DICT_4X4_50        # optional; absent = the app's aruco.dictionary
+#       markers:
+#         7:
+#           size_mm: 20.3
+#           xyz_mm:  [+12.40, -38.10, +5.20]    # the TARGET, expressed in marker 7's frame
+#           rpy_deg: [-90.00, +0.00, +180.00]
+#           views: 6                            # provenance, ignored by the loader
+#           residual_mm: 0.42
+#           residual_deg: 0.31
+#           measured: 2026-08-21
+#
+# Paste the block urlab.apps.marker_calibration prints (also written to its run directory as
+# marker_rigs.yaml). Uncomment and fill in once a rig has been calibrated -- an empty or absent
+# section simply means no rig exists, and `target_source: visual` will say so by name.
+# ============================================================================

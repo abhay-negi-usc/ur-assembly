@@ -97,7 +97,7 @@ from .. import log as urlog
 from .. import tool_frames
 from ..log import StepRunner
 from ..robot import AdmittanceController, ForceGuard
-from ..skills import manifold_debug, reset
+from ..skills import manifold_debug, marker_localize as mloc, reset
 from ..skills import trajectory as traj
 from ..skills import wiggle as wigmod
 from ..skills.manifold import mats_from_vec6, vec6_from_mats
@@ -729,6 +729,50 @@ def build_and_run(cfg, robot, camera, args):
                   tname, tool_frames.frames_path(cfg))
         return False
     T_base_socket = targets[tname]
+
+    # ---- WHERE THE TARGET COMES FROM: assembly.target_source -----------------------------------
+    # kinematic  the recorded targets: pose above. It is a reading taken by hand-guiding to a good
+    #            mate, and it is only true while nothing moves -- the fixture, the robot base, the
+    #            calibration. The 2026-08 hose campaign lost a session to exactly that drift.
+    # visual     fiducials bolted around the socket, calibrated once by apps/marker_calibration.
+    #            Each marker carries the target in ITS OWN frame, so the rig travels WITH the
+    #            fixture: unbolt it, move it, and the run still finds it.
+    #
+    # THE VISUAL ANSWER IS NOT MORE ACCURATE THAN THE RECORD IT WAS CALIBRATED FROM -- the rig was
+    # solved against this same targets: entry, so it inherits every error that reading carried.
+    # What it adds is INVARIANCE, and a live check: markers that disagree with each other, or a
+    # fixture that has moved further than max_shift_mm, are things the kinematic path cannot
+    # notice at all.
+    tgt_source = str(a.get('target_source') or 'kinematic').strip().lower()
+    if tgt_source not in ('kinematic', 'visual'):
+        log.error("assembly.target_source must be 'kinematic' or 'visual', got %r.",
+                  a.get('target_source'))
+        return False
+    vt = a.get('visual_target', {}) or {}
+    vt_rig = None
+    if tgt_source == 'visual':
+        # VALIDATED HERE, at parse time, not after the arm has already homed and driven to a view
+        # pose: a missing rig is a config typo, and finding out about it three moves in wastes a
+        # run and leaves the operator guessing which name was wrong.
+        try:
+            rigs = tool_frames.load_marker_rigs(cfg)
+        except ValueError as exc:
+            log.error('assembly.target_source is visual but %s', exc)
+            return False
+        vt_rig = rigs.get(tname)
+        if vt_rig is None:
+            log.error('assembly.target_source is visual but %s has no marker_rigs: entry for %r '
+                      '(rigs present: %s). Calibrate one with urlab.apps.marker_calibration.',
+                      tool_frames.frames_path(cfg), tname,
+                      ', '.join(sorted(rigs)) or 'none')
+            return False
+        log.info('Target source: VISUAL -- rig %r, markers %s (%s mm).', tname,
+                 ', '.join(str(m) for m in sorted(vt_rig['markers'])),
+                 ', '.join('%.1f' % (m['size_m'] * 1000.0)
+                           for _i, m in sorted(vt_rig['markers'].items())))
+    else:
+        log.info('Target source: KINEMATIC -- the recorded targets: pose of %r.', tname)
+
     # ---- ENGAGE CLOCK ANGLE: the roll the connector is MATED at ------------------------------
     # A BNC is free about its own axis until the bayonet pins pick up, so the clock angle it is
     # ENGAGED at is a free parameter. Applied ONCE, here, as a roll of the FRAME: every pose in
@@ -780,6 +824,21 @@ def build_and_run(cfg, robot, camera, args):
     # A press belongs in final_insertion.preload_mm, which applies to the COMMIT alone.
     T_base_targetobj = T_base_tconn @ inverse(mats[-1])
     T_base_commit = T_base_targetobj @ translation_matrix([fi_preload_mm / 1000.0, 0.0, 0.0])
+
+    def _anchor_target(T_socket):
+        """Rebuild EVERY frame the run plans from, off a (re)measured socket pose.
+
+        These four are the only parse-time products of the target, and each nested maneuver reads
+        them through the closure at call time -- so rebinding them here is enough to move the whole
+        run onto a new socket pose. Rebinding a subset instead would put the trajectory at one
+        place and the clocking axes at another, which is the failure mode this exists to prevent."""
+        nonlocal T_base_socket, T_base_tconn, T_clk, T_base_targetobj, T_base_commit
+        T_base_socket = T_socket
+        T_base_tconn = T_base_socket @ R_clock
+        T_clk = T_base_tconn
+        T_base_targetobj = T_base_tconn @ inverse(mats[-1])
+        T_base_commit = T_base_targetobj @ translation_matrix([fi_preload_mm / 1000.0, 0.0, 0.0])
+
     _sh_m, _sh_r = pose_error(T_base_targetobj, T_base_tconn)
     if _sh_m * 1000.0 > 1e-6 or np.degrees(_sh_r) > 1e-6:
         log.warning('trajectory_csv\'s last row is NOT identity (off by %.2f mm / %.2f deg) -- '
@@ -2231,11 +2290,85 @@ def build_and_run(cfg, robot, camera, args):
         return True
 
 
+    def locate_target_visually(q_return):
+        """Drive to the view pose, sweep the markers, and re-anchor the run on what they say.
+
+        RUNS BEFORE THE PICK, with the gripper empty and the arm at home: the camera has a clear
+        view of the fixture, and nothing is being carried that a view sweep could disturb. After
+        the mate the socket is behind a connector and a gripper, so this is the only moment the
+        markers are worth looking at."""
+        from ..perception import ArucoDetector
+
+        if camera is None:
+            log.error('assembly.target_source is visual but the app has no camera.')
+            return False
+        try:
+            plan = mloc.ViewPlan(cfg.section('marker_views'))
+        except ValueError as exc:
+            log.error('marker_views: %s', exc)
+            return False
+        detector = ArucoDetector(cfg, sizes_m=tool_frames.marker_sizes(vt_rig))
+
+        phase('scan')
+        q_view = vt.get('view_joints_deg')
+        if q_view is not None:
+            log.info('VISUAL TARGET: driving to the view pose %s deg.',
+                     list(np.round(np.asarray(q_view, dtype=float), 1)))
+            if not robot.arm.move_j(list(np.radians(np.asarray(q_view, dtype=float))),
+                                    label='marker view pose'):
+                log.error('VISUAL TARGET: could not reach '
+                          'assembly.visual_target.view_joints_deg.')
+                return False
+        else:
+            log.warning('VISUAL TARGET: no view_joints_deg -- sweeping from the HOME pose. Pin a '
+                        'view pose that sees the markers the way the calibration did; home is '
+                        'only where the arm happens to be.')
+
+        T_vis = mloc.locate(robot, camera, detector, vt_rig, plan)
+        if q_return is not None and vt.get('return_home_after', True):
+            # BACK TO HOME BEFORE THE PICK, whatever the localisation decided: the scan, the grasp
+            # geometry and every retry offset are written from the home pose, and leaving the arm
+            # parked at a view pose would silently change where the pick starts.
+            phase('reset')
+            if not robot.arm.move_j(q_return, label='home after the marker sweep'):
+                log.error('VISUAL TARGET: could not return home after the sweep.')
+                return False
+        if T_vis is None:
+            log.error('VISUAL TARGET: the markers did not produce a target pose. Nothing has '
+                      'moved and the recorded mate is untouched -- re-run with '
+                      'assembly.target_source: kinematic to use it, or fix the rig.')
+            return False
+
+        # HOW FAR THE FIXTURE HAS APPARENTLY MOVED. Not an error by itself -- the whole point of
+        # the rig is that the fixture MAY move -- but a shift of the wrong ORDER (a metre, a
+        # quarter turn) is a stale calibration or a marker on the wrong fixture, and driving an
+        # insertion trajectory at it would be the expensive way to find out.
+        d_lin, d_ang = pose_error(targets[tname], T_vis)
+        lim_mm = vt.get('max_shift_mm', 25.0)
+        lim_deg = vt.get('max_shift_deg', 10.0)
+        over = ((lim_mm is not None and d_lin * 1000.0 > float(lim_mm))
+                or (lim_deg is not None and np.degrees(d_ang) > float(lim_deg)))
+        (log.error if over else log.info)(
+            'VISUAL TARGET: the markers put %r %.2f mm / %.2f deg from the recorded mate%s.',
+            tname, d_lin * 1000.0, np.degrees(d_ang),
+            ' -- OVER assembly.visual_target.max_shift_mm/_deg (%s mm / %s deg)'
+            % (lim_mm, lim_deg) if over else '')
+        if over:
+            log.error('  Refusing to plan an insertion at it. If the fixture really did move that '
+                      'far, raise the limit or re-record the targets: entry; otherwise the rig is '
+                      'stale or a marker is on the wrong fixture.')
+            return False
+        _anchor_target(T_vis)
+        log.info('VISUAL TARGET: the run is now anchored on the MEASURED socket pose.')
+        return True
+
     # ---- RESET + PICK + slip-checked LIFT (identical to cable_pick_estimate_assemble) ----
     phase('reset')
     if not reset.reset_robot(robot, cfg, 'start reset'):
         return False
     q_home = robot.arm.q()
+    if tgt_source == 'visual' and not locate_target_visually(q_home):
+        return False
     attempt = 0
     runner = StepRunner(log, confirm=confirm is not None)
     while True:

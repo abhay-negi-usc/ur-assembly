@@ -22,19 +22,44 @@ def get_dictionary(name):
 
 
 class ArucoDetector:
-    """Detects markers and returns their poses in the CAMERA OPTICAL frame."""
+    """Detects markers and returns their poses in the CAMERA OPTICAL frame.
 
-    def __init__(self, cfg):
+    SIZE IS PER MARKER, not per detector. A rig of fiducials around one fixture is usually mixed
+    -- a big marker where there is room, small ones squeezed beside the socket -- and solvePnP
+    scales the translation LINEARLY with the side length it is told, so one wrong size does not
+    degrade a pose, it puts the marker at the wrong DEPTH by that ratio (a 20 mm marker solved as
+    30 mm lands 1.5x too far away) while the reprojection stays perfect. There is nothing in the
+    image to catch it. So sizes are declared per id -- `aruco.marker_sizes_m: {7: 0.0203}` in the
+    config, or the `sizes_m` argument -- and `marker_size_m` is only the fallback for ids that
+    were not declared."""
+
+    def __init__(self, cfg, sizes_m=None):
         a = cfg.section('aruco')
         self.marker_size = float(a.get('marker_size_m', 0.0203))
+        self.sizes = {int(k): float(v) for k, v in (a.get('marker_sizes_m') or {}).items()}
+        self.sizes.update({int(k): float(v) for k, v in (sizes_m or {}).items()})
+        bad = sorted(k for k, v in self.sizes.items() if not v > 0.0)
+        if bad:
+            raise ValueError(f'marker size must be positive; got <= 0 for id(s) {bad}')
         self.dictionary = get_dictionary(a.get('dictionary', 'DICT_4X4_50'))
         self.params = cv2.aruco.DetectorParameters()
         self._detector = cv2.aruco.ArucoDetector(self.dictionary, self.params)
+        self.obj_points = self.object_points(self.marker_size)
 
-        # ArUco corner order is TL, TR, BR, BL, centred on the marker with +Z out of its face.
-        h = self.marker_size / 2.0
-        self.obj_points = np.array([[-h, h, 0.0], [h, h, 0.0], [h, -h, 0.0], [-h, -h, 0.0]],
-                                   dtype=np.float32)
+    def size_of(self, marker_id):
+        """Side length (m) declared for `marker_id`, falling back to aruco.marker_size_m."""
+        return self.sizes.get(int(marker_id), self.marker_size)
+
+    @staticmethod
+    def object_points(size_m):
+        """The four corners in the marker's own frame, in ArUco's order.
+
+        TL, TR, BR, BL, centred on the marker with +Z out of its printed face -- so the pose the
+        solver returns is the MARKER frame, and a pose recorded wrt it survives the marker being
+        reprinted at another size."""
+        h = float(size_m) / 2.0
+        return np.array([[-h, h, 0.0], [h, h, 0.0], [h, -h, 0.0], [-h, -h, 0.0]],
+                        dtype=np.float32)
 
     def detect(self, frame):
         """{marker_id: T_cam_marker (4x4)} for every marker in the frame."""
@@ -49,7 +74,8 @@ class ArucoDetector:
             # IPPE_SQUARE is the analytic planar-square solver -- exact for four coplanar corners,
             # and far better conditioned than the iterative default at these marker sizes.
             ok, rvec, tvec = cv2.solvePnP(
-                self.obj_points, img_points, frame.K, frame.D, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+                self.object_points(self.size_of(marker_id)), img_points, frame.K, frame.D,
+                flags=cv2.SOLVEPNP_IPPE_SQUARE)
             if not ok:
                 continue
             T = np.eye(4)
@@ -78,7 +104,7 @@ class ArucoDetector:
         cv2.aruco.drawDetectedMarkers(img, corners, ids)
         for mid, T in (poses or self.detect(frame)).items():
             rvec, _ = cv2.Rodrigues(T[:3, :3])
-            cv2.drawFrameAxes(img, frame.K, frame.D, rvec, T[:3, 3], self.marker_size * 0.5)
+            cv2.drawFrameAxes(img, frame.K, frame.D, rvec, T[:3, 3], self.size_of(mid) * 0.5)
         return img
 
 

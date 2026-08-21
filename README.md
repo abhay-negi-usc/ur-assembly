@@ -170,6 +170,7 @@ and caveats.
 | `ur_gripper_bringup` | **not needed** | — | no URDF / controller_manager without ROS |
 | — (new) | `urlab.apps.monitor` | [monitor](docs/monitor.md) | **live frame monitor** — read-only, works with pendant freedrive |
 | — (new) | `urlab.apps.gripper_control` | — | **interactive gripper jog** — type a count, moves there, prints the measured count |
+| — (new) | `urlab.apps.marker_calibration` | — | **fiducial rig calibration** — measures the target's pose in each ArUco marker's frame; paste the printed block into `configs/frames.yaml` `marker_rigs:` and set `assembly.target_source: visual` to let `bnc_assembly` find the socket by looking at it |
 
 ## Layout
 

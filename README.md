@@ -183,13 +183,19 @@ urlab/
   robot/             URArm (RTDE), Robotiq2F85 (Modbus), Robot facade, ForceGuard
   perception/        RealSenseCamera, ArUco, SAM3 adapter, ConnectorEstimator (multi-view fusion)
   skills/            reusable behaviours: servo, scan, pick, touch, insert, trajectory
+  behaviors/         py_trees behavior-tree layer: a library of common robot behaviors
+                     (guarded moves, admittance ramps, gripper, operator gates) the apps
+                     compose their run trees from
   apps/              one thin script per demo
 configs/             one yaml per demo (+ assembly_trajectory.csv)
 tests/               offline math/geometry tests (no robot/camera/torch)
 ```
 
 A demo is a short script that **composes skills** — they hold no references to each other, so any
-two combine (scan + touch + insert) without one being a base class of the other. This is the
+two combine (scan + touch + insert) without one being a base class of the other. The refactored
+demos (calibration_check, wiggle_sampling, marker_calibration, cable_pick_estimate_assemble)
+express their run sequence as a **py_trees behavior tree** built from `urlab/behaviors` — the
+tree is logged at `--debug` before the arm moves, so the whole procedure is visible up front. This is the
 "modules and skills abstracted into common functions" the refactor was for; the ROS version
 expressed the same sharing through a four-deep inheritance chain
 (`PickPlace → CablePickPlace → CableTouchPickPlace / CablePickAssemble`).

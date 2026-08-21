@@ -4997,16 +4997,17 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
     body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
     order = ["label='realign with the engagement pose '",  # undo the sweep first...
              "label='collar retract (connector -X)'",       # ...back off ALONG the cable...
-             "label='collar lift-off (gripper -Z)'",        # ...free the fingers...
              "label='collar pitch onto the axis'",          # ...reorient onto the axis...
              "adm_cl.ramp(T_retreat, T_grip",               # ...then advance down it
              "gripper.close('grasp collar')",
              "label='twist '"]
     idx = [body.index(t) for t in order]
     assert idx == sorted(idx), (
-        'the order must be realign -> retract -> lift-off -> reorient -> advance -> close -> '
-        'twist. The realign comes FIRST so every station below is measured from where the '
-        'connector actually MATED rather than from wherever the oscillating sweep stopped')
+        'the order must be realign -> retract -> reorient -> advance -> close -> twist. '
+        'The realign comes FIRST so every station below is measured from where the connector '
+        'actually MATED rather than from wherever the oscillating sweep stopped. (The gripper '
+        '-Z lift-off leg between retract and reorient was REMOVED 2026-08-21.)')
+    assert "label='collar lift-off" not in body, 'the gripper -Z lift-off leg was removed'
 
     # THE RETRACT IS MEASURED FROM THE ENGAGEMENT POSE, which is reconstructed rather than stored:
     # connector_clocking captured the in-hand belief at engagement, and T_clk is that connector in
@@ -5042,10 +5043,10 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
         'the axial poses must be built directly from the axis frame, not derived from a path')
     assert 'refusing to thread it' in body or 'not a reachability one' in body, (
         'the END STATE must be verified, since the path no longer proves it by construction')
-    # a general rotation sweeps the fingers, so they must be clear of the cable first -- the
-    # single-axis pitch was what let the lift-off be skipped
-    assert "label='collar lift-off (gripper -Z)'" in body, (
-        'a general reorientation needs the fingers off the cable first')
+    # the gripper -Z lift-off between retract and reorient was REMOVED (2026-08-21, operator
+    # decision): the reorientation runs directly from the retract station
+    assert "label='collar lift-off" not in body, (
+        'the gripper -Z lift-off leg was removed -- it must not come back silently')
     assert True, (
         'retired with the pitch: the pivot no longer has to be the fingertip -- the fingers are '
         'lifted clear instead, which is what lets the end pose be stated outright. Kept as a '
@@ -5106,11 +5107,11 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
     for k in ('grasp_clock_deg', 'retract_mm', 'wall_standoff_mm'):
         assert k in ccl, f'collar_clocking must declare {k} so the axial approach is tunable'
     assert float(ccl['retract_mm']) > 0
-    # liftoff_mm is BACK: the general reorientation sweeps the fingers, so they have to be clear
-    # of the cable first. Only the single-axis pitch could skip it, and that could not reach the
-    # axial pose.
-    assert 'liftoff_mm' in ccl and float(ccl['liftoff_mm']) > 0, (
-        'a general reorientation needs the fingers lifted off the cable first')
+    # liftoff_mm is GONE (2026-08-21, operator decision): the gripper -Z leg between the
+    # target -X retract and the reorientation was a second retract the maneuver does not need
+    # -- the reorientation runs directly from the retract station.
+    assert 'liftoff_mm' not in ccl, 'the gripper -Z lift-off leg was removed'
+    assert 'cl_liftoff' not in code, 'no code may still read liftoff_mm'
     assert 'retreat_mm' not in ccl, 'retreat_mm was renamed retract_mm'
 
 

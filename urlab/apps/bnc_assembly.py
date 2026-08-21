@@ -606,10 +606,6 @@ def build_and_run(cfg, robot, camera, args):
     # left the arm; an axial approach is placed in free space, so the angle is simply stated.)
     _gc = cl.get('grasp_clock_deg')
     cl_grasp_clock = None if _gc is None else np.radians(float(_gc))
-    # LIFT-OFF: how far to back the OPEN fingers off the cable along the gripper's own -Z before
-    # reorienting. The radial -> axial change is a 90 deg pitch about the jaw-closing axis, which
-    # would sweep the fingers through the cable if they were still around it.
-    cl_liftoff_m = _num(cl, 'liftoff_mm', 100.0) / 1000.0
     # RETRACT: how far to back straight off along the TARGET connector -X, from wherever the
     # seat push left the arm, before the gripper is pitched onto the axis. Replaces
     # retreat_mm, which measured the reorient station BACKWARD FROM THE COLLAR and so moved
@@ -2131,22 +2127,7 @@ def build_and_run(cfg, robot, camera, args):
                           'pose (collar_clocking.retract_mm).', cl_retract_m * 1000.0)
                 return False
 
-        # ---- 3. LIFT THE OPEN FINGERS OFF THE CABLE -------------------------------------------
-        # Straight back along the GRIPPER's own -Z, the leg clocking_retract uses. It is needed
-        # again because the reorientation below is a GENERAL rotation, not a pitch about the
-        # jaw-closing axis: the single-axis pitch kept the cable in the gap at radius zero, but it
-        # could only reach the axial pose when the held attitude happened to be square to the
-        # connector Y -- which it is not, so it failed with tens of degrees of residual. Freeing
-        # the fingers is what buys the freedom to state the end pose and let IK find the joints.
-        if abs(cl_liftoff_m) > 1e-6:
-            T_off = robot.tool0() @ translation_matrix([0.0, 0.0, -abs(cl_liftoff_m)])
-            if not _guarded(robot, guard_shared, lambda: robot.arm.move_l(
-                    T_off, label='collar lift-off (gripper -Z)')):
-                log.error('Could not lift the open fingers off the cable (%.0f mm along the '
-                          'gripper -Z).', cl_liftoff_m * 1000.0)
-                return False
-
-        # ---- 4. REORIENT ONTO THE AXIS ---------------------------------------------------------
+        # ---- 3. REORIENT ONTO THE AXIS ---------------------------------------------------------
         # One move_j to the stated end pose. A joint move rather than a straight line because it
         # is the only large reorientation in the maneuver, and it happens a retract's length back
         # with the fingers clear, so the route it takes does not matter -- only the pose it
@@ -2184,7 +2165,7 @@ def build_and_run(cfg, robot, camera, args):
                       robot.arm.move_timeout, float(scales.get('collar_approach', 1.0)))
             return False
 
-        # ---- 5. ADVANCE DOWN THE AXIS, threading the cable into the open jaw ------------------
+        # ---- 4. ADVANCE DOWN THE AXIS, threading the cable into the open jaw ------------------
         # A PURE TRANSLATION along the connector +X: no rotation, so a straight move is exactly
         # the right path and there is no chord to cut. Guarded, because this is the leg that runs
         # the cable between the open fingers -- a snag must stop it rather than push through.

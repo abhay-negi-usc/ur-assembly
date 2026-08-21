@@ -601,10 +601,6 @@ assembly:
     # a pure translation with the open fingers still around the cable (they slide ALONG it).
     # The pitch onto the axis happens out here, the furthest from the wall the maneuver gets.
     retract_mm: 150.0
-    # LIFT-OFF, mm along the GRIPPER's own -Z, after the retract and before the
-    # reorientation.  The reorient is a GENERAL rotation onto the axis and sweeps the
-    # fingers, so they must be off the cable first.  0 disables (only for small reorients).
-    liftoff_mm: 150.0
     # WALL STANDOFF, mm: the largest tool0 station along the connector +X any planned pose
     # may take, in the TARGET frame (+X points INTO the wall, 0 = the mating face).  Every
     # station is known before the arm moves, so the closest approach to the wall is checked

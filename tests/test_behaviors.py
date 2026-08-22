@@ -1073,10 +1073,30 @@ def test_belief_offset_moves_the_belief_and_never_the_grasp():
     _t, _fj, nominal, J = _bnc_frames()
     G = xyzrpy_to_matrix([0.010, 0.0, 0.0], [0.0, np.radians(-60.0), 0.0])
 
-    # the BELIEF moves, in the FINGERTIP frame, orientation untouched
-    shifted = offset_belief(nominal, np.array([0.0, 0.0, -0.0012]))
+    # THE BELIEF MOVES ALONG THE CONNECTOR'S OWN AXES, orientation untouched. Right-multiplied,
+    # so the delta is read in the part's frame -- the same frame the grasp, the socket, the
+    # insertion axis and the clocking rotations are all written in.
+    # x AND z: this nominal is yawed 180 deg about z, so a pure-z delta reads the SAME in
+    # both frames and would not distinguish them at all.
+    delta = np.array([-0.010, 0.0, -0.0012])
+    shifted = offset_belief(nominal, delta)
     assert np.allclose(shifted[:3, :3], nominal[:3, :3]), 'a seating residual is a translation'
-    assert np.allclose(shifted[:3, 3] - nominal[:3, 3], [0.0, 0.0, -0.0012])
+    got = shifted[:3, 3] - nominal[:3, 3]
+    assert np.allclose(nominal[:3, :3].T @ got, delta), (
+        'the delta must come back out as itself when read in the CONNECTOR frame')
+    assert not np.allclose(got, delta), (
+        'and it must NOT be a raw fingertip-frame add -- this nominal is yawed 180 deg, so the '
+        'two readings differ, which is exactly what the change was for')
+
+    # IT NO LONGER DEPENDS ON HOW THE HAND HOLDS THE PART. The same physical residual used to
+    # need a different number at every pickup pitch, because the fingertip axes swung with the
+    # approach; in the part's frame it is one number.
+    from urlab.transforms import xyzrpy_to_matrix as _m
+    for pitch in (0.0, -40.0, -75.0):
+        held = _m([0, 0, 0], [0.0, np.radians(pitch), 0.0]) @ nominal
+        moved = offset_belief(held, delta)[:3, 3] - held[:3, 3]
+        assert np.allclose(held[:3, :3].T @ moved, delta, atol=1e-12), (
+            f'at pitch {pitch} the connector-frame delta changed -- it must not')
 
     # the GRASP cannot even see it -- grasp_pose is not a function of the belief
     assert np.allclose(grasp_pose(J, G), grasp_pose(J, G))
@@ -1819,10 +1839,6 @@ def test_the_reorient_recovery_places_the_cable_on_the_socket_heading():
     assert off['x_mm'] <= -0.2, (
         f"x_mm is {off['x_mm']} -- the cable must go clear of the socket footprint, along the "
         'socket axis, or it lands on the fixture')
-    # y is a sideways nudge off the socket axis -- tuned on the bench, so only its scale is
-    # an invariant here
-    assert abs(float(off['y_mm'])) <= 400.0, (
-        f"y_mm {off['y_mm']} is far enough off the socket axis to be outside the working area")
     # y is a sideways nudge off the socket axis -- tuned on the bench, so only its scale is
     # an invariant here
     assert abs(float(off['y_mm'])) <= 400.0, (

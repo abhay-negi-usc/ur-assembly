@@ -263,10 +263,10 @@ pickup:
   # m / rad.  Both units for one triple is an error, not a silent preference.
   # ===========================================================================================
   fingertip_in_connector:
-    xyz_mm:  [17.0, 0.0, 0.0]
-    rpy_deg: [0.0, -75.0, 0.0]
+    xyz_mm:  [35.0, 0.0, 0.0]
+    rpy_deg: [0.0, -70.0, 0.0]
 
-  # BELIEF OFFSET, mm in the FINGERTIP frame -- the one knob here that moves NOTHING at
+  # BELIEF OFFSET, mm in the CONNECTOR frame -- the one knob here that moves NOTHING at
   # pickup.  This is the split between the two things that were previously tangled:
   #
   #   the GRASP COMMAND  (pitch_deg, grip_offset_mm, junction_in_fingertip) = where the
@@ -289,6 +289,18 @@ pickup:
   # DO NOT fold this into junction_in_fingertip (that moves the grasp too, so you would chase
   # your own tail) or into frames.yaml bnc_connector_in_fingerpads (that frame is the
   # SQUARE-grip truth, shared with the recorded target, and the smoke suite guards it).
+  # THE FRAME IS THE CONNECTOR'S OWN, not the fingertip's: +x runs along the connector axis,
+  # y and z are its own transverse axes.  So [-10, 0, 0] reads "the part sits 10 mm further
+  # back along its own body than the grasp transform says", and it means that at ANY pickup
+  # angle -- a fingertip-frame delta had to be re-measured every time the approach pitch
+  # changed, because its axes swung with the hand.  It also matches everything else here:
+  # the grasp is fingertip_in_connector, and the socket, the insertion axis and the clocking
+  # rotations are all connector-frame quantities.
+  #
+  # THE TRADE: a residual that is genuinely a property of the JAWS -- the groove capturing the
+  # cylinder at a different depth along the approach -- is more naturally a hand-frame value,
+  # and in this frame it will move as the pitch changes.  Re-measure after a large change of
+  # approach angle either way.
   belief_offset_mm: [-10.0, 0.0, 0.0]
   # PICKUP HEIGHT from the gripper kinematic model.  Assumes the connector rests ON THE GROUND
   # PLANE (ground_plane.z_m): grasp target = plane + connector d_max/2 (centerline) + the
@@ -544,7 +556,7 @@ speed:
     # happens near the work surface, and at a large pickup.pitch_deg it swings the gripper
     # BODY down toward the ground plane rather than just the fingers.  Falls back to `scan`
     # when unset, so other apps are unaffected.
-    grasp_align: 0.5
+    grasp_align: 1.0
     pickup: 0.5      # the compliant grasp descent
     lift: 0.8        # the compliant lift (including the slip-check partial lift)
     standoff: 1.0    # the move to stand-off + the per-attempt realign moveJs
@@ -663,7 +675,7 @@ assembly:
     # plate, which a drop directly beneath the socket would land on.
     place_offsets:
       x_mm: -300.0
-      y_mm: 300.0
+      y_mm: 400.0
       # z is IGNORED while snap_to_ground is on, and it should be: "on the ground plane" is the
       # requirement, and the resting height is a property of the PART (ground + one barrel
       # radius, ~9 mm here), not a number worth typing twice.  Set snap_to_ground false to
@@ -762,7 +774,7 @@ assembly:
     # PRELOAD, mm past the mate along the connector's own +X, so the reference finishes
     # pressing rather than merely arriving.  0 = stop exactly on the mate.  (Distinct from
     # final_insertion.preload_mm, which belongs to the estimate-mode commit.)
-    preload_mm: 10.0
+    preload_mm: 0.0
 
     # Reference rebuild rate.  Must be >= 4x the highest active frequency or the sampled sine
     # aliases -- validated pre-motion.

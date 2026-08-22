@@ -1108,7 +1108,8 @@ def build_and_run(cfg, robot, camera, args):
     _bel_off = belief_offset_m(cfg)
     if float(np.linalg.norm(_bel_off)) > 0.0:
         T_ftip_conn = offset_belief(T_ftip_conn, _bel_off)
-        log.info('Belief offset %s mm (fingertip frame) applied to the in-hand pose ONLY -- '
+        log.info('Belief offset %s mm (CONNECTOR frame: +x along the connector axis) '
+                 'applied to the in-hand pose ONLY -- '
                  'the grasp command is unchanged.',
                  np.round(_bel_off * 1000.0, 2).tolist())
 

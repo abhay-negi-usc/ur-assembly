@@ -390,7 +390,7 @@ pickup:
     # Ground height comes from the top-level ground_plane.z_m -- ONE number for the bench, so
     # the checker and the place-the-cable descent cannot disagree about where the floor is.
     margin_mm: 0.0            # required clearance for EVERYTHING except the fingertips
-    fingertip_margin_mm: 5.0  # allowed INTERSECTION, fingertips only (see above)
+    fingertip_margin_mm: 15.0  # allowed INTERSECTION, fingertips only (see above)
     path_samples: 25
     # SELF-COLLISION: the arm against itself, and the tool against the arm.
     #
@@ -640,7 +640,7 @@ assembly:
     # the in-hand belief for the PLACE is derived from, so the pick and the set-down cannot
     # disagree about where the connector is being held.
     fingertip_in_connector:
-      xyz_mm:  [5.0, 0.0, 0.0]
+      xyz_mm:  [20.0, 0.0, -8.0]
       rpy_deg: [0.0, 0.0, 0.0]
     place_offsets:
       x_mm: 0.0

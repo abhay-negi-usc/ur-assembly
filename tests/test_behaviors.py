@@ -1874,3 +1874,73 @@ def test_the_reorient_recovery_reuses_the_scan_it_already_has():
 
     rec = inspect.getsource(app.build_and_run)
     assert 'T_conn=getattr(geom, ' in rec, 'the recovery must pass the stored detection back in'
+
+
+def test_both_places_lay_the_connector_along_the_socket_axis():
+    """THE REQUIREMENT: the placed connector's +X must be PARALLEL TO THE TARGET CONNECTOR'S +X.
+
+    Two ways that was being lost, both fixed here and both worth a regression:
+
+      1. THE BELIEF WAS DOUBLE-COUNTED. held_belief maps "the frames catalogue's SQUARE grip"
+         onto "the grip this run takes", so it must be applied to the CATALOGUE value. The
+         reorient recovery fed it a belief that already carried the coaxial grasp, composing
+         the two -- the connector went down 75 deg off horizontal, essentially on its end.
+      2. THE END-OF-RUN PLACE NEVER AIMED. It drove to the pick pose and descended, inheriting
+         whatever attitude the grip had; with a coaxial grip the connector hangs axis-down.
+    """
+    from urlab import config as urconfig
+    from urlab.skills.pick import fingertip_in_connector, held_belief
+    from urlab.transforms import from_cfg, xyzrpy_to_matrix
+
+    cfg = urconfig.load('bnc_assembly')
+    T_fj = from_cfg(cfg.section('junction_in_fingertip'))
+    catalogue = xyzrpy_to_matrix([-0.0457, 0.0, 0.0075], [0, 0, np.pi])   # frames.yaml nominal
+    coaxial = held_belief(catalogue, T_fj, fingertip_in_connector(cfg))
+
+    # a fingertip pointing straight down, as at a square place
+    T_ftip = xyzrpy_to_matrix([0.5, 0.0, -0.3], [np.pi, 0.0, 0.0])
+    square = xyzrpy_to_matrix([0.005, 0.0, 0.0], [0.0, 0.0, 0.0])
+
+    right = (T_ftip @ held_belief(catalogue, T_fj, square))[:3, 0]
+    wrong = (T_ftip @ held_belief(coaxial, T_fj, square))[:3, 0]
+    tilt = lambda v: abs(np.degrees(np.arcsin(np.clip(float(v[2]), -1.0, 1.0))))
+    assert tilt(right) < 1e-6, (
+        'from the CATALOGUE the square grasp lays the connector flat, as it must')
+    assert tilt(wrong) > 60.0, (
+        'composing two grasps tilts it by the coaxial angle -- this is the bug, kept here so '
+        'the fix cannot silently regress')
+
+    # the source must derive the recovery belief from the catalogue value, never the run's
+    import inspect
+    from urlab.apps import bnc_assembly as app
+    src = inspect.getsource(app.build_and_run)
+    assert 'T_ftip_conn_catalogue' in src and 'held_belief(T_ftip_conn_catalogue' in src, (
+        'the recovery must start from the catalogue belief, not one that already carries a grasp')
+
+    # BOTH places share one aimed pose, and neither descends from the pick pose any more
+    assert src.count('def aligned_place_pose(') == 1
+    assert src.count('aligned_place_pose(') >= 3, 'the recovery AND the end place must use it'
+    assert "move_j(q_pick, label='pick pose (to place)')" not in src, (
+        'the end-of-run place must AIM, not inherit the pick attitude'
+    )
+
+
+def test_the_aligned_place_pose_is_flat_and_on_the_socket_heading():
+    """Built, not inherited: heading from the socket, roll and pitch zero, z on the bench."""
+    from urlab import config as urconfig
+    from urlab.transforms import xyzrpy_to_matrix
+
+    cfg = urconfig.load('bnc_assembly')
+    off = cfg.get_path('assembly.reorient_recovery.place_offsets')
+    # a socket with a real attitude, not an axis-aligned one
+    T_t = xyzrpy_to_matrix([0.12, 1.09, -0.155], np.radians([-0.42, -0.44, 90.78]))
+    yaw = np.arctan2(T_t[1, 0], T_t[0, 0]) + np.radians(off['yaw_deg'])
+    T_place = xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, 0.0, yaw])
+
+    # the connector axis is PARALLEL to the socket axis, in the horizontal plane
+    got, want = T_place[:3, 0], T_t[:3, 0]
+    cos = float(np.dot(got, want) / (np.linalg.norm(got) * np.linalg.norm(want)))
+    assert np.degrees(np.arccos(np.clip(cos, -1, 1))) < 0.5, (
+        f'the placed +X is {np.degrees(np.arccos(cos)):.2f} deg off the socket +X')
+    assert abs(float(got[2])) < 1e-12, 'and it lies flat -- no vertical component'
+    assert np.allclose(T_place[:3, 2], [0, 0, 1]), 'connector +Z up, as it must be on a bench'

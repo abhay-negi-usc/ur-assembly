@@ -1090,6 +1090,12 @@ def build_and_run(cfg, robot, camera, args):
     # declared frame stays the physical truth and the pitch stays a run-time choice.
     _grip_off = fingertip_in_connector(cfg)
     _oxyz, _orpy = matrix_to_xyzrpy(_grip_off)
+    # THE RAW NOMINAL, kept before the grasp is folded in. held_belief maps "the frames
+    # catalogue's SQUARE grip" to "the grip this run actually takes", so it must always be
+    # applied to the catalogue value -- never to a belief that already carries a grasp. Feeding
+    # it its own output composes the two grasps: the reorient recovery did exactly that and put
+    # the connector down 75 deg off horizontal, nearly axis-vertical.
+    T_ftip_conn_catalogue = np.array(T_ftip_conn, dtype=float)
     T_ftip_conn = held_belief(T_ftip_conn, from_cfg(cfg.section('junction_in_fingertip')),
                               _grip_off)
     log.info('fingertip_in_connector xyz %s mm rpy %s deg (target fingertip wrt the detected '
@@ -1520,34 +1526,35 @@ def build_and_run(cfg, robot, camera, args):
         if not dis_place_on:
             log.info('DISASSEMBLY: place is off -- the cable stays in the fingers.')
             return True, state
+        T_place = aligned_place_pose(dis_clear_m)
         if not phase_gate('PLACE THE CABLE',
-                          'Return to the PICK pose, descend straight down to %.0f mm above the '
-                          'ground plane, release, and rise.' % (dis_clear_m * 1000.0)):
+                          'Lay the cable down ALONG THE SOCKET AXIS at xyz %s mm, %.0f mm '
+                          'clear of the ground, release and rise.'
+                          % (np.round(T_place[:3, 3] * 1000.0, 0).tolist(),
+                             dis_clear_m * 1000.0)):
             return False, state
+        # AIMED, NOT INHERITED. The old version drove to the pick pose and descended, which
+        # laid the part down in whatever attitude the grip happened to have -- and with the
+        # COAXIAL grip the connector hangs axis-down, so it was set on its end. The pose is
+        # built from the socket heading instead, and the arm is commanded to put the CONNECTOR
+        # there via the belief it is currently holding it with.
+        T_ftip_place = T_place @ inverse(T_ftip_conn)
+        up = translation_matrix([0.0, 0.0, float(dis_rise_m)])
+        log.info('PLACE: laying the connector along the socket axis -- heading %+.1f deg '
+                 '(socket %+.1f deg), %.0f mm above the ground plane.',
+                 np.degrees(np.arctan2(T_place[1, 0], T_place[0, 0])),
+                 np.degrees(np.arctan2(T_base_tconn[1, 0], T_base_tconn[0, 0])),
+                 (T_place[2, 3] - ground_z) * 1000.0)
         phase('reconfigure')
-        if not robot.arm.move_j(q_pick, label='pick pose (to place)'):
-            log.error('DISASSEMBLY: could not reach the pick pose to place the cable.')
+        if not _guarded(robot, guard_shared,
+                        lambda: robot.move_fingertip(up @ T_ftip_place, 'place (above)')):
+            log.error('DISASSEMBLY: could not reach the place stand-off.')
             return False, state
-        # STRAIGHT DOWN, in the world, from the pick attitude -- the same configuration the
-        # cable was picked from, so it is put back the way it was taken. The descent is sized
-        # from the FINGERTIP against the known ground plane and is GUARDED, so the pads stop
-        # short of the ground instead of pressing the cable into it.
-        z_now = float(robot.fingertip()[2, 3])
-        z_goal = float(ground_z) + dis_clear_m
-        drop = z_now - z_goal
-        if drop <= 0.0:
-            log.warning('DISASSEMBLY: the fingertip is already %.0f mm BELOW the release '
-                        'height -- not descending.', -drop * 1000.0)
-        else:
-            log.info('PLACE: descending %.0f mm (fingertip %.0f mm -> %.0f mm above the '
-                     'ground plane at %.3f m).', drop * 1000.0, (z_now - ground_z) * 1000.0,
-                     dis_clear_m * 1000.0, ground_z)
-            phase('lift')
-            T_down = translation_matrix([0.0, 0.0, -drop]) @ robot.tool0()
-            if not _guarded(robot, guard_shared,
-                            lambda: robot.arm.move_l(T_down, label='place (straight down)')):
-                log.error('DISASSEMBLY: the descent hit something before the release height.')
-                return False, state
+        phase('lift')
+        if not _guarded(robot, guard_shared,
+                        lambda: robot.move_fingertip(T_ftip_place, 'place (down)')):
+            log.error('DISASSEMBLY: the descent hit something before the release height.')
+            return False, state
         if not robot.gripper.open('release (cable placed)'):
             log.error('DISASSEMBLY: the gripper did not open to release the cable.')
             return False, state
@@ -2710,8 +2717,17 @@ def build_and_run(cfg, robot, camera, args):
         log.info('VISUAL TARGET: the run is now anchored on the MEASURED socket pose.')
         return True
 
-    def reorient_place_pose():
-        """Where the cable goes when the coaxial grasp cannot be reached, in base_link.
+    def aligned_place_pose(extra_clearance_m=0.0):
+        """Where the cable is set down, in base_link -- LYING ALONG THE SOCKET AXIS.
+
+        THE CONNECTOR +X COMES OUT PARALLEL TO THE TARGET CONNECTOR +X. That is the whole
+        requirement and it is easy to lose: a place that simply descends from the pick pose
+        inherits whatever attitude the grip has, and with a COAXIAL grip the connector hangs
+        with its axis along the tool -- i.e. pointing at the floor. The part then lands on its
+        end instead of on its side.
+
+        So the orientation here is BUILT, not inherited: heading from the socket, roll and
+        pitch zero. `extra_clearance_m` lifts the release point above the resting height.
 
         DEFINED RELATIVE TO THE TARGET CONNECTOR, because the whole point is to leave the cable
         ALIGNED WITH THE SOCKET: yaw 0 wrt the target puts the connector axis on the same
@@ -2735,7 +2751,7 @@ def build_and_run(cfg, robot, camera, args):
         # up -- a property of the part, not a number to type twice -- and "place it on the
         # ground plane" is the actual requirement. The configured z_mm is still reported,
         # because a large gap between the two means one of the two is wrong.
-        axis_z = ground_z + connector_axis_height_m(cfg)
+        axis_z = ground_z + connector_axis_height_m(cfg) + float(extra_clearance_m)
         if bool(r.get('snap_to_ground', True)):
             log.info('REORIENT PLACE: z_mm %+.0f puts the connector axis %+.0f mm above the '
                      'bench; snapping to the ground plane at %+.0f mm instead (one barrel '
@@ -2799,12 +2815,12 @@ def build_and_run(cfg, robot, camera, args):
 
             # WHERE IT GOES. The belief for the SQUARE grasp (cfg is still overridden here)
             # turns "put the CONNECTOR there" into a fingertip pose.
-            T_place = reorient_place_pose()
+            T_place = aligned_place_pose()
             # THE BELIEF FOR THE SQUARE GRASP -- cfg is still overridden here, so this is
             # derived from the very transform the pick was commanded with. That is the whole
             # reason the override wraps the place as well as the pick: a place computed from
             # the COAXIAL belief would set the part down rotated by the difference.
-            T_ftip_sq = held_belief(T_ftip_conn_nominal,
+            T_ftip_sq = held_belief(T_ftip_conn_catalogue,
                                     from_cfg(cfg.section('junction_in_fingertip')),
                                     fingertip_in_connector(cfg))
             T_ftip_target = T_place @ inverse(T_ftip_sq)

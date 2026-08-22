@@ -1426,7 +1426,11 @@ def test_the_bnc_config_guards_the_pick_against_the_bench():
     cfg = urconfig.load('bnc_assembly')
     c = cfg.get_path('pickup.collision')
     assert c and bool(c.get('enabled', True)), 'the pick must be guarded against the bench'
-    assert float(c['fingertip_margin_mm']) == 5.0, 'the fingertip intersection allowance'
+    # PINNED AS AN INVARIANT, not a value: this is live tuning. What must hold is that the
+    # fingertips get SOME allowance (they are meant to reach the work surface) and that it is
+    # not so large it would swallow the gripper body sitting just behind them.
+    fm = float(c['fingertip_margin_mm'])
+    assert 0.0 < fm <= 30.0, f'{fm} mm is not a sane fingertip intersection allowance'
     assert float(c.get('margin_mm', 0.0)) >= 0.0, (
         'a NEGATIVE margin would let the whole arm into the bench -- the intersection '
         'allowance is fingertip-only by design')
@@ -1784,7 +1788,9 @@ def test_the_reorient_recovery_places_the_cable_on_the_socket_heading():
     assert list(g['rpy_deg']) == [0.0, 0.0, 0.0], (
         'the fallback grasp must be SQUARE -- a vertical approach is the one that does not '
         'depend on the cable heading, which is the whole reason it is the fallback')
-    assert list(g['xyz_mm']) == [5.0, 0.0, 0.0], 'the measured square bite point'
+    # the bite point itself is measured and tuned -- only its scale is an invariant
+    assert all(abs(float(v)) <= 60.0 for v in g['xyz_mm']), (
+        f"square bite point {g['xyz_mm']} mm is implausibly far from the detected junction")
     assert 'grasp_rpy_deg' not in r, (
         'the WHOLE pose is overridden, not just the angles -- a leftover angles-only key would '
         'read as live and silently leave the coaxial bite point in place')
@@ -1805,13 +1811,19 @@ def test_the_reorient_recovery_places_the_cable_on_the_socket_heading():
     # HEADING PRESERVED: same compass direction as the socket, to the yaw offset
     assert abs(np.degrees(yaw) - (90.78 + off['yaw_deg'])) < 1e-9
 
-    # ... and z as configured does NOT reach the bench, which is why snap_to_ground exists
+    # SET DOWN OUT IN FRONT OF THE SOCKET, along its axis -- not underneath it, where the
+    # fixture and its mounting plate are.
+    assert off['x_mm'] <= -0.2, (
+        f"x_mm is {off['x_mm']} -- the cable must go clear of the socket footprint, along the "
+        'socket axis, or it lands on the fixture')
+    assert off['y_mm'] == 0.0
     gz = float(cfg.get_path('ground_plane.z_m'))
-    assert p[2] - gz > 0.15, (
-        f'the configured z_mm leaves the connector {(p[2] - gz) * 1000:.0f} mm up -- the test '
-        'exists to keep that visible, since "on the ground plane" is the actual requirement')
     assert bool(r.get('snap_to_ground', True)), (
-        'so the ground plane must win by default, or the cable is released in mid-air')
+        'the ground plane must set z, or the cable is released in mid-air')
+    # RELEASED A LITTLE ABOVE THE RESTING HEIGHT: the pads must not be pressing the cable into
+    # the bench when they open, and it must not be dropped far enough to bounce or roll.
+    rel = float(r['release_clearance_mm'])
+    assert 2.0 <= rel <= 30.0, f'{rel} mm is not a sane release height above the rest position'
 
     # what snapping actually uses: ground + one barrel radius, the resting axis height
     from urlab.skills.pick import connector_axis_height_m

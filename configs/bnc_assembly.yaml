@@ -642,17 +642,23 @@ assembly:
     fingertip_in_connector:
       xyz_mm:  [20.0, 0.0, -8.0]
       rpy_deg: [0.0, 0.0, 0.0]
+    # OFFSETS IN THE TARGET CONNECTOR FRAME.  x runs along the socket axis, so -400 sets the
+    # cable down 400 mm OUT IN FRONT of the socket -- clear of the fixture and its mounting
+    # plate, which a drop directly beneath the socket would land on.
     place_offsets:
-      x_mm: 0.0
+      x_mm: -400.0
       y_mm: 0.0
-      # -400 was the figure asked for, but it leaves the connector ~200 mm ABOVE the bench --
-      # the recorded socket sits at z -155 mm and the bench at -760.  snap_to_ground overrides
-      # it with the real resting height (ground + one barrel radius) and logs both, so the
-      # discrepancy stays visible rather than being silently split between two numbers.  Set
-      # snap_to_ground false to honour z_mm exactly.
-      z_mm: -400.0
+      # z is IGNORED while snap_to_ground is on, and it should be: "on the ground plane" is the
+      # requirement, and the resting height is a property of the PART (ground + one barrel
+      # radius, ~9 mm here), not a number worth typing twice.  Set snap_to_ground false to
+      # honour z_mm literally.
+      z_mm: 0.0
       yaw_deg: 0.0
     snap_to_ground: true
+    # RELEASE HEIGHT above where the connector comes to rest -- the gripper opens here and the
+    # part drops the last few mm.  Small on purpose: enough that the pads are not pressing the
+    # cable into the bench when they let go, not so much that it bounces or rolls.
+    release_clearance_mm: 10.0
     approach_mm: 120.0               # stand-off above the place, straight down onto it
   target_frame: bnc_connector_finger_holder
 

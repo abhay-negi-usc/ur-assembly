@@ -2815,7 +2815,10 @@ def build_and_run(cfg, robot, camera, args):
 
             # WHERE IT GOES. The belief for the SQUARE grasp (cfg is still overridden here)
             # turns "put the CONNECTOR there" into a fingertip pose.
-            T_place = aligned_place_pose()
+            # RELEASED A LITTLE ABOVE THE RESTING HEIGHT, so the pads are not pressing the
+            # cable into the bench when they open; the part drops the last few millimetres.
+            T_place = aligned_place_pose(
+                float(r.get('release_clearance_mm', 10.0)) / 1000.0)
             # THE BELIEF FOR THE SQUARE GRASP -- cfg is still overridden here, so this is
             # derived from the very transform the pick was commanded with. That is the whole
             # reason the override wraps the place as well as the pick: a place computed from

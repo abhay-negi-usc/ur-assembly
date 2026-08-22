@@ -11,7 +11,7 @@ me" -- is gone. `closed_counts: 228` is now compared against a number the grippe
 import numpy as np
 
 from .. import log as urlog
-from ..transforms import fmt_delta, inverse, pose_error, translation_matrix
+from ..transforms import UR_JOINTS, fmt_delta, inverse, pose_error, translation_matrix
 
 log = urlog.get('pick')
 
@@ -568,6 +568,18 @@ class GraspController:
         # slowing the multi-view scan, and falls back to 'scan' so nothing changes for a config
         # that does not set it.
         self.align_scale = float(scales.get('grasp_align', scales.get('scan', 1.0)))
+        # THE IK BRANCH FOR THE GRASP. A tool0 pose has up to eight joint solutions, and the
+        # controller returns the one NEAREST the seed -- which by default is wherever the scan
+        # left the arm. Two of those solutions differ by the WRIST FLIP (wrist_1 and wrist_3
+        # turned half a revolution, wrist_2 negated): the same fingertip pose with the wrist
+        # body on the opposite side. At a square pickup either is fine. At a steeply tilted
+        # fingertip_in_connector one of them swings wrist_2 down toward the work surface.
+        # Naming a seed here makes that a choice instead of an accident.
+        seed = p.get('approach_seed_joints_deg')
+        self.approach_seed = (None if seed is None
+                              else [float(np.radians(float(v))) for v in seed])
+        self.approach_seed_tol = float(np.radians(
+            float(p.get('approach_seed_tolerance_deg', 45.0))))
         self.settle_s = float(p.get('settle_s', 0.5))
         self._guard_cfg = p.get('force_guard', {}) or {}
         self._adm = None
@@ -618,13 +630,54 @@ class GraspController:
         return robot.move_fingertip(T_target, label)
 
     def align(self, robot, geom, label='grasp-align'):
-        """Move the fingertip onto the PRE-GRASP, at the 'grasp_align' phase scale.
+        """Move the fingertip onto the PRE-GRASP, at the 'grasp_align' phase scale and on the
+        SEEDED IK branch.
 
         A plain position move -- nothing is in front of the pads yet -- but it is the longest
-        motion that happens near the work surface, and at a large pickup.pitch_deg it carries
-        the gripper BODY down toward the ground plane rather than just the fingers. Slow."""
+        motion that happens near the work surface, and at a steeply tilted
+        fingertip_in_connector it carries the gripper BODY down toward the ground plane rather
+        than just the fingers. Slow, and on a configuration you picked.
+
+        THE BRANCH IS CHECKED BEFORE THE ARM MOVES. A seed is a hint -- the controller returns
+        the solution nearest it, which is not always the one you meant if the seed is far from
+        the target. So the solution is compared against the seed joint by joint first, and a
+        run that would land on a different branch is REFUSED while the arm is still parked,
+        naming the joint. A wrist flip shows up here as ~180 deg on wrist_1/wrist_3 or a
+        sign change on wrist_2; an elbow or shoulder flip shows up on those joints."""
         robot.arm.set_speed_scale(self.align_scale, 'grasp_align')
-        return robot.move_fingertip(geom.pre_grasp(), label)
+        T = geom.pre_grasp()
+        if self.approach_seed is None:
+            ok = robot.move_fingertip(T, label)
+            if ok and not robot.arm.dry_run:
+                log.info('  grasp-align configuration: %s deg (no approach_seed_joints_deg set, '
+                         'so this is whatever branch the scan left the arm nearest).',
+                         np.round(np.degrees(robot.arm.q()), 1).tolist())
+            return ok
+
+        q = robot.arm.ik(T @ inverse(robot.T_tool0_fingertip), self.approach_seed)
+        if q is None:
+            log.error('%s: no IK solution near pickup.approach_seed_joints_deg %s deg.',
+                      label, np.round(np.degrees(self.approach_seed), 1).tolist())
+            return False
+        # WRAPPED, because a joint at +179 and one at -179 are 2 deg apart, not 358.
+        d = np.abs(np.asarray(q, dtype=float) - np.asarray(self.approach_seed, dtype=float))
+        d = np.minimum(d, 2.0 * np.pi - d)
+        worst = int(np.argmax(d))
+        if d[worst] > self.approach_seed_tol:
+            log.error('%s: IK landed on a DIFFERENT BRANCH from the seed -- %s is %.1f deg away '
+                      '(limit %.1f). Solution %s deg vs seed %s deg. The wrist would sit on the '
+                      'other side; refusing while the arm is still parked. Either re-seed from a '
+                      'configuration that can actually reach this grasp, or raise '
+                      'pickup.approach_seed_tolerance_deg if the flip is acceptable.',
+                      label, UR_JOINTS[worst], np.degrees(d[worst]),
+                      np.degrees(self.approach_seed_tol),
+                      np.round(np.degrees(q), 1).tolist(),
+                      np.round(np.degrees(self.approach_seed), 1).tolist())
+            return False
+        log.info('  grasp-align on the seeded branch: %s deg (worst joint %s, %.1f deg from the '
+                 'seed).', np.round(np.degrees(q), 1).tolist(), UR_JOINTS[worst],
+                 np.degrees(d[worst]))
+        return robot.move_fingertip(T, label, qnear=self.approach_seed)
 
     def descend(self, robot, geom, label='grasp'):
         """Move to the grasp pose (from wherever the arm is -- the grasp-align pose). Tares in

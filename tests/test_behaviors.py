@@ -1147,3 +1147,76 @@ def test_the_bnc_config_asks_for_the_tilted_axial_grasp():
     assert abs(xyz[2]) < 1e-9, (
         'the barrel-radius lift belongs to rests_on_ground_plane, not here -- setting both '
         'doubles the correction')
+
+
+def test_the_grasp_align_can_seed_its_ik_branch():
+    """WHICH SIDE THE WRIST ENDS UP ON must be a choice, not an accident of the scan path.
+
+    A tool0 pose has up to eight joint solutions and the controller returns the one nearest the
+    seed; two of them are the WRIST FLIP (wrist_1/wrist_3 half a turn, wrist_2 negated), which
+    at a steeply tilted grasp is the difference between the wrist being up and being in the
+    floor. So: the seed reaches the IK call, and a solution that lands on another branch is
+    refused BEFORE the arm moves.
+    """
+    from urlab import config as urconfig
+    from urlab.skills.pick import GraspController
+
+    cfg = urconfig.load('bnc_assembly')
+    g = GraspController(cfg)
+    assert g.approach_seed is None, 'unset must keep the old nearest-to-current behaviour'
+    assert g.approach_seed_tol > 0, 'the branch check needs a limit'
+
+    seed_deg = [-85.0, -145.0, -105.0, -205.0, -85.0, 180.0]
+    cfg.set_path('pickup.approach_seed_joints_deg', seed_deg)
+    g = GraspController(cfg)
+    assert np.allclose(np.degrees(g.approach_seed), seed_deg), 'deg in the file, rad in the code'
+
+    # ---- the seed must actually REACH the IK call, and the branch check must bite ----------
+    seen, moved = {}, {}
+
+    class _Arm:
+        dry_run = False
+
+        def set_speed_scale(self, *a):
+            pass
+
+        def ik(self, T, qnear=None):
+            seen['qnear'] = qnear
+            return seen['returns']
+
+        def q(self):
+            return np.zeros(6)
+
+    class _Robot:
+        arm = _Arm()
+        T_tool0_fingertip = np.eye(4)
+
+        def move_fingertip(self, T, label='', qnear=None):
+            moved['qnear'] = qnear
+            return True
+
+    class _Geom:
+        def pre_grasp(self):
+            return np.eye(4)
+
+    robot, geom = _Robot(), _Geom()
+
+    # (a) the solution IS the seed -> proceeds, and hands the same seed to the move
+    seen['returns'] = list(g.approach_seed)
+    assert g.align(robot, geom) is True
+    assert np.allclose(seen['qnear'], g.approach_seed), 'the seed must reach arm.ik'
+    assert np.allclose(moved['qnear'], g.approach_seed), 'and the move must stay on that branch'
+
+    # (b) a WRIST FLIP -- wrist_1/wrist_3 half a turn, wrist_2 negated -> refused, no motion
+    moved.clear()
+    flip = list(g.approach_seed)
+    flip[3] += np.pi
+    flip[4] = -flip[4]
+    flip[5] -= np.pi
+    seen['returns'] = flip
+    assert g.align(robot, geom) is False, 'a branch flip must be refused before the arm moves'
+    assert not moved, 'and nothing may be commanded'
+
+    # (c) unreachable -> refused too, rather than falling back to an unseeded solve
+    seen['returns'] = None
+    assert g.align(robot, geom) is False

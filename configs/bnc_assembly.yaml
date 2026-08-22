@@ -233,8 +233,8 @@ pickup:
   # m / rad.  Both units for one triple is an error, not a silent preference.
   # ===========================================================================================
   fingertip_in_connector:
-    xyz_mm:  [10.0, 0.0, 0.0]
-    rpy_deg: [0.0, -60.0, 0.0]
+    xyz_mm:  [15.0, 0.0, 0.0]
+    rpy_deg: [0.0, -70.0, 0.0]
 
   # BELIEF OFFSET, mm in the FINGERTIP frame -- the one knob here that moves NOTHING at
   # pickup.  This is the split between the two things that were previously tangled:
@@ -290,6 +290,37 @@ pickup:
   # is derived from the grasp_check.connector_counts band through the calibrated gripper model
   # (the LOW count is the FAT end).  For this cable that band is [191, 212] -> 18.09 mm, so the
   # axis sits 9.04 mm up.  DERIVED, NOT MEASURED -- calipers on the barrel beat it.
+
+  # ===========================================================================================
+  # WHICH IK BRANCH THE GRASP LANDS ON -- i.e. which side the wrist ends up.
+  #
+  # A tool0 pose has up to EIGHT joint solutions and the controller returns the one NEAREST the
+  # seed it is given.  Today that seed is wherever the multi-view scan happened to leave the
+  # arm, which means the arm configuration at the grasp is an accident of the scan path.
+  #
+  # TWO OF THOSE SOLUTIONS ARE THE WRIST FLIP: wrist_1 and wrist_3 turned half a revolution and
+  # wrist_2 NEGATED.  Identical fingertip pose, wrist body on the opposite side.  At a square
+  # pickup either is fine.  At a steeply tilted fingertip_in_connector one of them swings
+  # wrist_2 DOWN toward the work surface -- same grasp, arm in the floor.
+  #
+  # HOW TO SET IT (once, on the bench):
+  #   1. Freedrive the arm to a good grasp on the connector -- fingertip where you want it AND
+  #      wrist_2 up, clear of the surface.
+  #   2. Read the six joint angles off `python -m urlab.apps.monitor` and paste them here.
+  #   3. Re-run.  The log line at grasp-align prints the branch it chose and how far it sits
+  #      from this seed.
+  # It only has to be CLOSE -- it selects a branch, it is not a target.  Leave it null to keep
+  # the old behaviour (nearest to wherever the arm is).
+  #
+  # THE TOLERANCE IS THE SAFETY NET.  A seed is a hint: if it is far from the target the
+  # controller can still return a different branch.  Every joint of the solution is compared
+  # against the seed BEFORE the arm moves, and a run that would flip is refused while the arm
+  # is still parked, naming the joint.  A wrist flip shows up as ~180 deg on wrist_1/wrist_3;
+  # an elbow or shoulder flip shows up on those.  45 deg is loose enough to allow the real
+  # reach and tight enough that no branch change slips through.
+  # ===========================================================================================
+  approach_seed_joints_deg: [-55, -180, -90, -90, 0, 180]
+  approach_seed_tolerance_deg: 45.0
   rests_on_ground_plane: true
 
   compliance:

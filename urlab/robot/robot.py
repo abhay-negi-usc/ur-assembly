@@ -257,8 +257,8 @@ class Robot:
         """Move so the CAMERA lands on T (used by every scan and visual-servo step)."""
         return self.arm.move_frame_to(T, self.T_tool0_cam, label)
 
-    def move_fingertip(self, T, label='move fingertip'):
-        return self.arm.move_frame_to(T, self.T_tool0_fingertip, label)
+    def move_fingertip(self, T, label='move fingertip', qnear=None):
+        return self.arm.move_frame_to(T, self.T_tool0_fingertip, label, qnear=qnear)
 
     def move_grasp_tcp(self, T, label='move grasp'):
         return self.arm.move_frame_to(T, self.T_tool0_grasp, label)

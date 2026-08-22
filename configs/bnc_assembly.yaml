@@ -499,6 +499,7 @@ assembly:
     # bayonet search is for.  Axial rather than |f| is what lets it be set low: a magnitude
     # limit tight enough to catch real resistance also stops on every lateral graze.
     max_axial_force_n: 10.0
+    max_axial_force_n: 10.0
     persistence_s: 0.10          # the limit must hold this long -- rides out contact spikes
 
     # ---- compliance overrides (else the top-level compliance:) ---
@@ -691,6 +692,7 @@ assembly:
     # --- compliance overrides (else the top-level compliance:) ---
     # Stiff along x (press the cams home), soft in rotation about x (let the bayonet steer).
     stiffness: [1500.0, 1500.0, 1500.0, 10.0, 10.0, 10.0]
+    stiffness: [1500.0, 1500.0, 1500.0, 10.0, 10.0, 10.0]
     mass: null
     damping_ratio: null
     # --- force guard overrides (else the top-level force_guard:) ---
@@ -720,6 +722,7 @@ assembly:
     # "ring stands 30 mm from the JUNCTION": junction sits at -45.7 mm on this axis, so
     # collar = -45.7 + 30 = -15.7 mm.  If re-tuned on the bench, measure from the connector
     # frame origin.
+    collar_offset_mm: -10
     collar_offset_mm: -10
     # COLLAR AXIS OFFSET, mm, in the SOCKET (target) frame's own axes: shifts the LINE the
     # whole collar maneuver works about (centring, unwind, advance, turn, and the tug

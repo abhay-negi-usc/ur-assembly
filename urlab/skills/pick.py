@@ -53,9 +53,22 @@ def grip_offset_matrix(cfg):
 
     The ROTATION is applied about the translated point, and it tilts the APPROACH -- roll
     about +x, pitch about +y, yaw about +z, extrinsic XYZ like every other rpy in the repo.
-    pickup.pitch_deg is the same rotation as an rpy of [0, pitch, 0] here; it stays a separate
-    key because it is the one people sweep, and because it composes AFTER this block (see
-    grip_delta) so that a correction written here does not move the pitch axis.
+
+    IT DOES NOT SUPERSEDE pickup.pitch_deg / roll_deg -- all three COMPOSE, in the order
+    grip_offset, then pitch, then roll (grip_delta). What that means in practice:
+
+      * the TRANSLATION is fully independent. It only moves the pivot, so sliding the bite
+        point never changes the approach angle and changing the angle never changes where
+        along the connector the fingers close. This is the part that is safe to tune alone.
+      * the ROTATION is NOT independent -- it multiplies with the other two. An rpy y here IS
+        pitch_deg (they are the same axis, so they simply ADD: y +10 with pitch_deg -75 is
+        exactly pitch_deg -65). An rpy x or z here TILTS THE AXIS the pitch then turns about,
+        so the result is not any pitch_deg value at all.
+
+    So: use the translation for bite-point corrections, and keep the approach angle in
+    pitch_deg / roll_deg where it is one number people can sweep. Reach for the rotation here
+    only for a correction that genuinely is not a pitch or a roll -- and expect it to compose,
+    not replace.
 
     ACCEPTS MONITOR UNITS: xyz_mm / rpy_deg, so a reading can be pasted straight off the
     monitor; xyz / rpy (m/rad) also work. Setting both units for one triple is an error.
@@ -152,15 +165,22 @@ def roll_delta(roll_rad):
 
 
 def grip_delta(pitch_rad, offset_m=0.0, roll_rad=0.0):
-    """The full bite-point transform in the JUNCTION frame: slide `offset_m` along the
-    connector axis, pitch about that point, then roll about the pitched APPROACH axis.
+    """The full bite-point transform in the JUNCTION frame:
 
-    Order matters and all three are deliberate. Translating first makes the OFFSET BITE POINT
-    the pivot, so the knobs stay independent: changing the pitch does not move where along the
-    connector the fingers close, and changing the offset does not change the approach angle.
-    Rolling LAST puts the roll about the approach direction the pitch actually produced -- roll
-    first and it would turn about the junction's own z, which after a -60 deg pitch is nowhere
-    near the direction the gripper advances along."""
+        grip_delta = grip_offset @ Ry(pitch) @ Rz(roll)
+
+    THE THREE COMPOSE -- none of them replaces another. `offset_m` is either the 6DOF
+    grip_offset pose or the legacy scalar along the connector axis.
+
+    Order matters and all three positions are deliberate:
+
+      * grip_offset FIRST, so its TRANSLATION becomes the pivot for what follows. That is what
+        keeps the bite point and the approach angle independent of each other. Its ROTATION,
+        if any, is not independent -- it premultiplies, so an rpy y adds to `pitch_rad` and an
+        rpy x/z tilts the axis the pitch then turns about.
+      * roll LAST, so it turns about the approach direction the pitch actually produced. Roll
+        first and it would turn about the junction's own z, which after a large pitch is
+        nowhere near the direction the gripper advances along."""
     return _offset_matrix(offset_m) @ pitch_delta(pitch_rad) @ roll_delta(roll_rad)
 
 

@@ -302,10 +302,20 @@ pickup:
   #             roll about +x (rotates the jaw line about the cable), pitch about +y (the same
   #             axis pickup.pitch_deg uses), yaw about +z.
   #
-  # ORDER: grip_offset is applied FIRST, then pitch_deg, then roll_deg -- so the pitch and roll
-  # pivot through the offset bite point, and a correction written here never moves the axis
-  # they turn about.  pickup.pitch_deg is exactly an rpy of [0, pitch, 0] in this block; it
-  # stays its own key because it is the one that gets swept.
+  # THIS DOES NOT REPLACE pitch_deg / roll_deg BELOW -- all three COMPOSE:
+  #
+  #     grip_delta = grip_offset @ Ry(pitch_deg) @ Rz(roll_deg)
+  #
+  # grip_offset is applied FIRST, so its TRANSLATION is the pivot the pitch and roll turn
+  # about.  That half is fully independent: sliding the bite point never changes the approach
+  # angle, and changing the angle never changes where along the connector the fingers close.
+  #
+  # ITS ROTATION IS NOT INDEPENDENT, and this is the easy mistake.  An rpy y here IS pitch_deg
+  # -- same axis, so they simply ADD (y +10 with pitch_deg -75 gives exactly pitch_deg -65,
+  # not -85 and not -75).  An rpy x or z here TILTS THE AXIS the pitch then turns about, so
+  # the result is not any pitch_deg value at all.  Keep the approach angle in pitch_deg /
+  # roll_deg, where it stays one number that can be swept, and use the xyz here for bite-point
+  # corrections.
   #
   # UNITS: xyz_mm / rpy_deg (monitor units, paste-able straight off urlab.apps.monitor), or
   # xyz / rpy in m / rad.  Both units for one triple is an error, not a silent preference.

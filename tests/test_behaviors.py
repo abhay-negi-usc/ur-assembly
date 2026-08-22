@@ -1763,3 +1763,80 @@ def test_the_camera_is_checked_against_the_arm_and_ground_but_not_the_tool():
     from urlab.robot.collision import FINGERTIP_BODIES
     assert 'camera_bracket' not in FINGERTIP_BODIES
     m.close()
+
+
+def test_the_reorient_recovery_places_the_cable_on_the_socket_heading():
+    """THE POINT OF THE MANOEUVRE is the HEADING. The coaxial grasp comes at the connector along
+    its own axis, so reachability depends on which way the cable is lying; setting it back down
+    on the socket's heading is what makes the retry able to succeed where the first try could
+    not. Dropping it on an arbitrary heading would fail the same way again.
+
+    ROLL AND PITCH ARE NOT SETTINGS. The part goes onto a flat bench, so its axis comes out
+    horizontal and its z up whatever attitude the socket has -- only the heading carries over.
+    """
+    from urlab import config as urconfig
+    from urlab.transforms import xyzrpy_to_matrix
+
+    cfg = urconfig.load('bnc_assembly')
+    r = cfg.get_path('assembly.reorient_recovery')
+    assert r and bool(r.get('enabled')), 'the recovery must be available'
+    assert list(r['grasp_rpy_deg']) == [0.0, 0.0, 0.0], (
+        'the fallback grasp must be SQUARE -- a vertical approach is the one that does not '
+        'depend on the cable heading, which is the whole reason it is the fallback')
+
+    # the pose maths, standalone: a socket rotated 90.78 deg with a slight roll/pitch, as recorded
+    T_t = xyzrpy_to_matrix([0.12029, 1.08887, -0.15540],
+                           np.radians([-0.42, -0.44, 90.78]))
+    off = r['place_offsets']
+    d = np.array([off['x_mm'], off['y_mm'], off['z_mm']], dtype=float) / 1000.0
+    p = T_t[:3, 3] + T_t[:3, :3] @ d
+    yaw = (np.arctan2(T_t[1, 0], T_t[0, 0]) + np.radians(off['yaw_deg']))
+    T_place = xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, 0.0, yaw])
+    T_place[:3, 3] = p
+
+    # FLAT: the connector axis is horizontal and its z is straight up, whatever the socket does
+    assert abs(float(T_place[2, 0])) < 1e-12, 'the connector axis must be horizontal on a bench'
+    assert np.allclose(T_place[:3, 2], [0.0, 0.0, 1.0]), 'and its z must be up'
+    # HEADING PRESERVED: same compass direction as the socket, to the yaw offset
+    assert abs(np.degrees(yaw) - (90.78 + off['yaw_deg'])) < 1e-9
+
+    # ... and z as configured does NOT reach the bench, which is why snap_to_ground exists
+    gz = float(cfg.get_path('ground_plane.z_m'))
+    assert p[2] - gz > 0.15, (
+        f'the configured z_mm leaves the connector {(p[2] - gz) * 1000:.0f} mm up -- the test '
+        'exists to keep that visible, since "on the ground plane" is the actual requirement')
+    assert bool(r.get('snap_to_ground', True)), (
+        'so the ground plane must win by default, or the cable is released in mid-air')
+
+    # what snapping actually uses: ground + one barrel radius, the resting axis height
+    from urlab.skills.pick import connector_axis_height_m
+    axis = gz + connector_axis_height_m(cfg)
+    assert 0.004 < axis - gz < 0.015, 'a plausible barrel radius'
+
+
+def test_an_unreachable_grasp_is_reported_as_such_and_not_as_an_abort():
+    """'unreachable' is ACTIONABLE where 'abort' is not. It says the GEOMETRY refused this
+    approach, which a caller can answer by changing the approach; an abort (comms, an operator
+    saying no) means stop. Collapsing the two is what made the recovery impossible to trigger."""
+    import inspect
+
+    from urlab.apps import cable_pick_assemble as cpa
+    from urlab.skills.pick import GraspController
+
+    src = inspect.getsource(cpa._pick)
+    assert "getattr(grasp, 'last_refusal', None) or 'abort'" in src, (
+        'the pick must pass the refusal reason up, not flatten every failure to abort')
+
+    # the controller sets it on the paths that mean "the geometry said no"
+    csrc = inspect.getsource(GraspController)
+    assert csrc.count("self.last_refusal = 'unreachable'") >= 4, (
+        'no IK, wrong branch, a path through the ground, and a blocked descent are all '
+        'unreachable -- each has to set it, or that path silently reads as an abort')
+    assert 'self.last_refusal = None' in csrc, 'and it must be cleared at the start of a try'
+
+    # the app treats it as a one-shot: squaring the cable twice cannot help
+    asrc = inspect.getsource(__import__('urlab.apps.bnc_assembly', fromlist=['x']).build_and_run)
+    assert "if result == 'unreachable':" in asrc and 'reoriented' in asrc
+    assert 'still unreachable after the cable was' in asrc, (
+        'a second reorientation must be refused -- the heading was not the problem'
+    )

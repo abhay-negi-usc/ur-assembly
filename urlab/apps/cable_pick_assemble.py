@@ -94,7 +94,10 @@ def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder, 
             ('report pre-grasp delta', lambda: log_grasp_delta(robot, geom.T_base_grasp, 'pre-grasp')),
             ('move to grasp', lambda: grasp.descend(robot, geom, 'grasp')),
         ]):
-            return 'abort'
+            # 'unreachable' is ACTIONABLE where 'abort' is not: it means the geometry refused
+            # this approach, which a caller can answer by changing the approach. Anything else
+            # (comms, an operator abort) stays 'abort'.
+            return getattr(grasp, 'last_refusal', None) or 'abort'
         # Close + grasp-check + recovery (blind retry, then mode-directed reseat nudges) -- see
         # GraspRecovery -- so a cable on the fingertip flats/tips is reseated, not failed.
         return recovery.grasp_with_recovery(robot, geom, check, camera=scanner.camera)

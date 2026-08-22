@@ -623,6 +623,11 @@ class GraspController:
         self._guard_cfg = p.get('force_guard', {}) or {}
         self._adm = None
         self._guard = None
+        # WHY the last approach was refused: 'unreachable' (no IK, wrong branch, or a path that
+        # goes through something) or None. A caller that can DO something about it needs to
+        # tell that apart from a comms failure or an operator abort, which is all a bare False
+        # conveys -- see the reorient recovery in bnc_assembly.
+        self.last_refusal = None
 
     @property
     def compliant(self):
@@ -720,11 +725,13 @@ class GraspController:
         naming the joint. A wrist flip shows up here as ~180 deg on wrist_1/wrist_3 or a
         sign change on wrist_2; an elbow or shoulder flip shows up on those joints."""
         robot.arm.set_speed_scale(self.align_scale, 'grasp_align')
+        self.last_refusal = None
         T = geom.pre_grasp()
         # SOLVE FIRST, MOVE SECOND -- both the branch check and the ground check need the
         # configuration in hand while the arm is still parked.
         q = robot.arm.ik(T @ inverse(robot.T_tool0_fingertip), self.approach_seed)
         if q is None:
+            self.last_refusal = 'unreachable'
             log.error('%s: no IK solution%s.', label,
                       '' if self.approach_seed is None else
                       ' near pickup.approach_seed_joints_deg %s deg'
@@ -745,6 +752,7 @@ class GraspController:
         d = np.abs((raw + np.pi) % (2.0 * np.pi) - np.pi)
         worst = int(np.argmax(d))
         if d[worst] > self.approach_seed_tol:
+            self.last_refusal = 'unreachable'
             log.error('%s: IK landed on a DIFFERENT BRANCH from the seed -- %s is %.1f deg away '
                       '(limit %.1f). Solution %s deg vs seed %s deg. The wrist would sit on the '
                       'other side; refusing while the arm is still parked. Either re-seed from a '
@@ -775,6 +783,7 @@ class GraspController:
         q_now = robot.arm.q()
         ok, body, over, frac = self._clear_between(via, q_goal)
         if not ok:
+            self.last_refusal = 'unreachable'
             log.error('%s: routing via pickup.approach_via_joints_deg does not help -- leg 2 '
                       'still puts %s %.1f mm past its allowance at %.0f%% along. The waypoint '
                       'needs to be higher, or the grasp itself is too low.',
@@ -812,6 +821,8 @@ class GraspController:
         # NOT a speed problem -- a moveJ traces the same arc at any speed. The three things
         # that actually move the arc are the BRANCH it ends on, the ROUTE it takes, and how low
         # the target is.
+        if not quiet:
+            self.last_refusal = 'unreachable'
         (log.info if quiet else log.error)(
             '%s: the joint path goes THROUGH THE GROUND PLANE -- %s is %.1f mm past its '
             'allowance at %.0f%% along the move.%s The arc is the same at any speed; what '
@@ -832,7 +843,9 @@ class GraspController:
         needed watching was never the one being watched. The descent is CARTESIAN, so it is the
         tool bodies that are checked (they depend only on tool0's pose, no IK required) -- and
         the tool is what arrives at the bench first anyway."""
+        self.last_refusal = None
         if not self._descent_is_clear(robot, geom, label):
+            self.last_refusal = 'unreachable'
             return False
         return self._to(robot, geom.T_base_grasp, label, 'Grasp descent', scale=self.pickup_scale)
 

@@ -1108,7 +1108,8 @@ def build_and_run(cfg, robot, camera, args):
     _bel_off = belief_offset_m(cfg)
     if float(np.linalg.norm(_bel_off)) > 0.0:
         T_ftip_conn = offset_belief(T_ftip_conn, _bel_off)
-        log.info('Belief offset %s mm (fingertip frame) applied to the in-hand pose ONLY -- '
+        log.info('Belief offset %s mm (CONNECTOR frame: +x along the connector axis) '
+                 'applied to the in-hand pose ONLY -- '
                  'the grasp command is unchanged.',
                  np.round(_bel_off * 1000.0, 2).tolist())
 
@@ -3236,13 +3237,26 @@ def build_and_run(cfg, robot, camera, args):
             cc_ok = ret_ok = False
             tug_res = None
             state = 'engaged'                    # the initial assembly mated it; that is where we are
+            # ALWAYS REPORTED, whichever frame the maneuvers then use. At the mate the part is
+            # physically IN the socket, so the believed connector and the target frame describe
+            # the same thing -- and any gap between them is in-hand belief error, measured
+            # exactly where it matters. Decomposed in the CONNECTOR's own axes because that is
+            # where the fix lives: along-axis is insertion depth or belief_offset x, lateral and
+            # vertical are the grasp, and roll is the clock angle.
+            _believed = robot.tool0() @ T_tool0_conn
+            _d = inverse(T_base_tconn) @ _believed
+            _dx, _dr = matrix_to_xyzrpy(_d)
+            log.info('BELIEF vs TARGET at the mate (connector frame): along-axis %+.2f mm, '
+                     'lateral %+.2f mm, vertical %+.2f mm | roll %+.2f, pitch %+.2f, yaw %+.2f '
+                     'deg. Zero means the belief agreed with the socket; anything else is the '
+                     'in-hand error the insertion had to absorb.',
+                     _dx[0] * 1000.0, _dx[1] * 1000.0, _dx[2] * 1000.0,
+                     *np.degrees(_dr))
             if pe_frame == 'believed':
                 # The believed connector frozen in base coordinates NOW, while the arm still grips
                 # it -- the maneuvers need one consistent frame, not one re-derived per use.
-                T_clk = robot.tool0() @ T_tool0_conn
-                _pl, _pa = pose_error(T_clk, T_base_tconn)
-                log.info('Post-engage frame: BELIEVED connector -- %.2f mm / %.2f deg from the '
-                         'recorded target frame.', _pl * 1000.0, np.degrees(_pa))
+                T_clk = _believed
+                log.info('Post-engage frame: BELIEVED connector.')
             else:
                 T_clk = T_base_tconn
                 log.info('Post-engage frame: TARGET connector (recorded socket pose).')

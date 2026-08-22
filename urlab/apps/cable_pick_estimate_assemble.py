@@ -150,7 +150,7 @@ class _AssemblyTask:
         bel_off = belief_offset_m(cfg)
         if float(np.linalg.norm(bel_off)) > 0.0:
             self.T_ftip_conn = offset_belief(self.T_ftip_conn, bel_off)
-            log.info('Belief offset %s mm (fingertip frame) applied to the in-hand pose ONLY.',
+            log.info('Belief offset %s mm (CONNECTOR frame) applied to the in-hand pose ONLY.',
                      np.round(bel_off * 1000.0, 2).tolist())
 
         # Speeds: ONE global speed: block, each phase applying its own scale to all four

@@ -103,7 +103,7 @@ def connector_axis_height_m(cfg):
 
 
 def belief_offset_m(cfg):
-    """`pickup.belief_offset_mm` as a 3-vector in metres, in the FINGERTIP frame.
+    """`pickup.belief_offset_mm` as a 3-vector in metres, in the CONNECTOR frame.
 
     THE MEASURED RESIDUAL, not a derived one -- and the reason this exists at all is that the
     two things it separates are genuinely different:
@@ -122,17 +122,33 @@ def belief_offset_m(cfg):
     v = cfg.get_path('pickup.belief_offset_mm') or [0.0, 0.0, 0.0]
     v = [float(x) for x in v]
     if len(v) != 3:
-        raise ValueError('pickup.belief_offset_mm must be [x, y, z] mm in the fingertip frame, '
+        raise ValueError('pickup.belief_offset_mm must be [x, y, z] mm in the connector frame, '
                          f'got {len(v)} entries')
     return np.asarray(v, dtype=float) / 1000.0
 
 
 def offset_belief(T_ftip_conn, offset_m):
-    """Shift the believed connector in the FINGERTIP frame by `offset_m`, leaving its
-    orientation alone. Left-multiplied because the offset is expressed in the fingertip's own
-    axes -- 'the part sits this much lower in the hand', not 'this much along its own body'."""
+    """Shift the believed connector along ITS OWN AXES by `offset_m`, orientation untouched.
+
+    RIGHT-MULTIPLIED, so the delta is read in the CONNECTOR frame: +x along the connector axis,
+    y and z its own transverse axes. "the part sits 10 mm further back along its own body",
+    not "10 mm deeper into the hand".
+
+    WHY THE PART'S FRAME AND NOT THE HAND'S. The residual it carries is a fact about where the
+    connector ends up relative to the fingers, and either frame can express that -- but the
+    part frame is the one the rest of this geometry is now written in. The grasp itself is
+    `fingertip_in_connector`, and the socket, the insertion axis and the clocking rotations are
+    all connector-frame quantities. A hand-frame delta was the odd one out, and its axes swing
+    with the approach angle: the same physical error needed a different number at every
+    pickup pitch. In the part's frame it does not.
+
+    THE TRADE, stated plainly: a residual that really is a property of the JAWS -- the groove
+    capturing the cylinder at a different depth along the approach -- is more naturally a
+    hand-frame quantity, and in the part frame it will move as the pitch changes. Which one a
+    given measurement belongs in depends on where the error comes from. Re-measure after a
+    large change of approach angle either way."""
     from ..transforms import translation_matrix
-    return translation_matrix(np.asarray(offset_m, dtype=float)) @ T_ftip_conn
+    return T_ftip_conn @ translation_matrix(np.asarray(offset_m, dtype=float))
 
 
 def grasp_pose(T_base_connector, T_conn_ftip):

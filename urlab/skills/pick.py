@@ -46,6 +46,39 @@ def grip_offset_m(cfg):
     return float(cfg.get_path('pickup.grip_offset_mm', 0.0) or 0.0) / 1000.0
 
 
+def belief_offset_m(cfg):
+    """`pickup.belief_offset_mm` as a 3-vector in metres, in the FINGERTIP frame.
+
+    THE MEASURED RESIDUAL, not a derived one -- and the reason this exists at all is that the
+    two things it separates are genuinely different:
+
+      * the GRASP COMMAND (pitch_deg, grip_offset_mm, junction_in_fingertip) says where the
+        fingers GO. Change one and the arm moves somewhere else.
+      * the BELIEF says where the connector then IS relative to those fingers. Change this and
+        NOTHING moves at pickup -- only the assembly's idea of what it is carrying.
+
+    pitched_belief() derives the belief from the command exactly, and its round trip is exact
+    -- but only under the assumption that the part seats in the jaws the same way at every
+    approach angle. It does not. The cable lies on the ground and stays horizontal while the
+    JAWS tilt, so tilted grooves capture the cylinder at a different depth than square ones.
+    That difference is a contact fact: measurable, not derivable from any frame. This is where
+    the measurement goes, so it cannot be confused with the geometry it corrects."""
+    v = cfg.get_path('pickup.belief_offset_mm') or [0.0, 0.0, 0.0]
+    v = [float(x) for x in v]
+    if len(v) != 3:
+        raise ValueError('pickup.belief_offset_mm must be [x, y, z] mm in the fingertip frame, '
+                         f'got {len(v)} entries')
+    return np.asarray(v, dtype=float) / 1000.0
+
+
+def offset_belief(T_ftip_conn, offset_m):
+    """Shift the believed connector in the FINGERTIP frame by `offset_m`, leaving its
+    orientation alone. Left-multiplied because the offset is expressed in the fingertip's own
+    axes -- 'the part sits this much lower in the hand', not 'this much along its own body'."""
+    from ..transforms import translation_matrix
+    return translation_matrix(np.asarray(offset_m, dtype=float)) @ T_ftip_conn
+
+
 def pitch_delta(pitch_rad):
     """The pitch as a transform in the JUNCTION frame: a rotation about its own y."""
     from ..transforms import xyzrpy_to_matrix

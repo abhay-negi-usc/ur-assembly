@@ -222,6 +222,30 @@ pickup:
   # (Distinct from grasp_check.retry_perturb_x_m, which jitters the SAME axis by +/-3 mm
   # between retries and is deliberately NOT modelled -- that is search noise, not a setting.)
   grip_offset_mm: 15.0
+  # BELIEF OFFSET, mm in the FINGERTIP frame -- the one knob here that moves NOTHING at
+  # pickup.  This is the split between the two things that were previously tangled:
+  #
+  #   the GRASP COMMAND  (pitch_deg, grip_offset_mm, junction_in_fingertip) = where the
+  #                      fingers GO.  Change one and the arm moves somewhere else.
+  #   the BELIEF         (this) = where the connector then IS relative to those fingers.
+  #                      Change it and the pick is identical; only the assembly's idea of
+  #                      what it is carrying moves.
+  #
+  # WHY IT IS NEEDED.  The belief is otherwise DERIVED from the command, exactly -- but that
+  # derivation assumes the part seats in the jaws the same way at every approach angle.  It
+  # does not: the cable lies on the ground and stays horizontal while the JAWS tilt, so
+  # tilted grooves capture the cylinder at a different depth than square ones.  That is a
+  # contact fact -- measurable, not derivable from any frame -- and it shows up exactly the
+  # way it did here: an in-hand pose that is off at a non-zero pitch_deg and right at 0.
+  #
+  # HOW TO SET IT: pick at the working pitch, measure where the connector actually sits
+  # against where the app says it does, and put the difference here.  It is PER-PITCH:
+  # change pitch_deg and this needs re-measuring.
+  #
+  # DO NOT fold this into junction_in_fingertip (that moves the grasp too, so you would chase
+  # your own tail) or into frames.yaml bnc_connector_in_fingerpads (that frame is the
+  # SQUARE-grip truth, shared with the recorded target, and the smoke suite guards it).
+  belief_offset_mm: [0.0, 0.0, -3.0]
   # PICKUP HEIGHT from the gripper kinematic model.  Assumes the connector rests ON THE GROUND
   # PLANE (ground_plane.z_m): grasp target = plane + connector d_max/2 (centerline) + the
   # fingertip ADVANCE between fingertip_ref_separation_mm (where fingertip_grasp z was
@@ -292,7 +316,7 @@ grasp_check:
 speed:
   max_joint_velocity_deg_s: 90.0
   max_joint_acceleration_deg_s2: 30.0
-  max_cartesian_translation_mm_s: 25.0
+  max_cartesian_translation_mm_s: 40.0
   max_cartesian_rotation_deg_s: 90.0
   retract_rotation_deg_s: 50.0
   # Per-PHASE scaling of ALL FOUR limits above (1.0 = the global limit itself), one entry per
@@ -309,14 +333,14 @@ speed:
     # speed (the controller's own 180 deg/s ceiling), but it does keep raising the cartesian
     # caps, which are what actually bind here.
     reconfigure: 3.0
-    assemble: 0.5      # the insertion reference ramp
+    assemble: 0.25      # the insertion reference ramp
     retract: 4.0       # the between-attempt retract + the release escape
     # POST-MATE CLOCKING, one scale per maneuver.  These pace the CONTACT ramps; free-space
     # moves inside a maneuver stay on standoff/retract.  A non-null speed_translation_mm_s /
     # speed_rotation_deg_s in the maneuver's own block overrides its scale entirely.
     visual_localize: 1.5     # the marker sweep + per-marker servo moves (camera near the fixture)
     connector_clock: 0.10    # the bayonet sweep legs
-    collar_clock: 0.25   # the collar turn
+    collar_clock: 0.10   # the collar turn
     clock_retract: 1.0   # the shared two-leg escape (free space, gripper already clear)
     # The collar maneuver's free-space approach (withdraw, lift off, big reorient onto the
     # axis).  Nothing is inserted, so it should not run at contact pacing -- and the reorient
@@ -402,7 +426,7 @@ assembly:
     # which are shared with marker_calibration and must stay identical to it).  false = the
     # plain sweep only -- faster, but the localization then views the markers differently
     # from how the calibration did, so the PnP bias cancellation is partly given up.
-    servo_refine: false
+    servo_refine: true
     # Keep true: return to home after the sweep; the app then drives to pick_joints_deg,
     # where the scan, grasp geometry and retry offsets are written.
     return_home_after: true
@@ -458,7 +482,7 @@ assembly:
     # PRELOAD, mm past the mate along the connector's own +X, so the reference finishes
     # pressing rather than merely arriving.  0 = stop exactly on the mate.  (Distinct from
     # final_insertion.preload_mm, which belongs to the estimate-mode commit.)
-    preload_mm: 25.0
+    preload_mm: 10.0
 
     # Reference rebuild rate.  Must be >= 4x the highest active frequency or the sampled sine
     # aliases -- validated pre-motion.

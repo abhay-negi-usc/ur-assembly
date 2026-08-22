@@ -885,6 +885,47 @@ def test_belief_matches_a_grasp_that_is_both_offset_and_pitched():
                 f'{np.degrees(ang):.4f} deg from where the connector actually ends up')
 
 
+def test_belief_offset_moves_the_belief_and_never_the_grasp():
+    """THE SEPARATION this knob exists for: `pickup.belief_offset_mm` is the MEASURED seating
+    residual, and it must move only what we think we are holding -- never where the fingers
+    go. The grasp command (pitch, grip offset, junction_in_fingertip) is derived geometry; the
+    belief offset is a contact measurement, and mixing them means tuning one perturbs the
+    other."""
+    from urlab.skills.pick import belief_offset_m, offset_belief, pitched_grasp
+    from urlab.transforms import frame_from_axis, translation_matrix, xyzrpy_to_matrix
+
+    T_fj = xyzrpy_to_matrix([-0.017, 0.0, 0.005], [0.0, 0.0, np.pi])
+    nominal_belief = T_fj @ translation_matrix([0.0457, 0.0, 0.0])
+    off = np.array([0.0, 0.0, -0.003])                     # 3 mm 'lower' in the fingertip frame
+
+    # the BELIEF moves, by exactly the offset, without rotating
+    moved = offset_belief(nominal_belief, off)
+    assert np.allclose(moved[:3, :3], nominal_belief[:3, :3]), 'a seating offset must not rotate'
+    assert np.allclose(moved[:3, 3] - nominal_belief[:3, 3], off), 'exactly the offset asked for'
+
+    # the GRASP does not: pitched_grasp cannot even see the offset
+    T_conn = np.eye(4)
+    T_conn[:3, :3] = frame_from_axis([1.0, 0.2, 0.0], [0.0, 0.0, 1.0])
+    T_conn[:3, 3] = [0.5, 0.0, -0.72]
+    before = pitched_grasp(T_conn, T_fj, np.radians(-15.0), 0.015)
+    after = pitched_grasp(T_conn, T_fj, np.radians(-15.0), 0.015)
+    assert np.allclose(before, after), 'the grasp command must be untouched by the belief knob'
+
+    # config plumbing: absent -> zero, and a malformed vector is refused rather than guessed
+    from urlab import config as urconfig
+    assert np.allclose(belief_offset_m(urconfig.load('bnc_assembly')), [0.0, 0.0, 0.0])
+    c = urconfig.load('bnc_assembly')
+    c.set_path('pickup.belief_offset_mm', [0.0, 0.0, -3.0])
+    assert np.allclose(belief_offset_m(c), [0.0, 0.0, -0.003])
+    c.set_path('pickup.belief_offset_mm', [1.0, 2.0])
+    try:
+        belief_offset_m(c)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('a 2-entry offset must be refused, not silently padded')
+
+
 def test_held_junction_in_fingertip_tracks_the_pitch():
     """Downstream users of the grasp geometry (the kinematic-assembly target) must see the
     ACTUAL junction-in-fingertip, not the nominal square-grip one."""

@@ -14,7 +14,8 @@ from ..robot import AdmittanceController, ForceGuard
 from ..skills import insert as ins
 from ..skills import reset
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
-                           GraspRecovery, log_grasp_delta, retry_offset_x)
+                           GraspRecovery, held_junction_in_fingertip, log_grasp_delta,
+                           pickup_pitch_rad, pitched_grasp, retry_offset_x)
 import numpy as np
 
 from ..transforms import from_cfg, inverse, translation_matrix
@@ -41,7 +42,16 @@ def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder, 
     if offset_x_m:
         log.info('Retry perturbation: %+.1f mm along the junction x-axis.', offset_x_m * 1000)
         T_conn = T_conn @ translation_matrix([offset_x_m, 0.0, 0.0])
-    geom.T_base_grasp = T_conn @ inverse(T_ftip_junction)
+    # PICKUP PITCH: tilt the approach about the junction's own y -- horizontal, orthogonal
+    # to the ground normal and to the cable axis -- through the bite point, so the fingers
+    # meet the same spot on the cable at an angle. 0 = straight down.
+    pitch = pickup_pitch_rad(cfg)
+    geom.T_base_grasp = pitched_grasp(T_conn, T_ftip_junction, pitch)
+    if pitch:
+        log.info('Pickup PITCH %+.1f deg about the axis perpendicular to the cable and to the '
+                 'ground normal. The in-hand belief is rotated to match; check the leading '
+                 'finger clears the ground plane before running this on hardware.',
+                 np.degrees(pitch))
     # WHICH WAY THE FINGERTIP WILL FACE, reported before the arm moves. The grasp pose is
     # T_conn @ inverse(junction_in_fingertip), so the fingertip's +X ends up along the DETECTED
     # heading rotated by that block's yaw -- and nothing downstream can tell you which way it came
@@ -139,8 +149,10 @@ def build_and_run(cfg, robot, camera, args):
             return False
 
     # 2. Reduce the target to a fingertip pose and derive the stand-off.
-    T_target = ins.fingertip_target(ic, inverse(from_cfg(cfg.section('junction_in_fingertip'))),
-                                    robot.T_tool0_fingertip)
+    T_target = ins.fingertip_target(
+        ic, inverse(held_junction_in_fingertip(from_cfg(cfg.section('junction_in_fingertip')),
+                                               pickup_pitch_rad(cfg))),
+        robot.T_tool0_fingertip)
     T_standoff = ins.standoff_of(ic, T_target)
     log.info('Kinematic assembly: fingertip target %s, stand-off %s.',
              T_target[:3, 3].round(4), T_standoff[:3, 3].round(4))

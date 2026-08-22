@@ -25,6 +25,8 @@
 #                        gripper kinematic model + gripper.groove_depth_mm (PREFERRED over the raw
 #                        count keys; also passed through as grasp_check.connector_diameter_mm for
 #                        the payload-width check). cable_diameter_mm passes through likewise.
+# (The PICKUP PITCH -- tilting the approach about the axis perpendicular to the cable -- is
+# NOT here: it is a per-run choice, so it lives in the app config as `pickup.pitch_deg`.)
 #   <cable>.junction_in_fingertip -> junction_in_fingertip  (the JUNCTION pose wrt the FINGERTIP at
 #                        the grasp: the robot poses the fingertip so the detected junction lands
 #                        exactly there, then closes the gripper. Replaces junction_offset_m AND the

@@ -42,7 +42,8 @@ from ..skills import trajectory as traj
 from ..skills.manifold import (FORCE_COLS, ManifoldEstimator, POSE_COLS, TORQUE_COLS,
                                vec6_from_mats)
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
-                           GraspRecovery, retry_offset_x, verify_cable_held)
+                           GraspRecovery, pickup_pitch_rad, pitched_belief, retry_offset_x,
+                           verify_cable_held)
 from ..transforms import from_cfg, inverse, matrix_to_xyzrpy, pose_error, translation_matrix
 from ._cable import build_scanner, make_confirm
 from ._common import experiment_dir, seg_time
@@ -137,6 +138,13 @@ class _AssemblyTask:
         init = cfg.get_path('estimation.initial_connector_in_fingertip')
         self.T_ftip_conn = from_cfg(init) if init \
             else from_cfg(cfg.section('junction_in_fingertip'))
+        # A pitched pickup rotates the part in the hand by the same angle (see skills/pick).
+        pitch = pickup_pitch_rad(cfg)
+        if pitch:
+            self.T_ftip_conn = pitched_belief(
+                self.T_ftip_conn, from_cfg(cfg.section('junction_in_fingertip')), pitch)
+            log.info('Pickup pitch %+.1f deg -> in-hand belief rotated to match.',
+                     np.degrees(pitch))
 
         # Speeds: ONE global speed: block, each phase applying its own scale to all four
         # limits (speed.phase_scale.<phase>).  Free-space moves inherit the scale from

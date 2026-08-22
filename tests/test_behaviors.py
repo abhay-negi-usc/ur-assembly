@@ -524,6 +524,131 @@ def test_joint_pnp_recovers_the_target_from_synthetic_corners():
     assert lin * 1000.0 < 0.5 and np.degrees(ang) < 0.1, (lin * 1000.0, np.degrees(ang))
 
 
+def test_no_undefined_names_anywhere_in_the_package():
+    """A name used but never imported is INVISIBLE to an import check: the module loads fine
+    and raises NameError only when that line runs -- which in this codebase means partway
+    through a hardware run, after the arm has already moved.
+
+    Two real instances motivated this (both 2026-08-21): bnc_assembly used pickup_pitch_rad
+    without importing it (NameError after the pick), and estimator_eval's eval_config.json
+    dump referenced an `fh` that was never opened -- swallowed by a bare except, so that file
+    had silently never been written. Neither was reachable by importing the module.
+    """
+    import io
+
+    import pytest
+    pytest.importorskip('pyflakes', reason='pyflakes guards undefined names; pip install -r '
+                                           'requirements/dev.txt')
+    from pyflakes import api as pyflakes_api
+    from pyflakes import messages as pfm
+    from pyflakes.reporter import Reporter
+
+    class Collect(Reporter):
+        def __init__(self):
+            super().__init__(io.StringIO(), io.StringIO())
+            self.found = []
+
+        def flake(self, message):
+            if isinstance(message, (pfm.UndefinedName, pfm.UndefinedLocal,
+                                    pfm.UndefinedExport)):
+                self.found.append('%s:%d: %s' % (message.filename, message.lineno,
+                                                 message.message % message.message_args))
+
+    root = os.path.join(os.path.dirname(__file__), '..', 'urlab')
+    reporter = Collect()
+    n = 0
+    for dirpath, _dirs, files in os.walk(root):
+        if '__pycache__' in dirpath:
+            continue
+        for f in files:
+            if f.endswith('.py'):
+                pyflakes_api.checkPath(os.path.join(dirpath, f), reporter)
+                n += 1
+    assert n > 20, f'only scanned {n} files -- the walk is not finding the package'
+    assert not reporter.found, (
+        'undefined name(s) -- these raise NameError at RUN time, not import time:\n  '
+        + '\n  '.join(reporter.found))
+
+
+def test_pickup_pitch_rotates_about_the_axis_orthogonal_to_ground_and_cable():
+    """The pitch axis must be the detected junction frame's own y -- horizontal, perpendicular
+    to the cable -- and the pivot must be the bite point, so the fingers meet the same spot on
+    the cable at an angle instead of somewhere else."""
+    from scipy.spatial.transform import Rotation
+
+    from urlab.skills.pick import pitched_grasp
+    from urlab.transforms import frame_from_axis, inverse, translation_matrix
+
+    cable = np.array([0.6, 0.8, 0.0])                  # a horizontal cable, off-axis on purpose
+    cable /= np.linalg.norm(cable)
+    T_conn = np.eye(4)
+    T_conn[:3, :3] = frame_from_axis(cable, [0.0, 0.0, 1.0])
+    T_conn[:3, 3] = [0.5, 0.1, -0.7]
+    T_fj = translation_matrix([-0.017, 0.0, 0.005])    # junction_in_fingertip, banana-style
+    phi = np.radians(25.0)
+
+    nominal = pitched_grasp(T_conn, T_fj, 0.0)
+    pitched = pitched_grasp(T_conn, T_fj, phi)
+    assert np.allclose(nominal, T_conn @ inverse(T_fj)), 'zero pitch must change nothing'
+
+    # the base-frame rotation taking the nominal grasp to the pitched one
+    rel = Rotation.from_matrix(pitched[:3, :3] @ nominal[:3, :3].T).as_rotvec()
+    ang = float(np.linalg.norm(rel))
+    axis = rel / ang
+    assert abs(np.degrees(ang) - 25.0) < 1e-6, 'the pitch angle must be what was asked for'
+    assert abs(float(np.dot(axis, [0.0, 0.0, 1.0]))) < 1e-9, 'axis must be ORTHOGONAL to ground'
+    assert abs(float(np.dot(axis, cable))) < 1e-9, 'axis must be ORTHOGONAL to the cable'
+
+    # the bite point does not move: the junction still lands where it was detected
+    for T in (nominal, pitched):
+        assert np.allclose((T @ T_fj)[:3, 3], T_conn[:3, 3], atol=1e-12)
+
+
+def test_pitched_belief_matches_what_the_pitched_grasp_actually_produces():
+    """The round trip that keeps the pick and the belief one pair: grasp a part at a pitch,
+    work out where the connector REALLY ends up in the hand, and it must equal the belief the
+    app plans with. This is the invariant that a hand-edited frames.yaml would break."""
+    from urlab.skills.pick import pitched_belief, pitched_grasp
+    from urlab.transforms import (frame_from_axis, inverse, pose_error, translation_matrix,
+                                  xyzrpy_to_matrix)
+
+    cable = np.array([1.0, 0.3, 0.0])
+    cable /= np.linalg.norm(cable)
+    T_conn = np.eye(4)                                  # the DETECTED junction, in the world
+    T_conn[:3, :3] = frame_from_axis(cable, [0.0, 0.0, 1.0])
+    T_conn[:3, 3] = [0.42, -0.15, -0.72]
+    T_fj = xyzrpy_to_matrix([-0.017, 0.0, 0.005], [0.0, 0.0, np.pi])   # junction_in_fingertip
+    # the PART: the connector sits 45.7 mm out along the cable from the junction, fixed
+    T_junction_conn = translation_matrix([0.0457, 0.0, 0.0])
+    nominal_belief = T_fj @ T_junction_conn
+
+    T_base_conn_true = T_conn @ T_junction_conn         # the part does not move when we grip it
+    for phi_deg in (0.0, 10.0, -20.0, 35.0):
+        phi = np.radians(phi_deg)
+        T_base_ftip = pitched_grasp(T_conn, T_fj, phi)
+        actual = inverse(T_base_ftip) @ T_base_conn_true          # where it REALLY is in hand
+        believed = pitched_belief(nominal_belief, T_fj, phi)      # what the app plans with
+        lin, ang = pose_error(actual, believed)
+        # exact algebra; the bounds are float noise (pose_error's arccos loses digits at identity)
+        assert lin * 1000.0 < 1e-6 and np.degrees(ang) < 1e-4, (
+            f'pitch {phi_deg} deg: belief is {lin * 1000:.4f} mm / {np.degrees(ang):.4f} deg '
+            'from where the connector actually ends up')
+    # and at zero pitch the belief is untouched
+    assert np.allclose(pitched_belief(nominal_belief, T_fj, 0.0), nominal_belief)
+
+
+def test_held_junction_in_fingertip_tracks_the_pitch():
+    """Downstream users of the grasp geometry (the kinematic-assembly target) must see the
+    ACTUAL junction-in-fingertip, not the nominal square-grip one."""
+    from urlab.skills.pick import held_junction_in_fingertip, pitch_delta
+    from urlab.transforms import translation_matrix
+
+    T_fj = translation_matrix([-0.017, 0.0, 0.005])
+    assert np.allclose(held_junction_in_fingertip(T_fj, 0.0), T_fj)
+    phi = np.radians(15.0)
+    assert np.allclose(held_junction_in_fingertip(T_fj, phi), T_fj @ pitch_delta(-phi))
+
+
 class _FakeFrame:
     def __init__(self, T_base_cam):
         self.color = np.zeros((60, 80, 3), dtype=np.uint8)

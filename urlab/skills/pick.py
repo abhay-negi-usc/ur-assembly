@@ -15,6 +15,62 @@ from ..transforms import fmt_delta, inverse, pose_error, translation_matrix
 
 log = urlog.get('pick')
 
+# ---------------------------------------------------------------------------- pickup pitch
+# The detected junction frame (skills/scan -> transforms.frame_from_axis) has
+#   x = the CABLE AXIS,  z = the ground normal (as close to `up` as orthogonality allows),
+#   y = z x x -- horizontal, perpendicular to the cable.
+# So a rotation about the junction frame's OWN y is exactly "pitch the gripper about the axis
+# orthogonal to the ground normal and to the connector axis", and because it acts through the
+# junction origin, the bite point on the cable does not move: only the approach tilts.
+
+
+def pickup_pitch_rad(cfg):
+    """The configured pickup pitch in radians (`pickup.pitch_deg` in the app config).
+    0 = the fingers come straight down.
+
+    A PER-APP setting, not a per-cable one: it lives beside the other pickup geometry
+    (pickup.height_from_model, pickup.compliance) rather than in cables.yaml, because it is a
+    choice about how this run approaches -- not a property of the cable. It must NOT go in
+    cables.yaml: apply_cable_profile runs after the config is read, so a cable entry would
+    silently overwrite whatever the app config set."""
+    return float(np.radians(float(cfg.get_path('pickup.pitch_deg', 0.0) or 0.0)))
+
+
+def pitch_delta(pitch_rad):
+    """The pitch as a transform in the JUNCTION frame: a rotation about its own y."""
+    from ..transforms import xyzrpy_to_matrix
+    return xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, float(pitch_rad), 0.0])
+
+
+def pitched_grasp(T_base_junction, T_ftip_junction, pitch_rad):
+    """The FINGERTIP grasp pose for a pitched pickup.
+
+    Nominally the fingertip goes to `detected_junction @ inverse(junction_in_fingertip)`; the
+    pitch is inserted in the junction frame, so the junction still lands at the detected point
+    and only the approach angle changes."""
+    return T_base_junction @ pitch_delta(pitch_rad) @ inverse(T_ftip_junction)
+
+
+def held_junction_in_fingertip(T_ftip_junction, pitch_rad):
+    """Where the junction ACTUALLY sits in the fingertip frame after a pitched pickup.
+
+    The nominal `junction_in_fingertip` describes a square grip; pitching the approach by phi
+    leaves the part rotated by -phi in the hand, which is what every downstream user of the
+    grasp geometry has to be told about."""
+    return T_ftip_junction @ pitch_delta(-pitch_rad)
+
+
+def pitched_belief(T_ftip_conn, T_ftip_junction, pitch_rad):
+    """The in-hand connector belief a pitched pickup actually produces.
+
+    The connector is rigid with the junction, so T_junction_connector is a property of the PART
+    and does not change; only the fingertip-to-junction relation does. Substituting
+    T_ftip_conn = T_ftip_junction @ T_junction_conn and replacing the latter's left factor with
+    held_junction_in_fingertip gives a conjugation of the nominal belief -- a rotation of -phi
+    about the junction's y, through the junction origin, expressed in the fingertip frame."""
+    return (held_junction_in_fingertip(T_ftip_junction, pitch_rad)
+            @ inverse(T_ftip_junction) @ T_ftip_conn)
+
 
 class GraspGeometry:
     """The grasp/pre-grasp/lift/place poses, all derived from one grasp target on demand -- so a

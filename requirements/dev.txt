@@ -2,3 +2,7 @@
 # fusion test that imports through the perception package, so pull perception in too.
 -r perception.txt
 pytest>=7.0
+# pyflakes backs tests/test_behaviors.py's undefined-name guard: a name used but never
+# imported loads fine and only raises NameError when that line runs, which here means
+# partway through a hardware run. The test skips without it, so it is not optional in CI.
+pyflakes>=3.0

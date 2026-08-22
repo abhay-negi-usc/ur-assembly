@@ -1868,19 +1868,20 @@ def build_and_run(cfg, robot, camera, args):
         # survives (README section 13).
         _tx, _tr = matrix_to_xyzrpy(T_base_tconn)
         _hx, _hr = matrix_to_xyzrpy(T_true)
-        json.dump({'held_frame': held_name, 'trajectory_csv': csv_in,
-                   'num_trials': num_trials, 'eval': ev,
-                   'ground_truth_frames': {
-                       'frames_path': str(tool_frames.frames_path(cfg)),
-                       'target_base_from_connector': {      # base_link <- target connector
-                           'xyz_mm': list(np.round(_tx * 1000.0, 6)),
-                           'rpy_deg': list(np.round(np.degrees(_tr), 6))},
-                       'held_tool0_from_connector_true': {  # tool0 <- connector, GROUND TRUTH
-                           'xyz_mm': list(np.round(_hx * 1000.0, 6)),
-                           'rpy_deg': list(np.round(np.degrees(_hr), 6))}},
-                   'estimation': cfg.section('estimation'),
-                   'compliance': cfg.section('compliance'),
-                   'force_guard': cfg.section('force_guard')}, fh, indent=2, default=str)
+        with open(os.path.join(out_dir, 'eval_config.json'), 'w') as fh:
+            json.dump({'held_frame': held_name, 'trajectory_csv': csv_in,
+                       'num_trials': num_trials, 'eval': ev,
+                       'ground_truth_frames': {
+                           'frames_path': str(tool_frames.frames_path(cfg)),
+                           'target_base_from_connector': {  # base_link <- target connector
+                               'xyz_mm': list(np.round(_tx * 1000.0, 6)),
+                               'rpy_deg': list(np.round(np.degrees(_tr), 6))},
+                           'held_tool0_from_connector_true': {  # tool0 <- connector, TRUTH
+                               'xyz_mm': list(np.round(_hx * 1000.0, 6)),
+                               'rpy_deg': list(np.round(np.degrees(_hr), 6))}},
+                       'estimation': cfg.section('estimation'),
+                       'compliance': cfg.section('compliance'),
+                       'force_guard': cfg.section('force_guard')}, fh, indent=2, default=str)
     except Exception as exc:                       # noqa: BLE001
         log.warning('eval_config.json skipped (%s)', exc)
     fout = open(os.path.join(out_dir, 'trials.csv'), 'w', newline='')

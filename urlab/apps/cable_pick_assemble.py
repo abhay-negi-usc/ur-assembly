@@ -14,12 +14,12 @@ from ..robot import AdmittanceController, ForceGuard
 from ..skills import insert as ins
 from ..skills import reset
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
-                           GraspRecovery, grip_offset_m, held_junction_in_fingertip,
+                           GraspRecovery, grip_offset_matrix, held_junction_in_fingertip,
                            log_grasp_delta, pickup_pitch_rad, pickup_roll_rad, pitched_grasp,
                            retry_offset_x)
 import numpy as np
 
-from ..transforms import from_cfg, inverse, translation_matrix
+from ..transforms import from_cfg, inverse, matrix_to_xyzrpy, translation_matrix
 from ._cable import build_scanner, make_confirm
 from ._common import guarded as _guarded   # re-exported: sibling apps import it from here
 from ._runner import run_app
@@ -47,7 +47,7 @@ def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder, 
     # to the ground normal and to the cable axis -- through the bite point, so the fingers
     # meet the same spot on the cable at an angle. 0 = straight down.
     pitch = pickup_pitch_rad(cfg)
-    grip_off = grip_offset_m(cfg)
+    grip_off = grip_offset_matrix(cfg)
     roll = pickup_roll_rad(cfg)
     geom.T_base_grasp = pitched_grasp(T_conn, T_ftip_junction, pitch, grip_off, roll)
     if roll:
@@ -59,11 +59,16 @@ def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder, 
                  'ground normal. The in-hand belief is rotated to match; check the leading '
                  'finger clears the ground plane before running this on hardware.',
                  np.degrees(pitch))
-    if grip_off:
-        log.info('Grip OFFSET %+.1f mm along the connector +X from the junction (further onto '
-                 'the body). The in-hand belief carries the same offset; re-check the '
-                 'grasp_check band -- the barrel diameter at the new bite point is what the '
-                 'counts read.', grip_off * 1000.0)
+    _oxyz, _orpy = matrix_to_xyzrpy(grip_off)
+    if float(np.linalg.norm(_oxyz)) + float(np.linalg.norm(_orpy)) > 0.0:
+        # THE JUNCTION FRAME, spelled out because every sign here is a physical direction:
+        # +x along the connector axis toward its free end, +y across the cable (the jaw-closing
+        # direction), +z UP off the ground plane.
+        log.info('Grip OFFSET (junction frame: +x along the connector, +y across the cable, '
+                 '+z up off the ground): xyz %s mm, rpy %s deg. The in-hand belief carries it; '
+                 're-check the grasp_check band -- the barrel diameter at the new bite point is '
+                 'what the counts read.',
+                 np.round(_oxyz * 1000.0, 2).tolist(), np.round(np.degrees(_orpy), 2).tolist())
     # WHICH WAY THE FINGERTIP WILL FACE, reported before the arm moves. The grasp pose is
     # T_conn @ inverse(junction_in_fingertip), so the fingertip's +X ends up along the DETECTED
     # heading rotated by that block's yaw -- and nothing downstream can tell you which way it came
@@ -112,7 +117,7 @@ def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder, 
     runner = StepRunner(log, confirm=confirm is not None)
     with recorder.recording(scanner.camera):
         if not runner.run([
-            ('move to grasp-align', lambda: robot.move_fingertip(geom.pre_grasp(), 'grasp-align')),
+            ('move to grasp-align', lambda: grasp.align(robot, geom, 'grasp-align')),
             ('report pre-grasp delta', lambda: log_grasp_delta(robot, geom.T_base_grasp, 'pre-grasp')),
             ('move to grasp', lambda: grasp.descend(robot, geom, 'grasp')),
         ]):
@@ -163,7 +168,7 @@ def build_and_run(cfg, robot, camera, args):
     # 2. Reduce the target to a fingertip pose and derive the stand-off.
     T_target = ins.fingertip_target(
         ic, inverse(held_junction_in_fingertip(from_cfg(cfg.section('junction_in_fingertip')),
-                                               pickup_pitch_rad(cfg), grip_offset_m(cfg),
+                                               pickup_pitch_rad(cfg), grip_offset_matrix(cfg),
                                                pickup_roll_rad(cfg))),
         robot.T_tool0_fingertip)
     T_standoff = ins.standoff_of(ic, T_target)

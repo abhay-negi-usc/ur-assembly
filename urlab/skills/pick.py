@@ -36,14 +36,39 @@ def pickup_pitch_rad(cfg):
     return float(np.radians(float(cfg.get_path('pickup.pitch_deg', 0.0) or 0.0)))
 
 
-def grip_offset_m(cfg):
-    """How far along the connector's own +X to grip, from the junction (`pickup.grip_offset_mm`).
+def grip_offset_matrix(cfg):
+    """`pickup.grip_offset` as a 4x4 -- WHERE THE BITE POINT SITS RELATIVE TO THE DETECTION.
 
-    POSITIVE = further onto the connector body, away from the cable. The junction frame's x IS
-    the connector axis, so this slides the bite point straight along the part. Gripping further
-    on usually buys a LARGER barrel diameter, which is what sets how much torque the jaws can
-    hold about that axis -- see the connector-clocking slip analysis."""
-    return float(cfg.get_path('pickup.grip_offset_mm', 0.0) or 0.0) / 1000.0
+    THE FRAME IS THE DETECTED JUNCTION FRAME, and every axis of it is physical:
+
+        +x   ALONG THE CONNECTOR AXIS, pointing from the cable toward the connector's free
+             END. Positive slides the bite further onto the connector body.
+        +y   HORIZONTAL AND ACROSS the cable (z cross x). This is also the axis the jaws
+             close along, so positive shifts the bite sideways off the barrel's centreline.
+        +z   THE GROUND NORMAL, i.e. UP. Positive lifts the bite point off the work surface.
+        origin  the detected junction -- where the cable meets the connector, AT THE GROUND
+             PLANE (the ground_plane scan puts it there; it does NOT sit at the barrel's
+             centreline, so a resting connector needs a positive z here or from
+             pickup.height_from_model, or the fingers aim at the floor).
+
+    The ROTATION is applied about the translated point, and it tilts the APPROACH -- roll
+    about +x, pitch about +y, yaw about +z, extrinsic XYZ like every other rpy in the repo.
+    pickup.pitch_deg is the same rotation as an rpy of [0, pitch, 0] here; it stays a separate
+    key because it is the one people sweep, and because it composes AFTER this block (see
+    grip_delta) so that a correction written here does not move the pitch axis.
+
+    ACCEPTS MONITOR UNITS: xyz_mm / rpy_deg, so a reading can be pasted straight off the
+    monitor; xyz / rpy (m/rad) also work. Setting both units for one triple is an error.
+
+    THE OLD SCALAR still works. `pickup.grip_offset_mm: 10` means exactly
+    `grip_offset: {xyz_mm: [10, 0, 0]}` and is read when the block is absent."""
+    from ..config import _pose_si
+    from ..transforms import from_cfg, translation_matrix
+    block = cfg.get_path('pickup.grip_offset')
+    if block is not None:
+        return from_cfg(_pose_si(block))
+    return translation_matrix(
+        [float(cfg.get_path('pickup.grip_offset_mm', 0.0) or 0.0) / 1000.0, 0.0, 0.0])
 
 
 def pickup_roll_rad(cfg):
@@ -110,6 +135,15 @@ def pitch_delta(pitch_rad):
     return xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, float(pitch_rad), 0.0])
 
 
+def _offset_matrix(offset):
+    """The grip offset as a 4x4, from either form: a full transform (grip_offset_matrix) or the
+    legacy scalar in METRES along the connector axis (pickup.grip_offset_mm / 1000)."""
+    from ..transforms import translation_matrix
+    if np.ndim(offset) == 2:
+        return np.asarray(offset, dtype=float)
+    return translation_matrix([float(offset), 0.0, 0.0])
+
+
 def roll_delta(roll_rad):
     """The roll as a transform: a rotation about the APPROACH axis. Written in the frame the
     pitch leaves behind, so composing it after pitch_delta turns about the pitched approach."""
@@ -127,9 +161,7 @@ def grip_delta(pitch_rad, offset_m=0.0, roll_rad=0.0):
     Rolling LAST puts the roll about the approach direction the pitch actually produced -- roll
     first and it would turn about the junction's own z, which after a -60 deg pitch is nowhere
     near the direction the gripper advances along."""
-    from ..transforms import translation_matrix
-    return (translation_matrix([float(offset_m), 0.0, 0.0]) @ pitch_delta(pitch_rad)
-            @ roll_delta(roll_rad))
+    return _offset_matrix(offset_m) @ pitch_delta(pitch_rad) @ roll_delta(roll_rad)
 
 
 def pitched_grasp(T_base_junction, T_ftip_junction, pitch_rad, offset_m=0.0, roll_rad=0.0):
@@ -150,11 +182,12 @@ def held_junction_in_fingertip(T_ftip_junction, pitch_rad, offset_m=0.0, roll_ra
     `offset_m` further along the axis leaves the junction that much further back in the hand,
     pitching by phi leaves the part rotated by -phi, and rolling by psi leaves it rotated by
     -psi about the approach -- which is what every downstream user of the grasp geometry has to
-    be told about. Exactly inverts pitched_grasp's insertion:
-    inverse(Trans @ Pitch @ Roll) = Roll(-psi) @ Pitch(-phi) @ Trans(-d)."""
-    from ..transforms import translation_matrix
-    return (T_ftip_junction @ roll_delta(-roll_rad) @ pitch_delta(-pitch_rad)
-            @ translation_matrix([-float(offset_m), 0.0, 0.0]))
+    be told about.
+
+    LITERALLY INVERTS what pitched_grasp inserted -- it calls the same grip_delta rather than
+    re-deriving the inverse by hand, so the two cannot drift when a knob is added (they did
+    have to be kept in step by hand, and that is exactly the bug this shape removes)."""
+    return T_ftip_junction @ inverse(grip_delta(pitch_rad, offset_m, roll_rad))
 
 
 def pitched_belief(T_ftip_conn, T_ftip_junction, pitch_rad, offset_m=0.0, roll_rad=0.0):
@@ -558,6 +591,12 @@ class GraspController:
         scales = spd.get('phase_scale', {}) or {}
         self.pickup_scale = float(scales.get('pickup', 1.0))
         self.lift_scale = float(scales.get('lift', 1.0))
+        # The FREE-SPACE move onto the pre-grasp (grasp-align). It used to inherit whatever
+        # phase the caller was in -- 'scan' -- which paced a long reposition next to the work
+        # surface at scanning speed. It gets its own scale so it can be slowed without also
+        # slowing the multi-view scan, and falls back to 'scan' so nothing changes for a config
+        # that does not set it.
+        self.align_scale = float(scales.get('grasp_align', scales.get('scan', 1.0)))
         self.settle_s = float(p.get('settle_s', 0.5))
         self._guard_cfg = p.get('force_guard', {}) or {}
         self._adm = None
@@ -606,6 +645,15 @@ class GraspController:
         if position_guard is not None:
             return position_guard(lambda: robot.move_fingertip(T_target, label))
         return robot.move_fingertip(T_target, label)
+
+    def align(self, robot, geom, label='grasp-align'):
+        """Move the fingertip onto the PRE-GRASP, at the 'grasp_align' phase scale.
+
+        A plain position move -- nothing is in front of the pads yet -- but it is the longest
+        motion that happens near the work surface, and at a large pickup.pitch_deg it carries
+        the gripper BODY down toward the ground plane rather than just the fingers. Slow."""
+        robot.arm.set_speed_scale(self.align_scale, 'grasp_align')
+        return robot.move_fingertip(geom.pre_grasp(), label)
 
     def descend(self, robot, geom, label='grasp'):
         """Move to the grasp pose (from wherever the arm is -- the grasp-align pose). Tares in

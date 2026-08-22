@@ -280,7 +280,46 @@ pickup:
   # so a different bite reads different counts and the success band shifts with it.
   # (Distinct from grasp_check.retry_perturb_x_m, which jitters the SAME axis by +/-3 mm
   # between retries and is deliberately NOT modelled -- that is search noise, not a setting.)
-  grip_offset_mm: 10.0
+  #
+  # ===========================================================================================
+  # THE OFFSET FRAME -- read this before changing a sign.
+  #
+  # grip_offset is a FULL 6DOF POSE OF THE BITE POINT, written in the DETECTED JUNCTION FRAME.
+  # That frame is built by the scan (skills/scan -> transforms.frame_from_axis) and every axis
+  # of it is a physical direction, not a convention:
+  #
+  #     ORIGIN  the detected junction -- where the cable meets the connector -- AT THE GROUND
+  #             PLANE.  The ground_plane scan puts it ON the plane, NOT on the connector's
+  #             centreline.  A connector resting on the bench therefore needs a POSITIVE z
+  #             here or the pads aim at the floor.  <- this is what was crashing the gripper.
+  #     +x      ALONG THE CONNECTOR AXIS, from the cable toward the connector's FREE END.
+  #             Positive = bite further onto the connector body.
+  #     +y      HORIZONTAL, ACROSS the cable (y = z cross x).  This is also the direction the
+  #             JAWS CLOSE, so positive slides the bite sideways off the barrel centreline.
+  #     +z      THE GROUND NORMAL -- UP.  Positive lifts the bite point off the work surface.
+  #
+  #     rpy     extrinsic XYZ, applied ABOUT THE TRANSLATED POINT, tilting the APPROACH:
+  #             roll about +x (rotates the jaw line about the cable), pitch about +y (the same
+  #             axis pickup.pitch_deg uses), yaw about +z.
+  #
+  # ORDER: grip_offset is applied FIRST, then pitch_deg, then roll_deg -- so the pitch and roll
+  # pivot through the offset bite point, and a correction written here never moves the axis
+  # they turn about.  pickup.pitch_deg is exactly an rpy of [0, pitch, 0] in this block; it
+  # stays its own key because it is the one that gets swept.
+  #
+  # UNITS: xyz_mm / rpy_deg (monitor units, paste-able straight off urlab.apps.monitor), or
+  # xyz / rpy in m / rad.  Both units for one triple is an error, not a silent preference.
+  # ===========================================================================================
+  #
+  # z = +9.0: HALF THE CONNECTOR'S LARGEST DIAMETER, so the pads aim at the barrel CENTRELINE
+  # instead of at the floor.  DERIVED, NOT MEASURED -- from this config's own grasp_check band
+  # through the calibrated gripper model: counts 191 (the fat end of the success band) is
+  # 18.09 mm of finger separation, so the axis of a part resting on that section sits 9.04 mm
+  # up.  Measure the barrel with calipers and correct this; it is the first thing to re-check
+  # if the grasp still sits low or now sits high.
+  grip_offset:
+    xyz_mm:  [10.0, 0.0, 9.0]
+    rpy_deg: [180.0, -60.0, 0.0]
   # BELIEF OFFSET, mm in the FINGERTIP frame -- the one knob here that moves NOTHING at
   # pickup.  This is the split between the two things that were previously tangled:
   #
@@ -311,8 +350,14 @@ pickup:
   # calibrated) and the expected stall separation.  Separations are zero-compression values;
   # the calibrated groove depth absorbs the average pad squeeze, so pad_compression_mm
   # usually stays 0.
+  # OFF, and it was already INERT: this block needs grasp_check.connector_diameter_mm, which
+  # the bnc cable entry does not define (only the raw counts), so `enabled: true` silently did
+  # NOTHING and the grasp target sat at the ground plane -- the low aim.  grip_offset's z now
+  # does that job explicitly.  Turning this back on would ADD its own dz on top and double the
+  # correction; and its `advance` term is a rise along the APPROACH, which at pickup.pitch_deg
+  # the approach is mostly horizontal, so it is the wrong tool at this grasp angle.
   height_from_model:
-    enabled: true
+    enabled: false
     fingertip_ref_separation_mm: 0.0
     pad_compression_mm: 0.0
   compliance:
@@ -398,7 +443,13 @@ speed:
   # phase.  An absent phase runs at 1.0.
   phase_scale:
     reset: 1.8       # start/end home moves (and the between-retry homes)
-    scan: 1.0        # the multi-view scan + grasp-align + reseat moves
+    scan: 1.0        # the multi-view scan + the reseat moves
+    # THE MOVE ONTO THE PRE-GRASP (view/scan pose -> grasp-align).  Split out of `scan` so it
+    # can be slowed without also slowing the multi-view sweep: it is the longest motion that
+    # happens near the work surface, and at a large pickup.pitch_deg it swings the gripper
+    # BODY down toward the ground plane rather than just the fingers.  Falls back to `scan`
+    # when unset, so other apps are unaffected.
+    grasp_align: 0.2
     pickup: 1.5      # the compliant grasp descent
     lift: 0.8        # the compliant lift (including the slip-check partial lift)
     standoff: 1.0    # the move to stand-off + the per-attempt realign moveJs

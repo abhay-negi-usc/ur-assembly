@@ -102,7 +102,7 @@ from ..skills import trajectory as traj
 from ..skills import wiggle as wigmod
 from ..skills.manifold import mats_from_vec6, vec6_from_mats
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
-                           GraspRecovery, belief_offset_m, grip_offset_m, offset_belief,
+                           GraspRecovery, belief_offset_m, grip_offset_matrix, offset_belief,
                            pickup_pitch_rad, pickup_roll_rad, pitched_belief, retry_offset_x,
                            verify_cable_held)
 from ..skills.solution_check import CheckedManifoldEstimator
@@ -1038,15 +1038,19 @@ def build_and_run(cfg, robot, camera, args):
     # PICKUP PITCH: the frames catalogue declares the SQUARE grip, so a pitched pickup rotates
     # the part in the hand by the same angle. Applied here rather than in frames.yaml, so the
     # declared frame stays the physical truth and the pitch stays a run-time choice.
-    _pitch, _grip_off, _roll = pickup_pitch_rad(cfg), grip_offset_m(cfg), pickup_roll_rad(cfg)
-    if _pitch or _grip_off or _roll:
+    _pitch, _roll = pickup_pitch_rad(cfg), pickup_roll_rad(cfg)
+    _grip_off = grip_offset_matrix(cfg)
+    _oxyz, _orpy = matrix_to_xyzrpy(_grip_off)
+    if _pitch or _roll or float(np.linalg.norm(_oxyz)) + float(np.linalg.norm(_orpy)) > 0.0:
         T_ftip_conn = pitched_belief(T_ftip_conn,
                                      from_cfg(cfg.section('junction_in_fingertip')),
                                      _pitch, _grip_off, _roll)
-        log.info('Pickup pitch %+.1f deg / grip offset %+.1f mm / roll %+.1f deg -> in-hand '
-                 'belief moved to match (the pick and the belief are one pair; changing one '
-                 'alone mates the connector wrong).',
-                 np.degrees(_pitch), _grip_off * 1000.0, np.degrees(_roll))
+        log.info('Pickup pitch %+.1f deg / roll %+.1f deg / grip offset xyz %s mm rpy %s deg '
+                 '(junction frame: +x along the connector, +y across the cable, +z up off the '
+                 'ground) -> in-hand belief moved to match (the pick and the belief are one '
+                 'pair; changing one alone mates the connector wrong).',
+                 np.degrees(_pitch), np.degrees(_roll),
+                 np.round(_oxyz * 1000.0, 2).tolist(), np.round(np.degrees(_orpy), 2).tolist())
     # THE MEASURED RESIDUAL, applied last and to the BELIEF ONLY: how the part actually seats
     # in the jaws at this approach angle, which no frame can predict. Moves nothing at pickup.
     _bel_off = belief_offset_m(cfg)

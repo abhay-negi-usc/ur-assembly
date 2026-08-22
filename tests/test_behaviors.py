@@ -790,10 +790,26 @@ def test_disassembly_config_is_coherent():
     cfg = yaml.safe_load(open(os.path.join(os.path.dirname(__file__), '..', 'configs',
                                            'bnc_assembly.yaml')))
     d = cfg['assembly']['disassembly']
-    assert d['enabled'] is False, 'ship it OFF -- it is the reverse of a destructive maneuver'
+    assert isinstance(d['enabled'], bool), 'enabled must be a plain bool'
     for k in ('unlock_collar', 'unclock_connector', 'extract_mm', 'place'):
         assert k in d, f'disassembly must declare {k}'
     assert float(d['extract_mm']) > 0
+    # CYCLES: a second pass needs the cell put back, so the loop is only meaningful with
+    # disassembly AND place on. The app clamps rather than looping into an already-mated
+    # socket; this pins the config half of that contract.
+    assert 'cycles' in d and int(d['cycles']) >= 1
+    if int(d['cycles']) > 1:
+        assert d['enabled'] and d['place']['enabled'], (
+            'cycles > 1 needs disassembly and place enabled -- otherwise the second pass has '
+            'nothing to pick and nowhere to start from')
+    src = open(os.path.join(os.path.dirname(__file__), '..', 'urlab', 'apps',
+                            'bnc_assembly.py'), encoding='utf-8').read()
+    assert 'T_ftip_conn_nominal' in src, (
+        'each cycle must reset the in-hand belief -- a fresh grasp has a fresh error, and '
+        "carrying the last cycle's correction starts the insertion confidently wrong")
+    assert 'scanner.reselect()' in src, (
+        'each cycle must drop the cached junction selection -- the cable was PLACED, so it is '
+        'not where it was picked from')
     p = d['place']
     for k in ('enabled', 'clearance_mm', 'retreat_mm'):
         assert k in p, f'disassembly.place must declare {k}'

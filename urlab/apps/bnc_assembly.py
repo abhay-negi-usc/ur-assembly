@@ -684,6 +684,17 @@ def build_and_run(cfg, robot, camera, args):
     dis_place_on = bool(dis_place.get('enabled', True))
     dis_clear_m = _num(dis_place, 'clearance_mm', 25.0) / 1000.0
     dis_rise_m = _num(dis_place, 'retreat_mm', 100.0) / 1000.0
+    # CYCLES: repeat the whole localize -> pick -> assemble -> disassemble pass. Only
+    # meaningful with disassembly ON, because only disassembly puts the cell back into a
+    # state a second pass can start from -- so it is CLAMPED to 1 rather than silently
+    # looping a run that would try to insert an already-mated connector.
+    n_cycles = max(1, int(_num(dis, 'cycles', 1)))
+    if n_cycles > 1 and not (dis_on and dis_place_on):
+        log.warning('assembly.disassembly.cycles = %d but %s -- a second pass has nothing to '
+                    'pick and nowhere to start from. Running ONE cycle.', n_cycles,
+                    'disassembly is off' if not dis_on else 'disassembly.place is off')
+        n_cycles = 1
+    cycle_ok = []
     if dis_on and not cc_on:
         # Nothing to unwind and, more to the point, no ENGAGED pose to unwind FROM: the
         # clocking maneuvers are what establish the frames disassembly reverses.
@@ -1325,7 +1336,7 @@ def build_and_run(cfg, robot, camera, args):
         return 'failed'
 
 
-    def disassembly(state, screw_deg):
+    def disassembly(state, screw_deg, T_base_conn_d):
         """DISASSEMBLY -- unwind the clocking, pull the connector out, put the cable down.
 
         THE STATE LADDER RUN BACKWARDS. Assembly walks engaged -> seated -> locked; this walks
@@ -1393,13 +1404,21 @@ def build_and_run(cfg, robot, camera, args):
                      what.upper(), np.degrees(turned), np.degrees(theta), _lin * 1000.0)
             return True
 
-        # ---- 1. LOCKED -> SEATED: unwind the collar ---------------------------------------
+        # ---- 1. LOCKED -> SEATED: re-approach, re-grip, unwind the collar -----------------
+        # The assembly RELEASED and retracted before this, so there is no grip to inherit: the
+        # unlock drives the SAME approach the lock did (retract along the cable, reorient onto
+        # the axis, advance down it, close on the ring) with the turn negated and the seat push
+        # off -- sharing that geometry is what keeps the unlock landing on the ring the lock
+        # turned, instead of on a station computed a second, divergent way.
         if state == 'locked' and dis_unlock:
             if not phase_gate('UNLOCK COLLAR',
-                              'Turn the collar %.0f deg BACK (the reverse of the lock), still '
-                              'gripping it on the axis.' % np.degrees(cl_rot)):
+                              'Re-approach the collar on the axis, close on it, and turn %.0f '
+                              'deg BACK -- the reverse of the lock.' % np.degrees(cl_rot)):
                 return False, state
-            if not twist(-cl_rot, 'unlock ', 'collar_unlock'):
+            if not collar_clocking(T_base_conn_d, screw_deg, cl_rot=-cl_rot, sp_on=False,
+                                   unlocking=True):
+                log.error('DISASSEMBLY: the collar did not unlock -- stopping with the '
+                          'connector still in the socket.')
                 return False, state
             state = _retreat_state(state, 'locked')
         elif state == 'locked':
@@ -1872,8 +1891,16 @@ def build_and_run(cfg, robot, camera, args):
                 return False, T_tool0_conn_now, T_base_conn
         return ok, T_tool0_conn_now, T_base_conn, float(np.degrees(screw_rad))
 
-    def collar_clocking(T_base_conn, screw_deg=None):
+    def collar_clocking(T_base_conn, screw_deg=None, cl_rot=cl_rot, sp_on=sp_on,
+                        unlocking=False):
         """COLLAR CLOCKING -- grasp the locking collar AXIALLY and twist the wrist.
+
+        RUNS IN BOTH DIRECTIONS. With `unlocking` the identical approach is driven with the
+        turn NEGATED and the seat push off, which is what disassembly uses: the station, the
+        wall check, the wrist-3 budget and the IK scan are all the same geometry, so sharing
+        them is what keeps the unlock landing on the ring the lock turned. The wrist-margin
+        arithmetic below already reads the SIGN of the rotation (sorted() and max(0, -rot)),
+        so a negative turn is budgeted correctly rather than accidentally.
 
         The gripper is brought onto the connector axis POINTING ALONG IT, fingers parallel to the
         cable, so tool0 sits on the axis 183 mm back and its Z is collinear with it. Turning the
@@ -2507,15 +2534,23 @@ def build_and_run(cfg, robot, camera, args):
                            'commanded_deg': round(float(np.degrees(cl_rot)), 3),
                            'tool0_x_mm': round(x_tool['collar grasp'], 3),
                            'success': True, 'force_stop': bool(stopped),
-                           'state_after': 'locked',
+                           'state_after': 'seated' if unlocking else 'locked',
                            'stopped_by': guard_cl.tripped_by or ''})
+        _word = 'UNLOCKED' if unlocking else 'LOCKED'
         if stopped:
+            # A guard trip means the OPPOSITE thing in each direction: reaching the lock stops
+            # the turn, but an unlock that stops early is a collar that did not come free.
+            if unlocking:
+                log.error('  the unlock stopped on the force guard (%s) after %.1f of %.1f deg '
+                          '-- the collar is NOT free. Do not pull on it.',
+                          guard_cl.tripped_by, np.degrees(turned), abs(np.degrees(cl_rot)))
+                return False
             log.info('  LOCKED -- the collar stopped on the force guard (%s) after %.1f deg, '
                      'which is what reaching the lock looks like; check it.',
                      guard_cl.tripped_by, np.degrees(turned))
         else:
-            log.info('  LOCKED -- collar turned %.1f deg (commanded %.1f). The flange moved '
-                     '%.1f mm: a wrist twist, not an arm swing.', np.degrees(turned),
+            log.info('  %s -- collar turned %.1f deg (commanded %.1f). The flange moved '
+                     '%.1f mm: a wrist twist, not an arm swing.', _word, np.degrees(turned),
                      np.degrees(cl_rot), _lin * 1000.0)
         return True
 
@@ -2629,450 +2664,488 @@ def build_and_run(cfg, robot, camera, args):
     if not robot.gripper.warmup():
         return False
     q_home = robot.arm.q()
-    if tgt_source == 'visual' and not locate_target_visually(q_home):
-        return False
-    # THE PICK POSE. Home is the marker VIEW pose (the sweep above, and the end-of-run
-    # image); the scan, the grasp geometry and every retry offset are written from HERE.
-    q_pick = q_home
-    _pick_deg = cfg.get('pick_joints_deg')
-    if _pick_deg is not None:
-        q_pick = list(np.radians(np.asarray(_pick_deg, dtype=float)))
-        # Gate BEFORE reconfiguring: this is a large joint move away from the marker view and
-        # into the pick pose, and everything downstream (scan, grasp, retry offsets) is
-        # written from where it lands.
-        if not phase_gate('RECONFIGURE FOR PICKUP',
-                          'The arm will leave the marker view and move to the pick pose %s deg.'
-                          % list(np.round(np.asarray(_pick_deg, dtype=float), 1))):
+    # ==================================================================================
+    # THE CYCLE. One pass is localize -> pick -> assemble -> clock -> verify -> take
+    # apart -> place the cable back -- i.e. the cell ends each pass in the state it
+    # started, which is the whole reason a second pass is possible. So the loop only runs
+    # when disassembly is enabled; without it the connector stays mated and there is
+    # nothing to assemble a second time.
+    #
+    # EVERYTHING INSIDE REPEATS, deliberately: the marker sweep re-measures the socket
+    # (the fixture is allowed to move between cycles -- that is what the rig buys), and
+    # the scan re-finds the cable, which after a place is NOT where it was picked from.
+    # ==================================================================================
+    T_ftip_conn_nominal = np.array(T_ftip_conn, dtype=float)
+    for cycle in range(1, n_cycles + 1):
+        if n_cycles > 1:
+            log.info('=' * 78)
+            log.info('CYCLE %d/%d', cycle, n_cycles)
+            log.info('=' * 78)
+        if cycle > 1:
+            # A FRESH PICK HAS A FRESH IN-HAND ERROR. The estimator spent the last cycle
+            # correcting the belief for the PREVIOUS grasp; carrying that correction into a
+            # new grasp would start the next insertion from a confidently wrong pose.
+            T_ftip_conn = np.array(T_ftip_conn_nominal, dtype=float)
+            # The cable was PLACED, so it is not where it was picked from and the cached
+            # junction selection is stale -- the same reason the slip recovery re-prompts.
+            if hasattr(scanner, 'reselect'):
+                scanner.reselect()
+        if tgt_source == 'visual' and not locate_target_visually(q_home):
             return False
-        # Its OWN phase, not 'reset': this is a large free-space traverse with an EMPTY
-        # gripper and nothing near the workpiece, so it has no reason to be paced like a
-        # move that ends in contact.
-        phase('reconfigure')
-        if not robot.arm.move_j(q_pick, label='pick pose'):
-            log.error('Could not reach pick_joints_deg.')
-            return False
-    attempt = 0
-    runner = StepRunner(log, confirm=confirm is not None)
-    while True:
-        phase('scan')
-        result = _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder,
-                       offset_x_m=retry_offset_x(attempt, check.retry_perturb_x_m))
-        if result == 'ok':
-            status = {}
-
-            def do_lift(_s=status):
-                _s['r'] = grasp.lift_verified(
-                    robot, geom, check, 'lift',
-                    position_guard=lambda mv: _guarded(robot, guard_shared, mv))
-                return _s['r'] == 'ok'
-
-            if runner.run([('lift (slip-checked)', do_lift)]):
-                break
-            result = status.get('r')
-            if result != 'slipped':
+        # THE PICK POSE. Home is the marker VIEW pose (the sweep above, and the end-of-run
+        # image); the scan, the grasp geometry and every retry offset are written from HERE.
+        q_pick = q_home
+        _pick_deg = cfg.get('pick_joints_deg')
+        if _pick_deg is not None:
+            q_pick = list(np.radians(np.asarray(_pick_deg, dtype=float)))
+            # Gate BEFORE reconfiguring: this is a large joint move away from the marker view and
+            # into the pick pose, and everything downstream (scan, grasp, retry offsets) is
+            # written from where it lands.
+            if not phase_gate('RECONFIGURE FOR PICKUP',
+                              'The arm will leave the marker view and move to the pick pose %s deg.'
+                              % list(np.round(np.asarray(_pick_deg, dtype=float), 1))):
                 return False
-        if result == 'abort':
-            return False
-        if attempt >= check.max_retries:
-            log.error('Grasp failed on all %d attempts; aborting.', check.max_retries + 1)
-            return False
-        attempt += 1
-        log.warning('Grasp %s -- recovering (attempt %d/%d).', result, attempt + 1,
-                    check.max_retries + 1)
-        if result == 'slipped' and hasattr(scanner, 'reselect'):
+            # Its OWN phase, not 'reset': this is a large free-space traverse with an EMPTY
+            # gripper and nothing near the workpiece, so it has no reason to be paced like a
+            # move that ends in contact.
+            phase('reconfigure')
+            if not robot.arm.move_j(q_pick, label='pick pose'):
+                log.error('Could not reach pick_joints_deg.')
+                return False
+        attempt = 0
+        runner = StepRunner(log, confirm=confirm is not None)
+        while True:
             phase('scan')
-            T_up = translation_matrix([0.0, 0.0, check.slip_raise_m]) @ robot.tool0()
-            if not (robot.gripper.open('drop')
-                    and _guarded(robot, guard_shared,
-                                 lambda: robot.arm.move_l(T_up, label='slip recovery (up)'))):
+            result = _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder,
+                           offset_x_m=retry_offset_x(attempt, check.retry_perturb_x_m))
+            if result == 'ok':
+                status = {}
+
+                def do_lift(_s=status):
+                    _s['r'] = grasp.lift_verified(
+                        robot, geom, check, 'lift',
+                        position_guard=lambda mv: _guarded(robot, guard_shared, mv))
+                    return _s['r'] == 'ok'
+
+                if runner.run([('lift (slip-checked)', do_lift)]):
+                    break
+                result = status.get('r')
+                if result != 'slipped':
+                    return False
+            if result == 'abort':
                 return False
-            scanner.reselect()
-        else:
-            phase('reset')
-            if not (robot.gripper.open('drop')
-                    and robot.arm.move_j(q_pick, label='pick pose')):
+            if attempt >= check.max_retries:
+                log.error('Grasp failed on all %d attempts; aborting.', check.max_retries + 1)
                 return False
+            attempt += 1
+            log.warning('Grasp %s -- recovering (attempt %d/%d).', result, attempt + 1,
+                        check.max_retries + 1)
+            if result == 'slipped' and hasattr(scanner, 'reselect'):
+                phase('scan')
+                T_up = translation_matrix([0.0, 0.0, check.slip_raise_m]) @ robot.tool0()
+                if not (robot.gripper.open('drop')
+                        and _guarded(robot, guard_shared,
+                                     lambda: robot.arm.move_l(T_up, label='slip recovery (up)'))):
+                    return False
+                scanner.reselect()
+            else:
+                phase('reset')
+                if not (robot.gripper.open('drop')
+                        and robot.arm.move_j(q_pick, label='pick pose')):
+                    return False
 
-    # ---- Stand-off, held check, and the unconditional human gate before contact ----
-    st = a.get('standoff', {}) or {}
-    T_standoff_row = translation_matrix(
-        np.asarray(st.get('axis', [-1, 0, 0]), dtype=float)
-        * float(st.get('distance_m', 0.01))) @ mats[0]
+        # ---- Stand-off, held check, and the unconditional human gate before contact ----
+        st = a.get('standoff', {}) or {}
+        T_standoff_row = translation_matrix(
+            np.asarray(st.get('axis', [-1, 0, 0]), dtype=float)
+            * float(st.get('distance_m', 0.01))) @ mats[0]
 
-    def traj_ref(row, T_tool0_conn, commit=False):
-        """A TRAJECTORY row -> a tool0 reference, anchored so the path ends on the mate.
+        def traj_ref(row, T_tool0_conn, commit=False):
+            """A TRAJECTORY row -> a tool0 reference, anchored so the path ends on the mate.
 
-        ANCHORED (T_base_targetobj = the mate with the CSV's last row normalised away), which is
-        why a preload must never be written as a trajectory row: it would be normalised out here
-        and driven everywhere else.
+            ANCHORED (T_base_targetobj = the mate with the CSV's last row normalised away), which is
+            why a preload must never be written as a trajectory row: it would be normalised out here
+            and driven everywhere else.
 
-        `commit=True` adds the final insertion's preload, so the press applies to the attempt
-        meant to SEAT and to nothing that collects observations."""
-        return (T_base_commit if commit else T_base_targetobj) @ row @ inverse(T_tool0_conn)
+            `commit=True` adds the final insertion's preload, so the press applies to the attempt
+            meant to SEAT and to nothing that collects observations."""
+            return (T_base_commit if commit else T_base_targetobj) @ row @ inverse(T_tool0_conn)
 
-    phase('standoff')
-    seed_q = robot.arm.q()
-    T_tool0_conn = robot.T_tool0_fingertip @ T_ftip_conn
-    q = robot.arm.ik(traj_ref(T_standoff_row, T_tool0_conn), seed_q)
-    if q is None or not _guarded(robot, guard_shared,
-                                 lambda: robot.arm.move_j(q, label='stand-off')):
-        return False
-    seed_q = q
-    if not verify_cable_held(robot, check, 'stand-off'):
-        return False
-    # Asked even with --yes -- this is the boundary between free space and contact. Only
-    # skip_prompts (--no-prompts) silences it.
-    if not robot.arm.dry_run and not no_prompts:
-        try:
-            ans = input('\n[stand-off] Ready to ENGAGE (contact ahead). '
-                        'Enter to continue (q to abort): ')
-        except EOFError:
-            ans = ''
-        if ans.strip().lower() in ('q', 'quit', 'n', 'no'):
-            log.info('Aborted at the stand-off by the user.')
+        phase('standoff')
+        seed_q = robot.arm.q()
+        T_tool0_conn = robot.T_tool0_fingertip @ T_ftip_conn
+        q = robot.arm.ik(traj_ref(T_standoff_row, T_tool0_conn), seed_q)
+        if q is None or not _guarded(robot, guard_shared,
+                                     lambda: robot.arm.move_j(q, label='stand-off')):
             return False
+        seed_q = q
+        if not verify_cable_held(robot, check, 'stand-off'):
+            return False
+        # Asked even with --yes -- this is the boundary between free space and contact. Only
+        # skip_prompts (--no-prompts) silences it.
+        if not robot.arm.dry_run and not no_prompts:
+            try:
+                ans = input('\n[stand-off] Ready to ENGAGE (contact ahead). '
+                            'Enter to continue (q to abort): ')
+            except EOFError:
+                ans = ''
+            if ans.strip().lower() in ('q', 'quit', 'n', 'no'):
+                log.info('Aborted at the stand-off by the user.')
+                return False
 
-    # ---- The collect / estimate / update loop ----
-    est_rows, success = [], False
-    acc = np.zeros((0, 12))
-    T_cum = np.eye(4)
-    trackc, trackr, trackg = [np.zeros(len(estimator.estimate_dims))], [], []
-    try:
-        if ins_mode == 'engage':
-            # ENGAGE replaces the estimate loop and the commit. A force stop is an ordinary
-            # outcome, so both endings continue to the clocking sequence.
-            en_status, _last_ref_e, en_depth = engage_insertion()
-            success = en_status in ('complete', 'force')
-            est_rows.append({'attempt': 'engage', 'status': en_status,
-                             'depth_mm': en_depth, 'success': bool(success)})
-        for it in (range(1, max_attempts + 1) if ins_mode == 'estimate' else ()):
-            T_tool0_conn = robot.T_tool0_fingertip @ T_ftip_conn
-            e_xyz, e_rpy = matrix_to_xyzrpy(T_ftip_conn)
-            log.info('--- attempt %d/%d --- in-hand estimate xyz=%s mm rpy=%s deg', it,
-                     max_attempts, np.round(e_xyz * 1000, 2).tolist(),
-                     np.round(np.degrees(e_rpy), 2).tolist())
+        # ---- The collect / estimate / update loop ----
+        est_rows, success = [], False
+        acc = np.zeros((0, 12))
+        T_cum = np.eye(4)
+        trackc, trackr, trackg = [np.zeros(len(estimator.estimate_dims))], [], []
+        try:
+            if ins_mode == 'engage':
+                # ENGAGE replaces the estimate loop and the commit. A force stop is an ordinary
+                # outcome, so both endings continue to the clocking sequence.
+                en_status, _last_ref_e, en_depth = engage_insertion()
+                success = en_status in ('complete', 'force')
+                est_rows.append({'attempt': 'engage', 'status': en_status,
+                                 'depth_mm': en_depth, 'success': bool(success)})
+            for it in (range(1, max_attempts + 1) if ins_mode == 'estimate' else ()):
+                T_tool0_conn = robot.T_tool0_fingertip @ T_ftip_conn
+                e_xyz, e_rpy = matrix_to_xyzrpy(T_ftip_conn)
+                log.info('--- attempt %d/%d --- in-hand estimate xyz=%s mm rpy=%s deg', it,
+                         max_attempts, np.round(e_xyz * 1000, 2).tolist(),
+                         np.round(np.degrees(e_rpy), 2).tolist())
 
-            # COLLECTION PASSES: the sweep commands one insertion per deliberate offset with
-            # the belief held FIXED across passes, so their evidence fuses exactly.
-            passes = ([list(o) for o in sweep_offsets] if col_mode == 'offset_sweep'
-                      else [None])
-            obs, lin, ang = [], 0.0, 0.0
-            for pi, poff in enumerate(passes):
-                if tn_on or poff is not None:
-                    rows_t = traj.noised(dense, noise_rng, tn_std if tn_on else [0.0] * 6,
-                                         tn_w, tn_dt, (1.0 - tn_da) ** (it - 1), poff)
-                else:
-                    rows_t = dense
-                refs = [traj_ref(row, T_tool0_conn) for row in rows_t]
-                phase('standoff')
-                label = (f'attempt {it}'
-                         + (f' sweep {pi + 1}/{len(passes)}' if poff is not None else '')
-                         + ' start')
-                q = robot.arm.ik(refs[0], seed_q)
-                if q is None or not _guarded(robot, guard_shared,
-                                             lambda: robot.arm.move_j(q, label=label)):
-                    log.error('Could not reach the pass start; aborting.')
-                    return False
-                seed_q = q
-                phase('assemble')
-                # Intermediate passes MUST back off -- the next realigns to a different offset's
-                # start. The LAST pass stays at its stop, so a mate the operator calls successful
-                # leaves the arm AT the seat for clocking to anchor on.
-                obs_i, lin, ang, stops, last_ref = run_insertion(
-                    adm, refs, T_tool0_conn, peck=(col_mode == 'peck'),
-                    retract=(pi < len(passes) - 1))
-                obs.extend(obs_i)
-                if poff is not None:
-                    log.info('  sweep %d/%d (pitch %+.1f deg, z %+.1f mm): %d obs, stop %s mm.',
-                             pi + 1, len(passes), poff[4], poff[2] * 1000.0, len(obs_i),
-                             [round(s, 1) for s in stops])
-                if not verify_cable_held(robot, check, f'attempt {it} pass {pi + 1}'):
-                    return False
+                # COLLECTION PASSES: the sweep commands one insertion per deliberate offset with
+                # the belief held FIXED across passes, so their evidence fuses exactly.
+                passes = ([list(o) for o in sweep_offsets] if col_mode == 'offset_sweep'
+                          else [None])
+                obs, lin, ang = [], 0.0, 0.0
+                for pi, poff in enumerate(passes):
+                    if tn_on or poff is not None:
+                        rows_t = traj.noised(dense, noise_rng, tn_std if tn_on else [0.0] * 6,
+                                             tn_w, tn_dt, (1.0 - tn_da) ** (it - 1), poff)
+                    else:
+                        rows_t = dense
+                    refs = [traj_ref(row, T_tool0_conn) for row in rows_t]
+                    phase('standoff')
+                    label = (f'attempt {it}'
+                             + (f' sweep {pi + 1}/{len(passes)}' if poff is not None else '')
+                             + ' start')
+                    q = robot.arm.ik(refs[0], seed_q)
+                    if q is None or not _guarded(robot, guard_shared,
+                                                 lambda: robot.arm.move_j(q, label=label)):
+                        log.error('Could not reach the pass start; aborting.')
+                        return False
+                    seed_q = q
+                    phase('assemble')
+                    # Intermediate passes MUST back off -- the next realigns to a different offset's
+                    # start. The LAST pass stays at its stop, so a mate the operator calls successful
+                    # leaves the arm AT the seat for clocking to anchor on.
+                    obs_i, lin, ang, stops, last_ref = run_insertion(
+                        adm, refs, T_tool0_conn, peck=(col_mode == 'peck'),
+                        retract=(pi < len(passes) - 1))
+                    obs.extend(obs_i)
+                    if poff is not None:
+                        log.info('  sweep %d/%d (pitch %+.1f deg, z %+.1f mm): %d obs, stop %s mm.',
+                                 pi + 1, len(passes), poff[4], poff[2] * 1000.0, len(obs_i),
+                                 [round(s, 1) for s in stops])
+                    if not verify_cable_held(robot, check, f'attempt {it} pass {pi + 1}'):
+                        return False
 
-            log.info('check: believed connector vs target: %.2f mm, %.2f deg (tol %.2f mm, '
-                     '%.2f deg)', lin * 1000, np.degrees(ang), tol_pos_m * 1000,
-                     np.degrees(tol_rot_rad))
-            _save_observations(os.path.join(out_dir, f'attempt_{it:02d}_observations.csv'), obs)
-            row = {'attempt': it, 'n_observations': len(obs), 'n_passes': len(passes),
-                   'check_pos_mm': lin * 1000.0, 'check_rot_deg': float(np.degrees(ang))}
+                log.info('check: believed connector vs target: %.2f mm, %.2f deg (tol %.2f mm, '
+                         '%.2f deg)', lin * 1000, np.degrees(ang), tol_pos_m * 1000,
+                         np.degrees(tol_rot_rad))
+                _save_observations(os.path.join(out_dir, f'attempt_{it:02d}_observations.csv'), obs)
+                row = {'attempt': it, 'n_observations': len(obs), 'n_passes': len(passes),
+                       'check_pos_mm': lin * 1000.0, 'check_rot_deg': float(np.degrees(ang))}
 
-            # SUCCESS is the operator's call -- they can see the physical mate; the kinematic
-            # numbers only see the belief. A dry run has no operator.
-            if robot.arm.dry_run or no_prompts:
-                row['success'] = bool(lin <= tol_pos_m and ang <= tol_rot_rad)
-            else:
-                try:
-                    ans = input(f'[check attempt {it}] Was the assembly SUCCESSFUL? '
-                                '(y = done / Enter = retry / q = abort): ').strip().lower()
-                except EOFError:
-                    ans = ''
-                if ans in ('q', 'quit'):
-                    est_rows.append(row)
-                    return False
-                row['success'] = ans in ('y', 'yes')
-            if row['success']:
-                est_rows.append(row)
-                # NO retract: the connector is mated and the arm stays on it, which is what makes
-                # this pose the ENGAGED pose the clocking maneuvers anchor to.
-                log.info('ASSEMBLY COMPLETE on attempt %d -- holding the seat (connector ENGAGED).',
-                         it)
-                success = True
-                break
-            # Not successful: NOW back off, because the next thing (another attempt, or the final
-            # insertion) approaches its own start under position control and needs the clearance.
-            phase('retract')
-            retract_from(last_ref, T_tool0_conn)
-            if it == max_attempts:
-                est_rows.append(row)
-                log.error('Attempt limit reached (%d) without a successful mate.', max_attempts)
-                break
-
-            # ---- ESTIMATE. Accumulated rows are re-projected into the belief after every
-            # update, exactly as in estimator_eval, so old evidence stays valid.
-            obs_arr = np.asarray(obs, dtype=float).reshape(-1, 12)
-            full = np.vstack([acc, obs_arr]) if accumulate and len(acc) else obs_arr
-            vec6, w6 = estimator.prepare_observations(full[:, :6], full[:, 6:9], full[:, 9:12])
-            if commit == 'argmin':
-                T_corr_mm, info, land_pack = _argmin_estimate(estimator, vec6, w6)
-            else:
-                T_corr_mm, info = estimator.estimate(vec6, w6)
-                land_pack = None
-            if T_corr_mm is None:
-                log.warning('Estimation skipped (%s) -- retrying with the UNCHANGED belief.',
-                            info)
-                row['estimate'] = f'skipped: {info}'
-                est_rows.append(row)
-                trackc.append(trackc[-1])
-                trackr.append(float('nan'))
-                trackg.append(np.zeros(0))
-                if accumulate:
-                    acc = full
-                continue
-            log.info('belief correction: %s  (residual %.3f, %d obs, %s)',
-                     {k: round(v, 3) for k, v in info['theta_corr'].items()},
-                     info['final_residual'], info['n_observations'], commit)
-            if dbg_on:
-                try:
-                    manifold_debug.figures(
-                        estimator, vec6, w6, dict(info['theta_corr']), None,
-                        os.path.join(out_dir, f'attempt_{it:02d}_match.png'),
-                        title=f'attempt {it} (no ground truth)',
-                        max_rows=int(dbg.get('max_rows', 250)),
-                        grid_n=int(dbg.get('grid_points', 41)), live_dir=dbg_live)
-                except Exception as exc:               # noqa: BLE001 -- never fatal
-                    log.warning('match diagnostics skipped (%s)', exc)
-
-            T_ftip_conn = T_ftip_conn @ _corr_to_m(T_corr_mm)      # believed @ corr ~= true
-            T_cum = T_cum @ np.asarray(T_corr_mm, dtype=float)
-            if accumulate:
-                from .estimator_eval import _rebase_rows
-                acc = _rebase_rows(full, T_corr_mm) if len(full) else full
-            trackc.append(vec6_from_mats(T_cum)[estimator.idx])
-            trackr.append(float(info['final_residual']))
-            trackg.append(np.asarray(info['res_hist'], dtype=float)[:, -1]
-                          if info.get('res_hist') is not None else np.zeros(0))
-            _plot_run(os.path.join(out_dir, 'run_corrections.png'), estimator.estimate_dims,
-                      trackc, trackr, trackg,
-                      f'attempt {it}/{max_attempts} | check {lin * 1000:.1f} mm', live_path)
-            row.update({f'corr_{k}': v for k, v in info['theta_corr'].items()})
-            row.update({'icp_residual': info['final_residual'], 'commit': commit})
-            est_rows.append(row)
-
-        # ---- FINAL INSERTION -- the COMMIT, from the final corrected belief, zero noise ----
-        if fi_on and not success and ins_mode == 'estimate':
-            log.info('FINAL INSERTION from the corrected belief (zero noise).')
-            T_tool0_conn = robot.T_tool0_fingertip @ T_ftip_conn
-            rows_f = (traj.noised(dense, noise_rng, fi_noise_std, fi_noise_w, 0.0, 1.0)
-                      if fi_noise_on else dense)
-            refs = [traj_ref(row_, T_tool0_conn, commit=True) for row_ in rows_f]
-            phase('standoff')
-            q = robot.arm.ik(refs[0], seed_q)
-            if q is None or not _guarded(robot, guard_shared,
-                                         lambda: robot.arm.move_j(q, label='final start')):
-                log.warning('IK/approach failed for the final insertion.')
-            else:
-                seed_q = q
-                phase('assemble')
-                # retract=False: this is the attempt meant to SEAT. Backing out of it would undo
-                # the mate before the operator can judge it and would leave the clocking maneuvers
-                # anchored on a retracted pose.
-                obs_f, lin, ang, _stops, last_ref_f = run_insertion(
-                    adm_final, refs, T_tool0_conn, guard_ctl=guard_final, settle=fi_settle,
-                    hold=fi_hold, speed=(fi_v, fi_wr) if (fi_v or fi_wr) else None,
-                    pause=fi_pause, retract=False)
-                _save_observations(os.path.join(out_dir, 'final_insertion_observations.csv'),
-                                   obs_f)
-                frow = {'attempt': 'final_insertion', 'n_observations': len(obs_f),
-                        'check_pos_mm': lin * 1000.0,
-                        'check_rot_deg': float(np.degrees(ang))}
+                # SUCCESS is the operator's call -- they can see the physical mate; the kinematic
+                # numbers only see the belief. A dry run has no operator.
                 if robot.arm.dry_run or no_prompts:
-                    frow['success'] = bool(lin <= tol_pos_m and ang <= tol_rot_rad)
-                    success = success or frow['success']
+                    row['success'] = bool(lin <= tol_pos_m and ang <= tol_rot_rad)
                 else:
                     try:
-                        ansf = input('[final insertion] SUCCESSFUL? (y/n): ').strip().lower()
+                        ans = input(f'[check attempt {it}] Was the assembly SUCCESSFUL? '
+                                    '(y = done / Enter = retry / q = abort): ').strip().lower()
                     except EOFError:
-                        ansf = ''
-                    frow['success'] = ansf in ('y', 'yes')
-                    success = success or frow['success']
-                est_rows.append(frow)
-                if not success:
-                    # Only NOW back off -- a failed commit has nothing to hold on to, and the
-                    # release/escape tail below expects clearance.
-                    phase('retract')
-                    retract_from(last_ref_f, T_tool0_conn, adm_final)
-    finally:
-        robot.arm.servo_stop()
-        if est_rows:
-            keys = sorted({k for r in est_rows for k in r}, key=str)
-            with open(os.path.join(out_dir, 'estimates.csv'), 'w', newline='') as fh:
-                w = _csv.DictWriter(fh, fieldnames=keys)
-                w.writeheader()
-                w.writerows(est_rows)
-            log.info('Per-attempt log: %s', os.path.join(out_dir, 'estimates.csv'))
+                        ans = ''
+                    if ans in ('q', 'quit'):
+                        est_rows.append(row)
+                        return False
+                    row['success'] = ans in ('y', 'yes')
+                if row['success']:
+                    est_rows.append(row)
+                    # NO retract: the connector is mated and the arm stays on it, which is what makes
+                    # this pose the ENGAGED pose the clocking maneuvers anchor to.
+                    log.info('ASSEMBLY COMPLETE on attempt %d -- holding the seat (connector ENGAGED).',
+                             it)
+                    success = True
+                    break
+                # Not successful: NOW back off, because the next thing (another attempt, or the final
+                # insertion) approaches its own start under position control and needs the clearance.
+                phase('retract')
+                retract_from(last_ref, T_tool0_conn)
+                if it == max_attempts:
+                    est_rows.append(row)
+                    log.error('Attempt limit reached (%d) without a successful mate.', max_attempts)
+                    break
 
-    if not success:
-        return False
-
-    # ---- POST-MATE: CONNECTOR CLOCKING, then COLLAR CLOCKING, then the shared escape -------------
-    # Both paths end in the same retract. The mate itself has already succeeded by here, so a
-    # clocking failure is reported without undoing it.
-    if cc_on:
-        cc_ok = ret_ok = False
-        tug_res = None
-        state = 'engaged'                    # the initial assembly mated it; that is where we are
-        if pe_frame == 'believed':
-            # The believed connector frozen in base coordinates NOW, while the arm still grips
-            # it -- the maneuvers need one consistent frame, not one re-derived per use.
-            T_clk = robot.tool0() @ T_tool0_conn
-            _pl, _pa = pose_error(T_clk, T_base_tconn)
-            log.info('Post-engage frame: BELIEVED connector -- %.2f mm / %.2f deg from the '
-                     'recorded target frame.', _pl * 1000.0, np.degrees(_pa))
-        else:
-            T_clk = T_base_tconn
-            log.info('Post-engage frame: TARGET connector (recorded socket pose).')
-        if not phase_gate('CONNECTOR CLOCKING (insert)',
-                          'The connector is ENGAGED. Next is the bayonet screw, which cams it '
-                          'HOME -- check the engagement looks right first.'):
-            robot.arm.servo_stop()
-            return False
-        try:
-            cc_ok, _T_tool0_conn, T_base_conn, cc_screw_deg = connector_clocking()
-            if cc_ok:
-                state = _advance_state(state, 'engaged')          # -> seated
-                if cl_on and not phase_gate(
-                        'COLLAR CLOCKING (lock)',
-                        'The connector is SEATED. Next is the collar turn, which LOCKS it -- the '
-                        'gripper will re-grasp the collar and rotate. Check the seat first.'):
-                    robot.arm.servo_stop()
-                    return False
-                if cl_on and collar_clocking(T_base_conn, cc_screw_deg):
-                    state = _advance_state(state, 'seated')       # -> locked
-                elif cl_on:
-                    cc_ok = False
-            else:
-                log.error('CONNECTOR CLOCKING FAILED after %d tr%s (every stroke was stopped by the '
-                          'force guard) -- the connector is ENGAGED but NOT SEATED. The mate '
-                          'itself succeeded; skipping collar clocking and retracting.',
-                          cc_tries, 'y' if cc_tries == 1 else 'ies')
-            # ---- TUG VERIFICATION, IN PLACE and BEFORE the escape ---------------------------
-            # collar_clocking returns with the fingers still CLOSED on the locked collar, which is
-            # already a grip on the assembly and already on the connector axis -- so the pull can
-            # happen right here. The old order released, retracted, drove back to the historical
-            # engaged pose and re-gripped, which put three free-space moves and a blind re-grasp
-            # between the lock and the test, every one of them a chance to disturb what it was
-            # meant to measure (and the re-grip could miss entirely).
-            if tv_on and state == 'locked':
-                if phase_gate('TUG VERIFY',
-                              'The collar is LOCKED and still HELD. Next: pull %.1f N along the '
-                              'connector -X for %.1f s without letting go -- a locked bayonet '
-                              'holds, an unlocked one backs out.' % (tv_force, tv_time)):
-                    tug_res = tug_verify_in_place(hold_after=dis_on)
-                    if tug_res == 'terminated':
-                        return False              # the finally still writes clocking.csv
+                # ---- ESTIMATE. Accumulated rows are re-projected into the belief after every
+                # update, exactly as in estimator_eval, so old evidence stays valid.
+                obs_arr = np.asarray(obs, dtype=float).reshape(-1, 12)
+                full = np.vstack([acc, obs_arr]) if accumulate and len(acc) else obs_arr
+                vec6, w6 = estimator.prepare_observations(full[:, :6], full[:, 6:9], full[:, 9:12])
+                if commit == 'argmin':
+                    T_corr_mm, info, land_pack = _argmin_estimate(estimator, vec6, w6)
                 else:
-                    tug_res = 'skipped'
-                    log.warning('Tug verification skipped by the user -- the assembly is '
-                                'UNVERIFIED.')
-            # ---- ESCAPE, ONLY IF THE TUG HAS NOT ALREADY DONE IT ----------------------------
-            # tug_verify_in_place ends both of its outcomes with the arm already clear: 'verified'
-            # releases and runs clocking_retract itself, 'failed' extracts the cable, drives HOME
-            # and releases there. Running the escape again on top of either put two more retract
-            # legs after a retract that had already happened -- and after a 'failed' it fired them
-            # from the home pose, nowhere near the socket. So the escape belongs to the paths that
-            # still have the arm at the connector: a skipped or disabled tug, or a run that never
-            # reached 'locked'.
-            # ---- DISASSEMBLY, from the grip the tug left -------------------------------
-            if dis_on and tug_res != 'failed' and state in ('locked', 'seated'):
-                if tug_res == 'verified_held':
-                    log.info('DISASSEMBLY: starting from the tug grip (collar held, on axis).')
-                elif not robot.gripper.close('re-grip for disassembly'):
-                    log.error('DISASSEMBLY: could not re-grip before unwinding.')
-                    return False
-                dis_ok, state = disassembly(state, cc_screw_deg)
-                if not dis_ok:
-                    log.error('DISASSEMBLY did not finish -- the arm is LEFT WHERE IT IS and '
-                              'the part may still be held. Free it by hand before commanding '
-                              'motion.')
-                    return False
-                tug_res = 'verified' if tug_res == 'verified_held' else tug_res
-                ret_ok = True                     # the place already left the arm clear
-                log.info('DISASSEMBLED -- the connector is %s.',
-                         'out and placed on the ground' if dis_place_on
-                         else 'out and still in the fingers')
-            elif tug_res == 'verified_held':
-                # disassembly declined or not applicable: finish the tug the normal way
-                robot.gripper.open('release (tug verified)')
-                ret_ok = clocking_retract('tug retract')
-                tug_res = 'verified'
+                    T_corr_mm, info = estimator.estimate(vec6, w6)
+                    land_pack = None
+                if T_corr_mm is None:
+                    log.warning('Estimation skipped (%s) -- retrying with the UNCHANGED belief.',
+                                info)
+                    row['estimate'] = f'skipped: {info}'
+                    est_rows.append(row)
+                    trackc.append(trackc[-1])
+                    trackr.append(float('nan'))
+                    trackg.append(np.zeros(0))
+                    if accumulate:
+                        acc = full
+                    continue
+                log.info('belief correction: %s  (residual %.3f, %d obs, %s)',
+                         {k: round(v, 3) for k, v in info['theta_corr'].items()},
+                         info['final_residual'], info['n_observations'], commit)
+                if dbg_on:
+                    try:
+                        manifold_debug.figures(
+                            estimator, vec6, w6, dict(info['theta_corr']), None,
+                            os.path.join(out_dir, f'attempt_{it:02d}_match.png'),
+                            title=f'attempt {it} (no ground truth)',
+                            max_rows=int(dbg.get('max_rows', 250)),
+                            grid_n=int(dbg.get('grid_points', 41)), live_dir=dbg_live)
+                    except Exception as exc:               # noqa: BLE001 -- never fatal
+                        log.warning('match diagnostics skipped (%s)', exc)
 
-            if tug_res in ('verified', 'failed'):
-                ret_ok = True
-                log.info('Escape not needed -- the tug verification already left the arm clear '
-                         '(%s). Going straight home.',
-                         'released and retracted' if tug_res == 'verified'
-                         else 'cable extracted and carried home')
-            elif phase_gate('ESCAPE',
-                            'Clocking done. Next: RELEASE the gripper, then the two-leg retract '
-                            '(the gripper backs off its own -Z, then away along the target -X).'):
-                # RELEASE FIRST: the fingers are still CLOSED on the collar, and the retract's
-                # first leg is written for OPEN fingers. Idempotent where it is already open.
-                if robot.gripper.open('release before escape'):
-                    ret_ok = clocking_retract()
+                T_ftip_conn = T_ftip_conn @ _corr_to_m(T_corr_mm)      # believed @ corr ~= true
+                T_cum = T_cum @ np.asarray(T_corr_mm, dtype=float)
+                if accumulate:
+                    from .estimator_eval import _rebase_rows
+                    acc = _rebase_rows(full, T_corr_mm) if len(full) else full
+                trackc.append(vec6_from_mats(T_cum)[estimator.idx])
+                trackr.append(float(info['final_residual']))
+                trackg.append(np.asarray(info['res_hist'], dtype=float)[:, -1]
+                              if info.get('res_hist') is not None else np.zeros(0))
+                _plot_run(os.path.join(out_dir, 'run_corrections.png'), estimator.estimate_dims,
+                          trackc, trackr, trackg,
+                          f'attempt {it}/{max_attempts} | check {lin * 1000:.1f} mm', live_path)
+                row.update({f'corr_{k}': v for k, v in info['theta_corr'].items()})
+                row.update({'icp_residual': info['final_residual'], 'commit': commit})
+                est_rows.append(row)
+
+            # ---- FINAL INSERTION -- the COMMIT, from the final corrected belief, zero noise ----
+            if fi_on and not success and ins_mode == 'estimate':
+                log.info('FINAL INSERTION from the corrected belief (zero noise).')
+                T_tool0_conn = robot.T_tool0_fingertip @ T_ftip_conn
+                rows_f = (traj.noised(dense, noise_rng, fi_noise_std, fi_noise_w, 0.0, 1.0)
+                          if fi_noise_on else dense)
+                refs = [traj_ref(row_, T_tool0_conn, commit=True) for row_ in rows_f]
+                phase('standoff')
+                q = robot.arm.ik(refs[0], seed_q)
+                if q is None or not _guarded(robot, guard_shared,
+                                             lambda: robot.arm.move_j(q, label='final start')):
+                    log.warning('IK/approach failed for the final insertion.')
                 else:
-                    log.error('Gripper did not open before the escape -- leaving the arm in '
-                              'place rather than dragging the locked assembly with clamped '
-                              'fingers.')
-            else:
-                log.warning('Escape skipped by the user -- the arm is still at the connector '
-                            'with the gripper in whatever state clocking left it.')
+                    seed_q = q
+                    phase('assemble')
+                    # retract=False: this is the attempt meant to SEAT. Backing out of it would undo
+                    # the mate before the operator can judge it and would leave the clocking maneuvers
+                    # anchored on a retracted pose.
+                    obs_f, lin, ang, _stops, last_ref_f = run_insertion(
+                        adm_final, refs, T_tool0_conn, guard_ctl=guard_final, settle=fi_settle,
+                        hold=fi_hold, speed=(fi_v, fi_wr) if (fi_v or fi_wr) else None,
+                        pause=fi_pause, retract=False)
+                    _save_observations(os.path.join(out_dir, 'final_insertion_observations.csv'),
+                                       obs_f)
+                    frow = {'attempt': 'final_insertion', 'n_observations': len(obs_f),
+                            'check_pos_mm': lin * 1000.0,
+                            'check_rot_deg': float(np.degrees(ang))}
+                    if robot.arm.dry_run or no_prompts:
+                        frow['success'] = bool(lin <= tol_pos_m and ang <= tol_rot_rad)
+                        success = success or frow['success']
+                    else:
+                        try:
+                            ansf = input('[final insertion] SUCCESSFUL? (y/n): ').strip().lower()
+                        except EOFError:
+                            ansf = ''
+                        frow['success'] = ansf in ('y', 'yes')
+                        success = success or frow['success']
+                    est_rows.append(frow)
+                    if not success:
+                        # Only NOW back off -- a failed commit has nothing to hold on to, and the
+                        # release/escape tail below expects clearance.
+                        phase('retract')
+                        retract_from(last_ref_f, T_tool0_conn, adm_final)
         finally:
             robot.arm.servo_stop()
-            if clock_rows:
-                keys = sorted({k for r in clock_rows for k in r}, key=str)
-                with open(os.path.join(out_dir, 'clocking.csv'), 'w', newline='') as fh:
+            if est_rows:
+                keys = sorted({k for r in est_rows for k in r}, key=str)
+                with open(os.path.join(out_dir, 'estimates.csv'), 'w', newline='') as fh:
                     w = _csv.DictWriter(fh, fieldnames=keys)
                     w.writeheader()
-                    w.writerows(clock_rows)
-                log.info('Clocking log: %s', os.path.join(out_dir, 'clocking.csv'))
-        # 'assembled' is claimed only at 'locked': a seated but unlocked BNC can still back out,
-        # so a run with collar clocking disabled succeeds without being called assembled.
-        if state == 'locked' and tug_res == 'failed':
-            log.error('Collar clocking reported LOCKED but the TUG pulled the connector back '
-                      'out -- NOT assembled. The cable has been extracted and released at home.')
-        elif state == 'locked':
-            log.info('ASSEMBLED -- connector ENGAGED -> SEATED -> LOCKED%s.',
-                     ', TUG-VERIFIED' if tug_res == 'verified' else
-                     ' (tug verification %s)' % ('skipped' if tug_res == 'skipped' else
-                                                 'disabled' if tug_res is None else 'ERRORED'))
-        elif state == 'seated':
-            log.warning('Connector SEATED but NOT LOCKED (collar clocking %s) -- not assembled.',
-                        'disabled' if not cl_on else 'FAILED')
-        else:
-            log.error('Connector ENGAGED only -- neither seated nor locked.')
-        phase('reset')
-        rst = end_reset_with_snapshot()                       # always, even after a failed screw
-        return bool(cc_ok and ret_ok and rst and tug_res in (None, 'skipped', 'verified'))
+                    w.writerows(est_rows)
+                log.info('Per-attempt log: %s', os.path.join(out_dir, 'estimates.csv'))
+
+        if not success:
+            return False
+
+        # ---- POST-MATE: CONNECTOR CLOCKING, then COLLAR CLOCKING, then the shared escape -------------
+        # Both paths end in the same retract. The mate itself has already succeeded by here, so a
+        # clocking failure is reported without undoing it.
+        if cc_on:
+            cc_ok = ret_ok = False
+            tug_res = None
+            state = 'engaged'                    # the initial assembly mated it; that is where we are
+            if pe_frame == 'believed':
+                # The believed connector frozen in base coordinates NOW, while the arm still grips
+                # it -- the maneuvers need one consistent frame, not one re-derived per use.
+                T_clk = robot.tool0() @ T_tool0_conn
+                _pl, _pa = pose_error(T_clk, T_base_tconn)
+                log.info('Post-engage frame: BELIEVED connector -- %.2f mm / %.2f deg from the '
+                         'recorded target frame.', _pl * 1000.0, np.degrees(_pa))
+            else:
+                T_clk = T_base_tconn
+                log.info('Post-engage frame: TARGET connector (recorded socket pose).')
+            if not phase_gate('CONNECTOR CLOCKING (insert)',
+                              'The connector is ENGAGED. Next is the bayonet screw, which cams it '
+                              'HOME -- check the engagement looks right first.'):
+                robot.arm.servo_stop()
+                return False
+            try:
+                cc_ok, _T_tool0_conn, T_base_conn, cc_screw_deg = connector_clocking()
+                if cc_ok:
+                    state = _advance_state(state, 'engaged')          # -> seated
+                    if cl_on and not phase_gate(
+                            'COLLAR CLOCKING (lock)',
+                            'The connector is SEATED. Next is the collar turn, which LOCKS it -- the '
+                            'gripper will re-grasp the collar and rotate. Check the seat first.'):
+                        robot.arm.servo_stop()
+                        return False
+                    if cl_on and collar_clocking(T_base_conn, cc_screw_deg):
+                        state = _advance_state(state, 'seated')       # -> locked
+                    elif cl_on:
+                        cc_ok = False
+                else:
+                    log.error('CONNECTOR CLOCKING FAILED after %d tr%s (every stroke was stopped by the '
+                              'force guard) -- the connector is ENGAGED but NOT SEATED. The mate '
+                              'itself succeeded; skipping collar clocking and retracting.',
+                              cc_tries, 'y' if cc_tries == 1 else 'ies')
+                # ---- TUG VERIFICATION, IN PLACE and BEFORE the escape ---------------------------
+                # collar_clocking returns with the fingers still CLOSED on the locked collar, which is
+                # already a grip on the assembly and already on the connector axis -- so the pull can
+                # happen right here. The old order released, retracted, drove back to the historical
+                # engaged pose and re-gripped, which put three free-space moves and a blind re-grasp
+                # between the lock and the test, every one of them a chance to disturb what it was
+                # meant to measure (and the re-grip could miss entirely).
+                if tv_on and state == 'locked':
+                    if phase_gate('TUG VERIFY',
+                                  'The collar is LOCKED and still HELD. Next: pull %.1f N along the '
+                                  'connector -X for %.1f s without letting go -- a locked bayonet '
+                                  'holds, an unlocked one backs out.' % (tv_force, tv_time)):
+                        tug_res = tug_verify_in_place()
+                        if tug_res == 'terminated':
+                            return False              # the finally still writes clocking.csv
+                    else:
+                        tug_res = 'skipped'
+                        log.warning('Tug verification skipped by the user -- the assembly is '
+                                    'UNVERIFIED.')
+                # ---- ESCAPE, ONLY IF THE TUG HAS NOT ALREADY DONE IT ----------------------------
+                # tug_verify_in_place ends both of its outcomes with the arm already clear: 'verified'
+                # releases and runs clocking_retract itself, 'failed' extracts the cable, drives HOME
+                # and releases there. Running the escape again on top of either put two more retract
+                # legs after a retract that had already happened -- and after a 'failed' it fired them
+                # from the home pose, nowhere near the socket. So the escape belongs to the paths that
+                # still have the arm at the connector: a skipped or disabled tug, or a run that never
+                # reached 'locked'.
+                if tug_res in ('verified', 'failed'):
+                    ret_ok = True
+                    log.info('Escape not needed -- the tug verification already left the arm clear '
+                             '(%s). Going straight home.',
+                             'released and retracted' if tug_res == 'verified'
+                             else 'cable extracted and carried home')
+                elif phase_gate('ESCAPE',
+                                'Clocking done. Next: RELEASE the gripper, then the two-leg retract '
+                                '(the gripper backs off its own -Z, then away along the target -X).'):
+                    # RELEASE FIRST: the fingers are still CLOSED on the collar, and the retract's
+                    # first leg is written for OPEN fingers. Idempotent where it is already open.
+                    if robot.gripper.open('release before escape'):
+                        ret_ok = clocking_retract()
+                    else:
+                        log.error('Gripper did not open before the escape -- leaving the arm in '
+                                  'place rather than dragging the locked assembly with clamped '
+                                  'fingers.')
+                else:
+                    log.warning('Escape skipped by the user -- the arm is still at the connector '
+                                'with the gripper in whatever state clocking left it.')
+
+                # ---- DISASSEMBLY, after the assembly has fully let go ------------------------
+                # It runs HERE, once the escape has released the connector and backed the arm off,
+                # so the two halves are cleanly separated: the assembly ends with the connector
+                # mated and the arm clear, exactly as a run without disassembly would leave it, and
+                # the disassembly starts by re-approaching and re-gripping like any other maneuver.
+                # Nothing it does depends on a grip inherited from the assembly.
+                if dis_on and ret_ok and tug_res != 'failed' and state in ('locked', 'seated'):
+                    dis_ok, state = disassembly(state, cc_screw_deg, T_base_conn)
+                    if not dis_ok:
+                        log.error('DISASSEMBLY did not finish -- the arm is LEFT WHERE IT IS and '
+                                  'the part may still be held or still in the socket. Free it by '
+                                  'hand before commanding motion.')
+                        return False
+                    log.info('DISASSEMBLED -- the connector is %s.',
+                             'out and placed on the ground' if dis_place_on
+                             else 'out and still in the fingers')
+                elif dis_on and tug_res == 'failed':
+                    log.warning('DISASSEMBLY skipped -- the tug already extracted the cable and '
+                                'carried it home, so there is nothing left to take apart.')
+                elif dis_on and not ret_ok:
+                    log.warning('DISASSEMBLY skipped -- the escape did not complete, so the arm is '
+                                'not in a known clear state to re-approach from.')
+            finally:
+                robot.arm.servo_stop()
+                if clock_rows:
+                    keys = sorted({k for r in clock_rows for k in r}, key=str)
+                    with open(os.path.join(out_dir, 'clocking.csv'), 'w', newline='') as fh:
+                        w = _csv.DictWriter(fh, fieldnames=keys)
+                        w.writeheader()
+                        w.writerows(clock_rows)
+                    log.info('Clocking log: %s', os.path.join(out_dir, 'clocking.csv'))
+            # 'assembled' is claimed only at 'locked': a seated but unlocked BNC can still back out,
+            # so a run with collar clocking disabled succeeds without being called assembled.
+            if state == 'locked' and tug_res == 'failed':
+                log.error('Collar clocking reported LOCKED but the TUG pulled the connector back '
+                          'out -- NOT assembled. The cable has been extracted and released at home.')
+            elif state == 'locked':
+                log.info('ASSEMBLED -- connector ENGAGED -> SEATED -> LOCKED%s.',
+                         ', TUG-VERIFIED' if tug_res == 'verified' else
+                         ' (tug verification %s)' % ('skipped' if tug_res == 'skipped' else
+                                                     'disabled' if tug_res is None else 'ERRORED'))
+            elif state == 'seated':
+                log.warning('Connector SEATED but NOT LOCKED (collar clocking %s) -- not assembled.',
+                            'disabled' if not cl_on else 'FAILED')
+            else:
+                log.error('Connector ENGAGED only -- neither seated nor locked.')
+            phase('reset')
+            rst = end_reset_with_snapshot()                       # always, even after a failed screw
+            ok_cycle = bool(cc_ok and ret_ok and rst
+                            and tug_res in (None, 'skipped', 'verified'))
+            cycle_ok.append(ok_cycle)
+            if not ok_cycle:
+                log.error('CYCLE %d/%d did not complete cleanly -- stopping the loop here '
+                          'rather than starting another pass on an unknown cell.',
+                          cycle, n_cycles)
+                return False
+            if cycle < n_cycles:
+                log.info('CYCLE %d/%d complete. The cable is back on the ground and the arm '
+                         'is home -- next cycle re-localizes and re-picks.', cycle, n_cycles)
+                continue
+            log.info('ALL %d CYCLE%s COMPLETE.', n_cycles, '' if n_cycles == 1 else 'S')
+            return True
 
     d_out = float(a.get('release_retract_distance_m', 0.08))
     back = -(robot.tool0() @ (robot.T_tool0_fingertip @ T_ftip_conn))[:3, 0] * d_out

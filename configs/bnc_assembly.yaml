@@ -45,7 +45,7 @@ aruco:
 # against depth; more frames from one spot only average sensor noise), hence the ring of
 # stops.  Use the SAME block the calibration used, so both see the same faces.
 marker_views:
-  settle_s: 0.4
+  settle_s: 0.25
   frames_per_view: 3               # captures averaged at each stop (sensor noise only)
   min_views: 1                     # a marker seen from fewer viewpoints is DROPPED, not fused
   min_markers: 2                   # at run time, refuse a single-marker answer: it has no check
@@ -316,7 +316,7 @@ speed:
     # speed_rotation_deg_s in the maneuver's own block overrides its scale entirely.
     visual_localize: 1.5     # the marker sweep + per-marker servo moves (camera near the fixture)
     connector_clock: 0.10    # the bayonet sweep legs
-    collar_clock: 0.5   # the collar turn
+    collar_clock: 0.25   # the collar turn
     clock_retract: 1.0   # the shared two-leg escape (free space, gripper already clear)
     # The collar maneuver's free-space approach (withdraw, lift off, big reorient onto the
     # axis).  Nothing is inserted, so it should not run at contact pacing -- and the reorient
@@ -402,7 +402,7 @@ assembly:
     # which are shared with marker_calibration and must stay identical to it).  false = the
     # plain sweep only -- faster, but the localization then views the markers differently
     # from how the calibration did, so the PnP bias cancellation is partly given up.
-    servo_refine: true
+    servo_refine: false
     # Keep true: return to home after the sweep; the app then drives to pick_joints_deg,
     # where the scan, grasp geometry and retry offsets are written.
     return_home_after: true
@@ -797,6 +797,16 @@ assembly:
   # line up with the slots.  Turning further would ride them onto the rim.
   disassembly:
     enabled: true
+    # CYCLES: repeat the whole pass -- localize, pick, assemble, clock, verify, take apart,
+    # place the cable back -- this many times.  Each cycle RE-LOCALIZES (the fixture may have
+    # moved; that is what the marker rig buys) and RE-PICKS from wherever the last cycle put
+    # the cable down, so it exercises the full pipeline rather than just the insertion.
+    #
+    # Needs disassembly AND place enabled: without them the connector stays mated and a second
+    # pass has nothing to pick.  The app clamps to 1 and says so rather than looping anyway.
+    # The in-hand belief is reset to nominal at the start of every cycle -- a fresh grasp has a
+    # fresh error, so last cycle's estimator correction must not carry over.
+    cycles: 1
     unlock_collar: true          # LOCKED -> SEATED (needs the collar to be held on the axis)
     unclock_connector: true      # SEATED -> ENGAGED (reverses the bayonet sweep)
     extract_mm: 60.0             # pull along the socket -X once the bayonet is free

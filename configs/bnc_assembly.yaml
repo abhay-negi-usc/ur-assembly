@@ -337,6 +337,55 @@ pickup:
   approach_seed_tolerance_deg: 90.0
   rests_on_ground_plane: true
 
+  # ===========================================================================================
+  # GROUND-COLLISION CHECK (pybullet).  Samples the JOINT PATH of the grasp-align move and
+  # refuses before the arm moves.
+  #
+  # THE ENDPOINTS ARE NOT THE PATH.  A moveJ interpolates in joint space, so the tool swings
+  # through an ARC: both ends can be comfortably clear of the bench while the middle is not.
+  # That is the collision this exists to catch, and it is why the whole interpolation is
+  # sampled rather than just the target pose.
+  #
+  # THE MODEL is built in code from the published UR10e DH parameters -- there is no URDF in
+  # this workspace and pybullet_data ships no UR10e -- with a CAPSULE per link, the 80 mm
+  # spacer, and the 2F-85 body and fingers.  Capsules are a CONSERVATIVE envelope: they contain
+  # the real shell, so a PASS is trustworthy and a FAIL can only be pessimistic.  Shrinking a
+  # radius only makes the guard more permissive, so treat the defaults as a floor.
+  #
+  # THE FK IS OURS, SO IT IS CHECKED.  arm.fk is a controller call that returns a fixed stand-in
+  # offline, so the model cannot lean on it; instead it compares the two on every real run and
+  # says so loudly on a mismatch.  A dry run reports the check as UNVERIFIED rather than
+  # pretending.  pybullet missing disables the CHECK, not the run -- with a warning.
+  #
+  # ---- THE FINGERTIP EXCEPTION, and it is the only hole in the guard ----------------------
+  # Picking a connector that LIES ON the bench means closing the pads around something whose
+  # centreline is one barrel-radius up, so the pads must reach beside and slightly below it.
+  # The fingertips are the part of the gripper that is SUPPOSED to arrive at the work surface;
+  # holding them to a hard zero would refuse every legitimate pick.  So the fingertips -- and
+  # ONLY the fingertips -- may intersect the ground plane by fingertip_margin_mm.
+  #
+  # THE GRIPPER WRIST IS NOT COVERED BY IT.  The wrist, the gripper body, the spacer and every
+  # arm link are held to margin_mm.  A wrist that touches the bench is a crash; a fingertip
+  # that grazes it is the job.  They are separate bodies in the model precisely so the
+  # allowance cannot leak from one to the other.
+  # ===========================================================================================
+  collision:
+    enabled: true
+    # Ground height comes from the top-level ground_plane.z_m -- ONE number for the bench, so
+    # the checker and the place-the-cable descent cannot disagree about where the floor is.
+    margin_mm: 0.0            # required clearance for EVERYTHING except the fingertips
+    fingertip_margin_mm: 5.0  # allowed INTERSECTION, fingertips only (see above)
+    path_samples: 25
+    tool:
+      spacer_length_mm: 8.0     # the coupling between tool0 and the gripper's mounting face
+      spacer_radius_mm: 37.5
+      # 2F-85 mounting face -> the finger mount (its knuckle), 54.9 mm in Robotiq's own URDF.
+      # Everything OUTBOARD of this is finger, and the split matters: the BODY carries no
+      # ground allowance while the fingers do.
+      gripper_body_length_mm: 55.0
+      gripper_body_radius_mm: 45.0
+      finger_radius_mm: 12.0
+      finger_half_gap_mm: 42.0  # half the OPEN jaw separation: the worst case for a ground hit
   compliance:
     enabled: true
     tare_before: true

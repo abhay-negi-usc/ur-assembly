@@ -11,3 +11,7 @@ numpy>=1.24
 scipy>=1.10
 PyYAML>=6.0
 py_trees>=2.2
+# Ground-collision checking for the pick path (urlab/robot/collision.py). OPTIONAL at
+# runtime: the app warns and runs UNCHECKED if it is missing, rather than refusing to
+# start over a guard.
+pybullet>=3.2

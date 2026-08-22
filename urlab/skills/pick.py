@@ -604,6 +604,13 @@ class GraspController:
                               else [float(np.radians(float(v))) for v in seed])
         self.approach_seed_tol = float(np.radians(
             float(p.get('approach_seed_tolerance_deg', 45.0))))
+        # GROUND COLLISION over the grasp-align move. Built LAZILY -- importing pybullet at
+        # construction would make it a hard dependency of every app that touches a gripper.
+        self._collision_cfg = dict(p.get('collision', {}) or {})
+        self._collision_ground_z = cfg.get_path('ground_plane.z_m')
+        self._collision_ftip_z = float(
+            (cfg.get_path('fingertip_grasp.xyz') or [0.0, 0.0, 0.183])[2])
+        self._collision = False        # False = not built yet, None = unavailable
         self.settle_s = float(p.get('settle_s', 0.5))
         self._guard_cfg = p.get('force_guard', {}) or {}
         self._adm = None
@@ -653,6 +660,42 @@ class GraspController:
             return position_guard(lambda: robot.move_fingertip(T_target, label))
         return robot.move_fingertip(T_target, label)
 
+    def collision_model(self):
+        """The ground model, or None if it is switched off or pybullet is missing.
+
+        A MISSING pybullet DISABLES THE CHECK RATHER THAN THE RUN: this is a guard bolted onto
+        an app that worked without it, and refusing to start because an optional package is
+        absent would be the wrong trade. It says so loudly -- once -- so an unguarded run is
+        never silent."""
+        if self._collision is not False:
+            return self._collision
+        self._collision = None
+        if not bool(self._collision_cfg.get('enabled', True)):
+            log.info('Ground-collision checking is OFF (pickup.collision.enabled).')
+            return None
+        if self._collision_ground_z is None:
+            log.warning('Ground-collision checking needs ground_plane.z_m -- not set, so the '
+                        'pick path is UNCHECKED.')
+            return None
+        try:
+            from ..robot.collision import GroundCollisionModel
+            self._collision = GroundCollisionModel(
+                self._collision_cfg, ground_z_m=float(self._collision_ground_z),
+                fingertip_z_m=self._collision_ftip_z)
+            log.info('Ground-collision model: %s', self._collision.describe())
+        except ImportError:
+            log.warning('pybullet is not installed, so the pick path is UNCHECKED against the '
+                        'ground plane. `pip install pybullet` to turn the guard on.')
+        except Exception as exc:                               # noqa: BLE001
+            log.warning('Ground-collision model could not be built (%s) -- the pick path is '
+                        'UNCHECKED.', exc)
+        return self._collision
+
+    def verify_collision_model(self, robot):
+        """Check our DH chain against the controller's FK. Call once, at start-up."""
+        model = self.collision_model()
+        return None if model is None else model.verify_against_controller(robot.arm)
+
     def align(self, robot, geom, label='grasp-align'):
         """Move the fingertip onto the PRE-GRASP, at the 'grasp_align' phase scale and on the
         SEEDED IK branch.
@@ -670,19 +713,22 @@ class GraspController:
         sign change on wrist_2; an elbow or shoulder flip shows up on those joints."""
         robot.arm.set_speed_scale(self.align_scale, 'grasp_align')
         T = geom.pre_grasp()
-        if self.approach_seed is None:
-            ok = robot.move_fingertip(T, label)
-            if ok and not robot.arm.dry_run:
-                log.info('  grasp-align configuration: %s deg (no approach_seed_joints_deg set, '
-                         'so this is whatever branch the scan left the arm nearest).',
-                         np.round(np.degrees(robot.arm.q()), 1).tolist())
-            return ok
-
+        # SOLVE FIRST, MOVE SECOND -- both the branch check and the ground check need the
+        # configuration in hand while the arm is still parked.
         q = robot.arm.ik(T @ inverse(robot.T_tool0_fingertip), self.approach_seed)
         if q is None:
-            log.error('%s: no IK solution near pickup.approach_seed_joints_deg %s deg.',
-                      label, np.round(np.degrees(self.approach_seed), 1).tolist())
+            log.error('%s: no IK solution%s.', label,
+                      '' if self.approach_seed is None else
+                      ' near pickup.approach_seed_joints_deg %s deg'
+                      % np.round(np.degrees(self.approach_seed), 1).tolist())
             return False
+        if self.approach_seed is None:
+            log.info('  grasp-align configuration: %s deg (no approach_seed_joints_deg set, so '
+                     'this is whatever branch the scan left the arm nearest).',
+                     np.round(np.degrees(q), 1).tolist())
+            if not self._path_is_clear(robot, q, label):
+                return False
+            return robot.move_fingertip(T, label)
         # WRAPPED, because a joint at +179 and one at -179 are 2 deg apart, not 358.
         d = np.abs(np.asarray(q, dtype=float) - np.asarray(self.approach_seed, dtype=float))
         d = np.minimum(d, 2.0 * np.pi - d)
@@ -701,13 +747,65 @@ class GraspController:
         log.info('  grasp-align on the seeded branch: %s deg (worst joint %s, %.1f deg from the '
                  'seed).', np.round(np.degrees(q), 1).tolist(), UR_JOINTS[worst],
                  np.degrees(d[worst]))
+        if not self._path_is_clear(robot, q, label):
+            return False
         return robot.move_fingertip(T, label, qnear=self.approach_seed)
+
+    def _path_is_clear(self, robot, q_goal, label):
+        """Refuse a move whose JOINT PATH puts the arm through the ground plane.
+
+        THE ENDPOINTS ARE NOT THE PATH. A moveJ interpolates in joint space, so the tool swings
+        through an arc: both ends can be comfortably clear while the middle is not. That is the
+        failure this exists for, and it is why the whole interpolation is sampled rather than
+        just the target."""
+        model = self.collision_model()
+        if model is None:
+            return True
+        q_now = robot.arm.q()
+        ok, body, over, frac = model.check_path(q_now, q_goal)
+        if ok:
+            return True
+        # The fingertips carry their own allowance (they are MEANT to reach the work surface);
+        # everything else, the gripper wrist included, is held to the strict margin.
+        log.error('%s: the joint path goes THROUGH THE GROUND PLANE -- %s is %.1f mm past its '
+                  'allowance at %.0f%% along the move. Refusing before the arm moves. Re-seed '
+                  'pickup.approach_seed_joints_deg so the arm swings the other way, or lower '
+                  'speed and step there in stages.',
+                  label, body, over * 1000.0, frac * 100.0)
+        return False
 
     def descend(self, robot, geom, label='grasp'):
         """Move to the grasp pose (from wherever the arm is -- the grasp-align pose). Tares in
         FREE SPACE (at grasp-align), which is the baseline the lift keeps. Runs at the 'pickup'
-        phase scale."""
+        phase scale.
+
+        CHECKED AGAINST THE GROUND FIRST. This is the move that actually approaches the bench,
+        so leaving it unguarded made the guard on grasp-align close to useless: the arc that
+        needed watching was never the one being watched. The descent is CARTESIAN, so it is the
+        tool bodies that are checked (they depend only on tool0's pose, no IK required) -- and
+        the tool is what arrives at the bench first anyway."""
+        if not self._descent_is_clear(robot, geom, label):
+            return False
         return self._to(robot, geom.T_base_grasp, label, 'Grasp descent', scale=self.pickup_scale)
+
+    def _descent_is_clear(self, robot, geom, label):
+        """Refuse a descent that would put the gripper through the bench."""
+        model = self.collision_model()
+        if model is None:
+            return True
+        from ..transforms import inverse
+        T_inv = inverse(robot.T_tool0_fingertip)
+        ok, body, over, frac = model.check_tool_path(geom.pre_grasp() @ T_inv,
+                                                     geom.T_base_grasp @ T_inv)
+        if ok:
+            return True
+        log.error('%s: the descent puts %s %.1f mm past its ground allowance at %.0f%% of the '
+                  'way down. Refusing. The fingertips may intersect by %.0f mm -- the gripper '
+                  'body and wrist may not -- so this is either too steep an approach angle '
+                  '(pickup.fingertip_in_connector rpy y) or a grasp target set too low.',
+                  label, body, over * 1000.0, frac * 100.0,
+                  model.fingertip_margin * 1000.0)
+        return False
 
     def lift(self, robot, geom, label='lift', position_guard=None):
         """Lift to geom.lift() in the SAME mode as the descent, at the 'lift' phase scale.

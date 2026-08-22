@@ -102,8 +102,8 @@ from ..skills import trajectory as traj
 from ..skills import wiggle as wigmod
 from ..skills.manifold import mats_from_vec6, vec6_from_mats
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
-                           GraspRecovery, grip_offset_m, pickup_pitch_rad, pitched_belief,
-                           retry_offset_x, verify_cable_held)
+                           GraspRecovery, belief_offset_m, grip_offset_m, offset_belief,
+                           pickup_pitch_rad, pitched_belief, retry_offset_x, verify_cable_held)
 from ..skills.solution_check import CheckedManifoldEstimator
 from ..transforms import (from_cfg, inverse, matrix_to_xyzrpy, pose_error, rotate_about_axis,
                           slerp_matrix, translation_matrix, xyzrpy_to_matrix)
@@ -1046,6 +1046,14 @@ def build_and_run(cfg, robot, camera, args):
         log.info('Pickup pitch %+.1f deg / grip offset %+.1f mm -> in-hand belief moved to '
                  'match (the pick and the belief are one pair; changing one alone mates the '
                  'connector wrong).', np.degrees(_pitch), _grip_off * 1000.0)
+    # THE MEASURED RESIDUAL, applied last and to the BELIEF ONLY: how the part actually seats
+    # in the jaws at this approach angle, which no frame can predict. Moves nothing at pickup.
+    _bel_off = belief_offset_m(cfg)
+    if float(np.linalg.norm(_bel_off)) > 0.0:
+        T_ftip_conn = offset_belief(T_ftip_conn, _bel_off)
+        log.info('Belief offset %s mm (fingertip frame) applied to the in-hand pose ONLY -- '
+                 'the grasp command is unchanged.',
+                 np.round(_bel_off * 1000.0, 2).tolist())
 
     live = a.get('live_plot', True)
     live_path = None

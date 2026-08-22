@@ -42,8 +42,8 @@ from ..skills import trajectory as traj
 from ..skills.manifold import (FORCE_COLS, ManifoldEstimator, POSE_COLS, TORQUE_COLS,
                                vec6_from_mats)
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
-                           GraspRecovery, grip_offset_m, pickup_pitch_rad, pitched_belief,
-                           retry_offset_x, verify_cable_held)
+                           GraspRecovery, belief_offset_m, grip_offset_m, offset_belief,
+                           pickup_pitch_rad, pitched_belief, retry_offset_x, verify_cable_held)
 from ..transforms import from_cfg, inverse, matrix_to_xyzrpy, pose_error, translation_matrix
 from ._cable import build_scanner, make_confirm
 from ._common import experiment_dir, prompts_off, seg_time
@@ -146,6 +146,12 @@ class _AssemblyTask:
                 pitch, grip_off)
             log.info('Pickup pitch %+.1f deg / grip offset %+.1f mm -> in-hand belief moved '
                      'to match.', np.degrees(pitch), grip_off * 1000.0)
+        # The measured seating residual -- BELIEF ONLY, nothing moves at pickup.
+        bel_off = belief_offset_m(cfg)
+        if float(np.linalg.norm(bel_off)) > 0.0:
+            self.T_ftip_conn = offset_belief(self.T_ftip_conn, bel_off)
+            log.info('Belief offset %s mm (fingertip frame) applied to the in-hand pose ONLY.',
+                     np.round(bel_off * 1000.0, 2).tolist())
 
         # Speeds: ONE global speed: block, each phase applying its own scale to all four
         # limits (speed.phase_scale.<phase>).  Free-space moves inherit the scale from

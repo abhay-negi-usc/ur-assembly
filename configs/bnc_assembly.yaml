@@ -222,6 +222,30 @@ pickup:
   # (Distinct from grasp_check.retry_perturb_x_m, which jitters the SAME axis by +/-3 mm
   # between retries and is deliberately NOT modelled -- that is search noise, not a setting.)
   grip_offset_mm: 15.0
+  # BELIEF OFFSET, mm in the FINGERTIP frame -- the one knob here that moves NOTHING at
+  # pickup.  This is the split between the two things that were previously tangled:
+  #
+  #   the GRASP COMMAND  (pitch_deg, grip_offset_mm, junction_in_fingertip) = where the
+  #                      fingers GO.  Change one and the arm moves somewhere else.
+  #   the BELIEF         (this) = where the connector then IS relative to those fingers.
+  #                      Change it and the pick is identical; only the assembly's idea of
+  #                      what it is carrying moves.
+  #
+  # WHY IT IS NEEDED.  The belief is otherwise DERIVED from the command, exactly -- but that
+  # derivation assumes the part seats in the jaws the same way at every approach angle.  It
+  # does not: the cable lies on the ground and stays horizontal while the JAWS tilt, so
+  # tilted grooves capture the cylinder at a different depth than square ones.  That is a
+  # contact fact -- measurable, not derivable from any frame -- and it shows up exactly the
+  # way it did here: an in-hand pose that is off at a non-zero pitch_deg and right at 0.
+  #
+  # HOW TO SET IT: pick at the working pitch, measure where the connector actually sits
+  # against where the app says it does, and put the difference here.  It is PER-PITCH:
+  # change pitch_deg and this needs re-measuring.
+  #
+  # DO NOT fold this into junction_in_fingertip (that moves the grasp too, so you would chase
+  # your own tail) or into frames.yaml bnc_connector_in_fingerpads (that frame is the
+  # SQUARE-grip truth, shared with the recorded target, and the smoke suite guards it).
+  belief_offset_mm: [0.0, 0.0, -3.0]
   # PICKUP HEIGHT from the gripper kinematic model.  Assumes the connector rests ON THE GROUND
   # PLANE (ground_plane.z_m): grasp target = plane + connector d_max/2 (centerline) + the
   # fingertip ADVANCE between fingertip_ref_separation_mm (where fingertip_grasp z was
@@ -458,7 +482,7 @@ assembly:
     # PRELOAD, mm past the mate along the connector's own +X, so the reference finishes
     # pressing rather than merely arriving.  0 = stop exactly on the mate.  (Distinct from
     # final_insertion.preload_mm, which belongs to the estimate-mode commit.)
-    preload_mm: 25.0
+    preload_mm: 10.0
 
     # Reference rebuild rate.  Must be >= 4x the highest active frequency or the sampled sine
     # aliases -- validated pre-motion.

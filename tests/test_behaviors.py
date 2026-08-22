@@ -889,6 +889,48 @@ def test_belief_matches_a_grasp_that_is_both_offset_and_pitched():
                 f'{np.degrees(ang):.4f} deg from where the connector actually ends up')
 
 
+def test_ground_contact_recovery_rises_where_the_empty_rule_would_drop():
+    """A full-closure stall is AMBIGUOUS -- the pads met nothing, which is either 'above the
+    part, drop onto it' or 'below it, bottomed on the table'. For the BNC it is the second, so
+    the reseat must go UP. Getting the sign wrong here presses the fingers harder into the
+    work surface on every retry, which is exactly what the rule exists to stop."""
+    from urlab import config as urconfig
+    from urlab.skills.pick import GraspRecovery
+
+    r = GraspRecovery(urconfig.load('bnc_assembly'))
+    assert r.ground_counts == 190 and r.ground_tol >= 1
+    assert r.ground_rise > 0, 'the ground reseat must be a RISE'
+    # it must be small: a rise past the part clears it entirely on the next try
+    assert r.ground_rise < r.empty_drop, (
+        'the ground rise should be a fraction of a diameter, smaller than the empty drop')
+
+    # A DISTINCT reading, at the opposite end of the travel from `empty`: an early/wide
+    # stall (blocked) versus a full closure on nothing (above the part). Confusing the two
+    # inverts the correction, which is the whole point of the rule.
+    assert abs(r.ground_counts - r.closed_counts) > r.tol, (
+        'the ground stall must not collide with the closed count -- they mean opposite things')
+    # WIDER than the success band. The bands may touch at the edge -- the success check runs
+    # FIRST, so a count inside the connector band is returned 'ok' before the ground rule is
+    # ever consulted -- but the ground stall must not sit INSIDE it.
+    assert r.ground_counts < r.connector_lo, (
+        'the ground stall must be wider than the connector success band')
+    assert abs(r.ground_counts - r.edge_counts) > r.ground_tol, 'not the free-closure point'
+
+    # OPT-IN: cables that did not declare it keep the old drop-on-empty behaviour
+    for other in ('cable_pick_estimate_assemble', 'cable_pick_place'):
+        assert GraspRecovery(urconfig.load(other)).ground_counts is None, (
+            f'{other} must be unaffected -- the rule is per-cable, not a fleet default')
+
+    # the branch is ordered BEFORE empty in the source, which is what makes it take effect
+    src = open(os.path.join(os.path.dirname(__file__), '..', 'urlab', 'skills', 'pick.py'),
+               encoding='utf-8').read()
+    assert src.index('GROUND CONTACT (%d ~ %d)') < src.index('EMPTY close (%d ~ closed %d)'), (
+        'the ground rule is checked before the empty rule -- harmless while the two counts are '
+        'distinct, and what makes the rise win if they are ever set to overlap')
+    assert 'translation_matrix([0.0, 0.0, self.ground_rise])' in src, (
+        '+z in the fingertip frame is up off the ground (the empty rule uses -z for down)')
+
+
 def test_belief_offset_moves_the_belief_and_never_the_grasp():
     """THE SEPARATION this knob exists for: `pickup.belief_offset_mm` is the MEASURED seating
     residual, and it must move only what we think we are holding -- never where the fingers

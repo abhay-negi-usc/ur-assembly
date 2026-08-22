@@ -245,7 +245,7 @@ pickup:
   # DO NOT fold this into junction_in_fingertip (that moves the grasp too, so you would chase
   # your own tail) or into frames.yaml bnc_connector_in_fingerpads (that frame is the
   # SQUARE-grip truth, shared with the recorded target, and the smoke suite guards it).
-  belief_offset_mm: [0.0, 0.0, -3.0]
+  belief_offset_mm: [0.0, 0.0, 0.0]
   # PICKUP HEIGHT from the gripper kinematic model.  Assumes the connector rests ON THE GROUND
   # PLANE (ground_plane.z_m): grasp target = plane + connector d_max/2 (centerline) + the
   # fingertip ADVANCE between fingertip_ref_separation_mm (where fingertip_grasp z was
@@ -309,6 +309,19 @@ grasp_check:
     # in -z, IN toward the connector.
     edge_tolerance_counts: 1
     edge_drop_m: 0.003
+    # GROUND CONTACT (BNC): an EARLY stall -- 190 counts is ~17.4 mm of finger separation,
+    # wider than the connector band -- means something stopped the fingers before they
+    # reached the part.  On the bench that is a finger tip down on the work
+    # surface, so the reseat is UP.  Distinct from `empty` (228 = shut on nothing, meaning the
+    # fingers are ABOVE the part, which drops onto it): these are opposite ends of the travel
+    # and opposite corrections.  Without this rule a 180 stall fell through to a blind retry
+    # from the same pose, which repeats the same collision.  null disables it.
+    #
+    # Small on purpose: the miss is a fraction of a connector diameter, so 0.5 mm walks back
+    # up onto the part, where a larger rise would clear it altogether on the next try.
+    ground_counts: 190
+    ground_tolerance_counts: 1
+    ground_rise_m: 0.0005
 
 # GLOBAL speed limits -- ONE set of four, all enforced simultaneously (whichever binds): the
 # joint caps bound every joint directly; the cartesian caps bound the TOOL (converted to an
@@ -482,7 +495,7 @@ assembly:
     # PRELOAD, mm past the mate along the connector's own +X, so the reference finishes
     # pressing rather than merely arriving.  0 = stop exactly on the mate.  (Distinct from
     # final_insertion.preload_mm, which belongs to the estimate-mode commit.)
-    preload_mm: 10.0
+    preload_mm: 5.0
 
     # Reference rebuild rate.  Must be >= 4x the highest active frequency or the sampled sine
     # aliases -- validated pre-motion.
@@ -499,11 +512,10 @@ assembly:
     # bayonet search is for.  Axial rather than |f| is what lets it be set low: a magnitude
     # limit tight enough to catch real resistance also stops on every lateral graze.
     max_axial_force_n: 10.0
-    max_axial_force_n: 10.0
     persistence_s: 0.10          # the limit must hold this long -- rides out contact spikes
 
     # ---- compliance overrides (else the top-level compliance:) ---
-    stiffness: [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
+    stiffness: [1500.0, 1500.0, 1500.0, 10.0, 10.0, 10.0]
     mass: null
     damping_ratio: null
     # ---- force guard overrides (else force_guard:) ---
@@ -692,7 +704,6 @@ assembly:
     # --- compliance overrides (else the top-level compliance:) ---
     # Stiff along x (press the cams home), soft in rotation about x (let the bayonet steer).
     stiffness: [1500.0, 1500.0, 1500.0, 10.0, 10.0, 10.0]
-    stiffness: [1500.0, 1500.0, 1500.0, 10.0, 10.0, 10.0]
     mass: null
     damping_ratio: null
     # --- force guard overrides (else the top-level force_guard:) ---
@@ -722,8 +733,7 @@ assembly:
     # "ring stands 30 mm from the JUNCTION": junction sits at -45.7 mm on this axis, so
     # collar = -45.7 + 30 = -15.7 mm.  If re-tuned on the bench, measure from the connector
     # frame origin.
-    collar_offset_mm: -10
-    collar_offset_mm: -10
+    collar_offset_mm: -6
     # COLLAR AXIS OFFSET, mm, in the SOCKET (target) frame's own axes: shifts the LINE the
     # whole collar maneuver works about (centring, unwind, advance, turn, and the tug
     # re-grip).  Y and Z move the line; X only slides the reference point along it.  Exists
@@ -833,7 +843,7 @@ assembly:
     # pass has nothing to pick.  The app clamps to 1 and says so rather than looping anyway.
     # The in-hand belief is reset to nominal at the start of every cycle -- a fresh grasp has a
     # fresh error, so last cycle's estimator correction must not carry over.
-    cycles: 1
+    cycles: 10
     # LOCKED -> SEATED.  The unlock drives the collar approach in reverse: turn rotation_deg
     # BACK, or until the torque limit stops it -- symmetric with the lock, because the ring
     # runs to a stop at BOTH ends of its travel, so torque building is the intended end in

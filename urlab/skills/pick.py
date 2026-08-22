@@ -233,6 +233,20 @@ class GraspRecovery:
         fw = float(rc.get('finger_width_m', 0.02278))
         self.cable_shift = float(rc.get('cable_shift_fraction', 0.8)) * fw   # +x reseat for a cable grab
         self.empty_drop = float(rc.get('empty_drop_m', 0.003))              # -z reseat for an empty close
+        # GROUND CONTACT, opt-in (null = off). An EARLY stall -- the fingers stopping while
+        # still WIDE -- means something got in their way before they could reach the part, and
+        # on a bench that something is the work surface: a finger tip touched down and the
+        # closure jammed against it. It is a distinct reading from every other count the check
+        # knows: too wide to be the connector band, nowhere near the free-closure point, and
+        # the opposite end of the travel from an `empty` full closure. The correction is
+        # therefore UP -- lift the fingers off the surface and try again -- where `empty`
+        # (fingers shut on nothing, so they are ABOVE the part) drops onto it.
+        #
+        # Stated per cable rather than derived: what separation counts as 'blocked' depends on
+        # the part, the pads and the approach angle.
+        _gcnt = rc.get('ground_counts')
+        self.ground_counts = None if _gcnt is None else int(_gcnt)
+        self.ground_rise = float(rc.get('ground_rise_m', 0.0005))            # +z reseat, up off it
         # EDGE-PINCH band: a stall at ~the FREE-CLOSURE counts means separation ~0 (held width at
         # the 2*groove floor, thinner than any connector) -- the grooves closed PAST the
         # connector's fat section, i.e. the grasp is too SHALLOW. Resolution: -z, IN toward the
@@ -240,6 +254,8 @@ class GraspRecovery:
         from ..robot.gripper_kinematics import COUNTS_CLOSED
         self.edge_counts = int(round(COUNTS_CLOSED))
         self.edge_tol = int(rc.get('edge_tolerance_counts', 1))
+        self.ground_tol = int(rc.get('ground_tolerance_counts',
+                                     rc.get('edge_tolerance_counts', 1)))
         self.edge_drop = float(rc.get('edge_drop_m', 0.003))                # -z reseat, deeper on
 
         # Count bands (from the grasp_check block, set per-cable by apply_cable_profile): the CONNECTOR
@@ -325,6 +341,19 @@ class GraspRecovery:
                 self._capture_grasp(camera, pos, tag, 'edge')
                 delta = translation_matrix([0.0, 0.0, -self.edge_drop])    # -z = deeper onto it
                 reseat = 'reseat -z (deeper onto the connector)'
+            elif (self.ground_counts is not None
+                  and abs(pos - self.ground_counts) <= self.ground_tol):
+                # The pads reached full closure because they went past the part and bottomed on
+                # the work surface -- so the correction is UP, not the drop an `empty` reading
+                # would ask for. Small on purpose: the miss is a fraction of a diameter, and a
+                # large rise would clear the part altogether on the next try.
+                log.warning('GROUND CONTACT (%d ~ %d): the fingers stalled while still '
+                            'WIDE, so something stopped them before they reached the part -- '
+                            'a finger is down on the work surface. Open, rise %.1f mm +z, '
+                            'retry.', pos, self.ground_counts, self.ground_rise * 1000)
+                self._capture_grasp(camera, pos, tag, 'ground')
+                delta = translation_matrix([0.0, 0.0, self.ground_rise])   # +z = up off the ground
+                reseat = 'reseat +z (up off the ground)'
             elif abs(pos - self.closed_counts) <= self.tol:
                 log.warning('EMPTY close (%d ~ closed %d) -- open, drop %.1f mm -z toward the '
                             'object, retry.', pos, self.closed_counts, self.empty_drop * 1000)
@@ -375,12 +404,28 @@ def _compliant_move(robot, adm, guard, T_start_ftip, T_target_ftip, duration,
              what, adm.S[0], adm.S[3], duration,
              '' if guard is None
              else f', guarded at {guard.max_force:.0f} N / {guard.max_torque:.1f} Nm')
+    # PEAK WRENCH over the whole move. Under admittance the arm YIELDS, so the commanded
+    # pose says nothing about how hard the part (or the table) was actually pushed -- the only
+    # record of that is the force seen while it happened. Worth a line at every pickup: a
+    # descent that peaks near the guard limit is one nudge away from tripping, and one that
+    # peaks at nothing never touched the part at all.
+    peak = {'f': 0.0, 'tau': 0.0}
+
+    def _watch():
+        w = robot.arm.wrench()
+        peak['f'] = max(peak['f'], float(np.linalg.norm(w[:3])))
+        peak['tau'] = max(peak['tau'], float(np.linalg.norm(w[3:])))
+
     try:
-        result = adm.ramp(ref(T_start_ftip), ref(T_target_ftip), duration, guard)
+        result = adm.ramp(ref(T_start_ftip), ref(T_target_ftip), duration, guard,
+                          on_step=_watch)
         if result == 'seated':
             log.info('  contact reached -- holding here (compliant).')
         else:
-            adm.hold(ref(T_target_ftip), settle_s, guard)
+            adm.hold(ref(T_target_ftip), settle_s, guard, on_step=_watch)
+        log.info('  %s peak wrench: %.1f N / %.2f Nm%s.', what, peak['f'], peak['tau'],
+                 '' if guard is None
+                 else ' (guard %.0f N / %.1f Nm)' % (guard.max_force, guard.max_torque))
         return True
     finally:
         robot.arm.servo_stop()                          # leave the servo loop before the next step

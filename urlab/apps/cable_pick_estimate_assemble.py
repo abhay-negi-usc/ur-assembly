@@ -43,7 +43,8 @@ from ..skills.manifold import (FORCE_COLS, ManifoldEstimator, POSE_COLS, TORQUE_
                                vec6_from_mats)
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
                            GraspRecovery, belief_offset_m, grip_offset_m, offset_belief,
-                           pickup_pitch_rad, pitched_belief, retry_offset_x, verify_cable_held)
+                           pickup_pitch_rad, pickup_roll_rad, pitched_belief, retry_offset_x,
+                           verify_cable_held)
 from ..transforms import from_cfg, inverse, matrix_to_xyzrpy, pose_error, translation_matrix
 from ._cable import build_scanner, make_confirm
 from ._common import experiment_dir, prompts_off, seg_time
@@ -140,12 +141,14 @@ class _AssemblyTask:
             else from_cfg(cfg.section('junction_in_fingertip'))
         # A pitched pickup rotates the part in the hand by the same angle (see skills/pick).
         pitch, grip_off = pickup_pitch_rad(cfg), grip_offset_m(cfg)
-        if pitch or grip_off:
+        roll = pickup_roll_rad(cfg)
+        if pitch or grip_off or roll:
             self.T_ftip_conn = pitched_belief(
                 self.T_ftip_conn, from_cfg(cfg.section('junction_in_fingertip')),
-                pitch, grip_off)
-            log.info('Pickup pitch %+.1f deg / grip offset %+.1f mm -> in-hand belief moved '
-                     'to match.', np.degrees(pitch), grip_off * 1000.0)
+                pitch, grip_off, roll)
+            log.info('Pickup pitch %+.1f deg / grip offset %+.1f mm / roll %+.1f deg -> in-hand '
+                     'belief moved to match.', np.degrees(pitch), grip_off * 1000.0,
+                     np.degrees(roll))
         # The measured seating residual -- BELIEF ONLY, nothing moves at pickup.
         bel_off = belief_offset_m(cfg)
         if float(np.linalg.norm(bel_off)) > 0.0:

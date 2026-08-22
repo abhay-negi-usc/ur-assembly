@@ -15,7 +15,8 @@ from ..skills import insert as ins
 from ..skills import reset
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
                            GraspRecovery, grip_offset_m, held_junction_in_fingertip,
-                           log_grasp_delta, pickup_pitch_rad, pitched_grasp, retry_offset_x)
+                           log_grasp_delta, pickup_pitch_rad, pickup_roll_rad, pitched_grasp,
+                           retry_offset_x)
 import numpy as np
 
 from ..transforms import from_cfg, inverse, translation_matrix
@@ -47,7 +48,12 @@ def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder, 
     # meet the same spot on the cable at an angle. 0 = straight down.
     pitch = pickup_pitch_rad(cfg)
     grip_off = grip_offset_m(cfg)
-    geom.T_base_grasp = pitched_grasp(T_conn, T_ftip_junction, pitch, grip_off)
+    roll = pickup_roll_rad(cfg)
+    geom.T_base_grasp = pitched_grasp(T_conn, T_ftip_junction, pitch, grip_off, roll)
+    if roll:
+        log.info('Pickup ROLL %+.1f deg about the approach axis -- the SAME bite with the wrist '
+                 'turned; 180 flips tool0 -Y from the connector -Z to its +Z. The in-hand belief '
+                 'carries it automatically.', np.degrees(roll))
     if pitch:
         log.info('Pickup PITCH %+.1f deg about the axis perpendicular to the cable and to the '
                  'ground normal. The in-hand belief is rotated to match; check the leading '
@@ -157,7 +163,8 @@ def build_and_run(cfg, robot, camera, args):
     # 2. Reduce the target to a fingertip pose and derive the stand-off.
     T_target = ins.fingertip_target(
         ic, inverse(held_junction_in_fingertip(from_cfg(cfg.section('junction_in_fingertip')),
-                                               pickup_pitch_rad(cfg), grip_offset_m(cfg))),
+                                               pickup_pitch_rad(cfg), grip_offset_m(cfg),
+                                               pickup_roll_rad(cfg))),
         robot.T_tool0_fingertip)
     T_standoff = ins.standoff_of(ic, T_target)
     log.info('Kinematic assembly: fingertip target %s, stand-off %s.',

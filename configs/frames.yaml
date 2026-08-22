@@ -99,8 +99,8 @@ targets:
   # Prefer a FRESH monitor reading when there is bench time -- this is arithmetic, not a
   # measurement.  (was xyz_mm [+108.52, +1013.93, -141.11])
   bnc_connector_finger_holder:
-    xyz_mm:  [120.16, 1088.74, -137.90]
-    rpy_deg: [-0.42, -0.44, 90.78]
+    xyz_mm:  [+120.63, +1088.62,  -137.52]
+    rpy_deg: [-0.61,   +0.04,  +89.54]
 
   # bnc_connector_in_fingerpads at the mate -- the target bnc_assembly drives to.
   #
@@ -121,8 +121,8 @@ targets:
   # error the finger_holder reading carried, including that it was itself re-derived arithmetically
   # on 2026-08-15 rather than measured.
   bnc_connector_in_fingerpads:
-    xyz_mm:  [120.29, 1088.87, -155.40]
-    rpy_deg: [-0.42, -0.44, 90.78]
+    xyz_mm:  [+120.81, +1088.60,  -155.02]
+    rpy_deg: [-0.61,   +0.04,  +89.54]
 
 marker_rigs:
   bnc_connector_finger_holder:
@@ -130,19 +130,19 @@ marker_rigs:
     markers:
       24:
         size_mm: 30.70
-        xyz_mm:  [230.74, 35.65, 23.51]
-        rpy_deg: [109.08, 87.29, -160.16]
+        xyz_mm:  [+229.46, +38.35, +38.62]
+        rpy_deg: [-83.09, +88.18, +8.70]
         views: 6
-        residual_mm: 2.04
-        residual_deg: 4.90
+        residual_mm: 2.07
+        residual_deg: 3.58
         measured: 2026-08-22
       25:
         size_mm: 30.70
-        xyz_mm:  [-225.08, 32.80, 31.23]
-        rpy_deg: [119.43, 89.15, -150.20]
+        xyz_mm:  [-223.40, +31.08, +35.29]
+        rpy_deg: [+156.96, +88.38, -111.81]
         views: 6
-        residual_mm: 2.73
-        residual_deg: 2.73
+        residual_mm: 0.99
+        residual_deg: 3.31
         measured: 2026-08-22
 
 # ============================================================================

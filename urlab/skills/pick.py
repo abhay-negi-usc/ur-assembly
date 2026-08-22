@@ -46,6 +46,31 @@ def grip_offset_m(cfg):
     return float(cfg.get_path('pickup.grip_offset_mm', 0.0) or 0.0) / 1000.0
 
 
+def pickup_roll_rad(cfg):
+    """The configured pickup ROLL in radians (`pickup.roll_deg`). 0 = the wrist sits where
+    junction_in_fingertip's yaw puts it.
+
+    A ROTATION ABOUT THE APPROACH AXIS -- the fingertip's own z, i.e. the direction the gripper
+    advances along -- applied AFTER the pitch, so it turns about the pitched approach and not
+    about a vertical the pitch has already left behind.
+
+    WHY 180 IS THE VALUE THAT MATTERS. A parallel jaw is symmetric under half a turn about its
+    approach axis: the pads land on the same two sides of the barrel either way, so 180 is the
+    SAME PHYSICAL BITE with the wrist on the other side. That makes it the one roll that is
+    free at every pitch, and it is what flips tool0 -Y from pointing along the connector -Z to
+    along its +Z. (At pitch +/-90 the approach runs down the connector axis and a cylinder has
+    no preferred diameter, so there every roll is free -- but only 180 stays valid as the pitch
+    backs off.)
+
+    IT IS THE SAME FLIP AS junction_in_fingertip's YAW, and deliberately not done there.
+    cables.yaml's yaw is baked into the NOMINAL grip, so changing it silently invalidates the
+    in-hand belief in frames.yaml (bnc_connector_in_fingerpads) and estimation.
+    initial_connector_in_fingertip -- flip one and the belief lands 180 deg and ~91 mm out.
+    Rolling here instead keeps those describing the nominal grip and lets pitched_belief carry
+    the flip through automatically, exactly as it already does for the pitch."""
+    return float(np.radians(float(cfg.get_path('pickup.roll_deg', 0.0) or 0.0)))
+
+
 def belief_offset_m(cfg):
     """`pickup.belief_offset_mm` as a 3-vector in metres, in the FINGERTIP frame.
 
@@ -85,49 +110,62 @@ def pitch_delta(pitch_rad):
     return xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, float(pitch_rad), 0.0])
 
 
-def grip_delta(pitch_rad, offset_m=0.0):
+def roll_delta(roll_rad):
+    """The roll as a transform: a rotation about the APPROACH axis. Written in the frame the
+    pitch leaves behind, so composing it after pitch_delta turns about the pitched approach."""
+    from ..transforms import xyzrpy_to_matrix
+    return xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, 0.0, float(roll_rad)])
+
+
+def grip_delta(pitch_rad, offset_m=0.0, roll_rad=0.0):
     """The full bite-point transform in the JUNCTION frame: slide `offset_m` along the
-    connector axis, THEN pitch about that point.
+    connector axis, pitch about that point, then roll about the pitched APPROACH axis.
 
-    Order matters and this one is deliberate -- translating first makes the OFFSET BITE POINT
-    the pivot, so the two knobs stay independent: changing the pitch does not move where along
-    the connector the fingers close, and changing the offset does not change the approach
-    angle."""
+    Order matters and all three are deliberate. Translating first makes the OFFSET BITE POINT
+    the pivot, so the knobs stay independent: changing the pitch does not move where along the
+    connector the fingers close, and changing the offset does not change the approach angle.
+    Rolling LAST puts the roll about the approach direction the pitch actually produced -- roll
+    first and it would turn about the junction's own z, which after a -60 deg pitch is nowhere
+    near the direction the gripper advances along."""
     from ..transforms import translation_matrix
-    return translation_matrix([float(offset_m), 0.0, 0.0]) @ pitch_delta(pitch_rad)
+    return (translation_matrix([float(offset_m), 0.0, 0.0]) @ pitch_delta(pitch_rad)
+            @ roll_delta(roll_rad))
 
 
-def pitched_grasp(T_base_junction, T_ftip_junction, pitch_rad, offset_m=0.0):
-    """The FINGERTIP grasp pose for a pitched / offset pickup.
+def pitched_grasp(T_base_junction, T_ftip_junction, pitch_rad, offset_m=0.0, roll_rad=0.0):
+    """The FINGERTIP grasp pose for a pitched / offset / rolled pickup.
 
-    Nominally the fingertip goes to `detected_junction @ inverse(junction_in_fingertip)`. Both
-    knobs are inserted in the JUNCTION frame: `offset_m` slides the bite point along the
-    connector axis, and the pitch tilts the approach about that point."""
-    return T_base_junction @ grip_delta(pitch_rad, offset_m) @ inverse(T_ftip_junction)
+    Nominally the fingertip goes to `detected_junction @ inverse(junction_in_fingertip)`. All
+    three knobs are inserted in the JUNCTION frame: `offset_m` slides the bite point along the
+    connector axis, the pitch tilts the approach about that point, and the roll spins the wrist
+    about the approach."""
+    return T_base_junction @ grip_delta(pitch_rad, offset_m, roll_rad) @ inverse(T_ftip_junction)
 
 
-def held_junction_in_fingertip(T_ftip_junction, pitch_rad, offset_m=0.0):
-    """Where the junction ACTUALLY sits in the fingertip frame after a pitched / offset pickup.
+def held_junction_in_fingertip(T_ftip_junction, pitch_rad, offset_m=0.0, roll_rad=0.0):
+    """Where the junction ACTUALLY sits in the fingertip frame after a pitched / offset /
+    rolled pickup.
 
     The nominal `junction_in_fingertip` describes a square grip AT the junction. Gripping
     `offset_m` further along the axis leaves the junction that much further back in the hand,
-    and pitching by phi leaves the part rotated by -phi -- which is what every downstream user
-    of the grasp geometry has to be told about. Exactly inverts pitched_grasp's insertion:
-    inverse(Trans @ Pitch) = Pitch(-phi) @ Trans(-d)."""
+    pitching by phi leaves the part rotated by -phi, and rolling by psi leaves it rotated by
+    -psi about the approach -- which is what every downstream user of the grasp geometry has to
+    be told about. Exactly inverts pitched_grasp's insertion:
+    inverse(Trans @ Pitch @ Roll) = Roll(-psi) @ Pitch(-phi) @ Trans(-d)."""
     from ..transforms import translation_matrix
-    return (T_ftip_junction @ pitch_delta(-pitch_rad)
+    return (T_ftip_junction @ roll_delta(-roll_rad) @ pitch_delta(-pitch_rad)
             @ translation_matrix([-float(offset_m), 0.0, 0.0]))
 
 
-def pitched_belief(T_ftip_conn, T_ftip_junction, pitch_rad, offset_m=0.0):
-    """The in-hand connector belief a pitched / offset pickup actually produces.
+def pitched_belief(T_ftip_conn, T_ftip_junction, pitch_rad, offset_m=0.0, roll_rad=0.0):
+    """The in-hand connector belief a pitched / offset / rolled pickup actually produces.
 
     The connector is rigid with the junction, so T_junction_connector is a property of the PART
     and does not change; only the fingertip-to-junction relation does. Substituting
     T_ftip_conn = T_ftip_junction @ T_junction_conn and replacing the latter's left factor with
     held_junction_in_fingertip gives a conjugation of the nominal belief -- a rotation of -phi
     about the junction's y, through the junction origin, expressed in the fingertip frame."""
-    return (held_junction_in_fingertip(T_ftip_junction, pitch_rad, offset_m)
+    return (held_junction_in_fingertip(T_ftip_junction, pitch_rad, offset_m, roll_rad)
             @ inverse(T_ftip_junction) @ T_ftip_conn)
 
 
@@ -317,6 +355,7 @@ class GraspRecovery:
             time.sleep(self.settle_s)
             pos = g.position()
             tag = 'grasp' if attempt == 0 else f'reseat{attempt}'
+            delta = world_delta = None      # in the fingertip frame / in base_link
 
             if self.connector_lo <= pos <= self.connector_hi:      # connector seated -> success
                 log.info('Grasp OK: %d counts in the connector band [%d, %d].',
@@ -352,8 +391,15 @@ class GraspRecovery:
                             'a finger is down on the work surface. Open, rise %.1f mm +z, '
                             'retry.', pos, self.ground_counts, self.ground_rise * 1000)
                 self._capture_grasp(camera, pos, tag, 'ground')
-                delta = translation_matrix([0.0, 0.0, self.ground_rise])   # +z = up off the ground
-                reseat = 'reseat +z (up off the ground)'
+                # IN THE WORLD, not in the hand. Every other reseat is a nudge along the
+                # APPROACH and is right to follow the fingertip; this one is the only reseat
+                # aimed at the GROUND PLANE, which does not tilt when the approach does. The
+                # two coincide at pitch 0 (fingertip +z IS world up there), so this changes
+                # nothing for a square pickup -- but at pickup.pitch_deg -75 the fingertip's
+                # own +z is 97% backwards along the cable and 26% up, i.e. the 'rise' would
+                # retreat instead of lift.
+                world_delta = translation_matrix([0.0, 0.0, self.ground_rise])
+                reseat = 'reseat +z world (up off the ground)'
             elif abs(pos - self.closed_counts) <= self.tol:
                 log.warning('EMPTY close (%d ~ closed %d) -- open, drop %.1f mm -z toward the '
                             'object, retry.', pos, self.closed_counts, self.empty_drop * 1000)
@@ -369,7 +415,10 @@ class GraspRecovery:
             if not g.open('reposition'):
                 return 'abort'
             if delta is not None:
-                geom.T_base_grasp = geom.T_base_grasp @ delta       # ACCUMULATE the correction
+                geom.T_base_grasp = geom.T_base_grasp @ delta       # ACCUMULATE, in the hand
+            if world_delta is not None:
+                geom.T_base_grasp = world_delta @ geom.T_base_grasp  # ACCUMULATE, in base_link
+            if delta is not None or world_delta is not None:
                 if not robot.move_fingertip(geom.T_base_grasp, reseat):
                     return 'abort'
 

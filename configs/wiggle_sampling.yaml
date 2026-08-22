@@ -151,9 +151,9 @@ wiggle:
   amplitude:
     x_mm:      0.0
     y_mm:      0.0
-    z_mm:      2.5
+    z_mm:      5.0
     roll_deg:  0.0
-    pitch_deg: 2.5
+    pitch_deg: 0.0
     yaw_deg:   0.0
 
   # FREQUENCY per axis (Hz). Three separate constraints bind here, and they pull against each

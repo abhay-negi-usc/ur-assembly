@@ -51,7 +51,7 @@ gripper:
   open: 3
   closed: 228            # fully closed on nothing
   speed: 255
-  force: 235
+  force: 20
   # Per-fingertip V-groove depth (mm) -- lets the gripper kinematic model convert PHYSICAL object
   # widths <-> stall counts (an object seated in the grooves stalls at face gap = width - 2*this).
   # Calibrated from the banana connector band; see urlab/robot/gripper_kinematics.py. NOTE this is

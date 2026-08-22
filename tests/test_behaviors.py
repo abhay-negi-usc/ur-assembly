@@ -1115,3 +1115,79 @@ def test_gripper_warmup_sequence():
 
     assert not GFail().warmup()
     assert calls == [0, 255, 150], 'the warm-up must stop at the failing stroke'
+
+
+def test_pickup_roll_flips_tool0_y_without_touching_the_belief():
+    """`pickup.roll_deg: 180` is the wrist flip -- and it must stay a RELABELING, not a change
+    to what the run believes it is holding.
+
+    THE TWO AXIS CONDITIONS ARE ONE CONDITION once the roll is 180: tool0 +Z lines up with the
+    connector +X and tool0 -Y with the connector +Z, both off parallel by exactly
+    90 - |pitch_deg|. Without the roll the second one points the OTHER WAY (150 deg at a -60
+    pitch), which is the whole reason the knob exists.
+
+    AND THE BELIEF MUST SURVIVE IT. The flip is the same rotation as junction_in_fingertip's
+    yaw, but doing it there would invalidate the nominal in-hand pose in frames.yaml; doing it
+    here means pitched_belief has to carry it, so the believed connector must still land
+    exactly where the part physically is.
+    """
+    import numpy as np
+
+    from urlab.skills.pick import pitched_belief, pitched_grasp
+    from urlab.transforms import inverse, pose_error, xyzrpy_to_matrix
+
+    T_tool0_ftip = xyzrpy_to_matrix([0.0, 0.0, 0.183], [np.pi, 0.0, -np.pi / 2])
+    T_ftip_junction = xyzrpy_to_matrix([0, 0, 0], [0, 0, np.pi])          # cables.yaml bnc
+    T_ftip_conn = xyzrpy_to_matrix([-0.0457, 0.0, 0.0075], [0, 0, np.pi])
+    # the detected junction: x = the connector axis, z = the ground normal
+    T_base_junction = xyzrpy_to_matrix([0.5, 0.0, 0.005], [0, 0, 0])
+    T_junction_conn = inverse(T_ftip_junction) @ T_ftip_conn              # a PROPERTY of the part
+    conn_x, conn_z = T_base_junction[:3, 0], T_base_junction[:3, 2]
+
+    def angle(u, v):
+        return float(np.degrees(np.arccos(np.clip(float(np.dot(u, v)), -1.0, 1.0))))
+
+    for pitch_deg in (-60.0, -75.0, -90.0):
+        phi = np.radians(pitch_deg)
+        want = 90.0 - abs(pitch_deg)
+        for roll_deg, expect_y in ((0.0, 180.0 - want), (180.0, want)):
+            psi = np.radians(roll_deg)
+            T_ftip = pitched_grasp(T_base_junction, T_ftip_junction, phi, 0.015, psi)
+            T_tool0 = T_ftip @ inverse(T_tool0_ftip)
+
+            # tool0 +Z onto the connector axis -- set by the PITCH, unchanged by the roll.
+            assert abs(angle(T_tool0[:3, 2], conn_x) - want) < 1e-6, (
+                f'pitch {pitch_deg} roll {roll_deg}: tool0 +Z is '
+                f'{angle(T_tool0[:3, 2], conn_x):.2f} deg off the connector axis, want {want}')
+            # tool0 -Y onto the connector +Z -- this is what the ROLL decides.
+            assert abs(angle(-T_tool0[:3, 1], conn_z) - expect_y) < 1e-6, (
+                f'pitch {pitch_deg} roll {roll_deg}: tool0 -Y is '
+                f'{angle(-T_tool0[:3, 1], conn_z):.2f} deg off the connector +Z, want {expect_y}')
+
+            # THE BELIEF STILL DESCRIBES THE REAL PART. pose_error's arccos loses digits near
+            # identity, hence 1e-4 deg rather than an exact zero.
+            believed = T_ftip @ pitched_belief(T_ftip_conn, T_ftip_junction, phi, 0.015, psi)
+            lin, ang = pose_error(believed, T_base_junction @ T_junction_conn)
+            assert lin * 1000.0 < 1e-6 and np.degrees(ang) < 1e-4, (
+                f'pitch {pitch_deg} roll {roll_deg}: the belief is {lin * 1000:.6f} mm / '
+                f'{np.degrees(ang):.6f} deg from where the part actually is')
+
+
+def test_the_bnc_config_asks_for_the_axial_grasp():
+    """The two knobs are a PAIR for this grasp: a large negative pitch alone leaves tool0 -Y
+    pointing at the connector -Z, and the roll alone does nothing useful at pitch 0."""
+    import numpy as np
+
+    from urlab import config as urconfig
+    from urlab.skills.pick import pickup_pitch_rad, pickup_roll_rad
+
+    cfg = urconfig.load('bnc_assembly')
+    pitch = np.degrees(pickup_pitch_rad(cfg))
+    roll = np.degrees(pickup_roll_rad(cfg))
+    assert pitch <= -45.0, (
+        f'pickup.pitch_deg is {pitch:.1f}; the axial grasp needs a large NEGATIVE pitch (the '
+        'gripper pointing down the cable), not a near-square one')
+    assert abs(abs(roll) - 180.0) < 1e-9, (
+        f'pickup.roll_deg is {roll:.1f}; only 180 is the same physical bite (a parallel jaw is '
+        'symmetric under half a turn about its approach axis) -- any other roll changes which '
+        'diameter the pads take, which is only free at pitch +/-90')

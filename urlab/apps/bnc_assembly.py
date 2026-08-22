@@ -105,6 +105,9 @@ from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImag
                            GraspRecovery, belief_offset_m, connector_axis_height_m,
                            fingertip_in_connector, held_belief, offset_belief, retry_offset_x,
                            verify_cable_held)
+                           GraspRecovery, belief_offset_m, connector_axis_height_m,
+                           fingertip_in_connector, held_belief, offset_belief, retry_offset_x,
+                           verify_cable_held)
 from ..skills.solution_check import CheckedManifoldEstimator
 from ..transforms import (from_cfg, inverse, matrix_to_xyzrpy, pose_error, rotate_about_axis,
                           slerp_matrix, translation_matrix, xyzrpy_to_matrix)
@@ -2901,7 +2904,9 @@ def build_and_run(cfg, robot, camera, args):
                 log.error('Could not reach pick_joints_deg.')
                 return False
 
+
         attempt = 0
+        reoriented = False
         reoriented = False
         runner = StepRunner(log, confirm=confirm is not None)
         while True:
@@ -2924,6 +2929,18 @@ def build_and_run(cfg, robot, camera, args):
                     return False
             if result == 'abort':
                 return False
+            # NO COLLISION-FREE PATH TO THE COAXIAL GRASP. Retrying the identical approach
+            # cannot help -- the geometry, not the attempt, is what refused. Square the cable
+            # up once and let the scan try again on a heading that works.
+            if result == 'unreachable':
+                if reoriented:
+                    log.error('The coaxial grasp is still unreachable after the cable was '
+                              'squared up -- its heading was not the problem. Aborting.')
+                    return False
+                reoriented = True
+                if not reorient_recovery():
+                    return False
+                continue
             # NO COLLISION-FREE PATH TO THE COAXIAL GRASP. Retrying the identical approach
             # cannot help -- the geometry, not the attempt, is what refused. Square the cable
             # up once and let the scan try again on a heading that works.

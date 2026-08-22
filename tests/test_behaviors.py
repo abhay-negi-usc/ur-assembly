@@ -1823,6 +1823,10 @@ def test_the_reorient_recovery_places_the_cable_on_the_socket_heading():
     # an invariant here
     assert abs(float(off['y_mm'])) <= 400.0, (
         f"y_mm {off['y_mm']} is far enough off the socket axis to be outside the working area")
+    # y is a sideways nudge off the socket axis -- tuned on the bench, so only its scale is
+    # an invariant here
+    assert abs(float(off['y_mm'])) <= 400.0, (
+        f"y_mm {off['y_mm']} is far enough off the socket axis to be outside the working area")
     gz = float(cfg.get_path('ground_plane.z_m'))
     assert bool(r.get('snap_to_ground', True)), (
         'the ground plane must set z, or the cable is released in mid-air')

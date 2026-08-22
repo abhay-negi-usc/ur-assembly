@@ -498,7 +498,7 @@ assembly:
     # Reaching it ENDS THE ENGAGE, not the run -- meeting resistance partway is what the
     # bayonet search is for.  Axial rather than |f| is what lets it be set low: a magnitude
     # limit tight enough to catch real resistance also stops on every lateral graze.
-    max_axial_force_n: 15.0
+    max_axial_force_n: 10.0
     persistence_s: 0.10          # the limit must hold this long -- rides out contact spikes
 
     # ---- compliance overrides (else the top-level compliance:) ---
@@ -690,7 +690,7 @@ assembly:
     speed_translation_mm_s: null
     # --- compliance overrides (else the top-level compliance:) ---
     # Stiff along x (press the cams home), soft in rotation about x (let the bayonet steer).
-    stiffness: [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
+    stiffness: [1500.0, 1500.0, 1500.0, 10.0, 10.0, 10.0]
     mass: null
     damping_ratio: null
     # --- force guard overrides (else the top-level force_guard:) ---
@@ -720,7 +720,7 @@ assembly:
     # "ring stands 30 mm from the JUNCTION": junction sits at -45.7 mm on this axis, so
     # collar = -45.7 + 30 = -15.7 mm.  If re-tuned on the bench, measure from the connector
     # frame origin.
-    collar_offset_mm: -8
+    collar_offset_mm: -10
     # COLLAR AXIS OFFSET, mm, in the SOCKET (target) frame's own axes: shifts the LINE the
     # whole collar maneuver works about (centring, unwind, advance, turn, and the tug
     # re-grip).  Y and Z move the line; X only slides the reference point along it.  Exists
@@ -831,8 +831,13 @@ assembly:
     # The in-hand belief is reset to nominal at the start of every cycle -- a fresh grasp has a
     # fresh error, so last cycle's estimator correction must not carry over.
     cycles: 1
-    unlock_collar: true          # LOCKED -> SEATED (needs the collar to be held on the axis)
-    unclock_connector: true      # SEATED -> ENGAGED (reverses the bayonet sweep)
+    # LOCKED -> SEATED.  The unlock drives the collar approach in reverse: turn rotation_deg
+    # BACK, or until the torque limit stops it -- symmetric with the lock, because the ring
+    # runs to a stop at BOTH ends of its travel, so torque building is the intended end in
+    # either direction.  It does NOT realign with the engagement angle first: the connector is
+    # already mated and the arm is already clear of it, and the collar station is absolute, so
+    # driving the open gripper back onto the connector would only be a pose to leave again.
+    unlock_collar: true
     extract_mm: 60.0             # pull along the socket -X once the bayonet is free
     # PLACE: back to the PICK pose, straight down, release ABOVE the ground, rise.  The same
     # configuration the cable was picked from, so it goes back the way it was taken.

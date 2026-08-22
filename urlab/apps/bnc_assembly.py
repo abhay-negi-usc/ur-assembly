@@ -678,7 +678,6 @@ def build_and_run(cfg, robot, camera, args):
     dis = a.get('disassembly', {}) or {}
     dis_on = bool(dis.get('enabled', False))
     dis_unlock = bool(dis.get('unlock_collar', True))
-    dis_unclock = bool(dis.get('unclock_connector', True))
     dis_extract_m = _num(dis, 'extract_mm', 60.0) / 1000.0
     dis_place = dis.get('place', {}) or {}
     dis_place_on = bool(dis_place.get('enabled', True))
@@ -1210,13 +1209,19 @@ def build_and_run(cfg, robot, camera, args):
         return (T_clk[:3, :3] @ R_clock[:3, :3].T) @ (np.asarray(cl_axis_off, dtype=float)
                                                       / 1000.0)
 
-    def clocking_retract(label='clocking retract'):
+    def clocking_retract(label='clocking retract', gripper_leg=True):
         """The post-clocking escape, in two legs.
 
         First along the GRIPPER's own axis, lifting the open fingers off the connector; then
         along the TARGET frame's axis, backing the arm away from the socket. Guarded straight
         lines, not the compliant `_retract_ref` used between attempts: the part is released by
-        now, so there is no held connector to thread back out along its own axis."""
+        now, so there is no held connector to thread back out along its own axis.
+
+        `gripper_leg=False` drops the first leg and backs straight out along the target -X.
+        That is the right shape after the COLLAR turn, because there tool0 sits ON the
+        connector axis with its Z collinear -- so the gripper -Z leg points essentially where
+        the target -X leg already goes, and running both just adds a second, differently
+        parametrised move for the same escape."""
         r = a.get('clocking_retract', {}) or {}
 
         def leg(vec, dist, in_target):
@@ -1237,8 +1242,12 @@ def build_and_run(cfg, robot, camera, args):
                 T, label=f'{label} ({what}, {abs(float(dist)) * 1000.0:.0f} mm)'))
 
         phase('clock_retract')
-        return (leg(r.get('gripper_axis', [0.0, 0.0, -1.0]),
-                    r.get('gripper_distance_m', 0.100), False)
+        if not gripper_leg:
+            log.info('  escape: target -X only (tool0 is already on the connector axis, so the '
+                     'gripper -Z leg would repeat it).')
+        return ((gripper_leg is False
+                 or leg(r.get('gripper_axis', [0.0, 0.0, -1.0]),
+                        r.get('gripper_distance_m', 0.100), False))
                 and leg(r.get('target_axis', [-1.0, 0.0, 0.0]),
                         r.get('target_distance_m', 0.100), True))
 
@@ -1314,7 +1323,11 @@ def build_and_run(cfg, robot, camera, args):
             if not robot.gripper.open('release (tug verified)'):
                 log.error('TUG VERIFY: gripper did not release after the tug.')
                 return 'error'
-            return 'verified' if clocking_retract('tug retract') else 'error'
+            # Straight out along the target -X when disassembly follows: it re-approaches
+            # the collar on the axis anyway, so lifting off the gripper -Z first only adds a
+            # move in the direction the next leg already travels.
+            return ('verified' if clocking_retract('tug retract', gripper_leg=not dis_on)
+                    else 'error')
         # FAILED: never locked, and already part-way out in the fingers -- so EXTRACT it fully
         # along the connector -X, carry it home and release. The global guard stays armed, so an
         # extraction that snags terminates rather than tearing at the fixture.
@@ -1348,10 +1361,14 @@ def build_and_run(cfg, robot, camera, args):
         """DISASSEMBLY -- unwind the clocking, pull the connector out, put the cable down.
 
         THE STATE LADDER RUN BACKWARDS. Assembly walks engaged -> seated -> locked; this walks
-        locked -> seated -> engaged -> removed, and each rung is only claimed by the step that
-        undoes it (_retreat_state asserts the rung we are actually on). A connector that was
-        never locked therefore skips the collar unlock instead of turning a collar that is not
-        there, and one that was never seated skips the bayonet.
+        locked -> seated -> engaged -> removed, each rung claimed only by the step that undoes
+        it (_retreat_state asserts the rung we are actually on).
+
+        ONE MOTION DROPS TWO RUNGS, and that is a fact about the grasp rather than a shortcut:
+        the axial grip closes on the collar AND the connector body together, so the reverse
+        turn backs the collar off its lock and carries the bayonet round to its slots in the
+        same stroke. Assembly needs two maneuvers there because it grips differently for each
+        (the bayonet at the junction, the collar on the ring); disassembly does not.
 
         WHERE IT STARTS, and why that matters. It runs straight after the tug, which leaves the
         fingers CLOSED on the collar with tool0 ON the connector axis -- the same reason the tug
@@ -1367,90 +1384,55 @@ def build_and_run(cfg, robot, camera, args):
         cut across.
 
         THE DIRECTIONS, and this is the part that is easy to get backwards:
-          * the collar was locked by turning +rotation_deg, so unlocking is -rotation_deg;
-          * the bayonet was seated by turning to +screw_deg (the ACHIEVED sweep angle, measured,
-            not commanded), so releasing it is a turn of -screw_deg -- back to the roll the
-            connector was mated at, which is where its pins line up with the slots. Turning
-            further, or to a fixed angle, would ride the pins onto the rim instead.
+          * the collar was locked by turning +rotation_deg, so the reverse turn is
+            -rotation_deg -- or until the torque limit, since the ring runs to a stop at both
+            ends of its travel and torque building is the intended end in either direction;
+          * that same turn carries the bayonet round with it, because the jaws hold the
+            connector body and the collar together -- so there is no separate angle to undo
+            and nothing to aim at the mated roll;
           * the pull is along the socket -X, the exact reverse of the insertion axis.
 
         Returns (ok, state)."""
         axn_d = T_clk[:3, 0] / float(np.linalg.norm(T_clk[:3, 0]))
-        axis_d, point_d = T_clk[:3, 0], T_clk[:3, 3]
         if float(np.linalg.norm(np.asarray(cl_axis_off, dtype=float))) > 0.0:
             log.warning('DISASSEMBLY: collar_clocking.axis_offset_mm is non-zero, but the '
                         'unwind turns about the SOCKET axis. Re-check the collar stays on the '
                         'ring through the unlock.')
 
-        def twist(theta, label, what):
-            """One reverse turn about the socket axis, from wherever the arm is."""
-            start = robot.tool0()
-            phase('collar_clock')
-            adm_cl.reset()
-            adm_cl.warmup(start)          # NO tare: the arm is loaded, gripping the assembly
-            guard_cl.reset()
-            res, _f = screw_ramp(
-                adm_cl, lambda f: rotate_about_axis(start, axis_d, point_d, theta * f),
-                guard_cl, cl_v, cl_w, abs(np.degrees(theta)), label=label)
-            _lin, turned = pose_error(start, robot.tool0())
-            adm_cl.reset()
-            adm_cl.stop()
-            robot.arm.servo_stop()
-            stopped = res == 'seated'     # ramp's word for a guard trip, not a state
-            clock_rows.append({'maneuver': what, 'try': 1, 'ramp_result': res,
-                               'turned_deg': round(float(np.degrees(turned)), 3),
-                               'commanded_deg': round(float(np.degrees(theta)), 3),
-                               'success': not stopped, 'force_stop': bool(stopped),
-                               'state_after': '', 'stopped_by': guard_cl.tripped_by or ''})
-            if stopped:
-                log.error('%s STOPPED by the force guard (%s) after %.1f of %.1f deg -- the '
-                          'part is still held and still in the socket. Freeing it by hand is '
-                          'safer than turning harder.', what.upper(),
-                          guard_cl.tripped_by, np.degrees(turned), np.degrees(theta))
-                return False
-            log.info('%s: turned %.1f deg (commanded %.1f); the flange moved %.1f mm.',
-                     what.upper(), np.degrees(turned), np.degrees(theta), _lin * 1000.0)
-            return True
-
-        # ---- 1. LOCKED -> SEATED: re-approach, re-grip, unwind the collar -----------------
+        # ---- 1. LOCKED/SEATED -> ENGAGED: ONE reverse turn undoes both --------------------
+        # THE AXIAL GRASP HOLDS BOTH. Closing on the ring closes on the connector body with
+        # it, so the single reverse turn backs the collar off its lock AND carries the bayonet
+        # round to where its pins line up with the slots -- there is no second, separate
+        # connector rotation to make, and making one would turn a part that is already free.
+        # That is why this drops two rungs of the ladder in one motion.
+        #
         # The assembly RELEASED and retracted before this, so there is no grip to inherit: the
-        # unlock drives the SAME approach the lock did (retract along the cable, reorient onto
-        # the axis, advance down it, close on the ring) with the turn negated and the seat push
-        # off -- sharing that geometry is what keeps the unlock landing on the ring the lock
+        # turn drives the SAME approach the lock did (retract along the cable, reorient onto
+        # the axis, advance down it, close on the ring) with the rotation negated and the seat
+        # push off. Sharing that geometry is what keeps the unlock landing on the ring the lock
         # turned, instead of on a station computed a second, divergent way.
-        if state == 'locked' and dis_unlock:
-            if not phase_gate('UNLOCK COLLAR',
-                              'Re-approach the collar on the axis, close on it, and turn %.0f '
-                              'deg BACK -- the reverse of the lock.' % np.degrees(cl_rot)):
+        if dis_unlock and state in ('locked', 'seated'):
+            if not phase_gate('UNLOCK',
+                              'Re-approach on the axis, close on the collar (which grips the '
+                              'connector body with it), and turn %.0f deg BACK -- or until the '
+                              'torque limit. That releases the lock and the bayonet together.'
+                              % np.degrees(cl_rot)):
                 return False, state
             if not collar_clocking(T_base_conn_d, screw_deg, cl_rot=-cl_rot, sp_on=False,
                                    unlocking=True):
-                log.error('DISASSEMBLY: the collar did not unlock -- stopping with the '
+                log.error('DISASSEMBLY: the reverse turn did not complete -- stopping with the '
                           'connector still in the socket.')
                 return False, state
-            state = _retreat_state(state, 'locked')
-        elif state == 'locked':
-            log.warning('DISASSEMBLY: the collar is LOCKED but unlock_collar is off -- the '
-                        'bayonet cannot release under a locked collar. Stopping here.')
-            return False, state
+            if state == 'locked':
+                state = _retreat_state(state, 'locked')      # -> seated (the lock is off)
+            state = _retreat_state(state, 'seated')          # -> engaged (the bayonet is free)
+            log.info('  the reverse turn released the collar AND the bayonet -- the connector '
+                     'is ENGAGED only, and free to pull.')
+        elif state in ('locked', 'seated'):
+            log.warning('DISASSEMBLY: unlock_collar is off, so nothing has released the '
+                        'bayonet -- the pull below will be against a %s connector.', state)
 
-        # ---- 2. SEATED -> ENGAGED: unwind the bayonet -------------------------------------
-        if state == 'seated' and dis_unclock:
-            back = -float(np.radians(screw_deg or 0.0))
-            if abs(back) < np.radians(0.5):
-                log.warning('DISASSEMBLY: the achieved sweep was %.2f deg, so there is no '
-                            'bayonet rotation to undo. Going straight to the pull -- if the '
-                            'connector resists, it was seated by a turn this run did not see.',
-                            screw_deg or 0.0)
-            elif not phase_gate('UNCLOCK CONNECTOR',
-                                'Turn the connector %.1f deg back to the roll it was MATED at, '
-                                'where its pins line up with the slots.' % np.degrees(back)):
-                return False, state
-            elif not twist(back, 'unclock ', 'connector_unclock'):
-                return False, state
-            state = _retreat_state(state, 'seated')
-
-        # ---- 3. ENGAGED -> REMOVED: pull it straight out ----------------------------------
+        # ---- 2. ENGAGED -> REMOVED: pull it straight out ----------------------------------
         if not phase_gate('EXTRACT',
                           'Pull the connector %.0f mm straight out along the socket -X. The '
                           'bayonet should be free; the global guard stops a pull that snags.'
@@ -1482,7 +1464,7 @@ def build_and_run(cfg, robot, camera, args):
                  'fingers.', pulled * 1000.0)
         state = _retreat_state(state, 'engaged')
 
-        # ---- 4. put the cable down --------------------------------------------------------
+        # ---- 3. put the cable down --------------------------------------------------------
         if not dis_place_on:
             log.info('DISASSEMBLY: place is off -- the cable stays in the fingers.')
             return True, state
@@ -2376,7 +2358,18 @@ def build_and_run(cfg, robot, camera, args):
             return T
 
         _re_lin, _re_ang = pose_error(_now, T_engaged)
-        if _re_ang > np.radians(0.5) or _re_lin > 1e-4:
+        if unlocking:
+            # UNLOCKING DOES NOT REALIGN. The realign exists to undo the bayonet sweep so the
+            # collar stations are measured from the mated pose -- but on the way OUT the
+            # connector is already mated and the arm is already clear of it (the escape ran
+            # before this), so driving the OPEN gripper back onto the connector would be a
+            # pointless approach to a pose we only want to leave again. The collar is turned
+            # from wherever it sits: the station below is absolute (built from the axis
+            # frame), so the approach still lands on the ring without it.
+            log.info('  UNLOCKING -- skipping the realign with the engagement pose (%.1f deg / '
+                     '%.1f mm away); the collar station is absolute, so the approach does not '
+                     'need it.', np.degrees(_re_ang), _re_lin * 1000.0)
+        elif _re_ang > np.radians(0.5) or _re_lin > 1e-4:
             adm_cl.reset()
             adm_cl.warmup(_now)
             guard_shared.reset()
@@ -2546,16 +2539,13 @@ def build_and_run(cfg, robot, camera, args):
                            'stopped_by': guard_cl.tripped_by or ''})
         _word = 'UNLOCKED' if unlocking else 'LOCKED'
         if stopped:
-            # A guard trip means the OPPOSITE thing in each direction: reaching the lock stops
-            # the turn, but an unlock that stops early is a collar that did not come free.
-            if unlocking:
-                log.error('  the unlock stopped on the force guard (%s) after %.1f of %.1f deg '
-                          '-- the collar is NOT free. Do not pull on it.',
-                          guard_cl.tripped_by, np.degrees(turned), abs(np.degrees(cl_rot)))
-                return False
-            log.info('  LOCKED -- the collar stopped on the force guard (%s) after %.1f deg, '
-                     'which is what reaching the lock looks like; check it.',
-                     guard_cl.tripped_by, np.degrees(turned))
+            # SYMMETRIC WITH THE LOCK: the collar runs to a stop at BOTH ends of its travel, so
+            # the torque building is the intended termination in either direction -- turn the
+            # full rotation_deg or until the ring stops turning, whichever comes first.
+            log.info('  %s -- the collar stopped on the force guard (%s) after %.1f of %.1f '
+                     'deg, which is what reaching the end of its travel looks like; check it.',
+                     _word, guard_cl.tripped_by, np.degrees(turned),
+                     abs(np.degrees(cl_rot)))
         else:
             log.info('  %s -- collar turned %.1f deg (commanded %.1f). The flange moved '
                      '%.1f mm: a wrist twist, not an arm swing.', _word, np.degrees(turned),

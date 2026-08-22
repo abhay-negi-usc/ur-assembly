@@ -791,7 +791,11 @@ def test_disassembly_config_is_coherent():
                                            'bnc_assembly.yaml')))
     d = cfg['assembly']['disassembly']
     assert isinstance(d['enabled'], bool), 'enabled must be a plain bool'
-    for k in ('unlock_collar', 'unclock_connector', 'extract_mm', 'place'):
+    # NO unclock_connector: the axial grasp holds the collar and the connector body together,
+    # so the single reverse turn releases both -- a separate bayonet rotation would turn a part
+    # that is already free.
+    assert 'unclock_connector' not in d, 'the separate bayonet rotation was removed'
+    for k in ('unlock_collar', 'extract_mm', 'place'):
         assert k in d, f'disassembly must declare {k}'
     assert float(d['extract_mm']) > 0
     # CYCLES: a second pass needs the cell put back, so the loop is only meaningful with
@@ -913,8 +917,10 @@ def test_belief_offset_moves_the_belief_and_never_the_grasp():
 
     # config plumbing: absent -> zero, and a malformed vector is refused rather than guessed
     from urlab import config as urconfig
-    assert np.allclose(belief_offset_m(urconfig.load('bnc_assembly')), [0.0, 0.0, 0.0])
     c = urconfig.load('bnc_assembly')
+    assert belief_offset_m(c).shape == (3,), 'the shipped value must parse as a 3-vector'
+    c.set_path('pickup.belief_offset_mm', None)
+    assert np.allclose(belief_offset_m(c), [0.0, 0.0, 0.0]), 'absent -> no correction'
     c.set_path('pickup.belief_offset_mm', [0.0, 0.0, -3.0])
     assert np.allclose(belief_offset_m(c), [0.0, 0.0, -0.003])
     c.set_path('pickup.belief_offset_mm', [1.0, 2.0])

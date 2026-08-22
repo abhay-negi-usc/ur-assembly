@@ -179,6 +179,20 @@ end_view_image: true
 
 approach_distance_m: 0.10
 approach_axis: [0.0, 0.0, 1.0]
+# WHICH FRAME approach_axis IS READ IN.
+#   grasp -- the gripper's own approach: stand off straight back along the tool axis and
+#            descend down it.  Right for a SQUARE pickup, where the tool axis is vertical.
+#   base  -- base_link, so [0, 0, 1] stands off straight UP off the ground plane and the
+#            descent comes straight DOWN onto the part, whatever attitude the gripper holds.
+#
+# base, because pickup.fingertip_in_connector now TILTS the approach.  In the grasp frame a
+# -60 deg pitch puts the stand-off 100 mm BACK ALONG THE CABLE, so the descent has to drag the
+# open jaw down the cable to reach the bite point -- threading the cable into the jaw, which a
+# cable that is not perfectly straight will snag.  From directly above, the pads simply drop
+# past the barrel's two sides.  The gripper ATTITUDE is unchanged either way; only the retreat
+# direction moves.  It also matches lift_axis below, so the approach and the departure are
+# mirror images instead of two different directions.
+approach_frame: base
 lift_distance_m: 0.10
 lift_axis: [0.0, 0.0, 1.0]
 
@@ -233,7 +247,7 @@ pickup:
   # m / rad.  Both units for one triple is an error, not a silent preference.
   # ===========================================================================================
   fingertip_in_connector:
-    xyz_mm:  [15.0, 0.0, 0.0]
+    xyz_mm:  [17.0, 0.0, 0.0]
     rpy_deg: [0.0, -70.0, 0.0]
 
   # BELIEF OFFSET, mm in the FINGERTIP frame -- the one knob here that moves NOTHING at
@@ -259,7 +273,7 @@ pickup:
   # DO NOT fold this into junction_in_fingertip (that moves the grasp too, so you would chase
   # your own tail) or into frames.yaml bnc_connector_in_fingerpads (that frame is the
   # SQUARE-grip truth, shared with the recorded target, and the smoke suite guards it).
-  belief_offset_mm: [0.0, 0.0, 0.0]
+  belief_offset_mm: [-10.0, 0.0, 0.0]
   # PICKUP HEIGHT from the gripper kinematic model.  Assumes the connector rests ON THE GROUND
   # PLANE (ground_plane.z_m): grasp target = plane + connector d_max/2 (centerline) + the
   # fingertip ADVANCE between fingertip_ref_separation_mm (where fingertip_grasp z was
@@ -320,7 +334,7 @@ pickup:
   # reach and tight enough that no branch change slips through.
   # ===========================================================================================
   approach_seed_joints_deg: [-55, -180, -90, -90, 0, 180]
-  approach_seed_tolerance_deg: 45.0
+  approach_seed_tolerance_deg: 90.0
   rests_on_ground_plane: true
 
   compliance:
@@ -412,7 +426,7 @@ speed:
     # happens near the work surface, and at a large pickup.pitch_deg it swings the gripper
     # BODY down toward the ground plane rather than just the fingers.  Falls back to `scan`
     # when unset, so other apps are unaffected.
-    grasp_align: 0.2
+    grasp_align: 1.2
     pickup: 1.5      # the compliant grasp descent
     lift: 0.8        # the compliant lift (including the slip-check partial lift)
     standoff: 1.0    # the move to stand-off + the per-attempt realign moveJs
@@ -571,7 +585,7 @@ assembly:
     # PRELOAD, mm past the mate along the connector's own +X, so the reference finishes
     # pressing rather than merely arriving.  0 = stop exactly on the mate.  (Distinct from
     # final_insertion.preload_mm, which belongs to the estimate-mode commit.)
-    preload_mm: 5.0
+    preload_mm: 10.0
 
     # Reference rebuild rate.  Must be >= 4x the highest active frequency or the sampled sine
     # aliases -- validated pre-motion.
@@ -591,7 +605,7 @@ assembly:
     persistence_s: 0.10          # the limit must hold this long -- rides out contact spikes
 
     # ---- compliance overrides (else the top-level compliance:) ---
-    stiffness: [1500.0, 1500.0, 1500.0, 10.0, 10.0, 10.0]
+    stiffness: [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
     mass: null
     damping_ratio: null
     # ---- force guard overrides (else force_guard:) ---
@@ -713,7 +727,7 @@ assembly:
     # row) so it survives anchoring and applies only to the COMMIT -- probing passes end on
     # the mate, where the map is.  It buys the break-in spike; what it can HOLD is
     # stiffness x preload.  0 = off.
-    preload_mm: 10.0
+    preload_mm: 25.0
     # NOISE on the commit trajectory, OFF deliberately: the jitter exists to gather varied
     # contact while PROBING and has no place in the attempt meant to seat.
     trajectory_noise:
@@ -752,7 +766,7 @@ assembly:
     # the far edge of the slot is found); only a sweep in which EVERY leg was guard-stopped is
     # reported NOT SEATED.  The app pre-samples the band and WARNS on poses with no IK
     # solution; more than two entries narrows in, one entry is a single stroke.
-    sweep_deg: [-80.0, +80.0]
+    sweep_deg: [-100.0, +100.0]
     # PUSH: how far past the engaged pose the virtual target aims, along the connector +X.
     # Too small and the cams never engage; too large and the spring loads the mate harder
     # than needed.
@@ -809,7 +823,7 @@ assembly:
     # "ring stands 30 mm from the JUNCTION": junction sits at -45.7 mm on this axis, so
     # collar = -45.7 + 30 = -15.7 mm.  If re-tuned on the bench, measure from the connector
     # frame origin.
-    collar_offset_mm: -6
+    collar_offset_mm: 0.0
     # COLLAR AXIS OFFSET, mm, in the SOCKET (target) frame's own axes: shifts the LINE the
     # whole collar maneuver works about (centring, unwind, advance, turn, and the tug
     # re-grip).  Y and Z move the line; X only slides the reference point along it.  Exists
@@ -850,7 +864,7 @@ assembly:
     # the analytic IK on a reachable branch.  If the angle does not solve, the app scans 24
     # alternatives and takes the cheapest reachable one, warning that it did.  Pin a number
     # here once it is stable.
-    grasp_clock_deg: null
+    grasp_clock_deg: -180.0
     # WRIST-3 MARGIN, deg inside each end of the usable wrist_3 range the turn must stay.
     # The grasp clock angle is exactly a wrist_3 offset, which lets the app PREWIND the wrist
     # before threading down the axis.  The margin exists because the compliant turn can walk

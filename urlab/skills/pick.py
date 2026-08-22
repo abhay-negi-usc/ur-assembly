@@ -180,6 +180,11 @@ class GraspGeometry:
     def __init__(self, cfg):
         self.approach_distance = float(cfg.get('approach_distance_m', 0.10))
         self.approach_axis = np.asarray(cfg.get('approach_axis', [0.0, 0.0, -1.0]), dtype=float)
+        # WHICH FRAME approach_axis IS READ IN -- see pre_grasp for why it matters.
+        self.approach_frame = str(cfg.get('approach_frame', 'grasp')).lower()
+        if self.approach_frame not in ('grasp', 'base'):
+            raise ValueError("approach_frame must be 'grasp' or 'base', got "
+                             f'{self.approach_frame!r}')
         self.lift_distance = float(cfg.get('lift_distance_m', 0.10))
         self.lift_axis = np.asarray(cfg.get('lift_axis', [0.0, 0.0, 1.0]), dtype=float)
         from ..transforms import xyzrpy_to_matrix
@@ -188,8 +193,27 @@ class GraspGeometry:
         self.T_base_grasp = np.eye(4)
 
     def pre_grasp(self):
-        """Stand-off before the grasp, along approach_axis IN THE GRASP FRAME."""
-        return self.T_base_grasp @ translation_matrix(self.approach_axis * self.approach_distance)
+        """Stand-off before the grasp -- and WHICH WAY it backs off is `approach_frame`.
+
+        'grasp' (default) reads approach_axis in the GRASP frame, so the stand-off is straight
+        back along the gripper's own approach and the descent runs down the tool axis. That is
+        right for a square pickup, where the tool axis IS vertical.
+
+        'base' reads it in BASE_LINK, so [0, 0, 1] stands off straight UP off the ground plane
+        and the descent comes straight DOWN onto the part, whatever attitude the gripper is
+        holding. This is the one to use once fingertip_in_connector tilts the approach: at a
+        -60 deg pitch the grasp-frame stand-off sits 100 mm BACK ALONG THE CABLE and the
+        descent drags the open jaw down the cable to reach the bite point -- it has to thread
+        the cable into the jaw, and a cable that is not straight snags it. Coming from directly
+        above, the pads drop past the barrel's two sides instead and nothing is threaded.
+
+        The gripper ATTITUDE is identical either way -- only the direction it retreats along
+        changes. It also puts the stand-off on the same axis the lift already uses, so the
+        approach and the departure are mirror images."""
+        step = translation_matrix(self.approach_axis * self.approach_distance)
+        if self.approach_frame == 'base':
+            return step @ self.T_base_grasp
+        return self.T_base_grasp @ step
 
     def lift(self):
         return translation_matrix(self.lift_axis * self.lift_distance) @ self.T_base_grasp

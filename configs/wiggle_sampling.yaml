@@ -204,7 +204,7 @@ wiggle:
   phase_deg:
     x_mm:      0.0
     y_mm:      60.0
-    z_mm:      120.0
+    z_mm:      0.0
     roll_deg:  180.0
     pitch_deg: 240.0
     yaw_deg:   300.0

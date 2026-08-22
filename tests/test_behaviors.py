@@ -1162,14 +1162,16 @@ def test_the_grasp_align_can_seed_its_ik_branch():
     from urlab.skills.pick import GraspController
 
     cfg = urconfig.load('bnc_assembly')
-    g = GraspController(cfg)
-    assert g.approach_seed is None, 'unset must keep the old nearest-to-current behaviour'
-    assert g.approach_seed_tol > 0, 'the branch check needs a limit'
+    # UNSET must keep the old nearest-to-current behaviour -- the seed is opt-in. (The shipped
+    # value is deliberately not pinned: which configuration is 'wrist up' is a bench fact.)
+    cfg.set_path('pickup.approach_seed_joints_deg', None)
+    assert GraspController(cfg).approach_seed is None
 
     seed_deg = [-85.0, -145.0, -105.0, -205.0, -85.0, 180.0]
     cfg.set_path('pickup.approach_seed_joints_deg', seed_deg)
     g = GraspController(cfg)
     assert np.allclose(np.degrees(g.approach_seed), seed_deg), 'deg in the file, rad in the code'
+    assert g.approach_seed_tol > 0, 'the branch check needs a limit'
 
     # ---- the seed must actually REACH the IK call, and the branch check must bite ----------
     seen, moved = {}, {}
@@ -1220,3 +1222,54 @@ def test_the_grasp_align_can_seed_its_ik_branch():
     # (c) unreachable -> refused too, rather than falling back to an unseeded solve
     seen['returns'] = None
     assert g.align(robot, geom) is False
+
+
+def test_the_pickup_stands_off_straight_up_off_the_ground_plane():
+    """WHERE THE DESCENT COMES FROM. With a tilted fingertip_in_connector, a stand-off taken in
+    the GRASP frame sits back along the cable, so the descent drags the open jaw down the cable
+    to reach the bite point -- it has to thread the cable into the jaw. Read in BASE_LINK the
+    stand-off is straight up and the pads drop past the barrel's two sides instead.
+
+    The gripper ATTITUDE must be identical either way -- only the retreat direction moves.
+    """
+    from urlab import config as urconfig
+    from urlab.skills.pick import (GraspGeometry, connector_axis_height_m,
+                                   fingertip_in_connector, grasp_pose)
+    from urlab.transforms import translation_matrix, xyzrpy_to_matrix
+
+    cfg = urconfig.load('bnc_assembly')
+    geom = GraspGeometry(cfg)
+    assert geom.approach_frame == 'base', (
+        'the bnc pickup approaches from above -- a grasp-frame stand-off at this tilt threads '
+        'the cable into the jaw')
+
+    # a detected connector lying along base +x, lifted onto its axis
+    J = translation_matrix([0.0, 0.0, connector_axis_height_m(cfg)]) @ xyzrpy_to_matrix(
+        [0.5, 0.0, 0.0], [0, 0, 0])
+    geom.T_base_grasp = grasp_pose(J, fingertip_in_connector(cfg))
+
+    pre = geom.pre_grasp()
+    step = pre[:3, 3] - geom.T_base_grasp[:3, 3]
+    assert np.allclose(step, [0.0, 0.0, geom.approach_distance]), (
+        f'the stand-off must be straight UP by approach_distance_m, got '
+        f'{np.round(step * 1000, 1).tolist()} mm')
+    assert np.allclose(pre[:3, :3], geom.T_base_grasp[:3, :3]), (
+        'the stand-off must not change the gripper attitude -- only where it retreats to')
+
+    # ... and it now mirrors the lift, which was already taken in base_link
+    assert np.allclose(geom.lift()[:3, 3] - geom.T_base_grasp[:3, 3],
+                       np.asarray(geom.lift_axis) * geom.lift_distance)
+
+    # THE OLD READING STILL WORKS, and is still the default, so a square pickup is untouched
+    geom.approach_frame = 'grasp'
+    grasp_frame_step = geom.pre_grasp()[:3, 3] - geom.T_base_grasp[:3, 3]
+    assert not np.allclose(grasp_frame_step, step), 'the two readings must actually differ here'
+    assert GraspGeometry(urconfig.load('cable_pick_assemble')).approach_frame == 'grasp', (
+        'the square-pickup apps must keep the tool-axis stand-off')
+
+    try:
+        GraspGeometry(urconfig.Config({'approach_frame': 'sideways'}))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('a bad approach_frame must refuse, not silently pick one')

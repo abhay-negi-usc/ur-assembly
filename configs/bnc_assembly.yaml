@@ -610,48 +610,6 @@ assembly:
   # connector exactly where the mate was recorded.  The two frames must describe the SAME
   # connector datum (same orientation, differing only in grip depth along tool0 z); the
   # smoke suite pins that.
-  # ===========================================================================================
-  # REORIENT RECOVERY -- what to do when the coaxial grasp simply cannot be reached.
-  #
-  # THE FAILURE IT ANSWERS.  The coaxial grasp (a steeply pitched
-  # pickup.fingertip_in_connector) comes at the connector from along its OWN axis, so whether
-  # the arm can get there depends on which way the cable happens to be lying.  A cable pointing
-  # the wrong way has NO collision-free path to that grasp, and retrying cannot produce one --
-  # the geometry refused, not the attempt.
-  #
-  # THE ANSWER.  A SQUARE grasp (pitch 0, straight down) has no such dependence: the approach is
-  # vertical whatever the heading.  So pick the cable the easy way, set it back down pointing
-  # where the socket points, and re-scan -- the coaxial grasp then has a heading it can reach.
-  #
-  # RUNS ONCE PER PICK.  If the coaxial grasp is still unreachable after the cable has been
-  # squared up, its heading was not the problem and repeating would only shuffle the part
-  # around the bench.
-  #
-  # THE PLACE POSE is written wrt the TARGET CONNECTOR, because aligning with the socket is the
-  # entire point.  yaw 0 puts the connector axis on the socket's own compass heading.  ROLL AND
-  # PITCH ARE NOT SETTINGS -- the part is going onto a flat bench, so its axis ends up
-  # horizontal and its z up regardless of the socket's attitude; only the heading carries over.
-  reorient_recovery:
-    enabled: true
-    # THE SQUARE GRASP: straight down, reachable at any cable heading.  The WHOLE pose, not
-    # just the angles -- the bite point that suits a coaxial approach is not the one that suits
-    # a vertical one.  This same transform is what the in-hand belief for the PLACE is derived
-    # from, so the pick and the set-down cannot disagree about where the connector is held.
-    fingertip_in_connector:
-      xyz_mm:  [5.0, 0.0, 0.0]
-      rpy_deg: [0.0, 0.0, 0.0]
-    place_offsets:
-      x_mm: 0.0
-      y_mm: 0.0
-      # -400 was the figure asked for, but it leaves the connector ~200 mm ABOVE the bench --
-      # the recorded socket sits at z -155 mm and the bench at -760.  snap_to_ground overrides
-      # it with the real resting height (ground + one barrel radius) and logs both, so the
-      # discrepancy is visible rather than silently split between two numbers.  Set
-      # snap_to_ground false to honour z_mm exactly.
-      z_mm: -400.0
-      yaw_deg: 0.0
-    snap_to_ground: true
-    approach_mm: 120.0               # stand-off above the place, straight down onto it
   target_frame: bnc_connector_finger_holder
 
   # ---- WHERE THE TARGET POSE COMES FROM ------------------------------------------------------

@@ -221,7 +221,7 @@ pickup:
   # so a different bite reads different counts and the success band shifts with it.
   # (Distinct from grasp_check.retry_perturb_x_m, which jitters the SAME axis by +/-3 mm
   # between retries and is deliberately NOT modelled -- that is search noise, not a setting.)
-  grip_offset_mm: 5.0
+  grip_offset_mm: 15.0
   # PICKUP HEIGHT from the gripper kinematic model.  Assumes the connector rests ON THE GROUND
   # PLANE (ground_plane.z_m): grasp target = plane + connector d_max/2 (centerline) + the
   # fingertip ADVANCE between fingertip_ref_separation_mm (where fingertip_grasp z was
@@ -298,7 +298,7 @@ speed:
   # Per-PHASE scaling of ALL FOUR limits above (1.0 = the global limit itself), one entry per
   # phase.  An absent phase runs at 1.0.
   phase_scale:
-    reset: 1.5       # start/end home moves (and the between-retry homes)
+    reset: 1.8       # start/end home moves (and the between-retry homes)
     scan: 1.0        # the multi-view scan + grasp-align + reseat moves
     pickup: 1.5      # the compliant grasp descent
     lift: 0.8        # the compliant lift (including the slip-check partial lift)
@@ -777,6 +777,37 @@ assembly:
     persistence_s: 1.0
     # TODO: grasp verification + failure recovery on the close -- a missed collar currently
     # turns an empty gripper.
+
+  # ---- DISASSEMBLY (optional) ---------------------------------------------------------
+  # Take the connector back OUT and put the cable down -- the assembly run in reverse, which
+  # is what makes repeated trials possible without a human resetting the fixture.
+  #
+  # WHERE IT STARTS: straight after the tug, which leaves the fingers CLOSED on the collar
+  # with tool0 already ON the connector axis.  Every rotation below is then a wrist twist
+  # about the axis the arm is already on -- no re-approach, no re-grip, nothing to lose the
+  # part between steps.  (With this enabled the tug HOLDS its grip instead of releasing.)
+  #
+  # THE STATE LADDER RUN BACKWARDS: locked -> seated -> engaged -> removed, each rung claimed
+  # only by the step that undoes it.  A connector that never locked skips the collar unlock;
+  # one that never seated skips the bayonet.
+  #
+  # DIRECTIONS (the easy thing to get backwards): the collar unlocks by -rotation_deg, and the
+  # bayonet releases by turning back through the ACHIEVED sweep angle -- the measured one, not
+  # the commanded -- which returns the connector to the roll it was MATED at, where its pins
+  # line up with the slots.  Turning further would ride them onto the rim.
+  disassembly:
+    enabled: true
+    unlock_collar: true          # LOCKED -> SEATED (needs the collar to be held on the axis)
+    unclock_connector: true      # SEATED -> ENGAGED (reverses the bayonet sweep)
+    extract_mm: 60.0             # pull along the socket -X once the bayonet is free
+    # PLACE: back to the PICK pose, straight down, release ABOVE the ground, rise.  The same
+    # configuration the cable was picked from, so it goes back the way it was taken.
+    place:
+      enabled: true
+      # The FINGERTIP stops this far above ground_plane.z_m -- the descent is guarded as well,
+      # so the pads stop short rather than pressing the cable into the table.
+      clearance_mm: 25.0
+      retreat_mm: 100.0          # rise this far after releasing, before going home
 
   # THE SHARED ESCAPE, after either path: two guarded straight legs (the part is released by
   # now, so there is no held connector to thread out along its own axis).

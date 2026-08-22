@@ -3251,8 +3251,11 @@ def test_bnc_clocking_state_vocabulary():
     for bad in ("seated = res == 'seated'", "seated = (res == 'seated')"):
         assert bad not in code, \
             "ramp's 'seated' means a guard tripped -- do not bind it to a variable called `seated`"
-    assert code.count("stopped = res == 'seated'") == 2, \
-        'both clocking maneuvers must read the ramp return into `stopped`'
+    # >= 2, not == 2: the two clocking maneuvers plus DISASSEMBLY's reverse twist, which
+    # follows the same convention. The invariant is the naming (asserted above), not the count
+    # -- a new maneuver adopting it should not have to edit this number.
+    assert code.count("stopped = res == 'seated'") >= 2, \
+        'every maneuver that reads a ramp return must bind it to `stopped`'
 
 
 def test_bnc_clocking_config():

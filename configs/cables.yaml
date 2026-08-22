@@ -96,7 +96,7 @@ cables:
     # frames: banana_connector_finger_holder + targets: banana_connector_finger_holder.)
 
   bnc:
-    connector: [196, 212]
+    connector: [191, 212]
     cable: 224
     # THIS YAW SETS WHICH WAY THE FINGERTIP FACES AT PICKUP. The grasp pose is
     # T_conn @ inverse(junction_in_fingertip), so 0 lays the fingertip +X ALONG the detected

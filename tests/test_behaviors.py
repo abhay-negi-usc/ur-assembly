@@ -723,6 +723,85 @@ def test_pitched_belief_matches_what_the_pitched_grasp_actually_produces():
     assert np.allclose(pitched_belief(nominal_belief, T_fj, 0.0), nominal_belief)
 
 
+def test_disassembly_walks_the_state_ladder_backwards():
+    """Assembly walks engaged -> seated -> locked; disassembly must walk locked -> seated ->
+    engaged -> removed, and each rung may only be claimed by the step that undoes it. The
+    failure this prevents is reporting a connector 'removed' that was never unlocked."""
+    from urlab.apps.bnc_assembly import (CLOCK_STATES, UNCLOCK_STATES, _advance_state,
+                                         _retreat_state)
+
+    assert CLOCK_STATES == ('engaged', 'seated', 'locked')
+    assert UNCLOCK_STATES == ('locked', 'seated', 'engaged', 'removed')
+    assert _retreat_state('locked', 'locked') == 'seated'
+    assert _retreat_state('seated', 'seated') == 'engaged'
+    assert _retreat_state('engaged', 'engaged') == 'removed'
+
+    # it must REFUSE to skip a rung, in either direction
+    for state, expected in (('locked', 'seated'), ('seated', 'locked'), ('engaged', 'locked')):
+        try:
+            _retreat_state(state, expected)
+        except AssertionError:
+            continue
+        raise AssertionError(f'retreating from {state!r} as {expected!r} must not be allowed')
+
+    # and the two ladders are exact mirrors over the rungs they share
+    for a, b in zip(CLOCK_STATES, reversed(UNCLOCK_STATES[:-1])):
+        assert a == b, 'the ladders must describe the same three states'
+    assert _advance_state('engaged', 'engaged') == 'seated'      # assembly still works
+
+
+def test_disassembly_reverses_the_assembly_rotations_about_the_socket_axis():
+    """The geometry the disassembly depends on: a rotation of -theta about the socket axis
+    line must exactly undo a rotation of +theta about that same line, leaving the arm where it
+    started -- and a point ON the axis must not translate at all through either.
+
+    This is what makes 'turn the collar back by -rotation_deg' and 'turn the connector back
+    through the ACHIEVED sweep' correct rather than approximately correct."""
+    from urlab.transforms import inverse, pose_error, rotate_about_axis, xyzrpy_to_matrix
+
+    # a socket frame with an arbitrary (non-axis-aligned) orientation, as a real mate has
+    T_clk = xyzrpy_to_matrix([0.048, 1.087, -0.155], np.radians([-1.02, 0.62, 94.17]))
+    axis, point = T_clk[:3, 0], T_clk[:3, 3]
+    T_tool0 = xyzrpy_to_matrix([0.1, 0.95, -0.15], np.radians([12.0, -80.0, 30.0]))
+
+    for deg in (120.0, 60.0, -75.0):
+        th = np.radians(deg)
+        fwd = rotate_about_axis(T_tool0, axis, point, th)
+        back = rotate_about_axis(fwd, axis, point, -th)
+        lin, ang = pose_error(T_tool0, back)
+        assert lin * 1000.0 < 1e-6 and np.degrees(ang) < 1e-4, (
+            f'{deg} deg then -{deg} deg must return the arm exactly where it started')
+
+    # a point ON the axis is unmoved by the turn -- which is why the connector spins in place
+    # rather than being dragged through an arc
+    on_axis = np.eye(4)
+    on_axis[:3, 3] = point + 0.03 * (axis / np.linalg.norm(axis))
+    turned = rotate_about_axis(on_axis, axis, point, np.radians(120.0))
+    assert float(np.linalg.norm(turned[:3, 3] - on_axis[:3, 3])) < 1e-12
+
+    # and the extraction direction is the exact reverse of the insertion axis
+    axn = axis / np.linalg.norm(axis)
+    assert abs(float(np.dot(-axn, T_clk[:3, 0] / np.linalg.norm(T_clk[:3, 0]))) + 1.0) < 1e-12
+
+
+def test_disassembly_config_is_coherent():
+    """The shipped block must parse, default OFF, and declare every knob the app reads."""
+    import yaml
+    cfg = yaml.safe_load(open(os.path.join(os.path.dirname(__file__), '..', 'configs',
+                                           'bnc_assembly.yaml')))
+    d = cfg['assembly']['disassembly']
+    assert d['enabled'] is False, 'ship it OFF -- it is the reverse of a destructive maneuver'
+    for k in ('unlock_collar', 'unclock_connector', 'extract_mm', 'place'):
+        assert k in d, f'disassembly must declare {k}'
+    assert float(d['extract_mm']) > 0
+    p = d['place']
+    for k in ('enabled', 'clearance_mm', 'retreat_mm'):
+        assert k in p, f'disassembly.place must declare {k}'
+    # the release height must clear the ground, and the rise must clear the released cable
+    assert float(p['clearance_mm']) > 0, 'releasing AT the ground would press the cable into it'
+    assert float(p['retreat_mm']) > float(p['clearance_mm'])
+
+
 def test_grip_offset_slides_the_bite_along_the_connector_axis():
     """`pickup.grip_offset_mm` must move the bite point along the CONNECTOR AXIS (the detected
     junction frame's x) by exactly that much, leave the approach direction alone, and stay

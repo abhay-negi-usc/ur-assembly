@@ -120,6 +120,20 @@ log = urlog.get('bnc-assembly')
 # The assembly state progression, walked in order (see the module docstring).
 CLOCK_STATES = ('engaged', 'seated', 'locked')
 
+# DISASSEMBLY walks the same ladder DOWNWARD and then one rung below the bottom. 'removed' is
+# not a clocking state -- it means the connector is out of the socket and in the fingers, which
+# is the only state from which placing it down is meaningful.
+UNCLOCK_STATES = ('locked', 'seated', 'engaged', 'removed')
+
+
+def _retreat_state(state, expected):
+    """The state BELOW `expected`, asserting that is where we actually are -- the mirror of
+    _advance_state, so a disassembly step cannot claim a rung it never undid."""
+    if state != expected:
+        raise AssertionError(
+            f'disassembly step expected the connector to be {expected!r}, but it is {state!r}')
+    return UNCLOCK_STATES[UNCLOCK_STATES.index(expected) + 1]
+
 # The six pose axes, in the order every 6-vector in this app uses (mm, mm, mm, deg, deg, deg).
 DIM_KEYS = ('x_mm', 'y_mm', 'z_mm', 'roll_deg', 'pitch_deg', 'yaw_deg')
 
@@ -659,6 +673,25 @@ def build_and_run(cfg, robot, camera, args):
         if tv.get(_k):
             _tv_phys[_k] = tv[_k]
     adm_tug = AdmittanceController(robot.arm, _tv_phys) if tv_on else None
+    ground_z = float(cfg.get_path('ground_plane.z_m', -0.76))
+    # ---- DISASSEMBLY (optional) -----------------------------------------------------------
+    dis = a.get('disassembly', {}) or {}
+    dis_on = bool(dis.get('enabled', False))
+    dis_unlock = bool(dis.get('unlock_collar', True))
+    dis_unclock = bool(dis.get('unclock_connector', True))
+    dis_extract_m = _num(dis, 'extract_mm', 60.0) / 1000.0
+    dis_place = dis.get('place', {}) or {}
+    dis_place_on = bool(dis_place.get('enabled', True))
+    dis_clear_m = _num(dis_place, 'clearance_mm', 25.0) / 1000.0
+    dis_rise_m = _num(dis_place, 'retreat_mm', 100.0) / 1000.0
+    if dis_on and not cc_on:
+        # Nothing to unwind and, more to the point, no ENGAGED pose to unwind FROM: the
+        # clocking maneuvers are what establish the frames disassembly reverses.
+        log.error('assembly.disassembly.enabled needs connector_clocking enabled -- the '
+                  'disassembly reverses the clocking, and without it there is nothing to '
+                  'reverse and no engaged pose to reverse from.')
+        return False
+
     sp = cl.get('seat_push', {}) or {}
     sp_on = bool(sp.get('enabled', True))
     sp_force = _num(sp, 'force_n', 5.0)
@@ -1190,7 +1223,7 @@ def build_and_run(cfg, robot, camera, args):
                 and leg(r.get('target_axis', [-1.0, 0.0, 0.0]),
                         r.get('target_distance_m', 0.100), True))
 
-    def tug_verify_in_place():
+    def tug_verify_in_place(hold_after=False):
         """TUG VERIFICATION, from wherever the collar turn ended, WITHOUT letting go.
 
         collar_clocking returns with the fingers still closed on the locked collar. That is
@@ -1252,6 +1285,13 @@ def build_and_run(cfg, robot, camera, args):
             log.info('TUG VERIFIED -- %.1f N for %.1f s moved the connector %.2f mm '
                      '(<= %.1f mm): the lock holds.', tv_force, tv_time, disp * 1000.0,
                      tv_thresh_m * 1000.0)
+            if hold_after:
+                # DISASSEMBLY IS NEXT and it starts from exactly this state: fingers closed on
+                # the collar, tool0 on the connector axis. Releasing and retracting here only
+                # to re-approach and re-grip would add the three free-space moves and the blind
+                # re-grasp that doing the tug in place exists to avoid.
+                log.info('  holding the grip -- disassembly starts from here.')
+                return 'verified_held'
             if not robot.gripper.open('release (tug verified)'):
                 log.error('TUG VERIFY: gripper did not release after the tug.')
                 return 'error'
@@ -1283,6 +1323,181 @@ def build_and_run(cfg, robot, camera, args):
             return 'terminated'
         robot.gripper.open('release (failed cable, at home)')
         return 'failed'
+
+
+    def disassembly(state, screw_deg):
+        """DISASSEMBLY -- unwind the clocking, pull the connector out, put the cable down.
+
+        THE STATE LADDER RUN BACKWARDS. Assembly walks engaged -> seated -> locked; this walks
+        locked -> seated -> engaged -> removed, and each rung is only claimed by the step that
+        undoes it (_retreat_state asserts the rung we are actually on). A connector that was
+        never locked therefore skips the collar unlock instead of turning a collar that is not
+        there, and one that was never seated skips the bayonet.
+
+        WHERE IT STARTS, and why that matters. It runs straight after the tug, which leaves the
+        fingers CLOSED on the collar with tool0 ON the connector axis -- the same reason the tug
+        itself happens in place. Every rotation below is therefore a wrist twist about the axis
+        the arm is already on: no re-approach, no re-grip, no chance to lose the part between
+        steps.
+
+        THE GEOMETRY. Both rotations are about the SAME LINE the assembly turned about: the
+        socket frame's own +X through its origin (T_clk), which is what connector_clocking
+        screwed about and -- with collar_clocking.axis_offset_mm at zero -- what the collar
+        turned about too. They are run through screw_ramp for the same reason the assembly is:
+        a rotation about a line 178 mm from tool0 bows into an arc that a straight ramp would
+        cut across.
+
+        THE DIRECTIONS, and this is the part that is easy to get backwards:
+          * the collar was locked by turning +rotation_deg, so unlocking is -rotation_deg;
+          * the bayonet was seated by turning to +screw_deg (the ACHIEVED sweep angle, measured,
+            not commanded), so releasing it is a turn of -screw_deg -- back to the roll the
+            connector was mated at, which is where its pins line up with the slots. Turning
+            further, or to a fixed angle, would ride the pins onto the rim instead.
+          * the pull is along the socket -X, the exact reverse of the insertion axis.
+
+        Returns (ok, state)."""
+        axn_d = T_clk[:3, 0] / float(np.linalg.norm(T_clk[:3, 0]))
+        axis_d, point_d = T_clk[:3, 0], T_clk[:3, 3]
+        if float(np.linalg.norm(np.asarray(cl_axis_off, dtype=float))) > 0.0:
+            log.warning('DISASSEMBLY: collar_clocking.axis_offset_mm is non-zero, but the '
+                        'unwind turns about the SOCKET axis. Re-check the collar stays on the '
+                        'ring through the unlock.')
+
+        def twist(theta, label, what):
+            """One reverse turn about the socket axis, from wherever the arm is."""
+            start = robot.tool0()
+            phase('collar_clock')
+            adm_cl.reset()
+            adm_cl.warmup(start)          # NO tare: the arm is loaded, gripping the assembly
+            guard_cl.reset()
+            res, _f = screw_ramp(
+                adm_cl, lambda f: rotate_about_axis(start, axis_d, point_d, theta * f),
+                guard_cl, cl_v, cl_w, abs(np.degrees(theta)), label=label)
+            _lin, turned = pose_error(start, robot.tool0())
+            adm_cl.reset()
+            adm_cl.stop()
+            robot.arm.servo_stop()
+            stopped = res == 'seated'     # ramp's word for a guard trip, not a state
+            clock_rows.append({'maneuver': what, 'try': 1, 'ramp_result': res,
+                               'turned_deg': round(float(np.degrees(turned)), 3),
+                               'commanded_deg': round(float(np.degrees(theta)), 3),
+                               'success': not stopped, 'force_stop': bool(stopped),
+                               'state_after': '', 'stopped_by': guard_cl.tripped_by or ''})
+            if stopped:
+                log.error('%s STOPPED by the force guard (%s) after %.1f of %.1f deg -- the '
+                          'part is still held and still in the socket. Freeing it by hand is '
+                          'safer than turning harder.', what.upper(),
+                          guard_cl.tripped_by, np.degrees(turned), np.degrees(theta))
+                return False
+            log.info('%s: turned %.1f deg (commanded %.1f); the flange moved %.1f mm.',
+                     what.upper(), np.degrees(turned), np.degrees(theta), _lin * 1000.0)
+            return True
+
+        # ---- 1. LOCKED -> SEATED: unwind the collar ---------------------------------------
+        if state == 'locked' and dis_unlock:
+            if not phase_gate('UNLOCK COLLAR',
+                              'Turn the collar %.0f deg BACK (the reverse of the lock), still '
+                              'gripping it on the axis.' % np.degrees(cl_rot)):
+                return False, state
+            if not twist(-cl_rot, 'unlock ', 'collar_unlock'):
+                return False, state
+            state = _retreat_state(state, 'locked')
+        elif state == 'locked':
+            log.warning('DISASSEMBLY: the collar is LOCKED but unlock_collar is off -- the '
+                        'bayonet cannot release under a locked collar. Stopping here.')
+            return False, state
+
+        # ---- 2. SEATED -> ENGAGED: unwind the bayonet -------------------------------------
+        if state == 'seated' and dis_unclock:
+            back = -float(np.radians(screw_deg or 0.0))
+            if abs(back) < np.radians(0.5):
+                log.warning('DISASSEMBLY: the achieved sweep was %.2f deg, so there is no '
+                            'bayonet rotation to undo. Going straight to the pull -- if the '
+                            'connector resists, it was seated by a turn this run did not see.',
+                            screw_deg or 0.0)
+            elif not phase_gate('UNCLOCK CONNECTOR',
+                                'Turn the connector %.1f deg back to the roll it was MATED at, '
+                                'where its pins line up with the slots.' % np.degrees(back)):
+                return False, state
+            elif not twist(back, 'unclock ', 'connector_unclock'):
+                return False, state
+            state = _retreat_state(state, 'seated')
+
+        # ---- 3. ENGAGED -> REMOVED: pull it straight out ----------------------------------
+        if not phase_gate('EXTRACT',
+                          'Pull the connector %.0f mm straight out along the socket -X. The '
+                          'bayonet should be free; the global guard stops a pull that snags.'
+                          % (dis_extract_m * 1000.0)):
+            return False, state
+        phase('retract')
+        T_now = robot.tool0()
+        T_out = translation_matrix(-dis_extract_m * axn_d) @ T_now
+        adm_cl.reset()
+        adm_cl.warmup(T_now)
+        guard_shared.reset()
+        res = adm_cl.ramp(T_now, T_out, seg_time(T_now, T_out), guard_shared)
+        pulled = float(np.dot(T_now[:3, 3] - robot.tool0()[:3, 3], axn_d))
+        adm_cl.reset()
+        adm_cl.stop()
+        robot.arm.servo_stop()
+        clock_rows.append({'maneuver': 'extract', 'try': 1, 'ramp_result': res,
+                           'advance_mm': round(-pulled * 1000.0, 3),
+                           'need_mm': round(dis_extract_m * 1000.0, 3),
+                           'success': res != 'seated', 'force_stop': res == 'seated',
+                           'state_after': 'removed' if res != 'seated' else 'engaged',
+                           'stopped_by': guard_shared.tripped_by or ''})
+        if res == 'seated':
+            log.error('EXTRACT: the global guard tripped after %.1f mm (%s) -- the connector '
+                      'is still in the socket and still held. Free it by hand.',
+                      pulled * 1000.0, guard_shared.tripped_by)
+            return False, state
+        log.info('EXTRACTED %.1f mm along the socket -X -- the connector is out and in the '
+                 'fingers.', pulled * 1000.0)
+        state = _retreat_state(state, 'engaged')
+
+        # ---- 4. put the cable down --------------------------------------------------------
+        if not dis_place_on:
+            log.info('DISASSEMBLY: place is off -- the cable stays in the fingers.')
+            return True, state
+        if not phase_gate('PLACE THE CABLE',
+                          'Return to the PICK pose, descend straight down to %.0f mm above the '
+                          'ground plane, release, and rise.' % (dis_clear_m * 1000.0)):
+            return False, state
+        phase('reconfigure')
+        if not robot.arm.move_j(q_pick, label='pick pose (to place)'):
+            log.error('DISASSEMBLY: could not reach the pick pose to place the cable.')
+            return False, state
+        # STRAIGHT DOWN, in the world, from the pick attitude -- the same configuration the
+        # cable was picked from, so it is put back the way it was taken. The descent is sized
+        # from the FINGERTIP against the known ground plane and is GUARDED, so the pads stop
+        # short of the ground instead of pressing the cable into it.
+        z_now = float(robot.fingertip()[2, 3])
+        z_goal = float(ground_z) + dis_clear_m
+        drop = z_now - z_goal
+        if drop <= 0.0:
+            log.warning('DISASSEMBLY: the fingertip is already %.0f mm BELOW the release '
+                        'height -- not descending.', -drop * 1000.0)
+        else:
+            log.info('PLACE: descending %.0f mm (fingertip %.0f mm -> %.0f mm above the '
+                     'ground plane at %.3f m).', drop * 1000.0, (z_now - ground_z) * 1000.0,
+                     dis_clear_m * 1000.0, ground_z)
+            phase('lift')
+            T_down = translation_matrix([0.0, 0.0, -drop]) @ robot.tool0()
+            if not _guarded(robot, guard_shared,
+                            lambda: robot.arm.move_l(T_down, label='place (straight down)')):
+                log.error('DISASSEMBLY: the descent hit something before the release height.')
+                return False, state
+        if not robot.gripper.open('release (cable placed)'):
+            log.error('DISASSEMBLY: the gripper did not open to release the cable.')
+            return False, state
+        T_up = translation_matrix([0.0, 0.0, dis_rise_m]) @ robot.tool0()
+        if not _guarded(robot, guard_shared,
+                        lambda: robot.arm.move_l(T_up, label='rise clear of the cable')):
+            log.error('DISASSEMBLY: could not rise after releasing.')
+            return False, state
+        log.info('CABLE PLACED %.0f mm above the ground plane and released.',
+                 dis_clear_m * 1000.0)
+        return True, state
 
     def engage_insertion():
         """ENGAGE -- drive the assembly trajectory home, optionally rocking, stop on axial force.
@@ -2772,7 +2987,7 @@ def build_and_run(cfg, robot, camera, args):
                               'The collar is LOCKED and still HELD. Next: pull %.1f N along the '
                               'connector -X for %.1f s without letting go -- a locked bayonet '
                               'holds, an unlocked one backs out.' % (tv_force, tv_time)):
-                    tug_res = tug_verify_in_place()
+                    tug_res = tug_verify_in_place(hold_after=dis_on)
                     if tug_res == 'terminated':
                         return False              # the finally still writes clocking.csv
                 else:
@@ -2787,6 +3002,30 @@ def build_and_run(cfg, robot, camera, args):
             # from the home pose, nowhere near the socket. So the escape belongs to the paths that
             # still have the arm at the connector: a skipped or disabled tug, or a run that never
             # reached 'locked'.
+            # ---- DISASSEMBLY, from the grip the tug left -------------------------------
+            if dis_on and tug_res != 'failed' and state in ('locked', 'seated'):
+                if tug_res == 'verified_held':
+                    log.info('DISASSEMBLY: starting from the tug grip (collar held, on axis).')
+                elif not robot.gripper.close('re-grip for disassembly'):
+                    log.error('DISASSEMBLY: could not re-grip before unwinding.')
+                    return False
+                dis_ok, state = disassembly(state, cc_screw_deg)
+                if not dis_ok:
+                    log.error('DISASSEMBLY did not finish -- the arm is LEFT WHERE IT IS and '
+                              'the part may still be held. Free it by hand before commanding '
+                              'motion.')
+                    return False
+                tug_res = 'verified' if tug_res == 'verified_held' else tug_res
+                ret_ok = True                     # the place already left the arm clear
+                log.info('DISASSEMBLED -- the connector is %s.',
+                         'out and placed on the ground' if dis_place_on
+                         else 'out and still in the fingers')
+            elif tug_res == 'verified_held':
+                # disassembly declined or not applicable: finish the tug the normal way
+                robot.gripper.open('release (tug verified)')
+                ret_ok = clocking_retract('tug retract')
+                tug_res = 'verified'
+
             if tug_res in ('verified', 'failed'):
                 ret_ok = True
                 log.info('Escape not needed -- the tug verification already left the arm clear '

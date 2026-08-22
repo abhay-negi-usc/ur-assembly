@@ -334,7 +334,23 @@ pickup:
   # reach and tight enough that no branch change slips through.
   # ===========================================================================================
   approach_seed_joints_deg: [-55, -180, -90, -90, 0, 180]
-  approach_seed_tolerance_deg: 90.0
+  approach_seed_tolerance_deg: 120.0
+  # A HIGH WAYPOINT TO ROUTE THROUGH when the direct arc dips.
+  #
+  # The grasp-align move is ONE moveJ from wherever the multi-view scan left the arm to the
+  # pre-grasp, and a single long arc that close to the bench is exactly what swings through it
+  # -- both ends clear, the middle not.  A seed alone cannot fix that: it chooses which
+  # SOLUTION to end on, not which route to take getting there.
+  #
+  # Used ONLY when the direct path is refused, so a clean approach costs nothing.  Both legs
+  # (here -> waypoint -> pre-grasp) are checked before anything moves.  pick_joints_deg is the
+  # obvious candidate -- ~650 mm above the bench -- BUT it is also where the arm already is
+  # when the pick starts, so it does nothing for a dip caused by the DESTINATION rather than
+  # the route.  A waypoint only helps when the arc between two otherwise-fine configurations
+  # sags; it cannot rescue a target that sits on a bad IK branch, because the last leg still
+  # ends there.  Set it to a genuinely different high configuration if you hit the first case.
+  # null = no reroute; a dipping arc is simply refused.
+  approach_via_joints_deg: null
   rests_on_ground_plane: true
 
   # ===========================================================================================

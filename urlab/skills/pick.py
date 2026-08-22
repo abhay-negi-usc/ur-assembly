@@ -604,6 +604,14 @@ class GraspController:
                               else [float(np.radians(float(v))) for v in seed])
         self.approach_seed_tol = float(np.radians(
             float(p.get('approach_seed_tolerance_deg', 45.0))))
+        # A WAYPOINT TO ROUTE AROUND THE BENCH. One moveJ from wherever the scan ended to the
+        # pre-grasp is a single long arc, and a long arc near the work surface is exactly what
+        # dips through it -- both ends can be clear while the middle is not. Naming a high,
+        # known-good configuration here gives the move somewhere to go via. Only used when the
+        # DIRECT path is refused, so a clean approach costs nothing.
+        via = p.get('approach_via_joints_deg')
+        self.approach_via = (None if via is None
+                             else [float(np.radians(float(v))) for v in via])
         # GROUND COLLISION over the grasp-align move. Built LAZILY -- importing pybullet at
         # construction would make it a hard dependency of every app that touches a gripper.
         self._collision_cfg = dict(p.get('collision', {}) or {})
@@ -726,12 +734,15 @@ class GraspController:
             log.info('  grasp-align configuration: %s deg (no approach_seed_joints_deg set, so '
                      'this is whatever branch the scan left the arm nearest).',
                      np.round(np.degrees(q), 1).tolist())
-            if not self._path_is_clear(robot, q, label):
-                return False
-            return robot.move_fingertip(T, label)
-        # WRAPPED, because a joint at +179 and one at -179 are 2 deg apart, not 358.
-        d = np.abs(np.asarray(q, dtype=float) - np.asarray(self.approach_seed, dtype=float))
-        d = np.minimum(d, 2.0 * np.pi - d)
+            return self._go(robot, T, q, label)
+        # WRAPPED ONTO [-pi, pi], because a joint at +179 and one at -179 are 2 deg apart,
+        # not 358. Done with a modulo rather than min(d, 2pi - d): the latter returns a
+        # NEGATIVE distance once a joint differs by more than a full turn -- and a negative
+        # sorts below every real distance, so the worst joint would be missed and the check
+        # would pass exactly when it most needed to fail. UR joints run to +/-360, so
+        # differences past 2pi are reachable, not hypothetical.
+        raw = np.asarray(q, dtype=float) - np.asarray(self.approach_seed, dtype=float)
+        d = np.abs((raw + np.pi) % (2.0 * np.pi) - np.pi)
         worst = int(np.argmax(d))
         if d[worst] > self.approach_seed_tol:
             log.error('%s: IK landed on a DIFFERENT BRANCH from the seed -- %s is %.1f deg away '
@@ -747,11 +758,42 @@ class GraspController:
         log.info('  grasp-align on the seeded branch: %s deg (worst joint %s, %.1f deg from the '
                  'seed).', np.round(np.degrees(q), 1).tolist(), UR_JOINTS[worst],
                  np.degrees(d[worst]))
-        if not self._path_is_clear(robot, q, label):
-            return False
-        return robot.move_fingertip(T, label, qnear=self.approach_seed)
+        return self._go(robot, T, q, label)
 
-    def _path_is_clear(self, robot, q_goal, label):
+    def _go(self, robot, T_target, q_goal, label):
+        """Drive to the pre-grasp: straight there if that arc is clear, otherwise via the
+        waypoint. Every leg is checked, and a refusal happens with the arm still parked."""
+        if self._path_is_clear(robot, q_goal, label, quiet=self.approach_via is not None):
+            return robot.move_fingertip(T_target, label, qnear=self.approach_seed)
+        if self.approach_via is None:
+            return False
+        # THE DIRECT ARC DIPS, so try the two legs through the waypoint. Both are checked
+        # before anything moves -- a route that only half works is no better than none.
+        via = self.approach_via
+        if not self._path_is_clear(robot, via, label + ' (leg 1: to the waypoint)'):
+            return False
+        q_now = robot.arm.q()
+        ok, body, over, frac = self._clear_between(via, q_goal)
+        if not ok:
+            log.error('%s: routing via pickup.approach_via_joints_deg does not help -- leg 2 '
+                      'still puts %s %.1f mm past its allowance at %.0f%% along. The waypoint '
+                      'needs to be higher, or the grasp itself is too low.',
+                      label, body, over * 1000.0, frac * 100.0)
+            return False
+        log.info('%s: the direct arc dips into the bench, so routing via the waypoint %s deg.',
+                 label, np.round(np.degrees(via), 1).tolist())
+        if not robot.arm.move_j(via, label=label + ' (waypoint)'):
+            return False
+        del q_now
+        return robot.move_fingertip(T_target, label, qnear=self.approach_seed)
+
+    def _clear_between(self, q_from, q_to):
+        model = self.collision_model()
+        if model is None:
+            return True, None, 0.0, 0.0
+        return model.check_path(q_from, q_to)
+
+    def _path_is_clear(self, robot, q_goal, label, quiet=False):
         """Refuse a move whose JOINT PATH puts the arm through the ground plane.
 
         THE ENDPOINTS ARE NOT THE PATH. A moveJ interpolates in joint space, so the tool swings
@@ -767,11 +809,17 @@ class GraspController:
             return True
         # The fingertips carry their own allowance (they are MEANT to reach the work surface);
         # everything else, the gripper wrist included, is held to the strict margin.
-        log.error('%s: the joint path goes THROUGH THE GROUND PLANE -- %s is %.1f mm past its '
-                  'allowance at %.0f%% along the move. Refusing before the arm moves. Re-seed '
-                  'pickup.approach_seed_joints_deg so the arm swings the other way, or lower '
-                  'speed and step there in stages.',
-                  label, body, over * 1000.0, frac * 100.0)
+        # NOT a speed problem -- a moveJ traces the same arc at any speed. The three things
+        # that actually move the arc are the BRANCH it ends on, the ROUTE it takes, and how low
+        # the target is.
+        (log.info if quiet else log.error)(
+            '%s: the joint path goes THROUGH THE GROUND PLANE -- %s is %.1f mm past its '
+            'allowance at %.0f%% along the move.%s The arc is the same at any speed; what '
+            'moves it is (a) pickup.approach_via_joints_deg, a high waypoint to route through, '
+            '(b) pickup.approach_seed_joints_deg, to land on a branch on the near side, or '
+            '(c) a less extreme fingertip_in_connector rpy, which raises the target.',
+            label, body, over * 1000.0, frac * 100.0,
+            '' if quiet else ' Refusing before the arm moves.')
         return False
 
     def descend(self, robot, geom, label='grasp'):

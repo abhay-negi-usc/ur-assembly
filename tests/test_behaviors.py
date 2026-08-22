@@ -1583,3 +1583,41 @@ def test_the_descent_is_checked_against_the_ground_not_just_the_align_move():
         assert name_just in ('fingertip_a', 'fingertip_b'), (
             f'with the body clear, only a fingertip may object, not {name_just}')
     m.close()
+
+
+def test_the_branch_check_wraps_past_a_full_turn():
+    """REGRESSION. The deviation used min(d, 2pi - d), which returns a NEGATIVE number once a
+    joint differs by more than a full revolution -- and a negative sorts below every real
+    distance, so argmax missed it and the check passed exactly when it most needed to fail.
+    UR joints run to +/-360 deg, so differences past 2pi are reachable, not hypothetical."""
+    from urlab import config as urconfig
+    from urlab.skills.pick import GraspController
+
+    cfg = urconfig.load('bnc_assembly')
+    seed = [0.0, -90.0, 0.0, -90.0, 0.0, 0.0]
+    cfg.set_path('pickup.approach_seed_joints_deg', seed)
+    cfg.set_path('pickup.approach_seed_tolerance_deg', 45.0)
+    g = GraspController(cfg)
+
+    def deviation(sol_deg):
+        raw = np.radians(sol_deg) - np.asarray(g.approach_seed)
+        return np.degrees(np.abs((raw + np.pi) % (2.0 * np.pi) - np.pi))
+
+    # 400 deg apart is 40 deg apart once wrapped -- and must NOT come out negative
+    d = deviation([400.0, -90.0, 0.0, -90.0, 0.0, 0.0])
+    assert abs(d[0] - 40.0) < 1e-9, f'400 deg must wrap to 40, got {d[0]:.1f}'
+    assert (d >= 0).all(), 'a wrapped distance is never negative'
+
+    # the ordinary near-half-turn case still reads correctly
+    assert abs(deviation([179.0, -90.0, 0, -90, 0, 0])[0] - 179.0) < 1e-9
+    assert abs(deviation([-179.0, -90.0, 0, -90, 0, 0])[0] - 179.0) < 1e-9
+
+    # and the real logged case is over a 90 deg tolerance, so it must be refused
+    logged = [57.7, -263.1, -91.8, -59.4, -24.5, 231.7]
+    cfg.set_path('pickup.approach_seed_joints_deg', [-55, -180, -90, -90, 0, 180])
+    cfg.set_path('pickup.approach_seed_tolerance_deg', 90.0)
+    g = GraspController(cfg)
+    raw = np.radians(logged) - np.asarray(g.approach_seed)
+    worst = np.degrees(np.abs((raw + np.pi) % (2.0 * np.pi) - np.pi)).max()
+    assert worst > np.degrees(g.approach_seed_tol), (
+        f'{worst:.1f} deg from the seed is a different arm posture, not a branch nudge')

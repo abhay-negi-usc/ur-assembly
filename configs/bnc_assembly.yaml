@@ -195,17 +195,76 @@ pickup:
   # frames.yaml entries keep describing the nominal SQUARE grip and this stays a run-time
   # choice.  Sweep it with `--set pickup.pitch_deg=...`.
   #
-  # CHECK BEFORE A LARGE ANGLE: the leading finger dips toward the ground plane (jog it once
-  # with the phase gate), and the counts-based grasp check assumes a square bite -- the band
-  # shifts once the pads meet the connector at an angle and the groove stops seating it
-  # cleanly, so re-measure grasp_check before trusting a miss/empty verdict.
+  # THE AXIAL REGIME (what a large NEGATIVE angle buys).  -90 puts tool0 +Z exactly along the
+  # connector +X: the gripper points down the cable, the jaws close across a diameter, and the
+  # flange sits ON the connector axis 183 mm behind the bite point.  That is the SAME grasp
+  # collar_clocking builds for itself, and it is why the angle is worth pushing:
   #
-  # The post-mate clocking maneuvers are unaffected: connector clocking's belief reset
-  # re-derives the in-hand pose from the MEASURED arm pose at the mate, which absorbs the
-  # pitch.  What does move is reachability -- the arm sits rotated at the mate, so the sweep
-  # band and the collar reorientation start from a different attitude (both pre-checked, and
-  # they warn rather than fail silently).
-  pitch_deg: -15.0
+  #   pitch   tool0 +Z to conn +X   flange OFF the axis   flange above the floor
+  #     0             90 deg              0 mm                   188 mm
+  #   -15              75                47                      182
+  #   -45              45               129                      134
+  #   -60              30               183 sin30 =  92           97
+  #   -75              15                          47             52
+  #   -80              10                          32             37
+  #   -90               0                           0              5   <- flange ON the floor
+  #
+  # ONE NUMBER SETS BOTH, and they pull opposite ways: 183*sin(90-|pitch|) mm is the flange's
+  # distance off the connector axis AND its height above the cable.  Small (near -90) makes the
+  # post-mate rotations a WRIST TWIST instead of a 183 mm arc -- less slip, no chord to cut --
+  # and large keeps the gripper body off the work surface.  -60 is the safe end of that trade;
+  # step toward -75 once the body clearance is confirmed by jogging.
+  #
+  # BEFORE GOING PAST -45, CHECK ON THE BENCH:
+  #   * BODY CLEARANCE.  The flange height above is the tool0 ORIGIN; the 2F-85 housing extends
+  #     radially from there.  Measure that radius and keep 183*sin(90-|pitch|) + 5 mm above it.
+  #     (The FINGERS no longer dip -- the pitch turns about the jaw-closing axis, so the pads
+  #     stay on the barrel's sides at every angle.  It is the wrist that comes down now.)
+  #   * THE GRASP CHECK BAND.  grasp_check.connector_counts and recovery.ground_counts were
+  #     measured with the pads crossing the barrel; near -90 they lie ALONG it and the grooves
+  #     seat differently.  Re-measure before trusting a miss/empty/ground verdict.
+  #   * THE APPROACH.  approach_distance_m is taken along the fingertip +Z, so it rotates with
+  #     this: at -75 the stand-off is 100 mm BACK ALONG THE CABLE and the descent threads the
+  #     cable into the open jaw (exactly collar_clocking's leg 4).  Shorten it, and keep
+  #     pickup.mode compliance so a snag yields instead of pushing through.
+  #   * REACHABILITY.  There is no offline kinematics (arm.fk/ik are controller calls), so IK
+  #     for the near-horizontal grasp can only be tested on hardware or URSim.
+  #
+  # ONE NUMBER: the believed in-hand connector pose is rotated by the same angle automatically
+  # (urlab/skills/pick.py pitched_belief) -- exact at every angle, -90 included -- so the pick
+  # and the belief cannot drift apart.  What is NOT automatic is belief_offset_mm below: that
+  # is a MEASURED seating residual, and it was measured at a different angle.
+  #
+  # The post-mate clocking maneuvers are unaffected in their arithmetic: connector clocking's
+  # belief reset re-derives the in-hand pose from the MEASURED arm pose at the mate, which
+  # absorbs the pitch.  What moves is reachability -- and, near -90, WRIST_3 BUDGET: the sweep
+  # and the collar turn become wrist_3 rotations, so the roll the pick leaves wrist_3 at has to
+  # leave room for them (collar_clocking pre-checks this and refuses, it does not fail blind).
+  pitch_deg: -75.0
+  # PICKUP ROLL, deg about the APPROACH axis (the fingertip's own z -- the direction the gripper
+  # advances along), applied AFTER the pitch so it turns about the pitched approach.
+  #
+  # 180 IS THE SAME PHYSICAL BITE.  A parallel jaw is symmetric under half a turn about its
+  # approach axis: the pads land on the same two sides of the barrel either way.  All that
+  # changes is which side the wrist sits on -- and with it the WRIST_3 ROLL the pick leaves
+  # behind, which is what the post-mate sweep and the 120 deg collar turn have to fit inside.
+  #
+  # WHAT IT BUYS HERE: it flips tool0 -Y from pointing along the connector -Z to along its +Z.
+  # Paired with a large negative pitch_deg the two conditions land TOGETHER, both off parallel
+  # by exactly 90 - |pitch_deg|:
+  #
+  #   pitch    tool0 +Z to conn +X    tool0 -Y to conn +Z  (roll 0)   (roll 180)
+  #     -60           30 deg                150 deg                     30 deg
+  #     -75           15                    165                         15
+  #     -90            0                    180                          0
+  #
+  # NOT DONE VIA cables.yaml junction_in_fingertip's YAW, which is the same rotation.  That yaw
+  # is baked into the NOMINAL grip, so flipping it silently invalidates the in-hand belief in
+  # frames.yaml (bnc_connector_in_fingerpads) and estimation.initial_connector_in_fingertip --
+  # flip one and the belief lands 180 deg and ~91 mm out.  Rolling here keeps those describing
+  # the nominal grip; pitched_belief carries the flip through automatically, exactly as it
+  # already does for the pitch (verified exact at every pitch/roll pair, -90/180 included).
+  roll_deg: 180.0
   # GRIP OFFSET, mm along the CONNECTOR's own +X from the junction.  POSITIVE = further onto
   # the connector body, away from the cable; the junction frame's x IS the connector axis, so
   # this slides the bite point straight along the part.  The in-hand belief carries the same
@@ -319,6 +378,9 @@ grasp_check:
     #
     # Small on purpose: the miss is a fraction of a connector diameter, so 0.5 mm walks back
     # up onto the part, where a larger rise would clear it altogether on the next try.
+    # RE-MEASURE THIS IF pickup.pitch_deg GOES AXIAL: 190 was read with the pads crossing the
+    # barrel.  The rise itself is applied in BASE_LINK (world up), not along the fingertip, so
+    # it stays a lift at any approach angle -- see GraspRecovery in urlab/skills/pick.py.
     ground_counts: 190
     ground_tolerance_counts: 1
     ground_rise_m: 0.0005

@@ -2901,7 +2901,9 @@ def build_and_run(cfg, robot, camera, args):
                 log.error('Could not reach pick_joints_deg.')
                 return False
 
+
         attempt = 0
+        reoriented = False
         reoriented = False
         runner = StepRunner(log, confirm=confirm is not None)
         while True:

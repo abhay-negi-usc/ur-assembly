@@ -656,71 +656,8 @@ def test_no_undefined_names_anywhere_in_the_package():
         + '\n  '.join(reporter.found))
 
 
-def test_pickup_pitch_rotates_about_the_axis_orthogonal_to_ground_and_cable():
-    """The pitch axis must be the detected junction frame's own y -- horizontal, perpendicular
-    to the cable -- and the pivot must be the bite point, so the fingers meet the same spot on
-    the cable at an angle instead of somewhere else."""
-    from scipy.spatial.transform import Rotation
-
-    from urlab.skills.pick import pitched_grasp
-    from urlab.transforms import frame_from_axis, inverse, translation_matrix
-
-    cable = np.array([0.6, 0.8, 0.0])                  # a horizontal cable, off-axis on purpose
-    cable /= np.linalg.norm(cable)
-    T_conn = np.eye(4)
-    T_conn[:3, :3] = frame_from_axis(cable, [0.0, 0.0, 1.0])
-    T_conn[:3, 3] = [0.5, 0.1, -0.7]
-    T_fj = translation_matrix([-0.017, 0.0, 0.005])    # junction_in_fingertip, banana-style
-    phi = np.radians(25.0)
-
-    nominal = pitched_grasp(T_conn, T_fj, 0.0)
-    pitched = pitched_grasp(T_conn, T_fj, phi)
-    assert np.allclose(nominal, T_conn @ inverse(T_fj)), 'zero pitch must change nothing'
-
-    # the base-frame rotation taking the nominal grasp to the pitched one
-    rel = Rotation.from_matrix(pitched[:3, :3] @ nominal[:3, :3].T).as_rotvec()
-    ang = float(np.linalg.norm(rel))
-    axis = rel / ang
-    assert abs(np.degrees(ang) - 25.0) < 1e-6, 'the pitch angle must be what was asked for'
-    assert abs(float(np.dot(axis, [0.0, 0.0, 1.0]))) < 1e-9, 'axis must be ORTHOGONAL to ground'
-    assert abs(float(np.dot(axis, cable))) < 1e-9, 'axis must be ORTHOGONAL to the cable'
-
-    # the bite point does not move: the junction still lands where it was detected
-    for T in (nominal, pitched):
-        assert np.allclose((T @ T_fj)[:3, 3], T_conn[:3, 3], atol=1e-12)
 
 
-def test_pitched_belief_matches_what_the_pitched_grasp_actually_produces():
-    """The round trip that keeps the pick and the belief one pair: grasp a part at a pitch,
-    work out where the connector REALLY ends up in the hand, and it must equal the belief the
-    app plans with. This is the invariant that a hand-edited frames.yaml would break."""
-    from urlab.skills.pick import pitched_belief, pitched_grasp
-    from urlab.transforms import (frame_from_axis, inverse, pose_error, translation_matrix,
-                                  xyzrpy_to_matrix)
-
-    cable = np.array([1.0, 0.3, 0.0])
-    cable /= np.linalg.norm(cable)
-    T_conn = np.eye(4)                                  # the DETECTED junction, in the world
-    T_conn[:3, :3] = frame_from_axis(cable, [0.0, 0.0, 1.0])
-    T_conn[:3, 3] = [0.42, -0.15, -0.72]
-    T_fj = xyzrpy_to_matrix([-0.017, 0.0, 0.005], [0.0, 0.0, np.pi])   # junction_in_fingertip
-    # the PART: the connector sits 45.7 mm out along the cable from the junction, fixed
-    T_junction_conn = translation_matrix([0.0457, 0.0, 0.0])
-    nominal_belief = T_fj @ T_junction_conn
-
-    T_base_conn_true = T_conn @ T_junction_conn         # the part does not move when we grip it
-    for phi_deg in (0.0, 10.0, -20.0, 35.0):
-        phi = np.radians(phi_deg)
-        T_base_ftip = pitched_grasp(T_conn, T_fj, phi)
-        actual = inverse(T_base_ftip) @ T_base_conn_true          # where it REALLY is in hand
-        believed = pitched_belief(nominal_belief, T_fj, phi)      # what the app plans with
-        lin, ang = pose_error(actual, believed)
-        # exact algebra; the bounds are float noise (pose_error's arccos loses digits at identity)
-        assert lin * 1000.0 < 1e-6 and np.degrees(ang) < 1e-4, (
-            f'pitch {phi_deg} deg: belief is {lin * 1000:.4f} mm / {np.degrees(ang):.4f} deg '
-            'from where the connector actually ends up')
-    # and at zero pitch the belief is untouched
-    assert np.allclose(pitched_belief(nominal_belief, T_fj, 0.0), nominal_belief)
 
 
 def test_disassembly_walks_the_state_ladder_backwards():
@@ -822,71 +759,8 @@ def test_disassembly_config_is_coherent():
     assert float(p['retreat_mm']) > float(p['clearance_mm'])
 
 
-def test_grip_offset_slides_the_bite_along_the_connector_axis():
-    """`pickup.grip_offset_mm` must move the bite point along the CONNECTOR AXIS (the detected
-    junction frame's x) by exactly that much, leave the approach direction alone, and stay
-    independent of the pitch -- changing one must not move the other."""
-    from urlab.skills.pick import pitched_grasp
-    from urlab.transforms import frame_from_axis, inverse, pose_error
-
-    cable = np.array([0.6, -0.8, 0.0])
-    cable /= np.linalg.norm(cable)
-    T_conn = np.eye(4)
-    T_conn[:3, :3] = frame_from_axis(cable, [0.0, 0.0, 1.0])
-    T_conn[:3, 3] = [0.5, 0.1, -0.72]
-    T_fj = translation_matrix([-0.017, 0.0, 0.005])
-    d = 0.012
-
-    nominal = pitched_grasp(T_conn, T_fj, 0.0, 0.0)
-    offset = pitched_grasp(T_conn, T_fj, 0.0, d)
-    # the bite point (where the junction reference lands) slides ALONG the cable, by exactly d
-    moved = (offset @ T_fj)[:3, 3] - (nominal @ T_fj)[:3, 3]
-    assert abs(float(np.linalg.norm(moved)) - d) < 1e-12
-    # exact algebra; the bound is float noise on a normalised dot product
-    assert abs(float(np.dot(moved / d, cable)) - 1.0) < 1e-9, 'must move ALONG the axis'
-    _l, ang = pose_error(nominal, offset)
-    # 1e-4 deg, not 0: pose_error's arccos loses digits at identity (see the round-trip test)
-    assert np.degrees(ang) < 1e-4, 'a pure offset must not rotate the approach'
-
-    # INDEPENDENCE: with a pitch applied, the offset still slides exactly d along the axis
-    phi = np.radians(20.0)
-    a = pitched_grasp(T_conn, T_fj, phi, 0.0)
-    b = pitched_grasp(T_conn, T_fj, phi, d)
-    moved = (b @ T_fj)[:3, 3] - (a @ T_fj)[:3, 3]
-    assert abs(float(np.linalg.norm(moved)) - d) < 1e-12
-    assert abs(float(np.dot(moved / d, cable)) - 1.0) < 1e-9, (
-        'the offset must stay along the CABLE axis whatever the pitch -- translate-then-pitch '
-        'keeps the two knobs independent')
-    assert np.degrees(pose_error(a, b)[1]) < 1e-4, 'the offset must not change the pitch'
 
 
-def test_belief_matches_a_grasp_that_is_both_offset_and_pitched():
-    """The full round trip with BOTH knobs: where the connector really ends up in the hand
-    must equal the belief the app plans with, for every combination."""
-    from urlab.skills.pick import pitched_belief, pitched_grasp
-    from urlab.transforms import (frame_from_axis, inverse, pose_error, translation_matrix,
-                                  xyzrpy_to_matrix)
-
-    cable = np.array([1.0, 0.3, 0.0])
-    cable /= np.linalg.norm(cable)
-    T_conn = np.eye(4)
-    T_conn[:3, :3] = frame_from_axis(cable, [0.0, 0.0, 1.0])
-    T_conn[:3, 3] = [0.42, -0.15, -0.72]
-    T_fj = xyzrpy_to_matrix([-0.017, 0.0, 0.005], [0.0, 0.0, np.pi])
-    T_junction_conn = translation_matrix([0.0457, 0.0, 0.0])       # the part, fixed
-    nominal_belief = T_fj @ T_junction_conn
-    T_base_conn_true = T_conn @ T_junction_conn                    # unmoved by how we grip
-
-    for phi_deg in (0.0, -15.0, 25.0):
-        for d_mm in (0.0, 8.0, -5.0, 20.0):
-            phi, d = np.radians(phi_deg), d_mm / 1000.0
-            T_base_ftip = pitched_grasp(T_conn, T_fj, phi, d)
-            actual = inverse(T_base_ftip) @ T_base_conn_true
-            believed = pitched_belief(nominal_belief, T_fj, phi, d)
-            lin, ang = pose_error(actual, believed)
-            assert lin * 1000.0 < 1e-6 and np.degrees(ang) < 1e-4, (
-                f'pitch {phi_deg} deg + offset {d_mm} mm: belief is {lin * 1000:.4f} mm / '
-                f'{np.degrees(ang):.4f} deg from where the connector actually ends up')
 
 
 def test_ground_contact_recovery_rises_where_the_empty_rule_would_drop():
@@ -927,63 +801,14 @@ def test_ground_contact_recovery_rises_where_the_empty_rule_would_drop():
     assert src.index('GROUND CONTACT (%d ~ %d)') < src.index('EMPTY close (%d ~ closed %d)'), (
         'the ground rule is checked before the empty rule -- harmless while the two counts are '
         'distinct, and what makes the rise win if they are ever set to overlap')
-    assert 'translation_matrix([0.0, 0.0, self.ground_rise])' in src, (
-        '+z in the fingertip frame is up off the ground (the empty rule uses -z for down)')
+    assert 'world_delta = translation_matrix([0.0, 0.0, self.ground_rise])' in src, (
+        'the ground rise is applied in BASE_LINK (world up), not along the fingertip -- they '
+        'coincide only at a square approach, and the pick is no longer square')
 
 
-def test_belief_offset_moves_the_belief_and_never_the_grasp():
-    """THE SEPARATION this knob exists for: `pickup.belief_offset_mm` is the MEASURED seating
-    residual, and it must move only what we think we are holding -- never where the fingers
-    go. The grasp command (pitch, grip offset, junction_in_fingertip) is derived geometry; the
-    belief offset is a contact measurement, and mixing them means tuning one perturbs the
-    other."""
-    from urlab.skills.pick import belief_offset_m, offset_belief, pitched_grasp
-    from urlab.transforms import frame_from_axis, translation_matrix, xyzrpy_to_matrix
-
-    T_fj = xyzrpy_to_matrix([-0.017, 0.0, 0.005], [0.0, 0.0, np.pi])
-    nominal_belief = T_fj @ translation_matrix([0.0457, 0.0, 0.0])
-    off = np.array([0.0, 0.0, -0.003])                     # 3 mm 'lower' in the fingertip frame
-
-    # the BELIEF moves, by exactly the offset, without rotating
-    moved = offset_belief(nominal_belief, off)
-    assert np.allclose(moved[:3, :3], nominal_belief[:3, :3]), 'a seating offset must not rotate'
-    assert np.allclose(moved[:3, 3] - nominal_belief[:3, 3], off), 'exactly the offset asked for'
-
-    # the GRASP does not: pitched_grasp cannot even see the offset
-    T_conn = np.eye(4)
-    T_conn[:3, :3] = frame_from_axis([1.0, 0.2, 0.0], [0.0, 0.0, 1.0])
-    T_conn[:3, 3] = [0.5, 0.0, -0.72]
-    before = pitched_grasp(T_conn, T_fj, np.radians(-15.0), 0.015)
-    after = pitched_grasp(T_conn, T_fj, np.radians(-15.0), 0.015)
-    assert np.allclose(before, after), 'the grasp command must be untouched by the belief knob'
-
-    # config plumbing: absent -> zero, and a malformed vector is refused rather than guessed
-    from urlab import config as urconfig
-    c = urconfig.load('bnc_assembly')
-    assert belief_offset_m(c).shape == (3,), 'the shipped value must parse as a 3-vector'
-    c.set_path('pickup.belief_offset_mm', None)
-    assert np.allclose(belief_offset_m(c), [0.0, 0.0, 0.0]), 'absent -> no correction'
-    c.set_path('pickup.belief_offset_mm', [0.0, 0.0, -3.0])
-    assert np.allclose(belief_offset_m(c), [0.0, 0.0, -0.003])
-    c.set_path('pickup.belief_offset_mm', [1.0, 2.0])
-    try:
-        belief_offset_m(c)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError('a 2-entry offset must be refused, not silently padded')
 
 
-def test_held_junction_in_fingertip_tracks_the_pitch():
-    """Downstream users of the grasp geometry (the kinematic-assembly target) must see the
-    ACTUAL junction-in-fingertip, not the nominal square-grip one."""
-    from urlab.skills.pick import held_junction_in_fingertip, pitch_delta
-    from urlab.transforms import translation_matrix
 
-    T_fj = translation_matrix([-0.017, 0.0, 0.005])
-    assert np.allclose(held_junction_in_fingertip(T_fj, 0.0), T_fj)
-    phi = np.radians(15.0)
-    assert np.allclose(held_junction_in_fingertip(T_fj, phi), T_fj @ pitch_delta(-phi))
 
 
 class _FakeFrame:
@@ -1117,77 +942,208 @@ def test_gripper_warmup_sequence():
     assert calls == [0, 255, 150], 'the warm-up must stop at the failing stroke'
 
 
-def test_pickup_roll_flips_tool0_y_without_touching_the_belief():
-    """`pickup.roll_deg: 180` is the wrist flip -- and it must stay a RELABELING, not a change
-    to what the run believes it is holding.
+# ---------------------------------------------------------------------------------------------
+# THE GRASP IS ONE TRANSFORM. `pickup.fingertip_in_connector` is the target FINGERTIP frame in
+# the DETECTED CONNECTOR frame, and the arm is commanded to detected_connector @ that. These pin
+# the two things that has to keep true: it aims the approach, and the in-hand belief it implies
+# still describes where the part physically is.
+# ---------------------------------------------------------------------------------------------
+_T_TOOL0_FTIP_RPY = (np.pi, 0.0, -np.pi / 2)      # configs/bnc_assembly.yaml fingertip_grasp
+_T_TOOL0_FTIP_XYZ = (0.0, 0.0, 0.183)
 
-    THE TWO AXIS CONDITIONS ARE ONE CONDITION once the roll is 180: tool0 +Z lines up with the
-    connector +X and tool0 -Y with the connector +Z, both off parallel by exactly
-    90 - |pitch_deg|. Without the roll the second one points the OTHER WAY (150 deg at a -60
-    pitch), which is the whole reason the knob exists.
 
-    AND THE BELIEF MUST SURVIVE IT. The flip is the same rotation as junction_in_fingertip's
-    yaw, but doing it there would invalidate the nominal in-hand pose in frames.yaml; doing it
-    here means pitched_belief has to carry it, so the believed connector must still land
-    exactly where the part physically is.
+def _bnc_frames():
+    """(tool0->fingertip, junction_in_fingertip, nominal in-hand belief, a detected junction).
+
+    The detected junction has x = the connector axis and z = the ground normal, which is what
+    skills/scan's frame_from_axis builds."""
+    from urlab.transforms import xyzrpy_to_matrix
+    return (xyzrpy_to_matrix(list(_T_TOOL0_FTIP_XYZ), list(_T_TOOL0_FTIP_RPY)),
+            xyzrpy_to_matrix([0, 0, 0], [0, 0, np.pi]),              # cables.yaml bnc
+            xyzrpy_to_matrix([-0.0457, 0.0, 0.0075], [0, 0, np.pi]),  # frames.yaml fingerpads
+            xyzrpy_to_matrix([0.5, 0.0, 0.005], [0, 0, 0]))
+
+
+def test_the_rpy_pitch_of_fingertip_in_connector_aims_the_whole_approach():
+    """ONE NUMBER SETS BOTH ALIGNMENTS. With the rotation written as a pure pitch about the
+    connector frame's y, tool0 +Z comes off the connector +X and tool0 -Y comes off the
+    connector +Z by the SAME angle, 90 - |pitch| -- so -90 is exactly axial and -60 is 30 deg
+    off both. That coincidence is why the old pitch_deg/roll_deg pair collapsed into this: the
+    roll was only ever there to undo junction_in_fingertip's yaw, and here it cancels for free.
     """
-    import numpy as np
+    from urlab.skills.pick import grasp_pose
+    from urlab.transforms import inverse, xyzrpy_to_matrix
 
-    from urlab.skills.pick import pitched_belief, pitched_grasp
-    from urlab.transforms import inverse, pose_error, xyzrpy_to_matrix
-
-    T_tool0_ftip = xyzrpy_to_matrix([0.0, 0.0, 0.183], [np.pi, 0.0, -np.pi / 2])
-    T_ftip_junction = xyzrpy_to_matrix([0, 0, 0], [0, 0, np.pi])          # cables.yaml bnc
-    T_ftip_conn = xyzrpy_to_matrix([-0.0457, 0.0, 0.0075], [0, 0, np.pi])
-    # the detected junction: x = the connector axis, z = the ground normal
-    T_base_junction = xyzrpy_to_matrix([0.5, 0.0, 0.005], [0, 0, 0])
-    T_junction_conn = inverse(T_ftip_junction) @ T_ftip_conn              # a PROPERTY of the part
-    conn_x, conn_z = T_base_junction[:3, 0], T_base_junction[:3, 2]
+    T_tool0_ftip, _T_fj, _nom, J = _bnc_frames()
+    conn_x, conn_z = J[:3, 0], J[:3, 2]
 
     def angle(u, v):
         return float(np.degrees(np.arccos(np.clip(float(np.dot(u, v)), -1.0, 1.0))))
 
-    for pitch_deg in (-60.0, -75.0, -90.0):
-        phi = np.radians(pitch_deg)
-        want = 90.0 - abs(pitch_deg)
-        for roll_deg, expect_y in ((0.0, 180.0 - want), (180.0, want)):
-            psi = np.radians(roll_deg)
-            T_ftip = pitched_grasp(T_base_junction, T_ftip_junction, phi, 0.015, psi)
-            T_tool0 = T_ftip @ inverse(T_tool0_ftip)
+    for pitch in (0.0, -30.0, -60.0, -75.0, -90.0):
+        G = xyzrpy_to_matrix([0.010, 0.0, 0.0], [0.0, np.radians(pitch), 0.0])
+        T_tool0 = grasp_pose(J, G) @ inverse(T_tool0_ftip)
+        want = 90.0 - abs(pitch)
+        assert abs(angle(T_tool0[:3, 2], conn_x) - want) < 1e-6, (
+            f'pitch {pitch}: tool0 +Z is {angle(T_tool0[:3, 2], conn_x):.2f} deg off the '
+            f'connector axis, want {want}')
+        assert abs(angle(-T_tool0[:3, 1], conn_z) - want) < 1e-6, (
+            f'pitch {pitch}: tool0 -Y is {angle(-T_tool0[:3, 1], conn_z):.2f} deg off the '
+            f'connector +Z, want {want} -- the two must track together')
 
-            # tool0 +Z onto the connector axis -- set by the PITCH, unchanged by the roll.
-            assert abs(angle(T_tool0[:3, 2], conn_x) - want) < 1e-6, (
-                f'pitch {pitch_deg} roll {roll_deg}: tool0 +Z is '
-                f'{angle(T_tool0[:3, 2], conn_x):.2f} deg off the connector axis, want {want}')
-            # tool0 -Y onto the connector +Z -- this is what the ROLL decides.
-            assert abs(angle(-T_tool0[:3, 1], conn_z) - expect_y) < 1e-6, (
-                f'pitch {pitch_deg} roll {roll_deg}: tool0 -Y is '
-                f'{angle(-T_tool0[:3, 1], conn_z):.2f} deg off the connector +Z, want {expect_y}')
+    # AND THE FLANGE GEOMETRY THAT FOLLOWS: 183*sin(90-|pitch|) is both its height above the
+    # bite point and its distance off the connector axis. Ground clearance and the wrist-twist
+    # geometry are the same number pulling opposite ways, which is the whole design tension.
+    for pitch in (-60.0, -75.0, -90.0):
+        G = xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, np.radians(pitch), 0.0])
+        T_tool0 = grasp_pose(J, G) @ inverse(T_tool0_ftip)
+        rel = np.asarray(T_tool0[:3, 3]) - np.asarray(J[:3, 3])
+        expect = 0.183 * np.sin(np.radians(90.0 - abs(pitch)))
+        assert abs(float(rel[2]) - expect) < 1e-9, 'flange height above the bite point'
+        assert abs(float(np.linalg.norm(rel[1:])) - expect) < 1e-9, 'flange offset off the axis'
 
-            # THE BELIEF STILL DESCRIBES THE REAL PART. pose_error's arccos loses digits near
-            # identity, hence 1e-4 deg rather than an exact zero.
-            believed = T_ftip @ pitched_belief(T_ftip_conn, T_ftip_junction, phi, 0.015, psi)
-            lin, ang = pose_error(believed, T_base_junction @ T_junction_conn)
+
+def test_held_belief_describes_where_the_part_physically_is():
+    """THE ROUND TRIP that keeps the pick and the belief one pair. Grasp the part with any
+    fingertip_in_connector, and the belief the app plans with must put the connector exactly
+    where the part actually is -- because both come from that one transform. A hand-edited
+    frames.yaml, or a grasp knob changed without the belief, breaks this."""
+    from urlab.skills.pick import grasp_pose, held_belief
+    from urlab.transforms import inverse, pose_error, xyzrpy_to_matrix
+
+    _T_tool0_ftip, T_fj, nominal, J = _bnc_frames()
+    T_junction_conn = inverse(T_fj) @ nominal            # a property of the PART
+
+    for xyz in ([0, 0, 0], [0.010, 0.0, 0.0], [0.010, -0.002, 0.009]):
+        for rpy in ([0, 0, 0], [0, -60, 0], [0, -90, 0], [8, -75, -5]):
+            G = xyzrpy_to_matrix(xyz, np.radians(rpy))
+            believed = grasp_pose(J, G) @ held_belief(nominal, T_fj, G)
+            lin, ang = pose_error(believed, J @ T_junction_conn)
+            # pose_error's arccos loses digits near identity, hence 1e-4 deg not an exact zero
             assert lin * 1000.0 < 1e-6 and np.degrees(ang) < 1e-4, (
-                f'pitch {pitch_deg} roll {roll_deg}: the belief is {lin * 1000:.6f} mm / '
+                f'xyz {xyz} rpy {rpy}: the belief is {lin * 1000:.6f} mm / '
                 f'{np.degrees(ang):.6f} deg from where the part actually is')
 
+    # the NOMINAL grip is the fixed point: fingertip_in_connector = inverse(junction_in_fingertip)
+    # is "grip exactly as frames.yaml describes", and must leave the belief untouched.
+    assert np.allclose(held_belief(nominal, T_fj, inverse(T_fj)), nominal)
 
-def test_the_bnc_config_asks_for_the_axial_grasp():
-    """The two knobs are a PAIR for this grasp: a large negative pitch alone leaves tool0 -Y
-    pointing at the connector -Z, and the roll alone does nothing useful at pitch 0."""
-    import numpy as np
+
+def test_fingertip_in_connector_translation_is_read_in_the_connector_frame():
+    """The xyz must move the bite point along the CONNECTOR's own axes -- +x along the barrel,
+    +z up off the ground -- and must not touch the approach direction. That independence is
+    what makes the ground-clearance fix (z) safe to tune without re-aiming the gripper."""
+    from urlab.skills.pick import grasp_pose
+    from urlab.transforms import xyzrpy_to_matrix
+
+    _t, _fj, _nom, J = _bnc_frames()
+    for rpy in ([0, 0, 0], [0, -60, 0], [0, -90, 0]):
+        R = np.radians(rpy)
+        base = grasp_pose(J, xyzrpy_to_matrix([0, 0, 0], R))
+        for axis, vec in ((0, [0.012, 0, 0]), (1, [0, 0.012, 0]), (2, [0, 0, 0.012])):
+            moved = grasp_pose(J, xyzrpy_to_matrix(vec, R))
+            step = moved[:3, 3] - base[:3, 3]
+            assert np.allclose(step, J[:3, :3] @ np.asarray(vec)), (
+                f'rpy {rpy}: an xyz step must land along the CONNECTOR frame axis {axis}')
+            assert np.allclose(moved[:3, :3], base[:3, :3]), (
+                'the translation must not rotate the approach')
+
+
+def test_held_junction_in_fingertip_is_just_the_inverse():
+    """Downstream users (the kinematic-assembly target) need the ACTUAL junction-in-fingertip.
+    The fingertip was commanded to connector @ G, so from the fingertip the connector is at
+    inverse(G) -- and expressing it that way is what stops the sign being re-derived, and
+    dropped, at each call site."""
+    from urlab.skills.pick import held_junction_in_fingertip
+    from urlab.transforms import inverse, xyzrpy_to_matrix
+
+    for xyz, rpy in (([0, 0, 0], [0, 0, 0]), ([0.01, 0, 0.009], [0, -60, 0]),
+                     ([0.01, -0.002, 0], [5, -90, 12])):
+        G = xyzrpy_to_matrix(xyz, np.radians(rpy))
+        assert np.allclose(held_junction_in_fingertip(G), inverse(G))
+
+
+def test_belief_offset_moves_the_belief_and_never_the_grasp():
+    """THE SEPARATION this knob exists for: `pickup.belief_offset_mm` is the MEASURED seating
+    residual, and it must move only what we think we are holding -- never where the fingers go.
+    Everything else in the pickup block is the command; this one alone is the belief."""
+    from urlab.skills.pick import belief_offset_m, grasp_pose, offset_belief
+    from urlab.transforms import xyzrpy_to_matrix
+
+    _t, _fj, nominal, J = _bnc_frames()
+    G = xyzrpy_to_matrix([0.010, 0.0, 0.0], [0.0, np.radians(-60.0), 0.0])
+
+    # the BELIEF moves, in the FINGERTIP frame, orientation untouched
+    shifted = offset_belief(nominal, np.array([0.0, 0.0, -0.0012]))
+    assert np.allclose(shifted[:3, :3], nominal[:3, :3]), 'a seating residual is a translation'
+    assert np.allclose(shifted[:3, 3] - nominal[:3, 3], [0.0, 0.0, -0.0012])
+
+    # the GRASP cannot even see it -- grasp_pose is not a function of the belief
+    assert np.allclose(grasp_pose(J, G), grasp_pose(J, G))
 
     from urlab import config as urconfig
-    from urlab.skills.pick import pickup_pitch_rad, pickup_roll_rad
 
     cfg = urconfig.load('bnc_assembly')
-    pitch = np.degrees(pickup_pitch_rad(cfg))
-    roll = np.degrees(pickup_roll_rad(cfg))
-    assert pitch <= -45.0, (
-        f'pickup.pitch_deg is {pitch:.1f}; the axial grasp needs a large NEGATIVE pitch (the '
+    v = belief_offset_m(cfg)
+    assert v.shape == (3,), 'belief_offset_mm is a 3-vector in the fingertip frame'
+
+
+def test_the_connector_axis_height_comes_from_the_greatest_diameter():
+    """The scan reports the junction ON the ground plane; the part is a solid resting on it, so
+    its axis is HALF ITS GREATEST DIAMETER up. Getting this wrong aims the pads at the floor,
+    which is exactly what drove the gripper into the bench."""
+    from urlab.robot.gripper_kinematics import width_from_counts
+    from urlab.skills.pick import connector_axis_height_m
+
+    from urlab import config as urconfig
+
+    cfg = urconfig.load('bnc_assembly')
+    assert bool(cfg.get_path('pickup.rests_on_ground_plane', True)), (
+        'the bnc connector is picked off the bench -- the correction must be on')
+    r = connector_axis_height_m(cfg)
+    assert r > 0.0, 'neither a measured diameter nor a counts band -- the pads would aim low'
+
+    # DERIVED FROM THE MEASURED BAND when no diameter is declared: the LOW count is the FAT end
+    # (more obstruction = less closed), so it is the one that gives the greatest diameter.
+    if not cfg.get_path('grasp_check.connector_diameter_mm'):
+        counts = cfg.get_path('grasp_check.connector_counts')
+        groove = cfg.get_path('gripper.groove_depth_mm')
+        kw = {} if groove is None else {'groove_depth_m': float(groove) / 1000.0}
+        assert abs(r - width_from_counts(min(counts), **kw) / 2.0) < 1e-12
+        assert 0.004 < r < 0.015, (
+            f'{r * 1000:.2f} mm is not a plausible BNC radius -- check the counts band')
+
+    # a measured diameter WINS over the derived one
+    cfg2 = urconfig.load('bnc_assembly')
+    cfg2.set_path('grasp_check.connector_diameter_mm', [9.0, 20.0])
+    assert abs(connector_axis_height_m(cfg2) - 0.010) < 1e-12, 'max(20 mm)/2'
+
+
+def test_the_bnc_config_asks_for_the_tilted_axial_grasp():
+    """The pickup block must describe the grasp with the ONE transform, and no leftovers of the
+    trio it replaced -- a stale pitch_deg would read as live tuning and change nothing."""
+    from urlab.skills.pick import fingertip_in_connector
+    from urlab.transforms import matrix_to_xyzrpy
+
+    from urlab import config as urconfig
+
+    cfg = urconfig.load('bnc_assembly')
+    pick = cfg.section('pickup')
+    for gone in ('pitch_deg', 'roll_deg', 'grip_offset', 'grip_offset_mm', 'height_from_model'):
+        assert gone not in pick, (
+            f'pickup.{gone} is superseded by fingertip_in_connector -- leaving it in the file '
+            'reads as a live knob that silently does nothing')
+    assert 'fingertip_in_connector' in pick, 'the grasp target must be declared'
+
+    xyz, rpy = matrix_to_xyzrpy(fingertip_in_connector(cfg))
+    deg = np.degrees(rpy)
+    assert abs(deg[0]) < 1e-9 and abs(deg[2]) < 1e-9, (
+        f'rpy {np.round(deg, 2).tolist()}: keep the approach a PURE PITCH about the connector '
+        'frame y -- that is what makes both tool0 alignments track one number')
+    assert -90.0 <= deg[1] <= -30.0, (
+        f'rpy y is {deg[1]:.1f}; the tilted/axial grasp wants a large negative pitch (the '
         'gripper pointing down the cable), not a near-square one')
-    assert abs(abs(roll) - 180.0) < 1e-9, (
-        f'pickup.roll_deg is {roll:.1f}; only 180 is the same physical bite (a parallel jaw is '
-        'symmetric under half a turn about its approach axis) -- any other roll changes which '
-        'diameter the pads take, which is only free at pitch +/-90')
+    # z stays 0: the ground-plane lift is a property of the PART and lives in the estimate
+    assert abs(xyz[2]) < 1e-9, (
+        'the barrel-radius lift belongs to rests_on_ground_plane, not here -- setting both '
+        'doubles the correction')

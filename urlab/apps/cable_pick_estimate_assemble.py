@@ -42,9 +42,8 @@ from ..skills import trajectory as traj
 from ..skills.manifold import (FORCE_COLS, ManifoldEstimator, POSE_COLS, TORQUE_COLS,
                                vec6_from_mats)
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
-                           GraspRecovery, belief_offset_m, grip_offset_matrix, offset_belief,
-                           pickup_pitch_rad, pickup_roll_rad, pitched_belief, retry_offset_x,
-                           verify_cable_held)
+                           GraspRecovery, belief_offset_m, fingertip_in_connector,
+                           held_belief, offset_belief, retry_offset_x, verify_cable_held)
 from ..transforms import from_cfg, inverse, matrix_to_xyzrpy, pose_error, translation_matrix
 from ._cable import build_scanner, make_confirm
 from ._common import experiment_dir, prompts_off, seg_time
@@ -140,17 +139,13 @@ class _AssemblyTask:
         self.T_ftip_conn = from_cfg(init) if init \
             else from_cfg(cfg.section('junction_in_fingertip'))
         # A pitched pickup rotates the part in the hand by the same angle (see skills/pick).
-        pitch, roll = pickup_pitch_rad(cfg), pickup_roll_rad(cfg)
-        grip_off = grip_offset_matrix(cfg)
+        grip_off = fingertip_in_connector(cfg)
         oxyz, orpy = matrix_to_xyzrpy(grip_off)
-        if pitch or roll or float(np.linalg.norm(oxyz)) + float(np.linalg.norm(orpy)) > 0.0:
-            self.T_ftip_conn = pitched_belief(
-                self.T_ftip_conn, from_cfg(cfg.section('junction_in_fingertip')),
-                pitch, grip_off, roll)
-            log.info('Pickup pitch %+.1f deg / roll %+.1f deg / grip offset xyz %s mm rpy %s deg '
-                     '(junction frame) -> in-hand belief moved to match.',
-                     np.degrees(pitch), np.degrees(roll),
-                     np.round(oxyz * 1000.0, 2).tolist(), np.round(np.degrees(orpy), 2).tolist())
+        self.T_ftip_conn = held_belief(
+            self.T_ftip_conn, from_cfg(cfg.section('junction_in_fingertip')), grip_off)
+        log.info('fingertip_in_connector xyz %s mm rpy %s deg (target fingertip wrt the '
+                 'connector) -> in-hand belief derived to match.',
+                 np.round(oxyz * 1000.0, 2).tolist(), np.round(np.degrees(orpy), 2).tolist())
         # The measured seating residual -- BELIEF ONLY, nothing moves at pickup.
         bel_off = belief_offset_m(cfg)
         if float(np.linalg.norm(bel_off)) > 0.0:

@@ -15,98 +15,91 @@ from ..transforms import fmt_delta, inverse, pose_error, translation_matrix
 
 log = urlog.get('pick')
 
-# ---------------------------------------------------------------------------- pickup pitch
-# The detected junction frame (skills/scan -> transforms.frame_from_axis) has
-#   x = the CABLE AXIS,  z = the ground normal (as close to `up` as orthogonality allows),
-#   y = z x x -- horizontal, perpendicular to the cable.
-# So a rotation about the junction frame's OWN y is exactly "pitch the gripper about the axis
-# orthogonal to the ground normal and to the connector axis", and because it acts through the
-# junction origin, the bite point on the cable does not move: only the approach tilts.
+# --------------------------------------------------------------- the fingertip grasp target
+# ONE TRANSFORM DECIDES THE WHOLE GRASP: `pickup.fingertip_in_connector` is the TARGET
+# FINGERTIP FRAME EXPRESSED IN THE DETECTED CONNECTOR FRAME, so the arm is commanded to
+#
+#     T_base_fingertip = detected_connector @ fingertip_in_connector
+#
+# and there is nothing else in the chain. It replaces the pitch_deg / roll_deg / grip_offset_mm
+# trio, which were three partial descriptions of that one pose composed in a fixed order -- a
+# shape that made the approach angle depend on cables.yaml's junction_in_fingertip yaw and made
+# "which rotation goes where" a standing question.
+#
+# THE FRAME IT IS WRITTEN IN is the detected connector (junction) frame, built by the scan
+# (skills/scan -> transforms.frame_from_axis). Every axis of it is physical:
+#
+#     ORIGIN  the detected junction -- where the cable meets the connector -- AT THE GROUND
+#             PLANE. The ground_plane scan puts it ON the plane, NOT on the barrel centreline,
+#             so a connector resting on the bench needs a POSITIVE z or the pads aim at the
+#             floor.
+#     +x      ALONG THE CONNECTOR AXIS, from the cable toward the connector's FREE END.
+#     +y      HORIZONTAL, ACROSS the cable (y = z cross x) -- also the direction the JAWS CLOSE.
+#     +z      THE GROUND NORMAL: UP.
 
 
-def pickup_pitch_rad(cfg):
-    """The configured pickup pitch in radians (`pickup.pitch_deg` in the app config).
-    0 = the fingers come straight down.
+def fingertip_in_connector(cfg):
+    """`pickup.fingertip_in_connector` as a 4x4 -- THE TARGET FINGERTIP FRAME WRT THE DETECTED
+    CONNECTOR.
 
-    A PER-APP setting, not a per-cable one: it lives beside the other pickup geometry
-    (pickup.height_from_model, pickup.compliance) rather than in cables.yaml, because it is a
-    choice about how this run approaches -- not a property of the cable. It must NOT go in
-    cables.yaml: apply_cable_profile runs after the config is read, so a cable entry would
-    silently overwrite whatever the app config set."""
-    return float(np.radians(float(cfg.get_path('pickup.pitch_deg', 0.0) or 0.0)))
+    The arm drives the fingertip to `detected_connector @ this`, so it alone says where the
+    hand ends up: the translation places the bite point, the rotation aims the approach. See
+    the frame definition above for what each axis means.
 
+    THE ROTATION, in the common cases (the fingertip's own z is the approach direction):
+        rpy_deg [0,   0, 0]   the fingers come straight DOWN onto the cable.
+        rpy_deg [0, -60, 0]   tilted 60 deg over toward the connector's free end.
+        rpy_deg [0, -90, 0]   AXIAL: tool0 +Z along the connector +X and tool0 -Y along its +Z,
+                              the flange on the connector axis 183 mm behind the bite. Both
+                              alignments are off parallel by exactly 90 - |pitch|, so the y of
+                              this rpy is the ONE number that sets the whole approach.
 
-def grip_offset_matrix(cfg):
-    """`pickup.grip_offset` as a 4x4 -- WHERE THE BITE POINT SITS RELATIVE TO THE DETECTION.
+    ACCEPTS MONITOR UNITS: xyz_mm / rpy_deg, paste-able off urlab.apps.monitor; xyz / rpy in
+    m / rad also work. Both units for one triple is an error, not a silent preference.
 
-    THE FRAME IS THE DETECTED JUNCTION FRAME, and every axis of it is physical:
-
-        +x   ALONG THE CONNECTOR AXIS, pointing from the cable toward the connector's free
-             END. Positive slides the bite further onto the connector body.
-        +y   HORIZONTAL AND ACROSS the cable (z cross x). This is also the axis the jaws
-             close along, so positive shifts the bite sideways off the barrel's centreline.
-        +z   THE GROUND NORMAL, i.e. UP. Positive lifts the bite point off the work surface.
-        origin  the detected junction -- where the cable meets the connector, AT THE GROUND
-             PLANE (the ground_plane scan puts it there; it does NOT sit at the barrel's
-             centreline, so a resting connector needs a positive z here or from
-             pickup.height_from_model, or the fingers aim at the floor).
-
-    The ROTATION is applied about the translated point, and it tilts the APPROACH -- roll
-    about +x, pitch about +y, yaw about +z, extrinsic XYZ like every other rpy in the repo.
-
-    IT DOES NOT SUPERSEDE pickup.pitch_deg / roll_deg -- all three COMPOSE, in the order
-    grip_offset, then pitch, then roll (grip_delta). What that means in practice:
-
-      * the TRANSLATION is fully independent. It only moves the pivot, so sliding the bite
-        point never changes the approach angle and changing the angle never changes where
-        along the connector the fingers close. This is the part that is safe to tune alone.
-      * the ROTATION is NOT independent -- it multiplies with the other two. An rpy y here IS
-        pitch_deg (they are the same axis, so they simply ADD: y +10 with pitch_deg -75 is
-        exactly pitch_deg -65). An rpy x or z here TILTS THE AXIS the pitch then turns about,
-        so the result is not any pitch_deg value at all.
-
-    So: use the translation for bite-point corrections, and keep the approach angle in
-    pitch_deg / roll_deg where it is one number people can sweep. Reach for the rotation here
-    only for a correction that genuinely is not a pitch or a roll -- and expect it to compose,
-    not replace.
-
-    ACCEPTS MONITOR UNITS: xyz_mm / rpy_deg, so a reading can be pasted straight off the
-    monitor; xyz / rpy (m/rad) also work. Setting both units for one triple is an error.
-
-    THE OLD SCALAR still works. `pickup.grip_offset_mm: 10` means exactly
-    `grip_offset: {xyz_mm: [10, 0, 0]}` and is read when the block is absent."""
+    THE LEGACY FALLBACK, used when the block is absent, reproduces exactly what the old chain
+    did for a config that never set an approach angle: slide `pickup.grip_offset_mm` along the
+    connector axis and take the orientation from cables.yaml's junction_in_fingertip. That is
+    what keeps the un-migrated pick apps bit-identical."""
     from ..config import _pose_si
     from ..transforms import from_cfg, translation_matrix
-    block = cfg.get_path('pickup.grip_offset')
+    block = cfg.get_path('pickup.fingertip_in_connector')
     if block is not None:
         return from_cfg(_pose_si(block))
-    return translation_matrix(
-        [float(cfg.get_path('pickup.grip_offset_mm', 0.0) or 0.0) / 1000.0, 0.0, 0.0])
+    d = float(cfg.get_path('pickup.grip_offset_mm', 0.0) or 0.0) / 1000.0
+    return (translation_matrix([d, 0.0, 0.0])
+            @ inverse(from_cfg(cfg.section('junction_in_fingertip'))))
 
 
-def pickup_roll_rad(cfg):
-    """The configured pickup ROLL in radians (`pickup.roll_deg`). 0 = the wrist sits where
-    junction_in_fingertip's yaw puts it.
+def connector_axis_height_m(cfg):
+    """How far the connector's AXIS sits above the ground plane when the part lies flat on it:
+    HALF ITS GREATEST DIAMETER.
 
-    A ROTATION ABOUT THE APPROACH AXIS -- the fingertip's own z, i.e. the direction the gripper
-    advances along -- applied AFTER the pitch, so it turns about the pitched approach and not
-    about a vertical the pitch has already left behind.
+    WHY IT BELONGS TO THE ESTIMATE, NOT THE GRASP. The ground_plane scan measures where the
+    cable meets the connector and reports it ON THE PLANE -- that is what the scan can see. The
+    connector is a solid resting on that plane, so its axis is one radius up, and it is the
+    LARGEST radius that decides it: a stepped barrel rests on its fattest section and every
+    other section is lifted clear along with it. Adding this to the DETECTED POSE fixes the
+    measurement once, for everything downstream; folding it into the grasp offset instead would
+    hide a property of the part inside a choice about the approach, and would silently be wrong
+    the moment the part is picked up off a fixture rather than off the bench.
 
-    WHY 180 IS THE VALUE THAT MATTERS. A parallel jaw is symmetric under half a turn about its
-    approach axis: the pads land on the same two sides of the barrel either way, so 180 is the
-    SAME PHYSICAL BITE with the wrist on the other side. That makes it the one roll that is
-    free at every pitch, and it is what flips tool0 -Y from pointing along the connector -Z to
-    along its +Z. (At pitch +/-90 the approach runs down the connector axis and a cylinder has
-    no preferred diameter, so there every roll is free -- but only 180 stays valid as the pitch
-    backs off.)
-
-    IT IS THE SAME FLIP AS junction_in_fingertip's YAW, and deliberately not done there.
-    cables.yaml's yaw is baked into the NOMINAL grip, so changing it silently invalidates the
-    in-hand belief in frames.yaml (bnc_connector_in_fingerpads) and estimation.
-    initial_connector_in_fingertip -- flip one and the belief lands 180 deg and ~91 mm out.
-    Rolling here instead keeps those describing the nominal grip and lets pitched_belief carry
-    the flip through automatically, exactly as it already does for the pitch."""
-    return float(np.radians(float(cfg.get_path('pickup.roll_deg', 0.0) or 0.0)))
+    WHERE THE DIAMETER COMES FROM, in order:
+      1. `grasp_check.connector_diameter_mm` -- measured with calipers. Preferred.
+      2. `grasp_check.connector_counts` -- the measured grasp-check band, converted through the
+         calibrated gripper model. The LOW count is the FAT end of the band (more obstruction =
+         less closed), so it is the one that gives the greatest diameter.
+    Returns 0.0 when neither is available, and the caller says so rather than guessing."""
+    d_conn = cfg.get_path('grasp_check.connector_diameter_mm')
+    if d_conn:
+        return max(float(v) for v in d_conn) / 1000.0 / 2.0
+    counts = cfg.get_path('grasp_check.connector_counts')
+    if counts:
+        from ..robot.gripper_kinematics import width_from_counts
+        groove = cfg.get_path('gripper.groove_depth_mm')
+        kw = {} if groove is None else {'groove_depth_m': float(groove) / 1000.0}
+        return width_from_counts(min(int(c) for c in counts), **kw) / 2.0
+    return 0.0
 
 
 def belief_offset_m(cfg):
@@ -115,13 +108,13 @@ def belief_offset_m(cfg):
     THE MEASURED RESIDUAL, not a derived one -- and the reason this exists at all is that the
     two things it separates are genuinely different:
 
-      * the GRASP COMMAND (pitch_deg, grip_offset_mm, junction_in_fingertip) says where the
-        fingers GO. Change one and the arm moves somewhere else.
+      * the GRASP COMMAND (grip_offset) says where the fingers GO. Change it and the arm moves
+        somewhere else.
       * the BELIEF says where the connector then IS relative to those fingers. Change this and
         NOTHING moves at pickup -- only the assembly's idea of what it is carrying.
 
-    pitched_belief() derives the belief from the command exactly, and its round trip is exact
-    -- but only under the assumption that the part seats in the jaws the same way at every
+    held_belief() derives the belief from the command exactly, and its round trip is exact --
+    but only under the assumption that the part seats in the jaws the same way at every
     approach angle. It does not. The cable lies on the ground and stays horizontal while the
     JAWS tilt, so tilted grooves capture the cylinder at a different depth than square ones.
     That difference is a contact fact: measurable, not derivable from any frame. This is where
@@ -142,84 +135,42 @@ def offset_belief(T_ftip_conn, offset_m):
     return translation_matrix(np.asarray(offset_m, dtype=float)) @ T_ftip_conn
 
 
-def pitch_delta(pitch_rad):
-    """The pitch as a transform in the JUNCTION frame: a rotation about its own y."""
-    from ..transforms import xyzrpy_to_matrix
-    return xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, float(pitch_rad), 0.0])
+def grasp_pose(T_base_connector, T_conn_ftip):
+    """The FINGERTIP grasp pose: the detected connector, with the grip offset applied.
+
+    The entire grasp command, in one product. Note what is NOT here: cables.yaml's
+    junction_in_fingertip no longer steers the arm at all. It survives as the descriptor of the
+    NOMINAL grip that held_belief reads the part's own geometry out of -- see there."""
+    return T_base_connector @ T_conn_ftip
 
 
-def _offset_matrix(offset):
-    """The grip offset as a 4x4, from either form: a full transform (grip_offset_matrix) or the
-    legacy scalar in METRES along the connector axis (pickup.grip_offset_mm / 1000)."""
-    from ..transforms import translation_matrix
-    if np.ndim(offset) == 2:
-        return np.asarray(offset, dtype=float)
-    return translation_matrix([float(offset), 0.0, 0.0])
+def held_junction_in_fingertip(T_conn_ftip):
+    """Where the detected connector frame sits in the FINGERTIP frame after the grasp.
+
+    Just the inverse: the fingertip was commanded to `connector @ T_conn_ftip`, so from the
+    fingertip's point of view the connector is back at `inverse(T_conn_ftip)`. Kept as a named
+    function because that inversion is the step everything downstream actually needs, and
+    writing it out at each call site is how the sign gets dropped."""
+    return inverse(T_conn_ftip)
 
 
-def roll_delta(roll_rad):
-    """The roll as a transform: a rotation about the APPROACH axis. Written in the frame the
-    pitch leaves behind, so composing it after pitch_delta turns about the pitched approach."""
-    from ..transforms import xyzrpy_to_matrix
-    return xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, 0.0, float(roll_rad)])
+def held_belief(T_ftip_conn_nominal, T_ftip_junction_nominal, T_conn_ftip):
+    """The in-hand connector belief this grasp produces.
 
+    TWO INPUTS DESCRIBE THE PART, ONE DESCRIBES THE GRASP, and separating them is the point:
 
-def grip_delta(pitch_rad, offset_m=0.0, roll_rad=0.0):
-    """The full bite-point transform in the JUNCTION frame:
+      * `T_ftip_conn_nominal` (estimation.initial_connector_in_fingertip / frames.yaml) and
+        `T_ftip_junction_nominal` (cables.yaml junction_in_fingertip) are both written for the
+        SAME nominal grip, so dividing one by the other cancels that grip out and leaves
+        T_junction_connector -- a property of the PART, true however it is held.
+      * `T_conn_ftip` is how this run actually took it.
 
-        grip_delta = grip_offset @ Ry(pitch) @ Rz(roll)
+    So the belief is the part's own geometry, seen from wherever the fingers ended up. Exact at
+    every offset, because it is the same product the grasp was commanded from -- there is no
+    second derivation to drift."""
+    return held_junction_in_fingertip(T_conn_ftip) @ inverse(
+        T_ftip_junction_nominal) @ T_ftip_conn_nominal
 
-    THE THREE COMPOSE -- none of them replaces another. `offset_m` is either the 6DOF
-    grip_offset pose or the legacy scalar along the connector axis.
-
-    Order matters and all three positions are deliberate:
-
-      * grip_offset FIRST, so its TRANSLATION becomes the pivot for what follows. That is what
-        keeps the bite point and the approach angle independent of each other. Its ROTATION,
-        if any, is not independent -- it premultiplies, so an rpy y adds to `pitch_rad` and an
-        rpy x/z tilts the axis the pitch then turns about.
-      * roll LAST, so it turns about the approach direction the pitch actually produced. Roll
-        first and it would turn about the junction's own z, which after a large pitch is
-        nowhere near the direction the gripper advances along."""
-    return _offset_matrix(offset_m) @ pitch_delta(pitch_rad) @ roll_delta(roll_rad)
-
-
-def pitched_grasp(T_base_junction, T_ftip_junction, pitch_rad, offset_m=0.0, roll_rad=0.0):
-    """The FINGERTIP grasp pose for a pitched / offset / rolled pickup.
-
-    Nominally the fingertip goes to `detected_junction @ inverse(junction_in_fingertip)`. All
-    three knobs are inserted in the JUNCTION frame: `offset_m` slides the bite point along the
-    connector axis, the pitch tilts the approach about that point, and the roll spins the wrist
-    about the approach."""
-    return T_base_junction @ grip_delta(pitch_rad, offset_m, roll_rad) @ inverse(T_ftip_junction)
-
-
-def held_junction_in_fingertip(T_ftip_junction, pitch_rad, offset_m=0.0, roll_rad=0.0):
-    """Where the junction ACTUALLY sits in the fingertip frame after a pitched / offset /
-    rolled pickup.
-
-    The nominal `junction_in_fingertip` describes a square grip AT the junction. Gripping
-    `offset_m` further along the axis leaves the junction that much further back in the hand,
-    pitching by phi leaves the part rotated by -phi, and rolling by psi leaves it rotated by
-    -psi about the approach -- which is what every downstream user of the grasp geometry has to
-    be told about.
-
-    LITERALLY INVERTS what pitched_grasp inserted -- it calls the same grip_delta rather than
-    re-deriving the inverse by hand, so the two cannot drift when a knob is added (they did
-    have to be kept in step by hand, and that is exactly the bug this shape removes)."""
-    return T_ftip_junction @ inverse(grip_delta(pitch_rad, offset_m, roll_rad))
-
-
-def pitched_belief(T_ftip_conn, T_ftip_junction, pitch_rad, offset_m=0.0, roll_rad=0.0):
-    """The in-hand connector belief a pitched / offset / rolled pickup actually produces.
-
-    The connector is rigid with the junction, so T_junction_connector is a property of the PART
-    and does not change; only the fingertip-to-junction relation does. Substituting
-    T_ftip_conn = T_ftip_junction @ T_junction_conn and replacing the latter's left factor with
-    held_junction_in_fingertip gives a conjugation of the nominal belief -- a rotation of -phi
-    about the junction's y, through the junction origin, expressed in the fingertip frame."""
-    return (held_junction_in_fingertip(T_ftip_junction, pitch_rad, offset_m, roll_rad)
-            @ inverse(T_ftip_junction) @ T_ftip_conn)
 
 
 class GraspGeometry:

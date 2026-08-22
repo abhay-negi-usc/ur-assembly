@@ -14,12 +14,12 @@ from ..robot import AdmittanceController, ForceGuard
 from ..skills import insert as ins
 from ..skills import reset
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
-                           GraspRecovery, grip_offset_matrix, held_junction_in_fingertip,
-                           log_grasp_delta, pickup_pitch_rad, pickup_roll_rad, pitched_grasp,
+                           GraspRecovery, connector_axis_height_m, fingertip_in_connector,
+                           grasp_pose, held_junction_in_fingertip, log_grasp_delta,
                            retry_offset_x)
 import numpy as np
 
-from ..transforms import from_cfg, inverse, matrix_to_xyzrpy, translation_matrix
+from ..transforms import inverse, matrix_to_xyzrpy, translation_matrix
 from ._cable import build_scanner, make_confirm
 from ._common import guarded as _guarded   # re-exported: sibling apps import it from here
 from ._runner import run_app
@@ -32,9 +32,6 @@ def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder, 
     grasp along the JUNCTION's own x-axis -- the outer-retry perturbation (retry_offset_x) that
     keeps a deterministic scan->grasp->fail loop from retrying the identical pose."""
     scanner.estimator.reset()
-    # junction_in_fingertip (from cables.yaml): where the junction sits in the FINGERTIP frame at
-    # the grasp -- so the fingertip goes to detected_junction @ its inverse before closing.
-    T_ftip_junction = from_cfg(cfg.section('junction_in_fingertip'))
     if not robot.gripper.open('open'):
         return 'abort'
     T_conn = scanner.scan(confirm=confirm)
@@ -43,70 +40,46 @@ def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder, 
     if offset_x_m:
         log.info('Retry perturbation: %+.1f mm along the junction x-axis.', offset_x_m * 1000)
         T_conn = T_conn @ translation_matrix([offset_x_m, 0.0, 0.0])
-    # PICKUP PITCH: tilt the approach about the junction's own y -- horizontal, orthogonal
-    # to the ground normal and to the cable axis -- through the bite point, so the fingers
-    # meet the same spot on the cable at an angle. 0 = straight down.
-    pitch = pickup_pitch_rad(cfg)
-    grip_off = grip_offset_matrix(cfg)
-    roll = pickup_roll_rad(cfg)
-    geom.T_base_grasp = pitched_grasp(T_conn, T_ftip_junction, pitch, grip_off, roll)
-    if roll:
-        log.info('Pickup ROLL %+.1f deg about the approach axis -- the SAME bite with the wrist '
-                 'turned; 180 flips tool0 -Y from the connector -Z to its +Z. The in-hand belief '
-                 'carries it automatically.', np.degrees(roll))
-    if pitch:
-        log.info('Pickup PITCH %+.1f deg about the axis perpendicular to the cable and to the '
-                 'ground normal. The in-hand belief is rotated to match; check the leading '
-                 'finger clears the ground plane before running this on hardware.',
-                 np.degrees(pitch))
-    _oxyz, _orpy = matrix_to_xyzrpy(grip_off)
-    if float(np.linalg.norm(_oxyz)) + float(np.linalg.norm(_orpy)) > 0.0:
-        # THE JUNCTION FRAME, spelled out because every sign here is a physical direction:
-        # +x along the connector axis toward its free end, +y across the cable (the jaw-closing
-        # direction), +z UP off the ground plane.
-        log.info('Grip OFFSET (junction frame: +x along the connector, +y across the cable, '
-                 '+z up off the ground): xyz %s mm, rpy %s deg. The in-hand belief carries it; '
-                 're-check the grasp_check band -- the barrel diameter at the new bite point is '
-                 'what the counts read.',
-                 np.round(_oxyz * 1000.0, 2).tolist(), np.round(np.degrees(_orpy), 2).tolist())
-    # WHICH WAY THE FINGERTIP WILL FACE, reported before the arm moves. The grasp pose is
-    # T_conn @ inverse(junction_in_fingertip), so the fingertip's +X ends up along the DETECTED
-    # heading rotated by that block's yaw -- and nothing downstream can tell you which way it came
-    # out. The knob is cables.yaml <cable>.junction_in_fingertip's yaw: 0 lays the fingertip +X
-    # along the detected heading, 180 opposes it. Everything that cares reads off this: the
-    # cable-grab reseat shifts along the grasp +x, and the assembly's in-hand belief
-    # (estimation.initial_connector_frame) must describe the connector in the SAME orientation.
-    _d = float(np.dot(geom.T_base_grasp[:3, 0], T_conn[:3, 0]))
-    log.info('Grasp orientation: fingertip +X is %s the detected connector heading (dot %+.2f). '
-             'If that is the wrong way round, flip cables.yaml junction_in_fingertip.rpy_deg yaw '
-             'by 180 -- and rotate the held-connector frames in frames.yaml with it, or the '
-             'in-hand belief ends up 180 deg and ~91 mm out.',
-             'ALONG' if _d > 0 else 'OPPOSED to', _d)
 
-    # PICKUP HEIGHT from the gripper model (pickup.height_from_model). ASSUMES the connector
-    # rests ON THE GROUND PLANE -- the ground-plane scan puts the junction estimate AT the plane,
-    # so the grasp target rises by d_max/2 (the centerline of the connector's thickest section)
-    # PLUS the fingertip ADVANCE between the separation fingertip_grasp was calibrated at and the
-    # expected grasp stall separation: the physical pad travels ~12.8 mm along the approach axis
-    # over the stroke (calibrated circle model), so the STATIC tool0->fingertip transform is
-    # exact at ONE separation only. COMPRESSION: all separations are zero-compression values; in
-    # practice the pads squeeze (desired -- grip pressure), which the calibrated groove depth
-    # already absorbs on average, and near closure the advance is insensitive to it (<0.1 mm) --
-    # pad_compression_mm is exposed for completeness.
-    hm = cfg.get_path('pickup.height_from_model', {}) or {}
-    d_conn = cfg.get_path('grasp_check.connector_diameter_mm')
-    if bool(hm.get('enabled', False)) and d_conn:
-        from ..robot.gripper_kinematics import pad_forward_from_gap
-        d_max = max(float(v) for v in d_conn) / 1000.0
-        s_ref = float(hm.get('fingertip_ref_separation_mm', 0.0)) / 1000.0
-        s_grasp = max(0.0, d_max - 2.0 * robot.gripper.groove_depth_m
-                      - float(hm.get('pad_compression_mm', 0.0)) / 1000.0)
-        advance = pad_forward_from_gap(s_grasp) - pad_forward_from_gap(s_ref)
-        dz = d_max / 2.0 + advance
-        log.info('Pickup height from the gripper model: %+.2f mm '
-                 '(centerline %+.2f, fingertip advance %+.2f at %.1f mm separation).',
-                 dz * 1000, d_max / 2.0 * 1000, advance * 1000, s_grasp * 1000)
-        geom.T_base_grasp = translation_matrix([0.0, 0.0, dz]) @ geom.T_base_grasp
+    # ---- CORRECT THE ESTIMATE FIRST: the part is a SOLID RESTING ON THE PLANE ----------------
+    # The ground_plane scan reports the junction ON the ground plane -- that is what it can see.
+    # The connector is lying flat on that plane, so its AXIS is one radius up, and it is the
+    # GREATEST radius that decides it: a stepped barrel rests on its fattest section and carries
+    # every thinner section clear with it. Fixing it HERE fixes the measurement once, for the
+    # grasp and for everything downstream; folding it into the grasp offset would bury a
+    # property of the PART inside a choice about the APPROACH.
+    if bool(cfg.get_path('pickup.rests_on_ground_plane', True)):
+        r_max = connector_axis_height_m(cfg)
+        if r_max > 0.0:
+            log.info('Connector rests on the ground plane: raising the detected pose %+.2f mm '
+                     '(half its greatest diameter, %.2f mm) so the estimate is on the AXIS '
+                     'rather than on the plane.', r_max * 1000.0, r_max * 2000.0)
+            T_conn = translation_matrix([0.0, 0.0, r_max]) @ T_conn
+        else:
+            log.warning('pickup.rests_on_ground_plane is on but neither '
+                        'grasp_check.connector_diameter_mm nor grasp_check.connector_counts is '
+                        'set, so the greatest diameter is unknown -- the detected pose stays ON '
+                        'the plane and the pads will aim low. Measure the barrel.')
+
+    # ---- THE WHOLE GRASP COMMAND: the fingertip goes to detected_connector @ this -----------
+    ftip_in_conn = fingertip_in_connector(cfg)
+    geom.T_base_grasp = grasp_pose(T_conn, ftip_in_conn)
+    _oxyz, _orpy = matrix_to_xyzrpy(ftip_in_conn)
+    # THE CONNECTOR FRAME, spelled out because every sign here is a physical direction:
+    # +x along the connector axis toward its free end, +y across the cable (the jaw-closing
+    # direction), +z UP off the ground plane; the rpy aims the approach.
+    log.info('fingertip_in_connector -- the target fingertip wrt the detected connector '
+             '(+x along the connector, +y across the cable, +z up off the ground): '
+             'xyz %s mm, rpy %s deg. The in-hand belief carries it; re-check the grasp_check '
+             'band -- the barrel diameter at the new bite point is what the counts read.',
+             np.round(_oxyz * 1000.0, 2).tolist(), np.round(np.degrees(_orpy), 2).tolist())
+    # WHICH WAY THE FINGERTIP WILL FACE, reported before the arm moves -- nothing downstream
+    # can tell you which way it came out. The knob is now fingertip_in_connector's own rpy yaw
+    # (180 opposes the detected heading); cables.yaml's junction_in_fingertip no longer steers
+    # the arm, it only describes the NOMINAL grip the in-hand belief is written against.
+    _d = float(np.dot(geom.T_base_grasp[:3, 0], T_conn[:3, 0]))
+    log.info('Grasp orientation: fingertip +X is %s the detected connector heading (dot %+.2f).',
+             'ALONG' if _d > 0 else 'OPPOSED to', _d)
 
     # Grasp directly from wherever the scan ended (already close to the cable) -- no detour home first.
     # Record wrist images at grasp_check.capture_rate_hz (default 1 Hz) over the descent + close +
@@ -167,9 +140,7 @@ def build_and_run(cfg, robot, camera, args):
 
     # 2. Reduce the target to a fingertip pose and derive the stand-off.
     T_target = ins.fingertip_target(
-        ic, inverse(held_junction_in_fingertip(from_cfg(cfg.section('junction_in_fingertip')),
-                                               pickup_pitch_rad(cfg), grip_offset_matrix(cfg),
-                                               pickup_roll_rad(cfg))),
+        ic, inverse(held_junction_in_fingertip(fingertip_in_connector(cfg))),
         robot.T_tool0_fingertip)
     T_standoff = ins.standoff_of(ic, T_target)
     log.info('Kinematic assembly: fingertip target %s, stand-off %s.',

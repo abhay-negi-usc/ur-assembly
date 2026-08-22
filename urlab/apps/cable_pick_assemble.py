@@ -27,16 +27,34 @@ from ._runner import run_app
 log = urlog.get('cable-assemble')
 
 
-def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder, offset_x_m=0.0):
-    """The cable pick, returning 'ok' | 'missed' | 'empty' | 'abort'. `offset_x_m` shifts the
-    grasp along the JUNCTION's own x-axis -- the outer-retry perturbation (retry_offset_x) that
-    keeps a deterministic scan->grasp->fail loop from retrying the identical pose."""
-    scanner.estimator.reset()
+def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder,
+          offset_x_m=0.0, T_conn=None):
+    """The cable pick, returning 'ok' | 'missed' | 'empty' | 'unreachable' | 'abort'.
+
+    `offset_x_m` shifts the grasp along the JUNCTION's own x-axis -- the outer-retry
+    perturbation (retry_offset_x) that keeps a deterministic scan->grasp->fail loop from
+    retrying the identical pose.
+
+    `T_conn` REUSES A DETECTION instead of scanning for a new one. The scan is a multi-view
+    convergence with camera moves and an operator prompt for which cable to take; re-running it
+    when NOTHING HAS MOVED costs all of that and can only return the same answer -- and it asks
+    the operator to identify the same cable a second time, which reads as though the first
+    answer was lost. A retry that only changes how the arm APPROACHES (see the reorient
+    recovery) is exactly that case. Pass the RAW detection: the resting-height correction below
+    is applied here, so handing back an already-corrected pose would raise it twice."""
+    if T_conn is None:
+        scanner.estimator.reset()
     if not robot.gripper.open('open'):
         return 'abort'
-    T_conn = scanner.scan(confirm=confirm)
+    if T_conn is None:
+        T_conn = scanner.scan(confirm=confirm)
+    else:
+        log.info('Reusing the previous detection -- nothing has moved, so neither the image nor '
+                 'the cable the operator picked has changed.')
     if T_conn is None:
         return 'abort'
+    # KEPT FOR REUSE, raw: the caller may want to retry this same cable a different way.
+    geom.T_base_detection = np.array(T_conn, dtype=float)
     if offset_x_m:
         log.info('Retry perturbation: %+.1f mm along the junction x-axis.', offset_x_m * 1000)
         T_conn = T_conn @ translation_matrix([offset_x_m, 0.0, 0.0])
@@ -94,7 +112,10 @@ def _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder, 
             ('report pre-grasp delta', lambda: log_grasp_delta(robot, geom.T_base_grasp, 'pre-grasp')),
             ('move to grasp', lambda: grasp.descend(robot, geom, 'grasp')),
         ]):
-            return 'abort'
+            # 'unreachable' is ACTIONABLE where 'abort' is not: it means the geometry refused
+            # this approach, which a caller can answer by changing the approach. Anything else
+            # (comms, an operator abort) stays 'abort'.
+            return getattr(grasp, 'last_refusal', None) or 'abort'
         # Close + grasp-check + recovery (blind retry, then mode-directed reseat nudges) -- see
         # GraspRecovery -- so a cable on the fingertip flats/tips is reseated, not failed.
         return recovery.grasp_with_recovery(robot, geom, check, camera=scanner.camera)

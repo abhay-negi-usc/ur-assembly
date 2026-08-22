@@ -6111,7 +6111,11 @@ def test_visual_target_reanchors_every_frame_the_run_plans_from():
         'behind a connector and a gripper, so this is the only moment the markers are visible')
 
     # THE SANITY GATE. The fixture may move -- that is the point -- but not by a metre.
-    loc = src[i_call - 6000:i_pick]
+    # SLICED ON THE FUNCTION, not on a byte count. This used to take a fixed 6000-character
+    # window back from the call site, which silently stopped covering locate_target_visually
+    # the moment an unrelated helper was added above it -- the test then failed for a reason
+    # that had nothing to do with what it checks.
+    loc = src[src.index('def locate_target_visually('):i_call]
     assert 'max_shift_mm' in loc and 'Refusing to plan an insertion at it' in loc, (
         'a visual pose wildly far from the recorded mate is a stale rig or a marker on the wrong '
         'fixture; driving an insertion trajectory at it is the expensive way to find out')

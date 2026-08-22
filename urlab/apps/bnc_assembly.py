@@ -102,8 +102,9 @@ from ..skills import trajectory as traj
 from ..skills import wiggle as wigmod
 from ..skills.manifold import mats_from_vec6, vec6_from_mats
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
-                           GraspRecovery, belief_offset_m, fingertip_in_connector,
-                           held_belief, offset_belief, retry_offset_x, verify_cable_held)
+                           GraspRecovery, belief_offset_m, connector_axis_height_m,
+                           fingertip_in_connector, held_belief, offset_belief, retry_offset_x,
+                           verify_cable_held)
 from ..skills.solution_check import CheckedManifoldEstimator
 from ..transforms import (from_cfg, inverse, matrix_to_xyzrpy, pose_error, rotate_about_axis,
                           slerp_matrix, translation_matrix, xyzrpy_to_matrix)
@@ -2709,6 +2710,134 @@ def build_and_run(cfg, robot, camera, args):
         log.info('VISUAL TARGET: the run is now anchored on the MEASURED socket pose.')
         return True
 
+    def reorient_place_pose():
+        """Where the cable goes when the coaxial grasp cannot be reached, in base_link.
+
+        DEFINED RELATIVE TO THE TARGET CONNECTOR, because the whole point is to leave the cable
+        ALIGNED WITH THE SOCKET: yaw 0 wrt the target puts the connector axis on the same
+        compass heading the socket has, which is the one heading a coaxial approach is known to
+        reach. Setting it down on an arbitrary heading would fail the same way again.
+
+        ROLL AND PITCH ARE NOT FREE -- the part is going onto a flat bench, so its axis ends up
+        horizontal and its z up, whatever attitude the socket itself has. Only the HEADING
+        carries over. (The recorded socket is level to within half a degree, so here the two
+        readings agree to well under a millimetre; the code does not lean on that.)"""
+        r = a.get('reorient_recovery', {}) or {}
+        off = r.get('place_offsets', {}) or {}
+        z_mm = float(off.get('z_mm', -400.0))
+        d = np.array([float(off.get('x_mm', 0.0)), float(off.get('y_mm', 0.0)), z_mm],
+                     dtype=float) / 1000.0
+        p = T_base_tconn[:3, 3] + T_base_tconn[:3, :3] @ d      # offsets in the TARGET frame
+        yaw = (float(np.arctan2(T_base_tconn[1, 0], T_base_tconn[0, 0]))
+               + float(np.radians(float(off.get('yaw_deg', 0.0)))))
+        T = xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, 0.0, yaw])   # flat: roll = pitch = 0
+        # THE GROUND DECIDES z, by default. A resting connector's AXIS sits one barrel-radius
+        # up -- a property of the part, not a number to type twice -- and "place it on the
+        # ground plane" is the actual requirement. The configured z_mm is still reported,
+        # because a large gap between the two means one of the two is wrong.
+        axis_z = ground_z + connector_axis_height_m(cfg)
+        if bool(r.get('snap_to_ground', True)):
+            log.info('REORIENT PLACE: z_mm %+.0f puts the connector axis %+.0f mm above the '
+                     'bench; snapping to the ground plane at %+.0f mm instead (one barrel '
+                     'radius, %.1f mm, up).', z_mm, (p[2] - ground_z) * 1000.0,
+                     (axis_z - ground_z) * 1000.0, connector_axis_height_m(cfg) * 1000.0)
+            p[2] = axis_z
+        T[:3, 3] = p
+        return T
+
+    def reorient_recovery():
+        """PICK IT SQUARE, SET IT DOWN ALIGNED, TRY AGAIN.
+
+        THE FAILURE THIS ANSWERS. The coaxial grasp reaches the connector from along its own
+        axis, so whether the arm can get there at all depends on which way the cable happens to
+        be lying. A cable pointing the wrong way has NO collision-free path to that grasp, and
+        no number of retries produces one -- the geometry refused, not the attempt.
+
+        A SQUARE grasp (pitch 0, straight down) has no such dependence: the approach is
+        vertical whatever the heading. That is exactly why it is the fallback. So this picks
+        the cable the easy way, sets it down pointing where the socket points, and hands back
+        to the scan -- which now sees a cable the coaxial grasp CAN reach.
+
+        ONCE PER PICK. If the coaxial grasp is still unreachable after the cable has been
+        squared up, its heading was not the problem and repeating this would only shuffle the
+        part around the bench."""
+        r = a.get('reorient_recovery', {}) or {}
+        if not bool(r.get('enabled', True)):
+            log.error('The coaxial grasp is unreachable and reorient_recovery is off.')
+            return False
+        if not phase_gate('REORIENT THE CABLE',
+                          'The coaxial grasp has no collision-free path to this cable. Next: '
+                          'pick it SQUARE (pitch 0), set it down aligned with the socket, and '
+                          're-scan.'):
+            return False
+
+        # THE SQUARE GRASP, WHOLE POSE, for this manoeuvre only -- restored in the finally,
+        # so a recovery that fails half way cannot leave the run picking with the wrong
+        # geometry. It overrides xyz as well as rpy: the bite point that suits a coaxial
+        # approach is not the one that suits a vertical one, and the same override is what the
+        # in-hand belief for the PLACE is derived from below, so the two cannot disagree.
+        keep = cfg.get_path('pickup.fingertip_in_connector')
+        square = dict(r.get('fingertip_in_connector')
+                      or {'xyz_mm': [5.0, 0.0, 0.0], 'rpy_deg': [0.0, 0.0, 0.0]})
+        try:
+            cfg.set_path('pickup.fingertip_in_connector', square)
+            log.info('REORIENT: picking SQUARE (xyz %s mm, rpy %s deg) instead of the coaxial '
+                     '(xyz %s, rpy %s).', square.get('xyz_mm'), square.get('rpy_deg'),
+                     (keep or {}).get('xyz_mm'), (keep or {}).get('rpy_deg'))
+            # NO NEW SCAN AND NO SECOND PROMPT. The cable has not moved since the coaxial
+            # attempt was refused -- only the way the arm means to approach it has changed --
+            # so the detection and the cable the operator already identified both still hold.
+            phase('scan')
+            if _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder,
+                     T_conn=getattr(geom, 'T_base_detection', None)) != 'ok':
+                log.error('REORIENT: the square pick failed too -- the cable heading is not '
+                          'what is wrong here. Stopping.')
+                return False
+            if not grasp.lift(robot, geom, 'reorient lift',
+                              position_guard=lambda mv: _guarded(robot, guard_shared, mv)):
+                return False
+
+            # WHERE IT GOES. The belief for the SQUARE grasp (cfg is still overridden here)
+            # turns "put the CONNECTOR there" into a fingertip pose.
+            T_place = reorient_place_pose()
+            # THE BELIEF FOR THE SQUARE GRASP -- cfg is still overridden here, so this is
+            # derived from the very transform the pick was commanded with. That is the whole
+            # reason the override wraps the place as well as the pick: a place computed from
+            # the COAXIAL belief would set the part down rotated by the difference.
+            T_ftip_sq = held_belief(T_ftip_conn_nominal,
+                                    from_cfg(cfg.section('junction_in_fingertip')),
+                                    fingertip_in_connector(cfg))
+            T_ftip_target = T_place @ inverse(T_ftip_sq)
+            log.info('REORIENT PLACE: connector to xyz %s mm on heading %+.1f deg (the socket '
+                     'heading %+.1f deg + yaw offset).',
+                     np.round(T_place[:3, 3] * 1000.0, 1).tolist(),
+                     np.degrees(np.arctan2(T_place[1, 0], T_place[0, 0])),
+                     np.degrees(np.arctan2(T_base_tconn[1, 0], T_base_tconn[0, 0])))
+
+            above = translation_matrix(
+                [0.0, 0.0, float(r.get('approach_mm', 120.0)) / 1000.0])
+            for tag, ph, T in (('above', 'reconfigure', above @ T_ftip_target),
+                               ('down', 'lift', T_ftip_target)):
+                phase(ph)
+                if not _guarded(robot, guard_shared,
+                                lambda _T=T, _t=tag: robot.move_fingertip(
+                                    _T, 'reorient place (%s)' % _t)):
+                    return False
+            if not robot.gripper.open('release (cable reoriented)'):
+                return False
+            phase('retract')
+            if not _guarded(robot, guard_shared,
+                            lambda: robot.move_fingertip(above @ T_ftip_target,
+                                                         'reorient place (clear)')):
+                return False
+            if hasattr(scanner, 'reselect'):
+                scanner.reselect()      # it is not where it was scanned from any more
+            log.info('REORIENT COMPLETE -- the cable now points where the socket does. '
+                     'Re-scanning and retrying the coaxial grasp.')
+            return True
+        finally:
+            cfg.set_path('pickup.fingertip_in_connector', keep)
+
     # ---- RESET + PICK + slip-checked LIFT (identical to cable_pick_estimate_assemble) ----
     phase('reset')
     if not reset.reset_robot(robot, cfg, 'start reset'):
@@ -2771,7 +2900,9 @@ def build_and_run(cfg, robot, camera, args):
             if not robot.arm.move_j(q_pick, label='pick pose'):
                 log.error('Could not reach pick_joints_deg.')
                 return False
+
         attempt = 0
+        reoriented = False
         runner = StepRunner(log, confirm=confirm is not None)
         while True:
             phase('scan')
@@ -2793,6 +2924,18 @@ def build_and_run(cfg, robot, camera, args):
                     return False
             if result == 'abort':
                 return False
+            # NO COLLISION-FREE PATH TO THE COAXIAL GRASP. Retrying the identical approach
+            # cannot help -- the geometry, not the attempt, is what refused. Square the cable
+            # up once and let the scan try again on a heading that works.
+            if result == 'unreachable':
+                if reoriented:
+                    log.error('The coaxial grasp is still unreachable after the cable was '
+                              'squared up -- its heading was not the problem. Aborting.')
+                    return False
+                reoriented = True
+                if not reorient_recovery():
+                    return False
+                continue
             if attempt >= check.max_retries:
                 log.error('Grasp failed on all %d attempts; aborting.', check.max_retries + 1)
                 return False

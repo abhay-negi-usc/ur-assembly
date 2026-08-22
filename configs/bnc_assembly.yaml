@@ -497,7 +497,7 @@ reset:
   # HOME = the MARKER VIEW pose: the reset drives here at the start and end of every run,
   # the visual localisation sweeps the markers from here, and the end-of-run image is
   # captured from here.  (The pick itself runs from pick_joints_deg below.)
-  home_joints_deg: [-85, -165, -105, 90, 80, 180]
+  home_joints_deg: [-85, -145, -105, -205, -85, 180]
   # (the home move is a guarded position moveJ, paced by the speed caps above)
   max_force_n: 50.0
   compliance:
@@ -513,7 +513,7 @@ reset:
 # THE PICK POSE, driven to after the start reset (and after the marker sweep, when
 # target_source is visual).  The scan, the grasp geometry and every retry offset are written
 # from HERE -- home above is only the marker view pose.  null = pick from home.
-pick_joints_deg: [-80, -155, -120, 5, 90, 190]
+pick_joints_deg: [-85, -145, -105, -205, -85, 180]
 
 # ===================================================================================================
 # ASSEMBLY -- the estimate-while-assemble loop

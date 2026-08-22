@@ -2659,6 +2659,12 @@ def build_and_run(cfg, robot, camera, args):
     phase('reset')
     if not reset.reset_robot(robot, cfg, 'start reset'):
         return False
+    # THE GROUND-COLLISION MODEL IS CHECKED ONCE, HERE, against the controller's own forward
+    # kinematics -- it is built from a DH chain written in this repo, and a typo there would
+    # make every clearance it reports confidently wrong. On a dry run it reports UNVERIFIED
+    # rather than pretending to have checked. Never fatal: an unchecked path is worse than a
+    # guarded one, but better than refusing to run at all.
+    grasp.verify_collision_model(robot)
     # GRIPPER WARM-UP instead of a plain open: full stroke, two partial cycles, end open.
     if not robot.gripper.warmup():
         return False

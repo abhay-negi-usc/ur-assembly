@@ -1273,3 +1273,264 @@ def test_the_pickup_stands_off_straight_up_off_the_ground_plane():
         pass
     else:
         raise AssertionError('a bad approach_frame must refuse, not silently pick one')
+
+
+# ---------------------------------------------------------------------------------------------
+# GROUND-COLLISION MODEL. Built in code from the UR10e DH parameters because there is no URDF in
+# this workspace, which means the chain itself needs pinning -- on hardware the model checks
+# itself against the controller, but nothing here can.
+# ---------------------------------------------------------------------------------------------
+def _collision_model(**over):
+    import pytest
+    pytest.importorskip('pybullet')
+    from urlab.robot.collision import GroundCollisionModel
+    cfg = {'margin_mm': 0.0, 'fingertip_margin_mm': 5.0}
+    cfg.update(over)
+    return GroundCollisionModel(cfg, ground_z_m=over.pop('ground', -0.760))
+
+
+def test_the_ur10e_chain_has_configuration_independent_link_lengths():
+    """THE ONLY OFFLINE CHECK ON THE DH TABLE, so it has to be the strong one.
+
+    The distance between consecutive joint origins is a property of the CHAIN -- it cannot
+    depend on the joint angles. A transposed `a`/`d`, a wrong alpha sign, or a mis-ordered row
+    breaks that immediately, while still producing plausible-looking poses. (On hardware
+    verify_against_controller compares against the real FK; offline this is what we have.)"""
+    from urlab.robot.collision import UR10E_LINK_LENGTHS, fk_links
+
+    rng = np.random.default_rng(0)
+    for _ in range(25):
+        f = fk_links(rng.uniform(-np.pi, np.pi, 6))
+        lens = [float(np.linalg.norm(f[i + 1][:3, 3] - f[i][:3, 3])) for i in range(6)]
+        assert np.allclose(lens, UR10E_LINK_LENGTHS, atol=1e-12), (
+            f'link lengths {np.round(lens, 5).tolist()} != {list(UR10E_LINK_LENGTHS)} -- the DH '
+            'table does not describe a rigid chain')
+    # the published UR10e figures, spelled out so a silent edit to the table is visible here
+    assert np.allclose(UR10E_LINK_LENGTHS,
+                       [0.1807, 0.6127, 0.57155, 0.17415, 0.11985, 0.11655])
+
+
+def test_a_configuration_well_clear_of_the_bench_reports_clear():
+    """REGRESSION. Every arm capsule was built at a fixed 1 m length regardless of which link it
+    stood for, so the 120 mm wrist_2 capsule hung 44 cm past both of its joint origins and
+    reported the floor as a collision from a quarter of a metre up. The joint origins here are
+    all >= 180 mm above the bench, so nothing may report a violation."""
+    from urlab.robot.collision import fk_links
+
+    m = _collision_model()
+    for deg in ([-55, -180, -90, -90, 0, 180], [-85, -145, -105, -205, -85, 180],
+                [-80, -150, -131, 100, 85, 180]):
+        q = np.radians(deg)
+        lowest = float(np.min(fk_links(q)[:, 2, 3]))
+        assert lowest - m.ground_z > 0.15, 'the fixture itself must be well clear'
+        ok, body, over = m.check_q(q)
+        assert ok, (f'{deg}: {body} reported {over * 1000:.1f} mm of violation, but the lowest '
+                    f'joint origin is {(lowest - m.ground_z) * 1000:.0f} mm above the bench')
+    m.close()
+
+
+def test_only_the_fingertips_may_intersect_the_ground():
+    """THE ONE DELIBERATE HOLE IN THE GUARD, and its boundary.
+
+    A connector lying on the bench has its centreline a barrel-radius up, so the pads must
+    reach beside and slightly below it -- the fingertips are SUPPOSED to arrive at the work
+    surface. The gripper wrist is not: a wrist that touches the bench is a crash. The two are
+    separate bodies precisely so the allowance cannot leak across, and this is that assertion.
+    """
+    q = np.radians([-85, -145, -105, -205, -85, 180])
+
+    # how low each body actually reaches, in base_link
+    base = _collision_model()
+    lows = {k: base.ground_z + v for k, v in base.clearances(q).items()}
+    base.close()
+    # THE LOWER FINGER is the one that decides: the gripper is tilted, so the two pads do not
+    # reach the same depth and anchoring on the wrong one tests nothing.
+    finger_low = min(lows['fingertip_a'], lows['fingertip_b'])
+
+    def at_ground(z):
+        m = _collision_model()
+        m.close()
+        from urlab.robot.collision import GroundCollisionModel
+        return GroundCollisionModel({'margin_mm': 0.0, 'fingertip_margin_mm': 5.0},
+                                    ground_z_m=z)
+
+    # (a) fingertips 3 mm under -> allowed; the body is still well clear
+    m = at_ground(finger_low + 0.003)
+    ok, body, _over = m.check_q(q)
+    assert ok, f'3 mm of fingertip intersection is inside the 5 mm allowance, but {body} refused'
+    m.close()
+
+    # (b) fingertips 7 mm under -> past the allowance, refused, and named
+    m = at_ground(finger_low + 0.007)
+    ok, body, over = m.check_q(q)
+    assert not ok and body in ('fingertip_a', 'fingertip_b'), (
+        f'7 mm of fingertip intersection must be refused, got ok={ok} body={body}')
+    assert 0.0015 < over < 0.003, f'{over * 1000:.1f} mm past a 5 mm allowance on a 7 mm dip'
+    m.close()
+
+    # (c) the GRIPPER BODY 1 mm under -> refused outright. No allowance leaks to the wrist.
+    m = at_ground(lows['gripper_body'] + 0.001)
+    ok, body, over = m.check_q(q)
+    assert not ok, 'the gripper body has NO intersection allowance -- that is the exception\'s '\
+                   'whole point'
+    assert over > 0.0005, f'{over * 1000:.2f} mm should be reported for a 1 mm dip'
+    m.close()
+
+
+def test_the_whole_joint_path_is_sampled_not_just_the_endpoints():
+    """A moveJ interpolates in JOINT space, so the tool swings through an arc: both ends can be
+    clear while the middle is not. check_path must therefore evaluate the interpolation, and
+    must report WHERE along it the violation is, so the message points at the swing rather than
+    at the target pose."""
+    m = _collision_model(path_samples=8)
+    seen = []
+    real = m.check_q
+    m.check_q = lambda q: (seen.append(np.array(q, dtype=float)), real(q))[1]
+
+    a, b = np.radians([-85, -145, -105, -205, -85, 180]), np.radians([-55, -180, -90, -90, 0, 180])
+    ok, _body, _over, _frac = m.check_path(a, b)
+    assert ok
+    assert len(seen) == 9, f'8 samples must give 9 evaluations including both ends, got {len(seen)}'
+    assert np.allclose(seen[0], a) and np.allclose(seen[-1], b), 'the endpoints must be included'
+    mid = np.array(seen[4])
+    assert np.allclose(mid, (a + b) / 2.0), 'and the samples must be the straight interpolation'
+    m.check_q = real
+    m.close()
+
+
+def test_the_tool_model_is_anchored_on_the_calibrated_fingertip():
+    """The spacer + gripper + fingers must add up to the CALIBRATED tool0->fingertip distance.
+    If they ever disagree the arm goes where the calibration says, so the check would be
+    guarding a robot that does not exist -- better to refuse to build the model."""
+    import pytest
+    pytest.importorskip('pybullet')
+    from urlab.robot.collision import ToolModel
+
+    t = ToolModel({'spacer_length_mm': 80.0}, fingertip_z_m=0.183)
+    assert abs(t.spacer_len - 0.080) < 1e-12, 'the 80 mm spacer is a hardware fact'
+    segs = t.segments()
+    assert segs[0][1] == 0.0, 'the spacer starts at tool0'
+    assert abs(segs[-1][2] - 0.183) < 1e-12, 'the fingers end at the calibrated pad plane'
+    # contiguous, no gaps and no overlap, along the tool axis
+    assert abs(segs[0][2] - segs[1][1]) < 1e-12 and abs(segs[1][2] - segs[2][1]) < 1e-12
+    # the two fingers straddle the tool axis
+    assert segs[2][4] == -segs[3][4] != 0.0
+
+    with pytest.raises(ValueError):
+        ToolModel({'spacer_length_mm': 200.0}, fingertip_z_m=0.183)
+
+
+def test_the_bnc_config_guards_the_pick_against_the_bench():
+    from urlab import config as urconfig
+
+    cfg = urconfig.load('bnc_assembly')
+    c = cfg.get_path('pickup.collision')
+    assert c and bool(c.get('enabled', True)), 'the pick must be guarded against the bench'
+    assert float(c['fingertip_margin_mm']) == 5.0, 'the fingertip intersection allowance'
+    assert float(c.get('margin_mm', 0.0)) >= 0.0, (
+        'a NEGATIVE margin would let the whole arm into the bench -- the intersection '
+        'allowance is fingertip-only by design')
+    assert float(c['tool']['spacer_length_mm']) == 80.0
+    assert cfg.get_path('ground_plane.z_m') is not None, (
+        'the checker takes the bench height from ground_plane.z_m -- one number for the cell')
+
+
+def test_the_ur10e_urdf_and_our_dh_chain_are_the_same_robot():
+    """THE OFFLINE CROSS-CHECK, and the reason the description is worth carrying.
+
+    ur10e.urdf is generated from Universal Robots' published JOINT ORIGINS
+    (config/ur10e/default_kinematics.yaml); collision.fk_links is written from their published
+    DH TABLE. Two descriptions, two different upstream files, one robot -- so if they agree the
+    chain is right, and if they diverge one of them has been edited wrong.
+
+    This is what replaces "trust the DH numbers": offline there is no controller to ask, and a
+    transposed parameter would otherwise sit there producing confident, wrong clearances."""
+    import os
+
+    import pytest
+    pb = pytest.importorskip('pybullet')
+    from urlab.robot.collision import GroundCollisionModel, fk_links
+
+    urdf = GroundCollisionModel.URDF
+    assert os.path.isfile(urdf), (
+        'the UR10e description is missing -- run `python -m urlab.robot.description.fetch_ur10e`')
+
+    cid = pb.connect(pb.DIRECT)
+    try:
+        rid = pb.loadURDF(urdf, useFixedBase=True, physicsClientId=cid)
+        joints, tool0 = [], None
+        for j in range(pb.getNumJoints(rid, physicsClientId=cid)):
+            info = pb.getJointInfo(rid, j, physicsClientId=cid)
+            if info[12].decode() == 'tool0':
+                tool0 = j
+            if info[2] != pb.JOINT_FIXED:
+                joints.append(j)
+        assert tool0 is not None, 'the URDF must expose a tool0 frame'
+        assert len(joints) == 6, f'a UR10e has six revolute joints, the URDF has {len(joints)}'
+
+        rng = np.random.default_rng(11)
+        worst = 0.0
+        for _ in range(60):
+            q = rng.uniform(-np.pi, np.pi, 6)
+            for j, v in zip(joints, q):
+                pb.resetJointState(rid, j, float(v), physicsClientId=cid)
+            st = pb.getLinkState(rid, tool0, computeForwardKinematics=True, physicsClientId=cid)
+            worst = max(worst, float(np.linalg.norm(np.array(st[4]) - fk_links(q)[6][:3, 3])))
+        # 1 micron: pybullet works in float32, so exact equality is not on offer. A real
+        # modelling difference -- a wrong offset or a flipped axis -- is millimetres or more.
+        assert worst < 1e-6, (
+            f'the URDF and the DH chain disagree by {worst * 1000:.4f} mm -- they describe '
+            'different robots, so one of them is wrong')
+    finally:
+        pb.disconnect(cid)
+
+
+def test_the_description_is_present_and_carries_its_licence():
+    """The meshes are third-party (BSD-3-Clause) and the licence must travel with them."""
+    import os
+
+    from urlab.robot.collision import GroundCollisionModel
+
+    root = os.path.dirname(GroundCollisionModel.URDF)
+    assert os.path.isfile(os.path.join(root, 'LICENSE')), (
+        "upstream's BSD-3-Clause licence must stay beside the meshes it covers")
+    meshes = os.path.join(root, 'meshes', 'collision')
+    for m in ('base', 'shoulder', 'upperarm', 'forearm', 'wrist1', 'wrist2', 'wrist3'):
+        p = os.path.join(meshes, m + '.stl')
+        assert os.path.isfile(p) and os.path.getsize(p) > 1000, f'{m}.stl missing or truncated'
+
+    # the URDF must reference them by a RELATIVE path -- pybullet resolves against the urdf dir,
+    # and an absolute path would only work on the machine that generated it
+    urdf = open(GroundCollisionModel.URDF, encoding='utf-8').read()
+    assert 'filename="meshes/collision/' in urdf
+    assert ':\\' not in urdf and 'file://' not in urdf, 'no absolute paths in a checked-in URDF'
+
+
+def test_the_collision_model_prefers_the_real_meshes():
+    """With the description present the arm is UR's own collision shells, not our conservative
+    capsules -- and the capsule path stays available for when it is not fetched."""
+    import pytest
+    pytest.importorskip('pybullet')
+    from urlab.robot.collision import GroundCollisionModel
+
+    m = GroundCollisionModel({}, ground_z_m=-0.760)
+    assert m.mode == 'urdf', 'the description is present, so the meshes should be in use'
+    assert 'wrist_2_link' in m.clearances(np.radians([-85, -145, -105, -205, -85, 180])), (
+        'urdf mode must report per-LINK clearances, or the error message cannot name the part'
+    )
+    m.close()
+
+    cap = GroundCollisionModel({'use_urdf': False}, ground_z_m=-0.760)
+    assert cap.mode == 'capsule', 'use_urdf: false must fall back to the capsule envelope'
+    q = np.radians([-55, -180, -90, -90, 0, 180])
+    # THE ENVELOPE IS CONSERVATIVE: the capsules contain the real shell, so every clearance they
+    # report must be no greater than the mesh model's. That is what makes a capsule PASS safe.
+    mesh = GroundCollisionModel({}, ground_z_m=-0.760)
+    lowest_cap = min(cap.clearances(q).values())
+    lowest_mesh = min(mesh.clearances(q).values())
+    assert lowest_cap <= lowest_mesh + 1e-9, (
+        f'the capsule envelope reported {lowest_cap * 1000:.1f} mm but the real mesh '
+        f'{lowest_mesh * 1000:.1f} mm -- an envelope that is LOOSER than the shell it stands '
+        'in for is not conservative, and a capsule-mode pass would not be safe')
+    cap.close()
+    mesh.close()

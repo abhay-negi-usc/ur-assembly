@@ -646,7 +646,7 @@ assembly:
     # cable down 400 mm OUT IN FRONT of the socket -- clear of the fixture and its mounting
     # plate, which a drop directly beneath the socket would land on.
     place_offsets:
-      x_mm: -400.0
+      x_mm: -300.0
       y_mm: 0.0
       # z is IGNORED while snap_to_ground is on, and it should be: "on the ground plane" is the
       # requirement, and the resting height is a property of the PART (ground + one barrel

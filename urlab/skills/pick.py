@@ -737,6 +737,14 @@ class GraspController:
                       ' near pickup.approach_seed_joints_deg %s deg'
                       % np.round(np.degrees(self.approach_seed), 1).tolist())
             return False
+        # THE GRASP ITSELF, BEFORE COMMITTING TO THE PRE-GRASP. Checking only the
+        # stand-off let the arm drive all the way there and discover at the descent that the
+        # pose it was standing off FROM could not be reached -- by which point it has moved,
+        # and the reorient recovery (which re-picks from where the run started) has lost that.
+        # The grasp is 100 mm away and its configuration is knowable right now. Checked here,
+        # before the branch split, so BOTH the seeded and unseeded paths get it.
+        if not self._grasp_is_reachable(robot, geom, q, label):
+            return False
         if self.approach_seed is None:
             log.info('  grasp-align configuration: %s deg (no approach_seed_joints_deg set, so '
                      'this is whatever branch the scan left the arm nearest).',
@@ -767,6 +775,46 @@ class GraspController:
                  'seed).', np.round(np.degrees(q), 1).tolist(), UR_JOINTS[worst],
                  np.degrees(d[worst]))
         return self._go(robot, T, q, label)
+
+    def _grasp_is_reachable(self, robot, geom, q_pregrasp, label):
+        """Is the GRASP pose -- not the stand-off -- reachable and clear?
+
+        WHAT THIS CATCHES THAT THE OTHER CHECKS DO NOT. `align` checks the path to the
+        PRE-GRASP; `descend` checks the TOOL along the cartesian descent. Neither ever solves
+        for the arm at the grasp, so an approach whose stand-off is fine but whose grasp puts
+        the FOREARM through the bench, or folds the arm into itself, was only discovered by
+        driving there.
+
+        SOLVED ON THE PRE-GRASP'S BRANCH. Seeding from `q_pregrasp` is what makes the answer
+        mean anything: a descent is a small move, so the grasp must be reachable from the same
+        configuration. A solution found on some other branch would be a pose the arm cannot
+        actually get to from the stand-off.
+
+        ONLY THE ENDPOINT, deliberately. The real descent is a straight cartesian line, and a
+        joint interpolation between these two is NOT that line -- checking it would invent
+        refusals for a path the arm never takes. The tool along the true line is covered
+        exactly by descend's cartesian check; this covers the arm at the end of it."""
+        model = self.collision_model()
+        if model is None:
+            return True
+        from ..transforms import inverse
+        T_grasp_tool0 = geom.T_base_grasp @ inverse(robot.T_tool0_fingertip)
+        q_grasp = robot.arm.ik(T_grasp_tool0, q_pregrasp)
+        if q_grasp is None:
+            self.last_refusal = 'unreachable'
+            log.error('%s: the STAND-OFF is reachable but the GRASP pose 100 mm below it is '
+                      'not -- no IK solution on that branch. Refusing before the arm moves.',
+                      label)
+            return False
+        ok, body, over = model.check_q(q_grasp)
+        if not ok:
+            self.last_refusal = 'unreachable'
+            log.error('%s: the GRASP pose is not collision-free -- %s is %.1f mm past its '
+                      'allowance when the arm is AT the grasp. The stand-off above it is fine, '
+                      'which is why this has to be checked separately. Refusing before the arm '
+                      'moves.', label, body, over * 1000.0)
+            return False
+        return True
 
     def _go(self, robot, T_target, q_goal, label):
         """Drive to the pre-grasp: straight there if that arc is clear, otherwise via the

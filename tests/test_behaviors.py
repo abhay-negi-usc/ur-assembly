@@ -1198,6 +1198,9 @@ def test_the_grasp_align_can_seed_its_ik_branch():
             return True
 
     class _Geom:
+        # the grasp is now solved and checked BEFORE the stand-off move, so the fake needs one
+        T_base_grasp = np.eye(4)
+
         def pre_grasp(self):
             return np.eye(4)
 
@@ -1956,3 +1959,44 @@ def test_the_aligned_place_pose_is_flat_and_on_the_socket_heading():
         f'the placed +X is {np.degrees(np.arccos(cos)):.2f} deg off the socket +X')
     assert abs(float(got[2])) < 1e-12, 'and it lies flat -- no vertical component'
     assert np.allclose(T_place[:3, 2], [0, 0, 1]), 'connector +Z up, as it must be on a bench'
+
+
+def test_the_grasp_pose_is_checked_before_the_arm_commits_to_the_standoff():
+    """THE GAP THIS CLOSES. `align` checked the path to the PRE-GRASP and `descend` checked the
+    TOOL along the cartesian descent -- but nothing ever solved for the ARM at the grasp. So an
+    approach whose stand-off is fine while its grasp puts the forearm through the bench (or
+    folds the arm into itself) was discovered only by driving there: the arm had already moved,
+    and the reorient recovery, which re-picks from where the run started, had lost that.
+
+    The grasp is 100 mm from the stand-off and its configuration is knowable in advance, so it
+    is solved and checked BEFORE any motion -- and before the seeded/unseeded branch splits, so
+    both paths get it."""
+    import inspect
+
+    from urlab.skills.pick import GraspController
+
+    src = inspect.getsource(GraspController.align)
+    assert src.count('_grasp_is_reachable(') == 1, 'checked once, covering both branches'
+    i_ik = src.index('q = robot.arm.ik(')
+    i_chk = src.index('_grasp_is_reachable(')
+    i_split = src.index('if self.approach_seed is None:')
+    i_move = src.index('return self._go(')
+    assert i_ik < i_chk < i_split, 'it must run after the IK and before the branch split'
+    assert i_chk < i_move, 'and BEFORE anything is commanded -- that is the whole point'
+
+    body = inspect.getsource(GraspController._grasp_is_reachable)
+    # solved on the PRE-GRASP's branch: a descent is a small move, so a solution on some other
+    # branch is a pose the arm cannot actually reach from the stand-off
+    assert 'robot.arm.ik(T_grasp_tool0, q_pregrasp)' in body, (
+        'the grasp must be solved seeded from the pre-grasp, or the answer is about a pose the '
+        'arm cannot get to from there')
+    # FULL check at the endpoint -- arm links and self-collision, not just the tool
+    assert 'model.check_q(q_grasp)' in body, (
+        'check_q covers the arm and self-collision; check_tool_pose would miss exactly the '
+        'forearm-through-the-bench case this exists for')
+    # and it must mark the failure as actionable, so the reorient recovery can fire
+    assert body.count("self.last_refusal = 'unreachable'") == 2, (
+        'both the no-IK and the in-collision cases are unreachable, not aborts')
+    # the joint path between stand-off and grasp is deliberately NOT checked -- the real move
+    # is a straight cartesian line, and interpolating joints would invent refusals
+    assert 'check_path(' not in body

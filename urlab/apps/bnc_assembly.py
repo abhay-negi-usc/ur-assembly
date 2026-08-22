@@ -1210,13 +1210,19 @@ def build_and_run(cfg, robot, camera, args):
         return (T_clk[:3, :3] @ R_clock[:3, :3].T) @ (np.asarray(cl_axis_off, dtype=float)
                                                       / 1000.0)
 
-    def clocking_retract(label='clocking retract'):
+    def clocking_retract(label='clocking retract', gripper_leg=True):
         """The post-clocking escape, in two legs.
 
         First along the GRIPPER's own axis, lifting the open fingers off the connector; then
         along the TARGET frame's axis, backing the arm away from the socket. Guarded straight
         lines, not the compliant `_retract_ref` used between attempts: the part is released by
-        now, so there is no held connector to thread back out along its own axis."""
+        now, so there is no held connector to thread back out along its own axis.
+
+        `gripper_leg=False` drops the first leg and backs straight out along the target -X.
+        That is the right shape after the COLLAR turn, because there tool0 sits ON the
+        connector axis with its Z collinear -- so the gripper -Z leg points essentially where
+        the target -X leg already goes, and running both just adds a second, differently
+        parametrised move for the same escape."""
         r = a.get('clocking_retract', {}) or {}
 
         def leg(vec, dist, in_target):
@@ -1237,8 +1243,12 @@ def build_and_run(cfg, robot, camera, args):
                 T, label=f'{label} ({what}, {abs(float(dist)) * 1000.0:.0f} mm)'))
 
         phase('clock_retract')
-        return (leg(r.get('gripper_axis', [0.0, 0.0, -1.0]),
-                    r.get('gripper_distance_m', 0.100), False)
+        if not gripper_leg:
+            log.info('  escape: target -X only (tool0 is already on the connector axis, so the '
+                     'gripper -Z leg would repeat it).')
+        return ((gripper_leg is False
+                 or leg(r.get('gripper_axis', [0.0, 0.0, -1.0]),
+                        r.get('gripper_distance_m', 0.100), False))
                 and leg(r.get('target_axis', [-1.0, 0.0, 0.0]),
                         r.get('target_distance_m', 0.100), True))
 
@@ -1314,7 +1324,11 @@ def build_and_run(cfg, robot, camera, args):
             if not robot.gripper.open('release (tug verified)'):
                 log.error('TUG VERIFY: gripper did not release after the tug.')
                 return 'error'
-            return 'verified' if clocking_retract('tug retract') else 'error'
+            # Straight out along the target -X when disassembly follows: it re-approaches
+            # the collar on the axis anyway, so lifting off the gripper -Z first only adds a
+            # move in the direction the next leg already travels.
+            return ('verified' if clocking_retract('tug retract', gripper_leg=not dis_on)
+                    else 'error')
         # FAILED: never locked, and already part-way out in the fingers -- so EXTRACT it fully
         # along the connector -X, carry it home and release. The global guard stays armed, so an
         # extraction that snags terminates rather than tearing at the fixture.
@@ -2376,7 +2390,18 @@ def build_and_run(cfg, robot, camera, args):
             return T
 
         _re_lin, _re_ang = pose_error(_now, T_engaged)
-        if _re_ang > np.radians(0.5) or _re_lin > 1e-4:
+        if unlocking:
+            # UNLOCKING DOES NOT REALIGN. The realign exists to undo the bayonet sweep so the
+            # collar stations are measured from the mated pose -- but on the way OUT the
+            # connector is already mated and the arm is already clear of it (the escape ran
+            # before this), so driving the OPEN gripper back onto the connector would be a
+            # pointless approach to a pose we only want to leave again. The collar is turned
+            # from wherever it sits: the station below is absolute (built from the axis
+            # frame), so the approach still lands on the ring without it.
+            log.info('  UNLOCKING -- skipping the realign with the engagement pose (%.1f deg / '
+                     '%.1f mm away); the collar station is absolute, so the approach does not '
+                     'need it.', np.degrees(_re_ang), _re_lin * 1000.0)
+        elif _re_ang > np.radians(0.5) or _re_lin > 1e-4:
             adm_cl.reset()
             adm_cl.warmup(_now)
             guard_shared.reset()
@@ -2546,16 +2571,13 @@ def build_and_run(cfg, robot, camera, args):
                            'stopped_by': guard_cl.tripped_by or ''})
         _word = 'UNLOCKED' if unlocking else 'LOCKED'
         if stopped:
-            # A guard trip means the OPPOSITE thing in each direction: reaching the lock stops
-            # the turn, but an unlock that stops early is a collar that did not come free.
-            if unlocking:
-                log.error('  the unlock stopped on the force guard (%s) after %.1f of %.1f deg '
-                          '-- the collar is NOT free. Do not pull on it.',
-                          guard_cl.tripped_by, np.degrees(turned), abs(np.degrees(cl_rot)))
-                return False
-            log.info('  LOCKED -- the collar stopped on the force guard (%s) after %.1f deg, '
-                     'which is what reaching the lock looks like; check it.',
-                     guard_cl.tripped_by, np.degrees(turned))
+            # SYMMETRIC WITH THE LOCK: the collar runs to a stop at BOTH ends of its travel, so
+            # the torque building is the intended termination in either direction -- turn the
+            # full rotation_deg or until the ring stops turning, whichever comes first.
+            log.info('  %s -- the collar stopped on the force guard (%s) after %.1f of %.1f '
+                     'deg, which is what reaching the end of its travel looks like; check it.',
+                     _word, guard_cl.tripped_by, np.degrees(turned),
+                     abs(np.degrees(cl_rot)))
         else:
             log.info('  %s -- collar turned %.1f deg (commanded %.1f). The flange moved '
                      '%.1f mm: a wrist twist, not an arm swing.', _word, np.degrees(turned),

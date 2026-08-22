@@ -913,8 +913,10 @@ def test_belief_offset_moves_the_belief_and_never_the_grasp():
 
     # config plumbing: absent -> zero, and a malformed vector is refused rather than guessed
     from urlab import config as urconfig
-    assert np.allclose(belief_offset_m(urconfig.load('bnc_assembly')), [0.0, 0.0, 0.0])
     c = urconfig.load('bnc_assembly')
+    assert belief_offset_m(c).shape == (3,), 'the shipped value must parse as a 3-vector'
+    c.set_path('pickup.belief_offset_mm', None)
+    assert np.allclose(belief_offset_m(c), [0.0, 0.0, 0.0]), 'absent -> no correction'
     c.set_path('pickup.belief_offset_mm', [0.0, 0.0, -3.0])
     assert np.allclose(belief_offset_m(c), [0.0, 0.0, -0.003])
     c.set_path('pickup.belief_offset_mm', [1.0, 2.0])

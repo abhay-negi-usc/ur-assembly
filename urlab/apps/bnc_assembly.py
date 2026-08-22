@@ -989,6 +989,16 @@ def build_and_run(cfg, robot, camera, args):
                             'or align it.', init_name, d_lin * 1000.0, np.degrees(d_ang))
     else:
         T_ftip_conn = from_cfg(init) if init else from_cfg(cfg.section('junction_in_fingertip'))
+    # PICKUP PITCH: the frames catalogue declares the SQUARE grip, so a pitched pickup rotates
+    # the part in the hand by the same angle. Applied here rather than in frames.yaml, so the
+    # declared frame stays the physical truth and the pitch stays a run-time choice.
+    _pitch = pickup_pitch_rad(cfg)
+    if _pitch:
+        T_ftip_conn = pitched_belief(T_ftip_conn,
+                                     from_cfg(cfg.section('junction_in_fingertip')), _pitch)
+        log.info('Pickup pitch %+.1f deg -> in-hand belief rotated to match (the pick and the '
+                 'belief are one pair; changing one alone mates the connector cocked).',
+                 np.degrees(_pitch))
 
     live = a.get('live_plot', True)
     live_path = None

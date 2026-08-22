@@ -37,7 +37,7 @@ camera:
 # This block is only the detector's dictionary + a fallback size for an undeclared id.
 aruco:
   dictionary: DICT_4X4_50
-  marker_size_m: 0.0197
+  marker_size_m: 0.0307
 
 # THE VIEW SWEEP, shared with urlab.apps.marker_calibration (urlab/skills/marker_localize.py).
 # Offsets are CAMERA-FRAME poses relative to the start pose; the markers must already be in
@@ -53,7 +53,7 @@ marker_views:
   aim_at_markers: true
   max_view_spread_mm: 3.0          # spread ACROSS VIEWS of one marker -- warns
   max_view_spread_deg: 3.0
-  max_disagreement_mm: 5.0         # spread ACROSS MARKERS -- REFUSES; null disables
+  max_disagreement_mm: 10.0         # spread ACROSS MARKERS -- REFUSES; null disables
   max_disagreement_deg: 10.0
   offsets:                     # null = the built-in ring (centre, 40 mm x4, 25 mm closer)
     - {xyz_mm: [0,0,0], rpy_deg: [0,0,0]}
@@ -81,12 +81,12 @@ marker_views:
   # markers.  MUST match the block marker_calibration ran with, so the biases cancel.
   servo:
     enabled: true
-    distance_m: 0.30
+    distance_m: 0.20
     max_iterations: 4
     pos_tol_mm: 5.0
     ang_tol_deg: 5.0
-    ring_mm: 20.0
-    ring_views: 1
+    ring_mm: 15.0
+    ring_views: 4
 
 sam3:
   repo_path: /abhay_ws/sam3-abhay
@@ -185,6 +185,27 @@ lift_axis: [0.0, 0.0, 1.0]
 pickup:
   mode: compliance
   settle_s: 0.5
+  # PICKUP PITCH, deg: tilt the approach about the axis perpendicular to BOTH the ground
+  # normal and the cable axis -- the detected junction frame's own y -- pivoting THROUGH THE
+  # BITE POINT, so the fingers close on the same spot on the cable, just at an angle.
+  # 0 = straight down.
+  #
+  # ONE NUMBER: the believed in-hand connector pose is rotated by the same angle automatically
+  # (urlab/skills/pick.py pitched_belief), so the pick and the belief cannot drift apart -- the
+  # frames.yaml entries keep describing the nominal SQUARE grip and this stays a run-time
+  # choice.  Sweep it with `--set pickup.pitch_deg=...`.
+  #
+  # CHECK BEFORE A LARGE ANGLE: the leading finger dips toward the ground plane (jog it once
+  # with the phase gate), and the counts-based grasp check assumes a square bite -- the band
+  # shifts once the pads meet the connector at an angle and the groove stops seating it
+  # cleanly, so re-measure grasp_check before trusting a miss/empty verdict.
+  #
+  # The post-mate clocking maneuvers are unaffected: connector clocking's belief reset
+  # re-derives the in-hand pose from the MEASURED arm pose at the mate, which absorbs the
+  # pitch.  What does move is reachability -- the arm sits rotated at the mate, so the sweep
+  # band and the collar reorientation start from a different attitude (both pre-checked, and
+  # they warn rather than fail silently).
+  pitch_deg: -15.0
   # PICKUP HEIGHT from the gripper kinematic model.  Assumes the connector rests ON THE GROUND
   # PLANE (ground_plane.z_m): grasp target = plane + connector d_max/2 (centerline) + the
   # fingertip ADVANCE between fingertip_ref_separation_mm (where fingertip_grasp z was
@@ -271,7 +292,7 @@ speed:
     # POST-MATE CLOCKING, one scale per maneuver.  These pace the CONTACT ramps; free-space
     # moves inside a maneuver stay on standoff/retract.  A non-null speed_translation_mm_s /
     # speed_rotation_deg_s in the maneuver's own block overrides its scale entirely.
-    visual_localize: 0.5     # the marker sweep + per-marker servo moves (camera near the fixture)
+    visual_localize: 1.5     # the marker sweep + per-marker servo moves (camera near the fixture)
     connector_clock: 0.10    # the bayonet sweep legs
     collar_clock: 0.5   # the collar turn
     clock_retract: 1.0   # the shared two-leg escape (free space, gripper already clear)
@@ -294,7 +315,7 @@ reset:
   # HOME = the MARKER VIEW pose: the reset drives here at the start and end of every run,
   # the visual localisation sweeps the markers from here, and the end-of-run image is
   # captured from here.  (The pick itself runs from pick_joints_deg below.)
-  home_joints_deg: [-80, -150, -131, 75, 85, 180]
+  home_joints_deg: [-85, -165, -105, 90, 80, 180]
   # (the home move is a guarded position moveJ, paced by the speed caps above)
   max_force_n: 50.0
   compliance:

@@ -1621,3 +1621,145 @@ def test_the_branch_check_wraps_past_a_full_turn():
     worst = np.degrees(np.abs((raw + np.pi) % (2.0 * np.pi) - np.pi)).max()
     assert worst > np.degrees(g.approach_seed_tol), (
         f'{worst:.1f} deg from the seed is a different arm posture, not a branch nudge')
+
+
+def test_the_engage_report_shows_every_termination_condition():
+    """THREE THINGS CAN END THE ENGAGE and they mean different things: the path running out
+    (nothing resisted), the AXIAL limit (a normal end -- the screw drives the rest), and the
+    general force guard (a jam). Reporting only the winner costs bench time, because 'stopped
+    on force' reads the same whether the limit was met at 2 mm or at 19.8 mm of 20, and whether
+    the general guard was idle or a hair under its own limit.
+
+    So all three are printed every time, each against ITS OWN limit -- a bare number cannot be
+    judged without the threshold it was tested against -- and the one that fired is marked."""
+    import logging
+
+    from urlab.apps.bnc_assembly import _engage_report
+
+    class _Guard:
+        enabled, max_force, max_torque = True, 60.0, 8.0
+        peak_force, peak_torque = 21.4, 0.42
+
+    class _Combo:
+        tripped_by = 'axial force 18.3 N >= 18.0 N for 0.31 s'
+
+    state = dict(elapsed_s=6.42, duration_s=8.0, driven_mm=16.1, total_mm=20.0,
+                 axial_n=18.3, axial_peak_n=18.9, axial_limit_n=18.0, axial_persist_s=0.3,
+                 force_n=21.4, torque_nm=0.42)
+
+    def render(status, guard=_Guard(), s=None):
+        rec = []
+        h = logging.Handler()
+        h.emit = lambda r: rec.append(r.getMessage())
+        lg = logging.getLogger('cable-assemble') if False else None
+        from urlab.apps import bnc_assembly as app
+        app.log.addHandler(h)
+        old = app.log.level
+        app.log.setLevel(logging.INFO)
+        try:
+            _engage_report(status, dict(s or state), 1.83, object(), guard, _Combo())
+        finally:
+            app.log.removeHandler(h)
+            app.log.setLevel(old)
+        del lg
+        return '\n'.join(rec)
+
+    out = render('force')
+    # EVERY condition present, whether or not it fired
+    for must in ('path complete', 'axial force', 'force guard', 'depth'):
+        assert must in out, f'{must!r} missing -- all conditions are reported, not just the winner'
+    # each against its own limit
+    assert '6.42 of 8.00 s' in out and '16.1 of 20.0 mm' in out
+    assert '18.3 N of 18.0 N' in out, 'the axial value must sit beside the limit it was tested on'
+    assert '21.4 N of 60.0 N' in out and '8.00 Nm' in out
+    # and exactly one marked as the one that fired
+    assert out.count('>>') == 1, 'exactly one condition fires'
+    assert '>> axial force' in out, 'the marker must sit on the condition that ended it'
+    assert 'ENGAGE ENDED: AXIAL FORCE LIMIT' in out
+
+    # the marker moves with the status
+    assert '>> path complete' in render('complete')
+    assert '>> force guard' in render('guard')
+
+    # a condition that CANNOT fire says so, rather than printing a limit of zero
+    off = render('complete', s=dict(state, axial_limit_n=0.0))
+    assert 'NO LIMIT SET' in off and 'can never end the engage' in off
+    assert 'DISABLED' in render('complete', guard=None), (
+        'a missing guard must be called out -- nothing was watching for a jam'
+    )
+
+
+def _self_model():
+    import pytest
+    pytest.importorskip('pybullet')
+    from urlab import config as urconfig
+    from urlab.robot.collision import GroundCollisionModel
+    cfg = urconfig.load('bnc_assembly')
+    return GroundCollisionModel(cfg.get_path('pickup.collision') or {},
+                                ground_z_m=float(cfg.get_path('ground_plane.z_m')))
+
+
+def test_self_collision_skips_the_pairs_that_touch_by_design():
+    """ADJACENT LINKS OVERLAP ON PURPOSE. Their housings interpenetrate at the joint so the arm
+    looks continuous -- measured at -2 to -5 mm on every working pose in this cell, at every
+    configuration, because it is how the meshes are drawn. Checking them would fire constantly
+    and mean nothing, so only pairs two or more apart in the chain are watched: on the same
+    poses the closest of THOSE sits at +18 mm, which is real signal."""
+    from urlab.robot.collision import CHAIN, SELF_PAIRS
+
+    for i in range(len(CHAIN) - 1):
+        assert (CHAIN[i], CHAIN[i + 1]) not in SELF_PAIRS, 'adjacent links touch by design'
+    assert ('upper_arm_link', 'wrist_2_link') in SELF_PAIRS, 'a foldable pair must be watched'
+
+    m = _self_model()
+    for deg in ([-85, -145, -105, -205, -85, 180], [-80, -150, -131, 100, 85, 180],
+                [-55, -180, -90, -90, 0, 180]):
+        sc = m.self_clearances(np.radians(deg))
+        assert sc, 'urdf mode must produce self-collision pairs'
+        worst = min(sc.values())
+        assert worst > 0.010, (
+            f'{deg}: closest self pair is {worst * 1000:.1f} mm -- a WORKING pose must not '
+            'read as a self-collision, or the check is unusable')
+
+    # a genuinely folded configuration IS caught
+    ok, body, over = m.check_q(np.radians([49, -83, -165, -174, 113, 149]))
+    assert not ok and '~' in str(body) and over > 0.05, (
+        f'a folded arm must be refused, got ok={ok} body={body}')
+    m.close()
+
+
+def test_the_camera_is_checked_against_the_arm_and_ground_but_not_the_tool():
+    """THE CAMERA BRACKET rides tool0 and can swing into the arm or the bench, so both are
+    watched. It CANNOT move relative to the gripper, the spacer or the flange it is bolted to,
+    so those are off: a rigid pair returns the same answer at every pose, and several of them
+    overlap by construction -- the bracket starts at the tool0 origin and so does the spacer,
+    so a check there would fire on every single move."""
+    m = _self_model()
+    names = m.tool.body_names()
+    assert 'camera_bracket' in names, 'the camera must be part of the tool model'
+
+    # the declared extents are the ones asked for, and the optics land inside them
+    _n, centre, half = next(b for b in m.tool.boxes if b[0] == 'camera_bracket')
+    lo, hi = (centre - half) * 1000.0, (centre + half) * 1000.0
+    assert np.allclose(lo, [-25.0, -110.0, 0.0]) and np.allclose(hi, [25.0, 0.0, 35.0]), (
+        f'camera extents {lo.tolist()}..{hi.tolist()} mm are not the measured ones')
+    assert np.all(np.abs(np.array([-0.009, -0.080, 0.031]) - centre) <= half), (
+        'hand_eye puts the camera outside its own bracket -- one of the two is wrong')
+
+    pairs = set(m.self_clearances(np.radians([-85, -145, -105, -205, -85, 180])))
+    cam = {p for p in pairs if 'camera_bracket' in p}
+    assert cam, 'the camera must be checked against the arm'
+    assert {'camera_bracket~forearm_link', 'camera_bracket~upper_arm_link'} <= cam
+
+    # OFF against everything bolted to the same flange, and against the flange itself
+    tool = set(names)
+    assert not [p for p in pairs if all(x in tool for x in p.split('~'))], (
+        'tool-vs-tool pairs are rigid and overlap by construction -- they must not be checked')
+    assert not [p for p in cam if 'wrist_3' in p], 'the mounting flange is excluded'
+
+    # ON against the ground
+    assert 'camera_bracket' in m.clearances(np.radians([-80, -150, -131, 100, 85, 180]))
+    # ... and it carries NO fingertip allowance: a bracket is never meant to reach the bench
+    from urlab.robot.collision import FINGERTIP_BODIES
+    assert 'camera_bracket' not in FINGERTIP_BODIES
+    m.close()

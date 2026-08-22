@@ -379,6 +379,56 @@ class _AnyGuard:
             g.reset()
 
 
+
+def _engage_report(status, s, depth_mm, det, guard, combo):
+    """Print WHICH condition ended the engage, and where every OTHER one stood when it did.
+
+    THREE THINGS CAN END THIS MOTION and they mean completely different things:
+
+        PATH COMPLETE   the whole trajectory ran. Nothing resisted enough to stop it.
+        AXIAL FORCE     the connector met the socket hard enough, along its own +X, for long
+                        enough. A NORMAL end -- the bayonet screw drives the rest.
+        FORCE GUARD     the general wrench limit, in any direction. A JAM.
+
+    Reporting only the winner has cost real bench time: 'stopped on force' reads the same
+    whether the axial limit was met at 2 mm or at 19.8 mm of a 20 mm path, and whether the
+    general guard was idle or a hair under its own limit. So all three are printed every time,
+    with the one that fired marked, and each shown against ITS OWN limit -- a bare number
+    cannot be judged without the threshold it was tested against."""
+    fired = {'complete': 'PATH COMPLETE', 'force': 'AXIAL FORCE LIMIT',
+             'guard': 'GENERAL FORCE GUARD'}.get(status, status.upper())
+    meaning = {
+        'complete': 'the full path ran without meeting the axial limit',
+        'force': 'a NORMAL end -- the clocking screw drives the rest',
+        'guard': 'a JAM: the general wrench limit, not the axial one',
+    }.get(status, '')
+    say = log.warning if status == 'guard' else log.info
+
+    def mark(name):
+        return '>>' if name == status else '  '
+
+    pct = 100.0 * s['elapsed_s'] / max(s['duration_s'], 1e-9)
+    say('  --- ENGAGE ENDED: %s --- %s', fired, meaning)
+    say('   %s path complete   %.2f of %.2f s (%.0f%%) -- drove %.1f of %.1f mm',
+        mark('complete'), s['elapsed_s'], s['duration_s'], pct, s['driven_mm'], s['total_mm'])
+    if s['axial_limit_n'] > 0:
+        say('   %s axial force     %.1f N of %.1f N limit (peak %.1f N%s)',
+            mark('force'), s['axial_n'], s['axial_limit_n'], s['axial_peak_n'],
+            ', persistence %.2f s' % s['axial_persist_s'] if s['axial_persist_s'] > 0 else '')
+    else:
+        say('   %s axial force     NO LIMIT SET (peak %.1f N seen) -- this condition can never '
+            'end the engage', mark('force'), s['axial_peak_n'])
+    if guard is not None and getattr(guard, 'enabled', False):
+        say('   %s force guard     |F| %.1f N of %.1f N (peak %.1f) | tau %.2f Nm of %.2f Nm '
+            '(peak %.2f)', mark('guard'), s['force_n'], guard.max_force, guard.peak_force,
+            s['torque_nm'], guard.max_torque, guard.peak_torque)
+    else:
+        say('   %s force guard     DISABLED -- nothing was watching for a jam', mark('guard'))
+    say('      depth           %+.2f mm past the recorded mate', depth_mm)
+    if status != 'complete' and combo is not None and combo.tripped_by:
+        say('      tripped by      %s', combo.tripped_by)
+
+
 def build_and_run(cfg, robot, camera, args):
     a = cfg.section('assembly')
 
@@ -1630,6 +1680,19 @@ def build_and_run(cfg, robot, camera, args):
             status = 'force' if combo.tripped is det else 'guard'
             break
 
+        # SNAPSHOT EVERY CONDITION AT THE MOMENT IT STOPPED, before the settle hold moves
+        # anything. Read once, here, rather than per servo cycle.
+        t_end = min(t, dur_s)
+        w_end = robot.arm.wrench()
+        end_state = {
+            'elapsed_s': t_end, 'duration_s': dur_s,
+            'driven_mm': min(v_mm_s * t_end, total_mm), 'total_mm': total_mm,
+            'axial_n': det.axial_n(), 'axial_peak_n': det.peak_n,
+            'axial_limit_n': en_fmax, 'axial_persist_s': en_fpers,
+            'force_n': float(np.linalg.norm(w_end[:3])),
+            'torque_nm': float(np.linalg.norm(w_end[3:])),
+        }
+
         stay = robot.tool0()
         adm_en.reset()
         if settle_shared > 0:
@@ -1639,16 +1702,7 @@ def build_and_run(cfg, robot, camera, args):
 
         depth = float(matrix_to_xyzrpy(
             inverse(T_base_tconn) @ (robot.tool0() @ T_tool0_conn))[0][0] * 1000.0)
-        if status == 'complete':
-            log.info('  ENGAGE COMPLETE -- drove the full %.1f mm; depth %.2f mm past the mate, '
-                     'peak axial force %.1f N.', total_mm, depth, det.peak_n)
-        elif status == 'force':
-            log.info('  ENGAGE stopped on the AXIAL FORCE LIMIT (%s) at depth %.2f mm. This is a '
-                     'normal end, not a failure: the clocking screw is what drives the rest.',
-                     det.tripped_by, depth)
-        else:
-            log.warning('  ENGAGE stopped on the general force guard (%s) at depth %.2f mm -- '
-                        'that is a JAM, not the axial limit.', combo.tripped_by, depth)
+        _engage_report(status, end_state, depth, det, guard_en, combo)
         if obs:
             _save_observations(os.path.join(out_dir, 'engage_observations.csv'), obs)
         return status, last_ref, depth

@@ -647,7 +647,7 @@ assembly:
     # plate, which a drop directly beneath the socket would land on.
     place_offsets:
       x_mm: -300.0
-      y_mm: 0.0
+      y_mm: -100.0
       # z is IGNORED while snap_to_ground is on, and it should be: "on the ground plane" is the
       # requirement, and the resting height is a property of the PART (ground + one barrel
       # radius, ~9 mm here), not a number worth typing twice.  Set snap_to_ground false to
@@ -660,6 +660,15 @@ assembly:
     # cable into the bench when they let go, not so much that it bounces or rolls.
     release_clearance_mm: 10.0
     approach_mm: 120.0               # stand-off above the place, straight down onto it
+    # WAIT BEFORE RE-SCANNING.  A cable that has just been carried and set down is still under
+    # whatever tension the move put into it, and it keeps moving for a second or two after the
+    # fingers open -- the free length pulls the connector round as it relaxes.  Scanning into
+    # that returns a junction pose the part has already left, and the coaxial grasp is the one
+    # approach that cannot absorb a heading error.  So wait, THEN take the picture.
+    #
+    # (The end-of-cycle disassembly place needs no equivalent: the end reset, the home move and
+    # the next cycle's marker sweep already put tens of seconds between it and the next scan.)
+    settle_s: 5.0
   target_frame: bnc_connector_finger_holder
 
   # ---- WHERE THE TARGET POSE COMES FROM ------------------------------------------------------

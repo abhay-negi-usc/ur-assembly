@@ -2000,3 +2000,31 @@ def test_the_grasp_pose_is_checked_before_the_arm_commits_to_the_standoff():
     # the joint path between stand-off and grasp is deliberately NOT checked -- the real move
     # is a straight cartesian line, and interpolating joints would invent refusals
     assert 'check_path(' not in body
+
+
+def test_the_reorient_waits_for_the_cable_to_settle_before_re_scanning():
+    """A cable that has just been carried and set down keeps moving for a second or two after
+    the fingers open -- the free length pulls the connector round as it relaxes. Scanning into
+    that returns a junction pose the part has already left, and the coaxial grasp is the one
+    approach that cannot absorb a heading error.
+
+    The wait therefore has to sit AFTER the release and BEFORE the scan, and it must not fire
+    on a dry run, where there is no cable and the delay is pure cost."""
+    import inspect
+
+    from urlab import config as urconfig
+    from urlab.apps import bnc_assembly as app
+
+    settle = float(urconfig.load('bnc_assembly').get_path(
+        'assembly.reorient_recovery.settle_s'))
+    assert settle >= 1.0, f'{settle} s is not long enough for a cable to stop moving'
+
+    src = inspect.getsource(app.build_and_run)
+    i_open = src.index("gripper.open('release (cable reoriented)')")
+    i_wait = src.index('_t.sleep(settle)')
+    i_done = src.index('REORIENT COMPLETE')
+    assert i_open < i_wait < i_done, (
+        'the wait must come after the release and before control returns to the scan -- '
+        'waiting while still holding the part settles nothing')
+    assert 'not robot.arm.dry_run' in src[i_wait - 400:i_wait], (
+        'a dry run has no cable to settle; the delay would be pure cost')

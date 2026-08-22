@@ -2851,6 +2851,17 @@ def build_and_run(cfg, robot, camera, args):
                 return False
             if hasattr(scanner, 'reselect'):
                 scanner.reselect()      # it is not where it was scanned from any more
+            # LET IT SETTLE BEFORE LOOKING AT IT. A cable that has just been carried and set
+            # down is still under whatever tension the move put into it, and it keeps moving
+            # for a second or two after the fingers open -- the free length pulls the connector
+            # round as it relaxes. Scanning into that gives a junction pose the part has
+            # already left, and the coaxial grasp is the one approach that cannot absorb a
+            # heading error. So wait, THEN take the picture.
+            settle = float(r.get('settle_s', 5.0))
+            if settle > 0.0 and not robot.arm.dry_run:
+                log.info('REORIENT: waiting %.1f s for the cable to settle before re-scanning '
+                         '-- it is still relaxing after being set down.', settle)
+                _t.sleep(settle)
             log.info('REORIENT COMPLETE -- the cable now points where the socket does. '
                      'Re-scanning and retrying the coaxial grasp.')
             return True

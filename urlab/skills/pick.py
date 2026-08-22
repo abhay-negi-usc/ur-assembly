@@ -987,7 +987,11 @@ class GraspImageRecorder:
                 self._dir = os.path.join(self._data_root, self._subdir,
                                          datetime.now().strftime('%Y%m%d_%H%M%S'))
             os.makedirs(self._dir, exist_ok=True)
-            img = camera.capture().color.copy()
+            # reconnect=False: this runs in a BACKGROUND thread at ~1 Hz while the grasp
+            # happens. If the camera vanished, waiting for it here would hold the recording
+            # open long after the grasp it was recording had finished -- and the run's own
+            # captures already do the waiting, in the foreground, where a pause is visible.
+            img = camera.capture(reconnect=False).color.copy()
             cv2.imwrite(os.path.join(self._dir, f'grasp_{self._seq:04d}.png'), img)
             self._seq += 1
         except Exception as exc:                       # noqa: BLE001 -- capture is best-effort

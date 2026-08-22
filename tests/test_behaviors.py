@@ -1819,7 +1819,10 @@ def test_the_reorient_recovery_places_the_cable_on_the_socket_heading():
     assert off['x_mm'] <= -0.2, (
         f"x_mm is {off['x_mm']} -- the cable must go clear of the socket footprint, along the "
         'socket axis, or it lands on the fixture')
-    assert off['y_mm'] == 0.0
+    # y is a sideways nudge off the socket axis -- tuned on the bench, so only its scale is
+    # an invariant here
+    assert abs(float(off['y_mm'])) <= 400.0, (
+        f"y_mm {off['y_mm']} is far enough off the socket axis to be outside the working area")
     gz = float(cfg.get_path('ground_plane.z_m'))
     assert bool(r.get('snap_to_ground', True)), (
         'the ground plane must set z, or the cable is released in mid-air')
@@ -2028,3 +2031,143 @@ def test_the_reorient_waits_for_the_cable_to_settle_before_re_scanning():
         'waiting while still holding the part settles nothing')
     assert 'not robot.arm.dry_run' in src[i_wait - 400:i_wait], (
         'a dry run has no cable to settle; the delay would be pure cost')
+
+
+def test_a_camera_disconnect_pauses_the_run_instead_of_ending_it():
+    """A nudged USB cable used to raise out of wait_for_frames and take the whole run with it --
+    an hour of cycle testing lost to a fault that fixes itself when the plug goes back in. The
+    capture now waits and returns the frame it was asked for.
+
+    Exercised through a fake pipeline, because the real failure needs someone to pull a cable.
+    """
+    import types
+
+    from urlab.perception.camera import RealSenseCamera
+
+    cam = RealSenseCamera.__new__(RealSenseCamera)      # no device, no __init__
+    cam.dry_run = False
+    cam.reconnect_enabled = True
+    cam.reconnect_interval_s = 0.0
+    cam.reconnect_max_wait_s = 0.0
+    cam.width, cam.height, cam.fps = 640, 480, 30
+    cam.K = np.array([[600.0, 0, 320.0], [0, 600.0, 240.0], [0, 0, 1.0]])
+    cam.D = np.zeros(5)
+
+    calls = {'n': 0, 'awaited': 0}
+
+    def flaky(_timeout):
+        calls['n'] += 1
+        if calls['n'] == 1:
+            raise RuntimeError('Frame didn\'t arrive within 5000')
+        return 'FRAME'
+
+    cam._capture_once = flaky
+    cam._await_device = lambda: calls.__setitem__('awaited', calls['awaited'] + 1)
+
+    assert cam.capture() == 'FRAME', 'the caller must still get its frame'
+    assert calls['awaited'] == 1, 'and the device must have been waited for'
+    assert calls['n'] == 2, 'the capture is retried once the device is back'
+
+    # BACKGROUND callers opt out: a daemon thread blocking on a vanished camera would outlive
+    # the grasp it was recording.
+    calls['n'] = 0
+    try:
+        cam.capture(reconnect=False)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('reconnect=False must raise immediately, not wait')
+    assert calls['awaited'] == 1, 'and must not have waited'
+
+    # the grasp recorder is one of those callers
+    import inspect
+    from urlab.skills.pick import GraspImageRecorder
+    assert 'camera.capture(reconnect=False)' in inspect.getsource(GraspImageRecorder._capture)
+
+    del types
+
+
+def test_a_camera_that_comes_back_different_is_refused():
+    """K is what every pose is measured through. A device returning at another resolution, or a
+    DIFFERENT camera appearing on the bus when no serial_no is pinned, would not fail -- it
+    would quietly return wrong answers, which is worse than the disconnect."""
+    import inspect
+
+    from urlab.perception.camera import RealSenseCamera
+
+    src = inspect.getsource(RealSenseCamera._await_device)
+    assert 'np.allclose(self.K, K0' in src and "(self.width, self.height) != size0" in src, (
+        'the reconnect must compare the intrinsics it comes back with against the ones the run '
+        'has been using')
+    assert 'raise RuntimeError' in src, 'and refuse, rather than carry on with a different K'
+    # the wait is bounded only if asked to be -- the default is to wait as long as it takes
+    from urlab import config as urconfig
+    rc = urconfig.load('bnc_assembly').get_path('camera.reconnect')
+    assert rc['enabled'] is True
+    assert float(rc['max_wait_s']) == 0.0, '0 = wait indefinitely, which is the point'
+
+
+def test_a_refused_grasp_reports_what_actually_failed():
+    """THE ONE-LINE REFUSALS NAME THE CHECK, NOT THE CAUSE. "no IK solution" is equally true of
+    a pose 50 mm into the bench, a pose past the reach, and a pose the wrist cannot twist to --
+    and those want completely different fixes. So every refusal dumps the whole approach.
+
+    THE PART THAT MATTERS MOST SURVIVES AN IK FAILURE: the tool bodies depend only on tool0's
+    pose, so "the gripper body is 5 mm into the bench" is still answerable when the arm is not,
+    and that is usually the real answer behind an unreachable coaxial grasp."""
+    import inspect
+    import logging
+
+    from urlab import config as urconfig
+    from urlab.skills.pick import (GraspController, GraspGeometry, connector_axis_height_m,
+                                   fingertip_in_connector, grasp_pose)
+    from urlab.transforms import translation_matrix, xyzrpy_to_matrix
+
+    cfg = urconfig.load('bnc_assembly')
+    gz = float(cfg.get_path('ground_plane.z_m'))
+    T_tool0_ftip = xyzrpy_to_matrix([0, 0, 0.183], [np.pi, 0, -np.pi / 2])
+
+    class _Arm:
+        dry_run = False
+
+        def q(self):
+            return np.radians([-85, -145, -105, -205, -85, 180])
+
+        def ik(self, T, qnear=None):
+            return None                     # the controller refuses, as on the bench
+
+    class _Robot:
+        arm = _Arm()
+        T_tool0_fingertip = T_tool0_ftip
+
+    geom = GraspGeometry(cfg)
+    J = translation_matrix([0, 0, connector_axis_height_m(cfg)]) @ xyzrpy_to_matrix(
+        [0.5, 0.0, gz], [0, 0, 0])
+    geom.T_base_grasp = grasp_pose(J, fingertip_in_connector(cfg))
+    geom.T_base_detection = J
+
+    rec = []
+    h = logging.Handler()
+    h.emit = lambda r: rec.append(r.getMessage())
+    from urlab.skills import pick as pickmod
+    pickmod.log.addHandler(h)
+    try:
+        GraspController(cfg).diagnose(_Robot(), geom, 'no IK', 'grasp-align')
+    finally:
+        pickmod.log.removeHandler(h)
+    out = '\n'.join(rec)
+
+    for must in ('grasp  fingertip', 'grasp  tool0', 'stand-off tool0', 'detected junction',
+                 'arm is now at', 'IK stand-off', 'IK grasp', 'tool vs ground AT THE GRASP'):
+        assert must in out, f'the report must include {must!r}'
+    assert 'above the bench' in out, 'heights are what make an unreachable pose legible'
+    # the clearance table runs even though IK failed, and says so rather than going quiet
+    assert 'gripper_body' in out and 'allowed' in out, (
+        'every body must be shown against its OWN allowance -- the fingertips may intersect '
+        'and nothing else may, so a bare clearance cannot be judged')
+    assert 'need an IK solution' in out, 'and it must say which parts it could not compute'
+
+    # every refusal path routes through it, not just one
+    src = inspect.getsource(GraspController)
+    assert src.count('self.diagnose(robot, geom') == 6, (
+        'all six refusal paths must diagnose, or the quiet one is the one you hit')

@@ -30,6 +30,22 @@ camera:
   width: 1280
   height: 720
   fps: 15                          # D405 max at 1280x720 is 15 fps
+  # A CAMERA THAT DROPS OUT MID-RUN MUST NOT END THE RUN.  A nudged USB cable used to raise
+  # out of wait_for_frames and take an hour of cycle testing with it, for a fault that fixes
+  # itself the moment the plug goes back in.  Instead the capture PAUSES -- arm holding
+  # position, nothing retried -- until there is a frame again.
+  #
+  # IT REFUSES A DEVICE THAT COMES BACK DIFFERENT.  Another resolution, or another camera
+  # appearing on the bus when no serial_no is pinned, means a different K -- and every pose is
+  # measured through K, so carrying on would return wrong answers rather than fail.  Pin
+  # serial_no if more than one device is present.
+  #
+  # Background best-effort captures (the grasp image recorder) opt OUT and simply skip a frame:
+  # a daemon thread blocking on a vanished camera would outlive the grasp it was recording.
+  reconnect:
+    enabled: true
+    retry_interval_s: 2.0
+    max_wait_s: 0.0        # 0 = wait indefinitely
 
 # ---- FIDUCIALS (only used when assembly.target_source is `visual`) --------------------------
 # The rig itself (which markers, sizes, target pose in each) lives in configs/frames.yaml
@@ -647,7 +663,7 @@ assembly:
     # plate, which a drop directly beneath the socket would land on.
     place_offsets:
       x_mm: -300.0
-      y_mm: -100.0
+      y_mm: 300.0
       # z is IGNORED while snap_to_ground is on, and it should be: "on the ground plane" is the
       # requirement, and the resting height is a property of the PART (ground + one barrel
       # radius, ~9 mm here), not a number worth typing twice.  Set snap_to_ground false to

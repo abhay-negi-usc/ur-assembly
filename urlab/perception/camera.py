@@ -51,6 +51,14 @@ class RealSenseCamera:
         self.enable_depth = bool(c.get('enable_depth', False))
         self.pose_fn = pose_fn
         self.dry_run = bool(cfg.get_path('robot.dry_run', False))
+        # RECONNECT. A USB camera that drops out mid-run used to end the run: wait_for_frames
+        # raises, and nothing caught it. Losing an hour of a cycle test to a nudged cable is a
+        # bad trade for a fault that fixes itself the moment the plug goes back in -- so the
+        # default is to WAIT, indefinitely, and carry on where it left off.
+        rc = c.get('reconnect', {}) or {}
+        self.reconnect_enabled = bool(rc.get('enabled', True))
+        self.reconnect_interval_s = float(rc.get('retry_interval_s', 2.0))
+        self.reconnect_max_wait_s = float(rc.get('max_wait_s', 0.0))   # 0 = forever
 
         if self.dry_run:
             log.warning('DRY RUN: the camera returns a black frame.')
@@ -147,13 +155,85 @@ class RealSenseCamera:
     def _fmt_modes(modes):
         return '\n'.join(f'  {w}x{h} @ {f} fps' for w, h, f in modes) or '  (none)'
 
-    def capture(self, timeout_ms=5000):
-        """One frame, stamped with the camera pose at capture."""
+    def capture(self, timeout_ms=5000, reconnect=None):
+        """One frame, stamped with the camera pose at capture.
+
+        SURVIVES A DISCONNECT. If the device drops out, this waits for it to come back and
+        returns the frame it was asked for, rather than raising and taking the run with it.
+        `reconnect=False` restores the old raise-immediately behaviour, which is what a
+        best-effort BACKGROUND capture wants: a recorder thread that blocks forever on a
+        vanished camera would sit there holding its `with` block open long after the grasp it
+        was recording finished."""
         if self.dry_run:
             color = np.zeros((self.height, self.width, 3), dtype=np.uint8)
             return Frame(color, self.K, self.D, time.monotonic(),
                          self.pose_fn() if self.pose_fn else None)
+        wait = self.reconnect_enabled if reconnect is None else bool(reconnect)
+        try:
+            return self._capture_once(timeout_ms)
+        except Exception as exc:                        # noqa: BLE001 -- any device fault
+            if not wait:
+                raise
+            log.error('CAMERA LOST (%s). Waiting for it to come back -- the run is PAUSED here, '
+                      'the arm is holding position, and nothing is retried until there is a '
+                      'frame again.', exc)
+        self._await_device()
+        return self._capture_once(timeout_ms)
 
+    def _await_device(self):
+        """Block until the pipeline yields a frame again, restarting it each attempt.
+
+        RE-READS THE INTRINSICS AND REFUSES A DIFFERENT ONE. A device that comes back at another
+        resolution -- or a DIFFERENT CAMERA appearing on the bus when no serial_no is pinned --
+        has a different K, and every pose this run has produced or will produce is measured
+        through K. Carrying on with the wrong one would not fail; it would quietly return wrong
+        answers, which is worse than the disconnect."""
+        rs = self._rs
+        K0, size0 = np.array(self.K, dtype=float), (self.width, self.height)
+        t0, n = time.monotonic(), 0
+        while True:
+            n += 1
+            waited = time.monotonic() - t0
+            if self.reconnect_max_wait_s > 0.0 and waited > self.reconnect_max_wait_s:
+                raise RuntimeError(
+                    'the camera did not come back within camera.reconnect.max_wait_s '
+                    f'({self.reconnect_max_wait_s:.0f} s)')
+            try:
+                self.pipeline.stop()
+            except Exception:                           # noqa: BLE001 -- already down
+                pass
+            time.sleep(self.reconnect_interval_s)
+            try:
+                self.pipeline = rs.pipeline()
+                profile = self._start_color(rs)
+                cp = profile.get_stream(rs.stream.color).as_video_stream_profile()
+                intr = cp.get_intrinsics()
+                self.width, self.height, self.fps = cp.width(), cp.height(), cp.fps()
+                self.K = np.array([[intr.fx, 0.0, intr.ppx],
+                                   [0.0, intr.fy, intr.ppy],
+                                   [0.0, 0.0, 1.0]])
+                self.D = np.asarray(intr.coeffs, dtype=float)
+                for _ in range(5):                      # let auto-exposure settle again
+                    self.pipeline.wait_for_frames()
+            except Exception as exc:                    # noqa: BLE001 -- still gone
+                if n == 1 or n % 15 == 0:
+                    log.warning('  camera still down after %.0f s (%s) -- still waiting.',
+                                waited, exc)
+                continue
+            if (self.width, self.height) != size0 or not np.allclose(self.K, K0, atol=1e-6):
+                raise RuntimeError(
+                    'the camera came back DIFFERENT: %dx%d fx=%.1f fy=%.1f, was %dx%d fx=%.1f '
+                    'fy=%.1f. Every pose is measured through K, so continuing would return '
+                    'wrong answers rather than fail. Pin camera.serial_no if more than one '
+                    'device is on the bus, and re-check the mode.'
+                    % (self.width, self.height, self.K[0, 0], self.K[1, 1],
+                       size0[0], size0[1], K0[0, 0], K0[1, 1]))
+            log.info('CAMERA BACK after %.0f s (%dx%d, fx=%.1f) -- resuming.',
+                     time.monotonic() - t0, self.width, self.height, self.K[0, 0])
+            return
+
+    def _capture_once(self, timeout_ms):
+        """One frame, no reconnect handling. Raises if the device is not there."""
         # DRAIN the pipeline's buffered frames first, THEN wait for a genuinely new one. The
         # pipeline keeps producing frames at 15 fps while the arm moves and settles, so a plain
         # wait_for_frames() can hand back a STALE frame captured mid-move -- which we would then
@@ -168,7 +248,10 @@ class RealSenseCamera:
         T_base_cam = self.pose_fn() if self.pose_fn else None
         stamp = time.monotonic()
 
-        color = np.asanyarray(frames.get_color_frame().get_data())
+        cf = frames.get_color_frame()
+        if not cf:
+            raise RuntimeError('the pipeline returned no color frame')
+        color = np.asanyarray(cf.get_data())
         depth = None
         if self.enable_depth:
             d = frames.get_depth_frame()

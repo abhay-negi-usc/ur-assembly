@@ -463,6 +463,24 @@ class GroundCollisionModel:
                 self.pb.resetBasePositionAndOrientation(self._bodies[name], p.tolist(), quat_t,
                                                         physicsClientId=self.client)
 
+    def tool_clearances(self, T_base_tool0):
+        """{tool body: clearance to the ground, m} from a tool0 pose alone.
+
+        NO IK REQUIRED, which is the point: when the arm cannot be solved for a grasp this is
+        still answerable, and "the gripper would be 20 mm into the bench" explains an
+        unreachable pose that a bare "no IK solution" does not."""
+        self._pose_tool(T_base_tool0)
+        out = {}
+        for name in self.tool.body_names():
+            pts = self.pb.getClosestPoints(self._bodies[name], self.plane, distance=1.0,
+                                           physicsClientId=self.client)
+            out[name] = min((c[8] for c in pts), default=1.0)
+        return out
+
+    def allowance(self, name):
+        """The clearance this body must keep: the fingertips may intersect, nothing else may."""
+        return -self.fingertip_margin if name in FINGERTIP_BODIES else self.margin
+
     def check_tool_pose(self, T_base_tool0):
         """(ok, worst_body, violation_m) for the SPACER, GRIPPER BODY and FINGERTIPS only.
 

@@ -732,10 +732,11 @@ class GraspController:
         q = robot.arm.ik(T @ inverse(robot.T_tool0_fingertip), self.approach_seed)
         if q is None:
             self.last_refusal = 'unreachable'
-            log.error('%s: no IK solution%s.', label,
+            log.error('%s: no IK solution for the STAND-OFF%s.', label,
                       '' if self.approach_seed is None else
                       ' near pickup.approach_seed_joints_deg %s deg'
                       % np.round(np.degrees(self.approach_seed), 1).tolist())
+            self.diagnose(robot, geom, 'the stand-off has no IK solution', label)
             return False
         # THE GRASP ITSELF, BEFORE COMMITTING TO THE PRE-GRASP. Checking only the
         # stand-off let the arm drive all the way there and discover at the descent that the
@@ -749,7 +750,7 @@ class GraspController:
             log.info('  grasp-align configuration: %s deg (no approach_seed_joints_deg set, so '
                      'this is whatever branch the scan left the arm nearest).',
                      np.round(np.degrees(q), 1).tolist())
-            return self._go(robot, T, q, label)
+            return self._go(robot, geom, T, q, label)
         # WRAPPED ONTO [-pi, pi], because a joint at +179 and one at -179 are 2 deg apart,
         # not 358. Done with a modulo rather than min(d, 2pi - d): the latter returns a
         # NEGATIVE distance once a joint differs by more than a full turn -- and a negative
@@ -770,11 +771,94 @@ class GraspController:
                       np.degrees(self.approach_seed_tol),
                       np.round(np.degrees(q), 1).tolist(),
                       np.round(np.degrees(self.approach_seed), 1).tolist())
+            self.diagnose(robot, geom, 'the IK landed on a different branch from the seed',
+                          label)
             return False
         log.info('  grasp-align on the seeded branch: %s deg (worst joint %s, %.1f deg from the '
                  'seed).', np.round(np.degrees(q), 1).tolist(), UR_JOINTS[worst],
                  np.degrees(d[worst]))
-        return self._go(robot, T, q, label)
+        return self._go(robot, geom, T, q, label)
+
+    def diagnose(self, robot, geom, why, label='grasp'):
+        """Print everything known about why this grasp could not be taken.
+
+        THE ONE-LINE REFUSALS NAME THE CHECK BUT NOT THE CAUSE. "no IK solution" is true of a
+        pose 50 mm into the bench, a pose past the reach, and a pose the wrist cannot twist to,
+        and they want completely different fixes. So on any refusal this dumps the whole
+        approach at once: where the grasp actually is, whether each of the two poses solves,
+        and what every body's clearance is.
+
+        MOST OF IT SURVIVES AN IK FAILURE. The tool bodies depend only on tool0's pose, so
+        "the gripper body is 20 mm into the bench" is still answerable when the arm is not --
+        and that is usually the real answer behind an unreachable coaxial grasp."""
+        model = self.collision_model()
+        from ..transforms import inverse, matrix_to_xyzrpy
+        T_inv = inverse(robot.T_tool0_fingertip)
+        T_g_f, T_p_f = geom.T_base_grasp, geom.pre_grasp()
+        T_g_0, T_p_0 = T_g_f @ T_inv, T_p_f @ T_inv
+        gz = model.ground_z if model is not None else None
+
+        def line(tag, T):
+            xyz, rpy = matrix_to_xyzrpy(T)
+            h = '' if gz is None else '  | %+.0f mm above the bench' % ((T[2, 3] - gz) * 1000.0)
+            return '%-18s xyz %-26s rpy %s deg%s' % (
+                tag, np.round(xyz * 1000.0, 1).tolist(),
+                np.round(np.degrees(rpy), 1).tolist(), h)
+
+        log.error('--- WHY THE GRASP WAS REFUSED: %s ---', why)
+        log.error('   %s', line('grasp  fingertip', T_g_f))
+        log.error('   %s', line('grasp  tool0', T_g_0))
+        log.error('   %s', line('stand-off tool0', T_p_0))
+        if getattr(geom, 'T_base_detection', None) is not None:
+            log.error('   %s', line('detected junction', geom.T_base_detection))
+
+        # ---- the two solves, reported separately: which one fails is the whole diagnosis ----
+        q_now = robot.arm.q()
+        log.error('   arm is now at    %s deg', np.round(np.degrees(q_now), 1).tolist())
+        q_p = robot.arm.ik(T_p_0, self.approach_seed if self.approach_seed is not None else q_now)
+        log.error('   IK stand-off     %s', 'UNREACHABLE' if q_p is None
+                  else str(np.round(np.degrees(q_p), 1).tolist()))
+        q_g = robot.arm.ik(T_g_0, q_p if q_p is not None else q_now)
+        log.error('   IK grasp         %s', 'UNREACHABLE' if q_g is None
+                  else str(np.round(np.degrees(q_g), 1).tolist()))
+        if q_p is not None and q_g is not None:
+            d = np.abs((np.asarray(q_g) - np.asarray(q_p) + np.pi) % (2 * np.pi) - np.pi)
+            log.error('   stand-off -> grasp joint change %s deg (worst %s)',
+                      np.round(np.degrees(d), 1).tolist(), UR_JOINTS[int(np.argmax(d))])
+        if self.approach_seed is not None and q_p is not None:
+            d = np.abs((np.asarray(q_p) - np.asarray(self.approach_seed) + np.pi)
+                       % (2 * np.pi) - np.pi)
+            log.error('   stand-off is %.1f deg from the seed at %s (tolerance %.0f)',
+                      np.degrees(d.max()), UR_JOINTS[int(np.argmax(d))],
+                      np.degrees(self.approach_seed_tol))
+        if model is None:
+            log.error('   (no collision model -- clearances unavailable)')
+            return
+
+        # ---- clearances that need NO joint solution -----------------------------------------
+        for tag, T0 in (('AT THE GRASP', T_g_0), ('at the stand-off', T_p_0)):
+            cl = model.tool_clearances(T0)
+            worst = sorted(cl, key=cl.get)[:4]
+            log.error('   tool vs ground %s:', tag)
+            for b in worst:
+                allow = model.allowance(b)
+                log.error('       %-15s %+8.1f mm   (allowed %+.1f)%s', b, cl[b] * 1000.0,
+                          allow * 1000.0, '   <-- OVER' if cl[b] < allow else '')
+        # ---- and the ones that do -----------------------------------------------------------
+        if q_g is None:
+            log.error('   arm/self clearances need an IK solution for the grasp, and there is '
+                      'none -- the tool numbers above are what there is.')
+            return
+        cl = model.clearances(q_g)
+        arm = {k: v for k, v in cl.items() if k not in model.tool.body_names()}
+        for b in sorted(arm, key=arm.get)[:3]:
+            log.error('       %-15s %+8.1f mm   (allowed %+.1f)%s', b, arm[b] * 1000.0,
+                      model.margin * 1000.0, '   <-- OVER' if arm[b] < model.margin else '')
+        sc = model.self_clearances(q_g)
+        for b in sorted(sc, key=sc.get)[:3]:
+            log.error('       %-28s %+8.1f mm   (allowed %+.1f)%s', b, sc[b] * 1000.0,
+                      model.self_margin * 1000.0,
+                      '   <-- OVER' if sc[b] < model.self_margin else '')
 
     def _grasp_is_reachable(self, robot, geom, q_pregrasp, label):
         """Is the GRASP pose -- not the stand-off -- reachable and clear?
@@ -802,9 +886,10 @@ class GraspController:
         q_grasp = robot.arm.ik(T_grasp_tool0, q_pregrasp)
         if q_grasp is None:
             self.last_refusal = 'unreachable'
-            log.error('%s: the STAND-OFF is reachable but the GRASP pose 100 mm below it is '
-                      'not -- no IK solution on that branch. Refusing before the arm moves.',
-                      label)
+            log.error('%s: the STAND-OFF is reachable but the GRASP pose below it is not -- '
+                      'no IK solution on that branch. Refusing before the arm moves.', label)
+            self.diagnose(robot, geom, 'the grasp has no IK solution on the stand-off branch',
+                          label)
             return False
         ok, body, over = model.check_q(q_grasp)
         if not ok:
@@ -813,10 +898,12 @@ class GraspController:
                       'allowance when the arm is AT the grasp. The stand-off above it is fine, '
                       'which is why this has to be checked separately. Refusing before the arm '
                       'moves.', label, body, over * 1000.0)
+            self.diagnose(robot, geom, '%s is %.1f mm into something at the grasp'
+                          % (body, over * 1000.0), label)
             return False
         return True
 
-    def _go(self, robot, T_target, q_goal, label):
+    def _go(self, robot, geom, T_target, q_goal, label):
         """Drive to the pre-grasp: straight there if that arc is clear, otherwise via the
         waypoint. Every leg is checked, and a refusal happens with the arm still parked."""
         if self._path_is_clear(robot, q_goal, label, quiet=self.approach_via is not None):
@@ -828,7 +915,6 @@ class GraspController:
         via = self.approach_via
         if not self._path_is_clear(robot, via, label + ' (leg 1: to the waypoint)'):
             return False
-        q_now = robot.arm.q()
         ok, body, over, frac = self._clear_between(via, q_goal)
         if not ok:
             self.last_refusal = 'unreachable'
@@ -836,12 +922,12 @@ class GraspController:
                       'still puts %s %.1f mm past its allowance at %.0f%% along. The waypoint '
                       'needs to be higher, or the grasp itself is too low.',
                       label, body, over * 1000.0, frac * 100.0)
+            self.diagnose(robot, geom, 'no route to the stand-off clears the bench', label)
             return False
         log.info('%s: the direct arc dips into the bench, so routing via the waypoint %s deg.',
                  label, np.round(np.degrees(via), 1).tolist())
         if not robot.arm.move_j(via, label=label + ' (waypoint)'):
             return False
-        del q_now
         return robot.move_fingertip(T_target, label, qnear=self.approach_seed)
 
     def _clear_between(self, q_from, q_to):
@@ -914,6 +1000,8 @@ class GraspController:
                   '(pickup.fingertip_in_connector rpy y) or a grasp target set too low.',
                   label, body, over * 1000.0, frac * 100.0,
                   model.fingertip_margin * 1000.0)
+        self.diagnose(robot, geom, 'the descent puts %s %.1f mm into the bench'
+                      % (body, over * 1000.0), label)
         return False
 
     def lift(self, robot, geom, label='lift', position_guard=None):
@@ -987,7 +1075,11 @@ class GraspImageRecorder:
                 self._dir = os.path.join(self._data_root, self._subdir,
                                          datetime.now().strftime('%Y%m%d_%H%M%S'))
             os.makedirs(self._dir, exist_ok=True)
-            img = camera.capture().color.copy()
+            # reconnect=False: this runs in a BACKGROUND thread at ~1 Hz while the grasp
+            # happens. If the camera vanished, waiting for it here would hold the recording
+            # open long after the grasp it was recording had finished -- and the run's own
+            # captures already do the waiting, in the foreground, where a pause is visible.
+            img = camera.capture(reconnect=False).color.copy()
             cv2.imwrite(os.path.join(self._dir, f'grasp_{self._seq:04d}.png'), img)
             self._seq += 1
         except Exception as exc:                       # noqa: BLE001 -- capture is best-effort

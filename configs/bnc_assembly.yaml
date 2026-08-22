@@ -248,7 +248,7 @@ pickup:
   # ===========================================================================================
   fingertip_in_connector:
     xyz_mm:  [17.0, 0.0, 0.0]
-    rpy_deg: [0.0, -70.0, 0.0]
+    rpy_deg: [0.0, -75.0, 0.0]
 
   # BELIEF OFFSET, mm in the FINGERTIP frame -- the one knob here that moves NOTHING at
   # pickup.  This is the split between the two things that were previously tangled:
@@ -333,8 +333,8 @@ pickup:
   # an elbow or shoulder flip shows up on those.  45 deg is loose enough to allow the real
   # reach and tight enough that no branch change slips through.
   # ===========================================================================================
-  approach_seed_joints_deg: [-55, -180, -90, -90, 0, 180]
-  approach_seed_tolerance_deg: 120.0
+  approach_seed_joints_deg: null
+  approach_seed_tolerance_deg: 45.0
   # A HIGH WAYPOINT TO ROUTE THROUGH when the direct arc dips.
   #
   # The grasp-align move is ONE moveJ from wherever the multi-view scan left the arm to the
@@ -392,6 +392,29 @@ pickup:
     margin_mm: 0.0            # required clearance for EVERYTHING except the fingertips
     fingertip_margin_mm: 5.0  # allowed INTERSECTION, fingertips only (see above)
     path_samples: 25
+    # SELF-COLLISION: the arm against itself, and the tool against the arm.
+    #
+    # WHAT IS NOT CHECKED, and why each exclusion is safe rather than convenient:
+    #   * ADJACENT chain links.  Their housings interpenetrate at the joint so the arm looks
+    #     continuous -- -2 to -5 mm at EVERY configuration, because it is how the meshes are
+    #     drawn.  Pairs two or more apart are watched instead; on a working pose the closest of
+    #     those sits at +18 mm, so there is real signal to read.
+    #   * THE TOOL against wrist_3.  That is the mounting face; the spacer is bolted to it and
+    #     overlaps its mesh by ~38 mm by construction.
+    #   * THE TOOL against wrist_2.  Rigid: measured range 0.0 mm over 150 random
+    #     configurations.  A per-pose check on a rigid offset can only return one answer, and
+    #     spacer/wrist_2 at 10.1 mm would have capped the usable margin below.  It is verified
+    #     ONCE at start-up instead, where a tool that fouls the wrist is reported as the design
+    #     error it is.
+    #   * TOOL against TOOL (camera vs gripper, vs spacer, vs the flange).  All bolted to
+    #     tool0, so rigid -- and several overlap by construction, the camera bracket and the
+    #     spacer both starting at the tool0 origin.
+    #
+    # The fingertip GROUND allowance does NOT reach any of this.  A pad is meant to arrive at
+    # the work surface; nothing is ever meant to arrive at the forearm.
+    self_collision:
+      enabled: true
+      margin_mm: 5.0
     tool:
       spacer_length_mm: 8.0     # the coupling between tool0 and the gripper's mounting face
       spacer_radius_mm: 37.5
@@ -402,6 +425,20 @@ pickup:
       gripper_body_radius_mm: 45.0
       finger_radius_mm: 12.0
       finger_half_gap_mm: 42.0  # half the OPEN jaw separation: the worst case for a ground hit
+      # BOXES BOLTED TO tool0 -- brackets, mounts, cable guides.  Written as tool0 EXTENTS in
+      # mm, which is how you measure one: rule on the flange, read where it starts and stops on
+      # each axis.  They ride tool0, so they take its orientation as well as its position, and
+      # they are checked against the ground AND against the arm.  NO fingertip allowance: the
+      # pads are meant to reach the work surface, a bracket never is.
+      boxes:
+        # The camera bracket.  x: symmetric about the tool0 yz plane, 50 mm wide.
+        #                      y: 110 mm along tool0 -Y, starting at the tool0 origin.
+        #                      z: 35 mm along tool0 +Z, base on the tool0 xy plane.
+        # Sanity check on the numbers: hand_eye puts the camera at [-9, -80, 31] mm, which lands
+        # inside these extents -- so the bracket is where the optics say it is.
+        - name: camera_bracket
+          min_mm: [-25.0, -110.0,  0.0]
+          max_mm: [ 25.0,    0.0, 35.0]
   compliance:
     enabled: true
     tare_before: true
@@ -491,8 +528,8 @@ speed:
     # happens near the work surface, and at a large pickup.pitch_deg it swings the gripper
     # BODY down toward the ground plane rather than just the fingers.  Falls back to `scan`
     # when unset, so other apps are unaffected.
-    grasp_align: 1.2
-    pickup: 1.5      # the compliant grasp descent
+    grasp_align: 0.5
+    pickup: 0.5      # the compliant grasp descent
     lift: 0.8        # the compliant lift (including the slip-check partial lift)
     standoff: 1.0    # the move to stand-off + the per-attempt realign moveJs
     # The marker-view -> pick-pose traverse (a ~70 deg wrist_1 swing, empty gripper, clear of
@@ -929,7 +966,7 @@ assembly:
     # the analytic IK on a reachable branch.  If the angle does not solve, the app scans 24
     # alternatives and takes the cheapest reachable one, warning that it did.  Pin a number
     # here once it is stable.
-    grasp_clock_deg: -180.0
+    grasp_clock_deg: -90.0
     # WRIST-3 MARGIN, deg inside each end of the usable wrist_3 range the turn must stay.
     # The grasp clock angle is exactly a wrist_3 offset, which lets the app PREWIND the wrist
     # before threading down the axis.  The margin exists because the compliant turn can walk

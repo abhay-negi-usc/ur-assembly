@@ -55,6 +55,12 @@ class ForceGuard:
         self.enabled = bool(c.get('enabled', True))
         self.tripped_by = None
         self._over_since = None
+        # PEAKS OVER THE WHOLE MOVE, for the end-of-behaviour report. Tracked here because
+        # __call__ already reads the wrench every step -- computing them anywhere else would
+        # mean a second RTDE read per servo cycle just to print a number. Never reset by
+        # reset(): the point is what the move as a whole saw.
+        self.peak_force = 0.0
+        self.peak_torque = 0.0
 
         if self.enabled and self.max_force <= 0.0 and self.max_torque <= 0.0:
             log.warning('Force guard is enabled but both limits are 0 -- it will never trip.')
@@ -68,6 +74,8 @@ class ForceGuard:
         w = self.arm.wrench()
         force = float(np.linalg.norm(w[:3]))
         torque = float(np.linalg.norm(w[3:]))
+        self.peak_force = max(self.peak_force, force)
+        self.peak_torque = max(self.peak_torque, torque)
 
         over = None
         if self.max_force > 0.0 and force >= self.max_force:

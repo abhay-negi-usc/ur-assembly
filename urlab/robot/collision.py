@@ -107,6 +107,22 @@ class ToolModel:
         # The jaws close along tool0 +/-X (fingertip y = tool0 -X), so the two fingers are
         # offset along X. Half the OPEN separation is the worst case for a ground check.
         self.finger_half_gap = float(c.get('finger_half_gap_mm', 42.0)) / 1000.0
+        # BOXES BOLTED TO tool0 -- brackets, camera mounts, cable guides. Written as tool0
+        # extents in mm, which is how you measure one: put a rule on the flange and read off
+        # where the thing starts and stops on each axis. A slab is NOT a capsule -- wrapping a
+        # 50 x 110 x 35 mm bracket in a capsule would give it a 60 mm radius and refuse most of
+        # the workspace -- so these are real boxes.
+        self.boxes = []
+        for i, b in enumerate(c.get('boxes', []) or []):
+            lo = np.asarray([float(v) for v in b['min_mm']], dtype=float) / 1000.0
+            hi = np.asarray([float(v) for v in b['max_mm']], dtype=float) / 1000.0
+            if np.any(hi <= lo):
+                raise ValueError('collision tool box %r: max_mm must exceed min_mm on every '
+                                 'axis, got %s .. %s' % (b.get('name', i), b['min_mm'],
+                                                         b['max_mm']))
+            self.boxes.append((str(b.get('name', 'box_%d' % i)),
+                               (lo + hi) / 2.0, (hi - lo) / 2.0))
+
         used = self.spacer_len + self.body_len
         self.finger_len = self.fingertip_z - used
         # A SANITY CHECK ON THE CHAIN, because this split is derived, not measured. Robotiq's
@@ -144,7 +160,49 @@ class ToolModel:
         ]
 
 
+    def body_names(self):
+        """Every tool body, capsules and boxes alike."""
+        return [s[0] for s in self.segments()] + [b[0] for b in self.boxes]
+
+
 FINGERTIP_BODIES = ('fingertip_a', 'fingertip_b')
+
+# ---- self-collision ------------------------------------------------------------------------
+# The kinematic chain, in order. Only meaningful in 'urdf' mode: the capsule envelope is
+# deliberately fatter than the real shell, so capsules overlap each other at every joint and
+# would report a permanent self-collision.
+CHAIN = ('base_link_inertia', 'shoulder_link', 'upper_arm_link', 'forearm_link',
+         'wrist_1_link', 'wrist_2_link', 'wrist_3_link')
+
+# ADJACENT LINKS OVERLAP BY DESIGN. Their housings interpenetrate at the joint so the arm looks
+# continuous -- measured at -2 to -5 mm on every working pose in this cell, at every
+# configuration, because it is how the meshes are drawn and not a function of the joint angles.
+# Checking them would fire constantly and mean nothing. Pairs two or more apart in the chain
+# are the ones that can actually come together: on the same working poses the closest of those
+# sits at +18 mm, so there is real signal to read.
+SELF_PAIRS = tuple((a, b) for i, a in enumerate(CHAIN) for b in CHAIN[i + 2:])
+
+# TOOL vs ARM, split by whether the pair can MOVE relative to each other.
+#
+# The tool is bolted to wrist_3 and every tool body is either on the tool axis or symmetric
+# about it, so wrist_3's rotation does not change where the tool sits relative to wrist_3 OR
+# wrist_2. Measured over 150 random configurations, every tool/wrist_2 distance has a range of
+# exactly 0.0 mm: spacer 10.1, gripper_body 10.6, fingertips 98.6. They are RIGID offsets.
+#
+# A per-pose check on a rigid offset is meaningless -- it is either always fine or always
+# broken -- and it is actively harmful here, because spacer/wrist_2 at 10.1 mm is the tightest
+# pair in the whole set and would cap the usable self-collision margin at 10 mm for a pair that
+# cannot collide. So they are checked ONCE at construction instead (see _check_fixed_pairs),
+# which still catches a tool model that would foul the wrist -- a longer spacer, say -- but
+# catches it as the design error it is rather than as a runtime refusal.
+# wrist_3 is the MOUNTING FACE. The spacer is bolted to it and the link's mesh includes the
+# flange, so the two overlap by ~38 mm at every configuration BY CONSTRUCTION. Excluded from
+# both checks; there is nothing it could tell us.
+TOOL_MOUNT_LINK = 'wrist_3_link'
+# wrist_2 is rigid relative to the tool but SHOULD be clear -- so it is the one worth checking
+# once, at build, where a tool that fouls it is reported as the design error it is.
+TOOL_FIXED_LINKS = ('wrist_2_link',)
+TOOL_SELF_SKIP = (TOOL_MOUNT_LINK,) + TOOL_FIXED_LINKS
 
 
 class GroundCollisionModel:
@@ -169,6 +227,12 @@ class GroundCollisionModel:
         # one can never widen the other.
         self.fingertip_margin = float(c.get('fingertip_margin_mm', 5.0)) / 1000.0
         self.path_samples = int(c.get('path_samples', 25))
+        # SELF-COLLISION. Its own margin, and deliberately NOT the fingertip ground allowance:
+        # a fingertip is meant to reach the work surface, it is never meant to reach the
+        # forearm. Nothing about the tool gets an allowance against the arm.
+        sc = dict(c.get('self_collision', {}) or {})
+        self.self_enabled = bool(sc.get('enabled', True))
+        self.self_margin = float(sc.get('margin_mm', 5.0)) / 1000.0
         self.tool = ToolModel(c.get('tool'), fingertip_z_m=fingertip_z_m)
         self.radii = [float(r) for r in c.get('link_radii_m', UR10E_RADII)]
 
@@ -187,6 +251,7 @@ class GroundCollisionModel:
         self._link_index = {}
         if bool(c.get('use_urdf', True)) and os.path.isfile(self.URDF):
             self.robot = pb.loadURDF(self.URDF, useFixedBase=True,
+                                     flags=pb.URDF_USE_SELF_COLLISION,
                                      physicsClientId=self.client)
             for j in range(pb.getNumJoints(self.robot, physicsClientId=self.client)):
                 info = pb.getJointInfo(self.robot, j, physicsClientId=self.client)
@@ -208,8 +273,47 @@ class GroundCollisionModel:
                                                            UR10E_LINK_LENGTHS[i])
         for name, z0, z1, r, _x in self.tool.segments():
             self._bodies[name] = self._capsule(r, max(z1 - z0, 1e-4))
+        for name, _centre, half in self.tool.boxes:
+            self._bodies[name] = self._box(half)
+        # The tool must clear the wrist it is bolted to, at every configuration. Fixed offsets,
+        # so this is a build-time question, not a per-move one.
+        self._pose_all(np.zeros(6))
+        self._check_fixed_pairs()
+
+    def _check_fixed_pairs(self):
+        """The tool/arm pairs whose relative pose is FIXED, verified once.
+
+        These cannot be checked per-pose usefully (see TOOL_SELF_SKIP), but they still have to
+        be clear or the tool fouls the wrist at every configuration. Checking at build turns
+        that from a runtime refusal nobody can act on into a startup error naming the part."""
+        if self.mode != 'urdf' or not self.self_enabled:
+            return True
+        ok = True
+        for tname in self.tool.body_names():
+            for link in TOOL_FIXED_LINKS:
+                if link not in self._link_index:
+                    continue
+                pts = self.pb.getClosestPoints(self._bodies[tname], self.robot, distance=0.5,
+                                               linkIndexB=self._link_index[link],
+                                               physicsClientId=self.client)
+                d = min((c[8] for c in pts), default=0.5)
+                if d < 0.0:
+                    ok = False
+                    log.error('TOOL MODEL FOULS THE WRIST: %s overlaps %s by %.1f mm, and that '
+                              'offset is RIGID -- it is wrong at every configuration, not just '
+                              'this one. Check pickup.collision.tool against the hardware.',
+                              tname, link, -d * 1000.0)
+        return ok
 
     # ------------------------------------------------------------------ construction
+    def _box(self, half_extents):
+        pb = self.pb
+        shape = pb.createCollisionShape(pb.GEOM_BOX,
+                                        halfExtents=[float(v) for v in half_extents],
+                                        physicsClientId=self.client)
+        return pb.createMultiBody(baseMass=0, baseCollisionShapeIndex=shape,
+                                  basePosition=[0, 0, 50.0], physicsClientId=self.client)
+
     def _capsule(self, radius, length):
         pb = self.pb
         shape = pb.createCollisionShape(pb.GEOM_CAPSULE, radius=radius, height=length,
@@ -260,12 +364,7 @@ class GroundCollisionModel:
             pb.resetBasePositionAndOrientation(body, mid.tolist(), quat,
                                                physicsClientId=self.client)
         T = frames[6]
-        for name, z0, z1, _r, xoff in self.tool.segments():
-            p0 = (T @ np.array([xoff, 0.0, z0, 1.0]))[:3]
-            p1 = (T @ np.array([xoff, 0.0, z1, 1.0]))[:3]
-            mid, quat, _n = self._segment_pose(p0, p1)
-            pb.resetBasePositionAndOrientation(self._bodies[name], mid.tolist(), quat,
-                                               physicsClientId=self.client)
+        self._pose_tool(T)
         return T
 
     # ------------------------------------------------------------------ queries
@@ -288,27 +387,81 @@ class GroundCollisionModel:
             out[name] = min((c[8] for c in pts), default=1.0)
         return out
 
-    def check_q(self, q):
-        """(ok, worst_body, violation_m) for one configuration.
+    def self_clearances(self, q):
+        """{pair: signed clearance, m} for the arm against itself and the tool against the arm.
 
-        `violation_m` is how far past its OWN allowance the worst body is, so the fingertip
-        exception is already accounted for and the number is comparable across bodies."""
+        ONLY IN 'urdf' MODE. The capsule envelope is intentionally fatter than the real shell,
+        so capsules overlap at every joint and would report a permanent, meaningless
+        self-collision -- returning nothing is honest, and the caller says so once.
+
+        Adjacent chain links are excluded because their meshes interpenetrate by design; see
+        SELF_PAIRS. The tool is excluded against wrist_3 for the same reason -- it is bolted
+        there.
+
+        WHAT IS DELIBERATELY NOT CHECKED: TOOL BODY vs TOOL BODY. The spacer, the gripper and
+        any bracket are all bolted to tool0, so their relative poses are RIGID -- a per-pose
+        check on them can only ever return the same answer. Worse, several overlap BY
+        CONSTRUCTION: the camera bracket starts at the tool0 origin and so does the spacer, so
+        they share space and a check would fire on every pose. The camera is checked against
+        the ARM and the GROUND -- the things it can actually move relative to."""
+        if self.mode != 'urdf' or not self.self_enabled:
+            return {}
+        self._pose_all(q)
+        out = {}
+        for a, b in SELF_PAIRS:
+            pts = self.pb.getClosestPoints(self.robot, self.robot, distance=0.5,
+                                           linkIndexA=self._link_index[a],
+                                           linkIndexB=self._link_index[b],
+                                           physicsClientId=self.client)
+            out['%s~%s' % (a, b)] = min((c[8] for c in pts), default=0.5)
+        for tname in self.tool.body_names():
+            for link in CHAIN:
+                if link in TOOL_SELF_SKIP:
+                    continue
+                pts = self.pb.getClosestPoints(self._bodies[tname], self.robot, distance=0.5,
+                                               linkIndexB=self._link_index[link],
+                                               physicsClientId=self.client)
+                out['%s~%s' % (tname, link)] = min((c[8] for c in pts), default=0.5)
+        return out
+
+    def check_q(self, q):
+        """(ok, worst_body, violation_m) for one configuration -- GROUND and SELF together.
+
+        `violation_m` is how far past its OWN allowance the worst offender is, so the fingertip
+        ground exception is already accounted for and the number stays comparable across very
+        different checks. A self-collision name reads 'link_a~link_b'."""
         worst_name, worst = None, 0.0
         for name, clear in self.clearances(q).items():
             allow = (-self.fingertip_margin if name in FINGERTIP_BODIES else self.margin)
             over = allow - clear            # > 0 means it broke its own allowance
             if over > worst:
                 worst_name, worst = name, over
+        # THE FINGERTIP ALLOWANCE DOES NOT REACH HERE. It exists because the pads must arrive
+        # at the work surface; nothing on the tool is ever meant to arrive at the forearm.
+        for name, clear in self.self_clearances(q).items():
+            over = self.self_margin - clear
+            if over > worst:
+                worst_name, worst = name, over
         return (worst_name is None), worst_name, worst
 
     def _pose_tool(self, T_base_tool0):
         """Place ONLY the tool bodies, from a tool0 pose. No joint angles needed."""
+        from scipy.spatial.transform import Rotation
         for name, z0, z1, _r, xoff in self.tool.segments():
             p0 = (T_base_tool0 @ np.array([xoff, 0.0, z0, 1.0]))[:3]
             p1 = (T_base_tool0 @ np.array([xoff, 0.0, z1, 1.0]))[:3]
             mid, quat, _n = self._segment_pose(p0, p1)
             self.pb.resetBasePositionAndOrientation(self._bodies[name], mid.tolist(), quat,
                                                     physicsClientId=self.client)
+        # A BOX TAKES tool0's ORIENTATION, not just its position -- it is bolted to the flange
+        # and turns with it. (A capsule only needs its two endpoints, which is why the two are
+        # posed differently.)
+        if self.tool.boxes:
+            quat_t = Rotation.from_matrix(T_base_tool0[:3, :3]).as_quat().tolist()
+            for name, centre, _half in self.tool.boxes:
+                p = (T_base_tool0 @ np.append(centre, 1.0))[:3]
+                self.pb.resetBasePositionAndOrientation(self._bodies[name], p.tolist(), quat_t,
+                                                        physicsClientId=self.client)
 
     def check_tool_pose(self, T_base_tool0):
         """(ok, worst_body, violation_m) for the SPACER, GRIPPER BODY and FINGERTIPS only.
@@ -324,9 +477,7 @@ class GroundCollisionModel:
         docstring. The gripper WRIST and body get none of it."""
         self._pose_tool(T_base_tool0)
         worst_name, worst = None, 0.0
-        for name in self._bodies:
-            if name not in [s[0] for s in self.tool.segments()]:
-                continue
+        for name in self.tool.body_names():
             pts = self.pb.getClosestPoints(self._bodies[name], self.plane, distance=1.0,
                                            physicsClientId=self.client)
             clear = min((c[8] for c in pts), default=1.0)
@@ -396,8 +547,21 @@ class GroundCollisionModel:
     def describe(self):
         seg = ', '.join('%s %.0f-%.0f mm r%.0f' % (n, z0 * 1000, z1 * 1000, r * 1000)
                         for n, z0, z1, r, _x in self.tool.segments())
+        for n, centre, half in self.tool.boxes:
+            seg += ', %s box %s mm at %s' % (n, np.round(half * 2000, 0).astype(int).tolist(),
+                                             np.round(centre * 1000, 0).astype(int).tolist())
         arm = ("UR10e collision MESHES (UR's own description)" if self.mode == 'urdf'
                else 'UR10e capsule envelope (conservative -- fetch the description for meshes)')
+        if self.mode != 'urdf':
+            self_txt = 'self-collision UNCHECKED (needs the meshes -- capsules overlap at every '
+            'joint)'
+        elif not self.self_enabled:
+            self_txt = 'self-collision OFF'
+        else:
+            self_txt = ('self-collision %.1f mm over %d link pairs + %d tool/arm pairs'
+                        % (self.self_margin * 1000, len(SELF_PAIRS),
+                           len(self.tool.body_names()) * (len(CHAIN) - len(TOOL_SELF_SKIP))))
         return ('arm: %s | ground z %.3f m | margin %.1f mm (fingertips %.1f mm INTERSECTION '
-                'allowed) | tool: %s' % (arm, self.ground_z, self.margin * 1000,
-                                         self.fingertip_margin * 1000, seg))
+                'allowed) | %s | tool: %s'
+                % (arm, self.ground_z, self.margin * 1000, self.fingertip_margin * 1000,
+                   self_txt, seg))

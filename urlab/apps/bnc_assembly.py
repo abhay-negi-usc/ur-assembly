@@ -102,12 +102,13 @@ from ..skills import trajectory as traj
 from ..skills import wiggle as wigmod
 from ..skills.manifold import mats_from_vec6, vec6_from_mats
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
-                           GraspRecovery, pickup_pitch_rad, pitched_belief, retry_offset_x,
-                           verify_cable_held)
+                           GraspRecovery, grip_offset_m, pickup_pitch_rad, pitched_belief,
+                           retry_offset_x, verify_cable_held)
 from ..skills.solution_check import CheckedManifoldEstimator
 from ..transforms import (from_cfg, inverse, matrix_to_xyzrpy, pose_error, rotate_about_axis,
                           slerp_matrix, translation_matrix, xyzrpy_to_matrix)
 from ._cable import build_scanner, make_confirm
+from ._common import prompts_off
 from ._runner import run_app
 from .cable_pick_assemble import _guarded, _pick
 from .cable_pick_estimate_assemble import (_corr_to_m, _observe, _plot_run, _save_observations)
@@ -993,13 +994,14 @@ def build_and_run(cfg, robot, camera, args):
     # PICKUP PITCH: the frames catalogue declares the SQUARE grip, so a pitched pickup rotates
     # the part in the hand by the same angle. Applied here rather than in frames.yaml, so the
     # declared frame stays the physical truth and the pitch stays a run-time choice.
-    _pitch = pickup_pitch_rad(cfg)
-    if _pitch:
+    _pitch, _grip_off = pickup_pitch_rad(cfg), grip_offset_m(cfg)
+    if _pitch or _grip_off:
         T_ftip_conn = pitched_belief(T_ftip_conn,
-                                     from_cfg(cfg.section('junction_in_fingertip')), _pitch)
-        log.info('Pickup pitch %+.1f deg -> in-hand belief rotated to match (the pick and the '
-                 'belief are one pair; changing one alone mates the connector cocked).',
-                 np.degrees(_pitch))
+                                     from_cfg(cfg.section('junction_in_fingertip')),
+                                     _pitch, _grip_off)
+        log.info('Pickup pitch %+.1f deg / grip offset %+.1f mm -> in-hand belief moved to '
+                 'match (the pick and the belief are one pair; changing one alone mates the '
+                 'connector wrong).', np.degrees(_pitch), _grip_off * 1000.0)
 
     live = a.get('live_plot', True)
     live_path = None
@@ -1028,7 +1030,12 @@ def build_and_run(cfg, robot, camera, args):
                 log.warning('end-of-run image skipped (%s)', exc)
         return ok
 
-    gates_on = cfg.get('confirm_each_step', True) is not False
+    no_prompts = prompts_off(cfg)
+    if no_prompts:
+        log.warning('skip_prompts: running with NO confirmations -- the reset, the pre-contact '
+                    'stand-off and the success calls are all skipped (success falls back to '
+                    'the tolerance check). Only the cable labelling still asks.')
+    gates_on = cfg.get('confirm_each_step', True) is not False and not no_prompts
 
     def phase_gate(name, ahead):
         """Continue/abort between two phases. True = go on.
@@ -2324,6 +2331,14 @@ def build_and_run(cfg, robot, camera, args):
                      'sweep views only.')
         detector = ArucoDetector(cfg, sizes_m=tool_frames.marker_sizes(vt_rig))
 
+        # Gate BEFORE the first sweep move: the camera is about to drive a ring of views a few
+        # hundred mm off the fixture, and the whole run is anchored on what it measures.
+        if not phase_gate('VISUAL LOCALIZATION',
+                          'The camera will sweep the markers from the home view%s. The run is '
+                          'then anchored on the pose they measure.'
+                          % (' and servo to each one' if plan.servo.enabled else '')):
+            return False
+
         phase('visual_localize')
         q_view = vt.get('view_joints_deg')
         if q_view is not None:
@@ -2407,7 +2422,17 @@ def build_and_run(cfg, robot, camera, args):
     _pick_deg = cfg.get('pick_joints_deg')
     if _pick_deg is not None:
         q_pick = list(np.radians(np.asarray(_pick_deg, dtype=float)))
-        phase('reset')
+        # Gate BEFORE reconfiguring: this is a large joint move away from the marker view and
+        # into the pick pose, and everything downstream (scan, grasp, retry offsets) is
+        # written from where it lands.
+        if not phase_gate('RECONFIGURE FOR PICKUP',
+                          'The arm will leave the marker view and move to the pick pose %s deg.'
+                          % list(np.round(np.asarray(_pick_deg, dtype=float), 1))):
+            return False
+        # Its OWN phase, not 'reset': this is a large free-space traverse with an EMPTY
+        # gripper and nothing near the workpiece, so it has no reason to be paced like a
+        # move that ends in contact.
+        phase('reconfigure')
         if not robot.arm.move_j(q_pick, label='pick pose'):
             log.error('Could not reach pick_joints_deg.')
             return False
@@ -2480,9 +2505,9 @@ def build_and_run(cfg, robot, camera, args):
     seed_q = q
     if not verify_cable_held(robot, check, 'stand-off'):
         return False
-    # UNCONDITIONAL, unlike the gates below: this is the boundary between free space and
-    # contact, so it is asked even with --yes.
-    if not robot.arm.dry_run:
+    # Asked even with --yes -- this is the boundary between free space and contact. Only
+    # skip_prompts (--no-prompts) silences it.
+    if not robot.arm.dry_run and not no_prompts:
         try:
             ans = input('\n[stand-off] Ready to ENGAGE (contact ahead). '
                         'Enter to continue (q to abort): ')
@@ -2558,7 +2583,7 @@ def build_and_run(cfg, robot, camera, args):
 
             # SUCCESS is the operator's call -- they can see the physical mate; the kinematic
             # numbers only see the belief. A dry run has no operator.
-            if robot.arm.dry_run:
+            if robot.arm.dry_run or no_prompts:
                 row['success'] = bool(lin <= tol_pos_m and ang <= tol_rot_rad)
             else:
                 try:
@@ -2665,7 +2690,10 @@ def build_and_run(cfg, robot, camera, args):
                 frow = {'attempt': 'final_insertion', 'n_observations': len(obs_f),
                         'check_pos_mm': lin * 1000.0,
                         'check_rot_deg': float(np.degrees(ang))}
-                if not robot.arm.dry_run:
+                if robot.arm.dry_run or no_prompts:
+                    frow['success'] = bool(lin <= tol_pos_m and ang <= tol_rot_rad)
+                    success = success or frow['success']
+                else:
                     try:
                         ansf = input('[final insertion] SUCCESSFUL? (y/n): ').strip().lower()
                     except EOFError:

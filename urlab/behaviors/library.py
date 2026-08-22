@@ -94,9 +94,9 @@ class OperatorGate(Action):
     """An UNCONDITIONAL operator prompt (ignores confirm_each_step) -- for the moments a human
     must gate regardless, e.g. right before the first contact motion. Skipped on dry runs."""
 
-    def __init__(self, robot, prompt, label='operator gate', on_eof=True):
+    def __init__(self, robot, prompt, label='operator gate', on_eof=True, skip=False):
         def fn():
-            if robot.arm.dry_run:
+            if robot.arm.dry_run or skip:
                 return True
             if not ask(prompt, on_eof=on_eof):
                 log.info('Aborted by the user at %r.', label)

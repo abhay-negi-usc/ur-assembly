@@ -36,39 +36,65 @@ def pickup_pitch_rad(cfg):
     return float(np.radians(float(cfg.get_path('pickup.pitch_deg', 0.0) or 0.0)))
 
 
+def grip_offset_m(cfg):
+    """How far along the connector's own +X to grip, from the junction (`pickup.grip_offset_mm`).
+
+    POSITIVE = further onto the connector body, away from the cable. The junction frame's x IS
+    the connector axis, so this slides the bite point straight along the part. Gripping further
+    on usually buys a LARGER barrel diameter, which is what sets how much torque the jaws can
+    hold about that axis -- see the connector-clocking slip analysis."""
+    return float(cfg.get_path('pickup.grip_offset_mm', 0.0) or 0.0) / 1000.0
+
+
 def pitch_delta(pitch_rad):
     """The pitch as a transform in the JUNCTION frame: a rotation about its own y."""
     from ..transforms import xyzrpy_to_matrix
     return xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, float(pitch_rad), 0.0])
 
 
-def pitched_grasp(T_base_junction, T_ftip_junction, pitch_rad):
-    """The FINGERTIP grasp pose for a pitched pickup.
+def grip_delta(pitch_rad, offset_m=0.0):
+    """The full bite-point transform in the JUNCTION frame: slide `offset_m` along the
+    connector axis, THEN pitch about that point.
 
-    Nominally the fingertip goes to `detected_junction @ inverse(junction_in_fingertip)`; the
-    pitch is inserted in the junction frame, so the junction still lands at the detected point
-    and only the approach angle changes."""
-    return T_base_junction @ pitch_delta(pitch_rad) @ inverse(T_ftip_junction)
-
-
-def held_junction_in_fingertip(T_ftip_junction, pitch_rad):
-    """Where the junction ACTUALLY sits in the fingertip frame after a pitched pickup.
-
-    The nominal `junction_in_fingertip` describes a square grip; pitching the approach by phi
-    leaves the part rotated by -phi in the hand, which is what every downstream user of the
-    grasp geometry has to be told about."""
-    return T_ftip_junction @ pitch_delta(-pitch_rad)
+    Order matters and this one is deliberate -- translating first makes the OFFSET BITE POINT
+    the pivot, so the two knobs stay independent: changing the pitch does not move where along
+    the connector the fingers close, and changing the offset does not change the approach
+    angle."""
+    from ..transforms import translation_matrix
+    return translation_matrix([float(offset_m), 0.0, 0.0]) @ pitch_delta(pitch_rad)
 
 
-def pitched_belief(T_ftip_conn, T_ftip_junction, pitch_rad):
-    """The in-hand connector belief a pitched pickup actually produces.
+def pitched_grasp(T_base_junction, T_ftip_junction, pitch_rad, offset_m=0.0):
+    """The FINGERTIP grasp pose for a pitched / offset pickup.
+
+    Nominally the fingertip goes to `detected_junction @ inverse(junction_in_fingertip)`. Both
+    knobs are inserted in the JUNCTION frame: `offset_m` slides the bite point along the
+    connector axis, and the pitch tilts the approach about that point."""
+    return T_base_junction @ grip_delta(pitch_rad, offset_m) @ inverse(T_ftip_junction)
+
+
+def held_junction_in_fingertip(T_ftip_junction, pitch_rad, offset_m=0.0):
+    """Where the junction ACTUALLY sits in the fingertip frame after a pitched / offset pickup.
+
+    The nominal `junction_in_fingertip` describes a square grip AT the junction. Gripping
+    `offset_m` further along the axis leaves the junction that much further back in the hand,
+    and pitching by phi leaves the part rotated by -phi -- which is what every downstream user
+    of the grasp geometry has to be told about. Exactly inverts pitched_grasp's insertion:
+    inverse(Trans @ Pitch) = Pitch(-phi) @ Trans(-d)."""
+    from ..transforms import translation_matrix
+    return (T_ftip_junction @ pitch_delta(-pitch_rad)
+            @ translation_matrix([-float(offset_m), 0.0, 0.0]))
+
+
+def pitched_belief(T_ftip_conn, T_ftip_junction, pitch_rad, offset_m=0.0):
+    """The in-hand connector belief a pitched / offset pickup actually produces.
 
     The connector is rigid with the junction, so T_junction_connector is a property of the PART
     and does not change; only the fingertip-to-junction relation does. Substituting
     T_ftip_conn = T_ftip_junction @ T_junction_conn and replacing the latter's left factor with
     held_junction_in_fingertip gives a conjugation of the nominal belief -- a rotation of -phi
     about the junction's y, through the junction origin, expressed in the fingertip frame."""
-    return (held_junction_in_fingertip(T_ftip_junction, pitch_rad)
+    return (held_junction_in_fingertip(T_ftip_junction, pitch_rad, offset_m)
             @ inverse(T_ftip_junction) @ T_ftip_conn)
 
 

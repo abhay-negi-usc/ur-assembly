@@ -436,7 +436,13 @@ def test_cable_profile_applies_counts():
     assert cfg.get_path('gripper.open_counts') == 3
     assert cfg.get_path('gripper.closed_counts') == 228
     assert cfg.get_path('gripper.speed_counts') == 255
-    assert cfg.get_path('gripper.force_counts') == 150
+    # Carried THROUGH from cables.yaml rather than pinned to a number: the grip force is a
+    # TUNING value (raised for the connector-clocking torque problem, where a parallel jaw on
+    # a round barrel holds only ~1 Nm), and a test that froze it would fail on every retune.
+    import yaml as _yaml
+    _shared = (_yaml.safe_load(open(os.path.join(CONFIG_DIR, 'cables.yaml')))
+               or {}).get('gripper') or {}
+    assert cfg.get_path('gripper.force_counts') == int(_shared['force'])
     assert cfg.get_path('grasp_check.empty_counts') == 228
     # The banana band is now DERIVED from connector_diameter_mm via the calibrated gripper model
     # + groove depth -- and must land on the measured reference band.

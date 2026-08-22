@@ -39,7 +39,7 @@ import numpy as np
 from .. import behaviors as bt
 from .. import log as urlog
 from .. import tool_frames
-from ..apps._common import experiment_dir
+from ..apps._common import experiment_dir, prompts_off
 from ..skills import marker_localize as mloc
 from ..transforms import matrix_to_xyzrpy, pose_error
 from ._runner import run_app
@@ -125,7 +125,8 @@ class _Calibration:
                                           label='marker view pose'):
                 log.error('Could not reach view_joints_deg.')
                 return False
-        elif self.cfg.get('confirm_start', True) and not self.robot.arm.dry_run:
+        elif (self.cfg.get('confirm_start', True) and not self.robot.arm.dry_run
+              and not prompts_off(self.cfg)):
             input('Hand-guide the camera so ALL markers are in view, then press Enter: ')
         # The OVERVIEW: the one pose with every marker in frame. The sweep starts here, and
         # the servo refinement returns here between markers.

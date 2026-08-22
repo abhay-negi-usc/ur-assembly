@@ -206,6 +206,22 @@ pickup:
   # band and the collar reorientation start from a different attitude (both pre-checked, and
   # they warn rather than fail silently).
   pitch_deg: -15.0
+  # GRIP OFFSET, mm along the CONNECTOR's own +X from the junction.  POSITIVE = further onto
+  # the connector body, away from the cable; the junction frame's x IS the connector axis, so
+  # this slides the bite point straight along the part.  The in-hand belief carries the same
+  # offset automatically, so this is a ONE-number change like pitch_deg above.
+  #
+  # WHY YOU MIGHT WANT IT: gripping further on usually means a LARGER barrel diameter, and the
+  # torque the jaws can hold about the connector axis scales with that radius -- the binding
+  # limit for the bayonet sweep (a parallel jaw on a round barrel holds only ~1 Nm there).  If
+  # the body has knurling or flats further along, biting THERE is worth far more than any
+  # increase in grip force.
+  #
+  # RE-CHECK grasp_check AFTER MOVING IT: the counts band is the diameter at the bite point,
+  # so a different bite reads different counts and the success band shifts with it.
+  # (Distinct from grasp_check.retry_perturb_x_m, which jitters the SAME axis by +/-3 mm
+  # between retries and is deliberately NOT modelled -- that is search noise, not a setting.)
+  grip_offset_mm: 5.0
   # PICKUP HEIGHT from the gripper kinematic model.  Assumes the connector rests ON THE GROUND
   # PLANE (ground_plane.z_m): grasp target = plane + connector d_max/2 (centerline) + the
   # fingertip ADVANCE between fingertip_ref_separation_mm (where fingertip_grasp z was
@@ -277,7 +293,7 @@ speed:
   max_joint_velocity_deg_s: 90.0
   max_joint_acceleration_deg_s2: 30.0
   max_cartesian_translation_mm_s: 25.0
-  max_cartesian_rotation_deg_s: 30.0
+  max_cartesian_rotation_deg_s: 90.0
   retract_rotation_deg_s: 50.0
   # Per-PHASE scaling of ALL FOUR limits above (1.0 = the global limit itself), one entry per
   # phase.  An absent phase runs at 1.0.
@@ -287,6 +303,12 @@ speed:
     pickup: 1.5      # the compliant grasp descent
     lift: 0.8        # the compliant lift (including the slip-check partial lift)
     standoff: 1.0    # the move to stand-off + the per-attempt realign moveJs
+    # The marker-view -> pick-pose traverse (a ~70 deg wrist_1 swing, empty gripper, clear of
+    # everything).  Paced by the CARTESIAN caps like every moveJ, so the scale is what moves
+    # it: 1.5 -> ~8 s, 3.0 -> ~4 s, 5.0 -> ~2.4 s.  Raising it past 2.0 no longer buys joint
+    # speed (the controller's own 180 deg/s ceiling), but it does keep raising the cartesian
+    # caps, which are what actually bind here.
+    reconfigure: 3.0
     assemble: 0.5      # the insertion reference ramp
     retract: 4.0       # the between-attempt retract + the release escape
     # POST-MATE CLOCKING, one scale per maneuver.  These pace the CONTACT ramps; free-space
@@ -308,7 +330,17 @@ speed:
 # "did not finish", this and speed.phase_scale.collar_approach are the two knobs.
 move_timeout_s: 120.0
 settle_s: 0.5
+# PER-STEP gates: the Enter-to-continue prompts between phases (including the two new ones,
+# VISUAL LOCALIZATION and RECONFIGURE FOR PICKUP).  false (or --yes) silences these but KEEPS
+# the deliberate interlocks: the reset, the pre-contact stand-off, and the operator's success
+# call.
 confirm_each_step: true
+# SKIP EVERYTHING: ask nothing at all -- the interlocks above included.  Success then falls
+# back to the tolerance check, exactly as a dry run decides it.  The ONE prompt this does not
+# touch is the CABLE LABELLING (skills/ground_pick "target #>"): which cable to pick is an
+# input, not a confirmation, and a run that guessed would grab an arbitrary one.
+# Equivalent to --no-prompts on the command line.
+skip_prompts: false
 debug: false
 
 reset:
@@ -607,7 +639,7 @@ assembly:
     # the far edge of the slot is found); only a sweep in which EVERY leg was guard-stopped is
     # reported NOT SEATED.  The app pre-samples the band and WARNS on poses with no IK
     # solution; more than two entries narrows in, one entry is a single stroke.
-    sweep_deg: [-60.0, +60.0]
+    sweep_deg: [-80.0, +80.0]
     # PUSH: how far past the engaged pose the virtual target aims, along the connector +X.
     # Too small and the cams never engage; too large and the spring loads the mate harder
     # than needed.

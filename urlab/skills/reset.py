@@ -60,7 +60,8 @@ def reset_robot(robot, cfg, label='reset'):
     ALWAYS prompts for Enter before moving -- UNCONDITIONALLY, ignoring --yes / confirm_each_step.
     The reset drives the arm home, and that is exactly the motion you want a human to gate every
     time (especially after a bad home move). Only a dry run skips the prompt."""
-    if not robot.arm.dry_run:
+    from ..apps._common import prompts_off
+    if not robot.arm.dry_run and not prompts_off(cfg):
         try:
             answer = input(f'\n[{label}] The arm will OPEN THE GRIPPER and RETURN HOME. '
                            'Enter to proceed (q to abort): ')

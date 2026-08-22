@@ -227,6 +227,9 @@ def arg_parser(description, default_config):
                    help='plan and print every move without connecting to the robot')
     p.add_argument('--yes', '-y', action='store_true',
                    help='skip the per-step confirmation prompts')
+    p.add_argument('--no-prompts', action='store_true',
+                   help='ask NOTHING except the cable labelling -- also skips the reset, '
+                        'stand-off and success prompts that --yes deliberately keeps')
     p.add_argument('--debug', action='store_true', help='verbose pose/delta logging')
     return p
 
@@ -240,6 +243,9 @@ def from_args(args):
         cfg.set_path('robot.dry_run', True)
     if args.yes:
         cfg.set_path('confirm_each_step', False)
+    if getattr(args, 'no_prompts', False):
+        cfg.set_path('confirm_each_step', False)
+        cfg.set_path('skip_prompts', True)
     if args.debug:
         cfg.set_path('debug', True)
     return cfg

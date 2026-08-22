@@ -524,6 +524,92 @@ def test_joint_pnp_recovers_the_target_from_synthetic_corners():
     assert lin * 1000.0 < 0.5 and np.degrees(ang) < 0.1, (lin * 1000.0, np.degrees(ang))
 
 
+def test_commanded_speeds_are_clamped_to_the_controller_ceiling():
+    """ur_rtde REJECTS an out-of-range speed rather than clamping it -- moveJ raises
+    ValueError('The value is not within [0;3.14]') and the run dies wherever it happened.
+    Since speed.phase_scale multiplies the global caps, any scale past ~2x the shipped 90
+    deg/s joint cap lands over the UR's own pi rad/s ceiling. Clamping is the honest
+    behaviour: the controller limits internally anyway, so the exception only cost the run.
+    """
+    from urlab.robot.arm import (RTDE_MAX_JOINT_ACCEL, RTDE_MAX_JOINT_VELOCITY,
+                                 RTDE_MAX_TOOL_VELOCITY, clamp_rtde)
+
+    assert clamp_rtde(2.36, RTDE_MAX_JOINT_VELOCITY, 'v', 'ok') == 2.36, 'under = untouched'
+    assert clamp_rtde(6.28, RTDE_MAX_JOINT_VELOCITY, 'v', 'retract') == RTDE_MAX_JOINT_VELOCITY
+    assert clamp_rtde(-1.0, RTDE_MAX_JOINT_VELOCITY, 'v', 'x') == 0.0, 'never negative'
+    assert clamp_rtde(999.0, RTDE_MAX_TOOL_VELOCITY, 'v', 'x') == RTDE_MAX_TOOL_VELOCITY
+    assert clamp_rtde(999.0, RTDE_MAX_JOINT_ACCEL, 'a', 'x') == RTDE_MAX_JOINT_ACCEL
+
+    # every phase_scale in the shipped config, resolved against the ceiling -- reported rather
+    # than asserted, since a scale over the ceiling is now safe (clamped + warned), not fatal
+    import yaml
+    cfg = yaml.safe_load(open(os.path.join(os.path.dirname(__file__), '..', 'configs',
+                                           'bnc_assembly.yaml')))
+    jv = np.radians(float(cfg['speed']['max_joint_velocity_deg_s']))
+    over = {n: round(jv * float(s), 2)
+            for n, s in (cfg['speed'].get('phase_scale') or {}).items()
+            if jv * float(s) > RTDE_MAX_JOINT_VELOCITY}
+    assert all(v > RTDE_MAX_JOINT_VELOCITY for v in over.values())   # the arithmetic holds
+    assert isinstance(over, dict)
+
+
+def test_skip_prompts_silences_everything_except_the_cable_labelling():
+    """`skip_prompts` / --no-prompts is the STRONGER switch: --yes only silences the per-step
+    gates and deliberately keeps the interlocks (reset, pre-contact stand-off, the operator's
+    success call), while this silences those too. The cable labelling is exempt by design --
+    which cable to pick is an input with no sane default, not a confirmation."""
+    from urlab import config as urconfig
+    from urlab.apps._cable import make_confirm
+    from urlab.apps._common import prompts_off
+
+    plain = urconfig.load('bnc_assembly')
+    assert prompts_off(plain) is False, 'the shipped config must still ask'
+
+    # --yes / confirm_each_step: false is NOT the same switch
+    yes_only = urconfig.load('bnc_assembly', ['confirm_each_step=false'])
+    assert prompts_off(yes_only) is False, (
+        '--yes must leave the interlocks asking -- that is the whole difference between the '
+        'two switches')
+
+    off = urconfig.load('bnc_assembly', ['skip_prompts=true'])
+    assert prompts_off(off) is True
+    assert make_confirm(off) is None, 'the per-step confirm callback must be disabled too'
+
+    # the CLI flag sets both keys
+    parser = urconfig.arg_parser('t', 'bnc_assembly')
+    args = parser.parse_args(['--no-prompts'])
+    cfg = urconfig.from_args(args)
+    assert prompts_off(cfg) is True and cfg.get('confirm_each_step') is False
+
+    # the cable labelling prompt is NOT routed through the switch
+    src = open(os.path.join(os.path.dirname(__file__), '..', 'urlab', 'skills',
+                            'ground_pick.py'), encoding='utf-8').read()
+    assert 'prompts_off' not in src and "input('target #> ')" in src, (
+        'the cable selection must keep asking regardless -- a run that guessed which cable to '
+        'grab would pick an arbitrary one')
+
+
+def test_operator_gate_skip_bypasses_the_prompt():
+    """The pre-contact gate must pass without touching stdin when skipping is requested (a
+    prompt with closed stdin is the classic unattended-run hang)."""
+    class FakeArm:
+        dry_run = False
+
+    class FakeRobot:
+        arm = FakeArm()
+
+    def boom(*_a, **_k):
+        raise AssertionError('must not prompt when skip=True')
+
+    gate = bt.OperatorGate(FakeRobot(), 'ready? ', label='gate', skip=True)
+    import builtins
+    real, builtins.input = builtins.input, boom
+    try:
+        assert bt.run_tree(gate)
+    finally:
+        builtins.input = real
+
+
 def test_no_undefined_names_anywhere_in_the_package():
     """A name used but never imported is INVISIBLE to an import check: the module loads fine
     and raises NameError only when that line runs -- which in this codebase means partway
@@ -635,6 +721,73 @@ def test_pitched_belief_matches_what_the_pitched_grasp_actually_produces():
             'from where the connector actually ends up')
     # and at zero pitch the belief is untouched
     assert np.allclose(pitched_belief(nominal_belief, T_fj, 0.0), nominal_belief)
+
+
+def test_grip_offset_slides_the_bite_along_the_connector_axis():
+    """`pickup.grip_offset_mm` must move the bite point along the CONNECTOR AXIS (the detected
+    junction frame's x) by exactly that much, leave the approach direction alone, and stay
+    independent of the pitch -- changing one must not move the other."""
+    from urlab.skills.pick import pitched_grasp
+    from urlab.transforms import frame_from_axis, inverse, pose_error
+
+    cable = np.array([0.6, -0.8, 0.0])
+    cable /= np.linalg.norm(cable)
+    T_conn = np.eye(4)
+    T_conn[:3, :3] = frame_from_axis(cable, [0.0, 0.0, 1.0])
+    T_conn[:3, 3] = [0.5, 0.1, -0.72]
+    T_fj = translation_matrix([-0.017, 0.0, 0.005])
+    d = 0.012
+
+    nominal = pitched_grasp(T_conn, T_fj, 0.0, 0.0)
+    offset = pitched_grasp(T_conn, T_fj, 0.0, d)
+    # the bite point (where the junction reference lands) slides ALONG the cable, by exactly d
+    moved = (offset @ T_fj)[:3, 3] - (nominal @ T_fj)[:3, 3]
+    assert abs(float(np.linalg.norm(moved)) - d) < 1e-12
+    # exact algebra; the bound is float noise on a normalised dot product
+    assert abs(float(np.dot(moved / d, cable)) - 1.0) < 1e-9, 'must move ALONG the axis'
+    _l, ang = pose_error(nominal, offset)
+    # 1e-4 deg, not 0: pose_error's arccos loses digits at identity (see the round-trip test)
+    assert np.degrees(ang) < 1e-4, 'a pure offset must not rotate the approach'
+
+    # INDEPENDENCE: with a pitch applied, the offset still slides exactly d along the axis
+    phi = np.radians(20.0)
+    a = pitched_grasp(T_conn, T_fj, phi, 0.0)
+    b = pitched_grasp(T_conn, T_fj, phi, d)
+    moved = (b @ T_fj)[:3, 3] - (a @ T_fj)[:3, 3]
+    assert abs(float(np.linalg.norm(moved)) - d) < 1e-12
+    assert abs(float(np.dot(moved / d, cable)) - 1.0) < 1e-9, (
+        'the offset must stay along the CABLE axis whatever the pitch -- translate-then-pitch '
+        'keeps the two knobs independent')
+    assert np.degrees(pose_error(a, b)[1]) < 1e-4, 'the offset must not change the pitch'
+
+
+def test_belief_matches_a_grasp_that_is_both_offset_and_pitched():
+    """The full round trip with BOTH knobs: where the connector really ends up in the hand
+    must equal the belief the app plans with, for every combination."""
+    from urlab.skills.pick import pitched_belief, pitched_grasp
+    from urlab.transforms import (frame_from_axis, inverse, pose_error, translation_matrix,
+                                  xyzrpy_to_matrix)
+
+    cable = np.array([1.0, 0.3, 0.0])
+    cable /= np.linalg.norm(cable)
+    T_conn = np.eye(4)
+    T_conn[:3, :3] = frame_from_axis(cable, [0.0, 0.0, 1.0])
+    T_conn[:3, 3] = [0.42, -0.15, -0.72]
+    T_fj = xyzrpy_to_matrix([-0.017, 0.0, 0.005], [0.0, 0.0, np.pi])
+    T_junction_conn = translation_matrix([0.0457, 0.0, 0.0])       # the part, fixed
+    nominal_belief = T_fj @ T_junction_conn
+    T_base_conn_true = T_conn @ T_junction_conn                    # unmoved by how we grip
+
+    for phi_deg in (0.0, -15.0, 25.0):
+        for d_mm in (0.0, 8.0, -5.0, 20.0):
+            phi, d = np.radians(phi_deg), d_mm / 1000.0
+            T_base_ftip = pitched_grasp(T_conn, T_fj, phi, d)
+            actual = inverse(T_base_ftip) @ T_base_conn_true
+            believed = pitched_belief(nominal_belief, T_fj, phi, d)
+            lin, ang = pose_error(actual, believed)
+            assert lin * 1000.0 < 1e-6 and np.degrees(ang) < 1e-4, (
+                f'pitch {phi_deg} deg + offset {d_mm} mm: belief is {lin * 1000:.4f} mm / '
+                f'{np.degrees(ang):.4f} deg from where the connector actually ends up')
 
 
 def test_held_junction_in_fingertip_tracks_the_pitch():

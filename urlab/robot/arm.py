@@ -44,6 +44,37 @@ from ..transforms import (
 log = urlog.get('arm')
 
 
+
+# ur_rtde VALIDATION BOUNDS. rtde_control checks every speed/acceleration argument against
+# these and raises ValueError("The value is not within [0;3.14]") rather than clamping, which
+# aborts the run wherever it happens -- mid-sweep, or worse, mid-insertion. The joint-velocity
+# ceiling is the UR's own limit of pi rad/s; the others are ur_rtde's documented maxima.
+#
+# WHY THIS BITES HERE: speed.phase_scale multiplies the GLOBAL caps, so any scale above
+# ~2.0x with the shipped 90 deg/s joint cap lands past 180 deg/s. The config comments say as
+# much ("past ~2.0x the joint-velocity cap is at the UR's own ceiling") but nothing enforced
+# it, so the ceiling was discovered as a traceback instead of a warning.
+RTDE_MAX_JOINT_VELOCITY = 3.14        # rad/s
+RTDE_MAX_JOINT_ACCEL = 40.0           # rad/s^2
+RTDE_MAX_TOOL_VELOCITY = 3.0          # m/s
+RTDE_MAX_TOOL_ACCEL = 150.0           # m/s^2
+
+
+def clamp_rtde(value, ceiling, what, label=''):
+    """Hold a commanded speed/accel inside ur_rtde's accepted range, warning ONCE per move if
+    the configured value asked for more. Returning the ceiling is the honest thing: the arm
+    could never have gone faster anyway -- the controller clamps internally -- so the only
+    thing the exception bought was a dead run."""
+    v = float(value)
+    if v > ceiling:
+        log.warning('[%s] commanded %s %.2f exceeds the %.2f the controller accepts -- '
+                    'CLAMPED. Lower the speed.phase_scale for this phase (or the global cap); '
+                    'the arm was never going to move faster than the ceiling.',
+                    label or '?', what, v, ceiling)
+        return ceiling
+    return max(v, 0.0)
+
+
 class ArmError(RuntimeError):
     pass
 
@@ -216,6 +247,18 @@ class URArm:
         self.speed_scale = max(float(scale), 1e-3)
         log.info('Speed scale%s: %.2fx the global limits',
                  f' [{phase}]' if phase else '', self.speed_scale)
+        # WARN WHEN THE PHASE IS ENTERED, not when a move inside it is rejected: the scale
+        # multiplies the global caps, so a large one lands past the controller's own ceiling
+        # and every move in the phase then runs clamped. Said here, it names the phase to fix.
+        jv = self.max_joint_vel * self.speed_scale
+        if jv > RTDE_MAX_JOINT_VELOCITY:
+            log.warning('speed.phase_scale%s = %.2f puts the joint cap at %.2f rad/s '
+                        '(%.0f deg/s), past the %.2f rad/s the controller accepts -- every '
+                        'move in this phase will be CLAMPED to the ceiling. Lower the scale, '
+                        'or raise the CARTESIAN caps instead (they are what actually pace a '
+                        'free-space move).',
+                        f' [{phase}]' if phase else '', self.speed_scale, jv,
+                        np.degrees(jv), RTDE_MAX_JOINT_VELOCITY)
 
     def _limits(self, caps):
         """The four limits for one move. None = the global limits x the CURRENT phase scale
@@ -275,6 +318,8 @@ class URArm:
         else:
             which = 'explicit'
         accel = auto_accel if accel is None else accel
+        speed = clamp_rtde(speed, RTDE_MAX_JOINT_VELOCITY, 'joint velocity (rad/s)', label)
+        accel = clamp_rtde(accel, RTDE_MAX_JOINT_ACCEL, 'joint accel (rad/s^2)', label)
         # Log the COMMANDED speed and the cap that produced it: if the arm visibly moves slower
         # than this line says, the throttle is on the CONTROLLER side (pendant speed slider,
         # safety Reduced mode / restricted limits), not in this code or the config.
@@ -304,6 +349,8 @@ class URArm:
         pose = matrix_to_rtde(T_base_tool0)
         speed = self._limits(caps)[2] if speed is None else speed
         accel = self.cart_accel if accel is None else accel
+        speed = clamp_rtde(speed, RTDE_MAX_TOOL_VELOCITY, 'tool velocity (m/s)', label)
+        accel = clamp_rtde(accel, RTDE_MAX_TOOL_ACCEL, 'tool accel (m/s^2)', label)
         log.info('[%s] moveL %.3f m/s, accel %.2f m/s^2', label, speed, accel)
         if not self._guards:
             ok = self.rtde_c.moveL(pose, speed, accel, False)

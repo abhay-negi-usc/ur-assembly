@@ -43,6 +43,20 @@ def guarded(robot, guard, move_fn):
     return guarded_move(robot, guard, move_fn)
 
 
+def prompts_off(cfg):
+    """True when `skip_prompts` (or --no-prompts) is set: run without asking ANYTHING.
+
+    Stronger than confirm_each_step / --yes, which only silence the per-step gates and leave
+    the deliberate interlocks -- the reset, the pre-contact stand-off, the operator's success
+    call -- still asking. This silences those too, and each falls back to the same behaviour a
+    dry run uses (the tolerance check decides success).
+
+    THE ONE PROMPT IT DOES NOT TOUCH is the cable labelling: which cable to pick is an input,
+    not a confirmation, and there is no sane default for it -- a run that guessed would grab
+    an arbitrary cable. skills/ground_pick asks regardless."""
+    return bool(cfg.get('skip_prompts', False))
+
+
 def ask(prompt, abort_answers=('q', 'quit', 'n', 'no'), on_eof=True):
     """EOF-safe operator prompt. Returns False if the user aborts; `on_eof` is the answer when
     stdin is closed (piped/unattended runs)."""

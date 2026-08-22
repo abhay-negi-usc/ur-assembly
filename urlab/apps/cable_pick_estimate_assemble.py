@@ -42,11 +42,11 @@ from ..skills import trajectory as traj
 from ..skills.manifold import (FORCE_COLS, ManifoldEstimator, POSE_COLS, TORQUE_COLS,
                                vec6_from_mats)
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
-                           GraspRecovery, pickup_pitch_rad, pitched_belief, retry_offset_x,
-                           verify_cable_held)
+                           GraspRecovery, grip_offset_m, pickup_pitch_rad, pitched_belief,
+                           retry_offset_x, verify_cable_held)
 from ..transforms import from_cfg, inverse, matrix_to_xyzrpy, pose_error, translation_matrix
 from ._cable import build_scanner, make_confirm
-from ._common import experiment_dir, seg_time
+from ._common import experiment_dir, prompts_off, seg_time
 from ._estimate_plots import plot_estimate as _plot_estimate
 from ._estimate_plots import plot_run as _plot_run
 from ._runner import run_app
@@ -139,12 +139,13 @@ class _AssemblyTask:
         self.T_ftip_conn = from_cfg(init) if init \
             else from_cfg(cfg.section('junction_in_fingertip'))
         # A pitched pickup rotates the part in the hand by the same angle (see skills/pick).
-        pitch = pickup_pitch_rad(cfg)
-        if pitch:
+        pitch, grip_off = pickup_pitch_rad(cfg), grip_offset_m(cfg)
+        if pitch or grip_off:
             self.T_ftip_conn = pitched_belief(
-                self.T_ftip_conn, from_cfg(cfg.section('junction_in_fingertip')), pitch)
-            log.info('Pickup pitch %+.1f deg -> in-hand belief rotated to match.',
-                     np.degrees(pitch))
+                self.T_ftip_conn, from_cfg(cfg.section('junction_in_fingertip')),
+                pitch, grip_off)
+            log.info('Pickup pitch %+.1f deg / grip offset %+.1f mm -> in-hand belief moved '
+                     'to match.', np.degrees(pitch), grip_off * 1000.0)
 
         # Speeds: ONE global speed: block, each phase applying its own scale to all four
         # limits (speed.phase_scale.<phase>).  Free-space moves inherit the scale from
@@ -315,7 +316,7 @@ class _AssemblyTask:
         """The SUCCESS DECISION is the OPERATOR's -- they can see the physical mate; the
         kinematic numbers only see the belief.  A dry run has no operator, so it falls back
         to the tolerance check.  Returns 'done' | 'retry' | 'abort'."""
-        if self.robot.arm.dry_run:
+        if self.robot.arm.dry_run or prompts_off(self.cfg):
             row['success'] = bool(row['check_pos_mm'] / 1000.0 <= self.tol_pos_m
                                   and np.radians(row['check_rot_deg']) <= self.tol_rot_rad)
             return 'done' if row['success'] else 'retry'
@@ -526,7 +527,8 @@ def build_and_run(cfg, robot, camera, args):
         # UNCONDITIONAL pause: the next motion drives the held part into contact, so a human
         # confirms the scene is ready regardless of confirm_each_step.
         bt.OperatorGate(robot, '\n[stand-off] Ready to ASSEMBLE (contact ahead). '
-                               'Enter to continue (q to abort): ', label='stand-off gate'),
+                               'Enter to continue (q to abort): ', label='stand-off gate',
+                        skip=prompts_off(cfg)),
         bt.Action('assemble / estimate / retry loop', task.assembly_loop),
         bt.Action('set retract speed', lambda: task.phase('retract')),
         bt.Action('open gripper (release)', lambda: robot.gripper.open(), confirm=gate),

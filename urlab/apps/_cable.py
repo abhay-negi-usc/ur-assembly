@@ -55,7 +55,8 @@ def build_scanner(cfg, robot, camera):
 
 def make_confirm(cfg):
     """A confirm(label) callback, or None if confirmation is disabled."""
-    if cfg.get('confirm_each_step', True) is False:
+    from ._common import prompts_off
+    if cfg.get('confirm_each_step', True) is False or prompts_off(cfg):
         return None
 
     def confirm(label):

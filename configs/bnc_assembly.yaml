@@ -267,6 +267,7 @@ pickup:
     rpy_deg: [0.0, -70.0, 0.0]
 
   # BELIEF OFFSET, mm in the CONNECTOR frame -- the one knob here that moves NOTHING at
+  # BELIEF OFFSET, mm in the CONNECTOR frame -- the one knob here that moves NOTHING at
   # pickup.  This is the split between the two things that were previously tangled:
   #
   #   the GRASP COMMAND  (pitch_deg, grip_offset_mm, junction_in_fingertip) = where the
@@ -557,6 +558,7 @@ speed:
     # BODY down toward the ground plane rather than just the fingers.  Falls back to `scan`
     # when unset, so other apps are unaffected.
     grasp_align: 1.0
+    grasp_align: 1.0
     pickup: 0.5      # the compliant grasp descent
     lift: 0.8        # the compliant lift (including the slip-check partial lift)
     standoff: 1.0    # the move to stand-off + the per-attempt realign moveJs
@@ -676,6 +678,7 @@ assembly:
     place_offsets:
       x_mm: -300.0
       y_mm: 400.0
+      y_mm: 400.0
       # z is IGNORED while snap_to_ground is on, and it should be: "on the ground plane" is the
       # requirement, and the resting height is a property of the PART (ground + one barrel
       # radius, ~9 mm here), not a number worth typing twice.  Set snap_to_ground false to
@@ -774,6 +777,7 @@ assembly:
     # PRELOAD, mm past the mate along the connector's own +X, so the reference finishes
     # pressing rather than merely arriving.  0 = stop exactly on the mate.  (Distinct from
     # final_insertion.preload_mm, which belongs to the estimate-mode commit.)
+    preload_mm: 0.0
     preload_mm: 0.0
 
     # Reference rebuild rate.  Must be >= 4x the highest active frequency or the sampled sine

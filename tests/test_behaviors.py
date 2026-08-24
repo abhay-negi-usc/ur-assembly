@@ -105,6 +105,28 @@ def test_gripper_repl_grammar():
     assert parse_command('wat', 0, 255) == ('help', None)
 
 
+def test_gripper_repl_sets_force_and_each_letter_means_one_thing():
+    """Grip force is settable live. 'f' is force ONLY and 'c' is clear ONLY -- no letter does
+    double duty, which is why close lost its shorthand: a slip that clears instead of closing
+    re-homes the fingers and drops the held object."""
+    from urlab.apps.gripper_control import force_newtons, parse_command
+    assert parse_command('f', 0, 255) == ('force', None), 'bare f reports the force'
+    assert parse_command('f 80', 0, 255) == ('force', 80)
+    assert parse_command('force 80', 0, 255) == ('force', 80)
+    assert parse_command('force 999', 0, 255) == ('force', 255), 'force clamps to 0-255 too'
+    assert parse_command('force -1', 0, 255) == ('force', 0)
+    assert parse_command('force nope', 0, 255) == ('help', None)
+
+    assert parse_command('c', 0, 255) == ('clear', None), 'c clears the fault, it does NOT close'
+    assert parse_command('clear', 0, 255) == ('clear', None)
+    assert parse_command('close', 3, 250) == ('move', 250), 'close must be spelled out'
+    assert parse_command('o', 3, 250) == ('move', 3), 'open keeps its shorthand'
+
+    # A plain number is still a POSITION, not a force.
+    assert parse_command('80', 0, 255) == ('move', 80)
+    assert force_newtons(0) == 20.0 and force_newtons(255) == 235.0
+
+
 def test_calibration_check_retract_modes():
     from urlab.apps.calibration_check import _parse_retract
 

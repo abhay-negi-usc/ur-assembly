@@ -568,7 +568,7 @@ speed:
     # speed (the controller's own 180 deg/s ceiling), but it does keep raising the cartesian
     # caps, which are what actually bind here.
     reconfigure: 3.0
-    assemble: 0.25      # the insertion reference ramp
+    assemble: 0.10      # the insertion reference ramp
     retract: 4.0       # the between-attempt retract + the release escape
     # POST-MATE CLOCKING, one scale per maneuver.  These pace the CONTACT ramps; free-space
     # moves inside a maneuver stay on standoff/retract.  A non-null speed_translation_mm_s /
@@ -676,15 +676,15 @@ assembly:
     # cable down 400 mm OUT IN FRONT of the socket -- clear of the fixture and its mounting
     # plate, which a drop directly beneath the socket would land on.
     place_offsets:
-      x_mm: -300.0
-      y_mm: 400.0
+      x_mm: -400.0
+      y_mm: 300.0
       y_mm: 400.0
       # z is IGNORED while snap_to_ground is on, and it should be: "on the ground plane" is the
       # requirement, and the resting height is a property of the PART (ground + one barrel
       # radius, ~9 mm here), not a number worth typing twice.  Set snap_to_ground false to
       # honour z_mm literally.
       z_mm: 0.0
-      yaw_deg: 0.0
+      yaw_deg: -90.0
     snap_to_ground: true
     # RELEASE HEIGHT above where the connector comes to rest -- the gripper opens here and the
     # part drops the last few mm.  Small on purpose: enough that the pads are not pressing the

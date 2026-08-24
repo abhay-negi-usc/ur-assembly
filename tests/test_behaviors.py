@@ -2213,3 +2213,62 @@ def test_a_refused_grasp_reports_what_actually_failed():
     src = inspect.getsource(GraspController)
     assert src.count('self.diagnose(robot, geom') == 6, (
         'all six refusal paths must diagnose, or the quiet one is the one you hit')
+
+
+def test_the_fk_check_rejects_a_non_pose_instead_of_blaming_the_dh_chain():
+    """REGRESSION: a 3358 mm "FK mismatch" that was not a kinematics problem at all.
+
+    ur_rtde's getForwardKinematics is not a receive field -- it writes the joints into RTDE
+    registers, triggers the CONTROL SCRIPT, and polls an output register. When that handshake
+    breaks (two control clients on one register range, script not running, a crashed run still
+    holding the connection) it returns whatever was stale in those registers, and the next call
+    blocks. On hardware that produced a "tool0" 2957 mm from the base and an error message
+    accusing the DH table -- which is provably innocent, since no two reachable tool0 positions
+    can be even 3078 mm apart.
+
+    So the check must recognise a value that is not a pose, and say what it actually is."""
+    import pytest
+    pytest.importorskip('pybullet')
+    import numpy as np
+    from urlab.robot.collision import UR10E_MAX_REACH, fk_links
+    from urlab.transforms import translation_matrix
+
+    q = np.radians([-90.0, -140.0, -130.0, -90.0, -90.0, 180.0])
+    truth = fk_links(q)[6]
+    assert float(np.linalg.norm(truth[:3, 3])) < UR10E_MAX_REACH
+
+    class FakeArm:
+        dry_run = False
+
+        def __init__(self, T, offset=None):
+            self._T, self._offset = T, offset
+            self.rtde_c = self
+
+        def q(self):
+            return list(q)
+
+        def tcp_pose(self):
+            return self._T
+
+        def getTCPOffset(self):
+            return self._offset if self._offset is not None else [0.0] * 6
+
+    m = _collision_model()
+    try:
+        # The observed garbage: 2957 mm from base. Must be REFUSED, and must not raise.
+        bad = translation_matrix([0.2466, -1.3300, -2.6293])
+        assert m.verify_against_controller(FakeArm(bad)) is False
+
+        # A genuine agreement still passes.
+        assert m.verify_against_controller(FakeArm(truth)) is True
+
+        # A non-zero pendant TCP is DIVIDED OUT, not assumed away: getActualTCPPose reports the
+        # TCP while fk_links reports the flange, and they differ by exactly that offset.
+        off = [0.0, 0.0, 0.1, 0.0, 0.0, 0.0]
+        shifted = truth @ translation_matrix([0.0, 0.0, 0.1])
+        assert m.verify_against_controller(FakeArm(shifted, off)) is True, \
+            'a declared TCP offset must be removed before comparing against the flange'
+        assert m.verify_against_controller(FakeArm(shifted)) is False, \
+            'the same shift with NO declared offset is a real 100 mm disagreement'
+    finally:
+        m.close()

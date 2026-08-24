@@ -36,11 +36,14 @@ def tare_fn(robot, cfg_section, key='tare_before', default=True):
     return None
 
 
-def guarded(robot, guard, move_fn):
+def guarded(robot, guard, move_fn, label=None):
     """Run a free-space move with the force guard armed as a canceller (the canonical
-    implementation lives next to ForceGuard in robot/guard.py)."""
+    implementation lives next to ForceGuard in robot/guard.py).
+
+    `label` names the behaviour in the end-of-move report, so a log full of moves says WHICH one
+    stopped and why."""
     from ..robot.guard import guarded_move
-    return guarded_move(robot, guard, move_fn)
+    return guarded_move(robot, guard, move_fn, label=label)
 
 
 def prompts_off(cfg):

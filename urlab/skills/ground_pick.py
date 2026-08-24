@@ -55,6 +55,15 @@ class GroundPlaneScanner:
         self.max_cables = int(gp.get('max_cables', 8))
         self.new_view_delta = float(gp.get('new_view_translation_m', 0.04))   # 'n' camera step
         self.z_step = float(gp.get('z_step_m', 0.05))       # 'z' step toward the cable (optical +z)
+        # AFTER THE CABLE IS REPLACED, back the camera off before localizing again. A cable that
+        # has just been set down is not where it was picked from and may be anywhere in the
+        # neighbourhood, so the view that framed the old position can easily clip the new one --
+        # and a cable running out of frame is the case the junction trace handles worst. Raising
+        # widens the footprint at the cost of resolution. Applied ONCE per replace (see reselect),
+        # in BASE +Z, so it is a real height change and not a step along whatever way the camera
+        # happens to be pointing.
+        self.replace_raise = float(gp.get('replace_view_raise_mm', 50.0)) / 1000.0
+        self._raise_pending = False
         self._dir_px = 24.0                 # pixels along the connector direction, to project a heading
         self._selection = None              # cached target junction (base frame); persists across retries
         self._base_view = None              # camera pose at scan start, for new-view nudges
@@ -78,14 +87,23 @@ class GroundPlaneScanner:
         """Drop the cached cable selection AND re-anchor the view base at the CURRENT camera
         pose, so the next scan() re-detects, re-numbers, and RE-PROMPTS the operator from here.
         Used by the slip recovery: a dropped cable lands somewhere new, so the cached junction
-        (and the auto re-match against it) is stale."""
+        (and the auto re-match against it) is stale.
+
+        THIS IS THE 'THE CABLE HAS BEEN REPLACED' SIGNAL -- every path that puts the cable down
+        and starts again calls it (a new cycle, a slip, a reorient). So it is also where the
+        localization view is raised: see _raise_pending."""
         self._selection = None
         self._base_view = None
+        # Arm the view raise rather than moving here. reselect() is called from inside recovery
+        # sequences that are mid-motion; moving the arm as a side effect of clearing state would
+        # be a surprise. scan() owns the motion, and applies this once before it captures.
+        self._raise_pending = True
 
     # ------------------------------------------------------------------ scan
     def scan(self, confirm=None):
         """Capture, let the user pick a cable (once; 'n' takes a new view), and return its
         ground-plane T_base_connector. None on abort / no detection."""
+        self._raise_view()
         if self._base_view is None and self.robot is not None:
             self._base_view = self.robot.camera().copy()
 
@@ -122,6 +140,25 @@ class GroundPlaneScanner:
                 continue
             self._selection = projected[choice]['junction'].copy()
             return self._pose(projected[choice])
+
+    def _raise_view(self):
+        """Lift the camera by replace_view_raise_mm, once, after the cable has been replaced.
+
+        Cleared whether or not the move succeeds: a failed raise is worth one warning, not a
+        retry on every scan of the run."""
+        if not self._raise_pending:
+            return
+        self._raise_pending = False
+        if self.robot is None or self.replace_raise <= 0.0:
+            return
+        T = self.robot.camera().copy()
+        T[:3, 3] = T[:3, 3] + np.array([0.0, 0.0, self.replace_raise])
+        log.info('  the cable was replaced: raising the localization view %.0f mm '
+                 '(base +Z) before re-detecting.', self.replace_raise * 1000)
+        if not self.robot.move_camera(T, 'ground-plane raise view after replace'):
+            log.warning('  could not raise the view; localizing from where the arm is.')
+            return
+        self._base_view = self.robot.camera().copy()   # re-anchor the n/z ring at the new height
 
     # ------------------------------------------------------------------ tag matching
     def _detect_ranked(self, frame):

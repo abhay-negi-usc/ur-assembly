@@ -125,6 +125,10 @@ ground_plane:
   max_cables: 8           # number the largest N cables for selection
   new_view_translation_m: 0.04   # lateral camera step for a new view ('n')
   z_step_m: 0.05          # camera step TOWARD the cable for a closer view ('z')
+  # After the cable is REPLACED (new cycle, slip, or reorient), lift the camera this far in base
+  # +Z before localizing again. The cable is no longer where it was picked from, so the old view
+  # can clip it -- and a cable running out of frame is what the junction trace handles worst.
+  replace_view_raise_mm: 50.0
 # labeled_image_path: data/ground_scan_labeled.png   # where the numbered image is written (default shown)
 
 connector_frame: connector

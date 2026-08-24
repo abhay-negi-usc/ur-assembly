@@ -83,6 +83,10 @@ ground_plane:
   max_cables: 8
   new_view_translation_m: 0.04
   z_step_m: 0.05
+  # After the cable is REPLACED (new cycle, slip, or reorient), lift the camera this far in base
+  # +Z before localizing again. The cable is no longer where it was picked from, so the old view
+  # can clip it -- and a cable running out of frame is what the junction trace handles worst.
+  replace_view_raise_mm: 50.0
 
 connector_frame: connector
 

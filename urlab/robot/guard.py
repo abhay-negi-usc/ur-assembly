@@ -25,20 +25,39 @@ from .. import log as urlog
 log = urlog.get('guard')
 
 
-def guarded_move(robot, guard, move_fn):
+def guarded_move(robot, guard, move_fn, label=None):
     """Run a free-space move with the force guard armed as a canceller.
 
     A trip here means the arm hit something UNEXPECTED; contact phases read the guard
-    themselves, where a trip means 'seated'."""
+    themselves, where a trip means 'seated'.
+
+    EVERY MOVE SAYS WHY IT ENDED. Three outcomes are possible and they mean different things --
+    the path ran, the guard cancelled it, or the move itself failed with the guard idle (an IK
+    refusal, a joint limit, a controller reject) -- and previously only the middle one was
+    reported. A run that stops silently is then indistinguishable in the log from one that
+    finished, which is exactly the ambiguity that costs bench time. The completion line carries
+    the peak wrench too, so how close a clean move came to tripping is visible without
+    instrumenting anything."""
     guard.reset()
     robot.arm.add_guard(guard)
     try:
         ok = move_fn()
     finally:
         robot.arm.clear_guards()
-    if not ok and guard.tripped_by:
-        log.error('Force guard tripped during a free-space move (%s) -- hit something '
-                  'unexpected.', guard.tripped_by)
+    what = f' [{label}]' if label else ''
+    if ok:
+        log.info('  ENDED%s: PATH COMPLETE -- the move ran to its target; the guard did not '
+                 'trip (peak |F| %.1f N, tau %.2f Nm).',
+                 what, getattr(guard, 'peak_force', 0.0), getattr(guard, 'peak_torque', 0.0))
+    elif guard.tripped_by:
+        log.error('  ENDED%s: FORCE GUARD -- %s. A free-space move was cancelled, so the arm hit '
+                  'something unexpected.', what, guard.tripped_by)
+    else:
+        log.error('  ENDED%s: MOVE REFUSED -- the motion did not complete and the force guard did '
+                  'NOT trip, so nothing was touched: the controller rejected the move (IK, a '
+                  'joint or safety limit, or a pose outside limits). Peak |F| %.1f N, tau %.2f '
+                  'Nm.', what, getattr(guard, 'peak_force', 0.0),
+                  getattr(guard, 'peak_torque', 0.0))
     return ok
 
 

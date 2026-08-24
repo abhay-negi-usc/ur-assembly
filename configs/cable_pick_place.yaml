@@ -34,12 +34,19 @@ camera:
 
 # ---- SAM3 detector (in-process) ----
 sam3:
-  repo_path: /abhay_ws/sam3-abhay   # the checkout holding the detector modules + the model venv
   # neck     -- cable/connector junction (cable_neck_core), adaptive-threshold mode available.
-  # junction -- the SAME junction by the DIAMETER-PROFILING method (cable_neck_diameter): unions
-  #             both prompts, classification-free, ONE junction per frame, NO adaptive mode.
+  # junction -- the SAME junction by the DIAMETER-PROFILING method (urlab/perception/junction.py):
+  #             unions both prompts, classification-free, ONE junction per frame, NO adaptive mode.
   # tip      -- the cable's free END (classification-free).
   mode: junction                        # neck | junction | tip
+  # Centreline tracer for the junction geometry (urlab/perception/junction.py, vendored):
+  #   graph    -- build the skeleton's graph and walk THROUGH a self-crossing, pairing branches on
+  #               tangent continuity, flagging the fused samples so they cannot be mistaken for the
+  #               connector's diameter step. Falls back to geodesic on a shattered skeleton.
+  #   geodesic -- the ORIGINAL: shortest path between the shape's two farthest points. Shortcuts a
+  #               loop (skipping a lobe, sometimes the one the connector is on) and reports the
+  #               width spike at a crossing as a junction, with high contrast. Kept for A/B.
+  trace: graph
   cable_prompt: cable
   connector_prompt: connector
   adaptive: true                    # (neck only) tune the threshold per image above a floor

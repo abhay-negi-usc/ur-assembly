@@ -105,8 +105,15 @@ marker_views:
     ring_views: 4
 
 sam3:
-  repo_path: /abhay_ws/sam3-abhay
   mode: junction
+  # Centreline tracer for the junction geometry (urlab/perception/junction.py, vendored):
+  #   graph    -- build the skeleton's graph and walk THROUGH a self-crossing, pairing branches on
+  #               tangent continuity, flagging the fused samples so they cannot be mistaken for the
+  #               connector's diameter step. Falls back to geodesic on a shattered skeleton.
+  #   geodesic -- the ORIGINAL: shortest path between the shape's two farthest points. Shortcuts a
+  #               loop (skipping a lobe, sometimes the one the connector is on) and reports the
+  #               width spike at a crossing as a junction, with high contrast. Kept for A/B.
+  trace: graph
   cable_prompt: cable
   connector_prompt: connector
   adaptive: true
@@ -144,7 +151,7 @@ grasp_tcp_offset:
   xyz: [0.0, 0.0, 0.0]
   rpy: [0.0, 0.0, 0.0]
 fingertip_grasp:
-  xyz: [0.0, 0.0, 0.183]
+  xyz: [0.0, 0.0, 0.182]
   rpy: [3.14159, 0.0, -1.5708]
 
 scan:
@@ -302,7 +309,7 @@ pickup:
   # cylinder at a different depth along the approach -- is more naturally a hand-frame value,
   # and in this frame it will move as the pitch changes.  Re-measure after a large change of
   # approach angle either way.
-  belief_offset_mm: [0.0, 0.0, 0.0]
+  belief_offset_mm: [0.0, 0.0, -12.5]
   # PICKUP HEIGHT from the gripper kinematic model.  Assumes the connector rests ON THE GROUND
   # PLANE (ground_plane.z_m): grasp target = plane + connector d_max/2 (centerline) + the
   # fingertip ADVANCE between fingertip_ref_separation_mm (where fingertip_grasp z was
@@ -542,9 +549,9 @@ grasp_check:
 # joint caps bound every joint directly; the cartesian caps bound the TOOL (converted to an
 # equivalent joint bound for moveJ, and pacing the compliant reference ramps + moveL directly).
 speed:
-  max_joint_velocity_deg_s: 90.0
-  max_joint_acceleration_deg_s2: 30.0
-  max_cartesian_translation_mm_s: 40.0
+  max_joint_velocity_deg_s: 120.0
+  max_joint_acceleration_deg_s2: 80.0
+  max_cartesian_translation_mm_s: 50.0
   max_cartesian_rotation_deg_s: 90.0
   retract_rotation_deg_s: 50.0
   # Per-PHASE scaling of ALL FOUR limits above (1.0 = the global limit itself), one entry per
@@ -606,7 +613,7 @@ reset:
   # HOME = the MARKER VIEW pose: the reset drives here at the start and end of every run,
   # the visual localisation sweeps the markers from here, and the end-of-run image is
   # captured from here.  (The pick itself runs from pick_joints_deg below.)
-  home_joints_deg: [-85, -145, -105, -205, -85, 180]
+  home_joints_deg: [-90, -140, -130, -90, -90, 180]
   # (the home move is a guarded position moveJ, paced by the speed caps above)
   max_force_n: 50.0
   compliance:
@@ -676,15 +683,14 @@ assembly:
     # cable down 400 mm OUT IN FRONT of the socket -- clear of the fixture and its mounting
     # plate, which a drop directly beneath the socket would land on.
     place_offsets:
-      x_mm: -400.0
-      y_mm: 300.0
-      y_mm: 400.0
+      x_mm: -250.0
+      y_mm: -100.0
       # z is IGNORED while snap_to_ground is on, and it should be: "on the ground plane" is the
       # requirement, and the resting height is a property of the PART (ground + one barrel
       # radius, ~9 mm here), not a number worth typing twice.  Set snap_to_ground false to
       # honour z_mm literally.
       z_mm: 0.0
-      yaw_deg: -90.0
+      yaw_deg: -45.0
     snap_to_ground: true
     # RELEASE HEIGHT above where the connector comes to rest -- the gripper opens here and the
     # part drops the last few mm.  Small on purpose: enough that the pads are not pressing the
@@ -711,7 +717,7 @@ assembly:
   #            fixture, and disagreeing markers / a large shift are visible cross-checks.
   # The sweep runs ONCE, after the start reset and BEFORE the pick (gripper empty, arm at
   # home, clear view -- after the mate the socket is behind a connector and a gripper).
-  target_source: kinematic
+  target_source: visual
   visual_target:
     # Joint degrees for the sweep's start pose.  null = sweep from HOME, which IS the
     # marker view pose (reset.home_joints_deg) -- set this only to sweep from somewhere
@@ -777,8 +783,7 @@ assembly:
     # PRELOAD, mm past the mate along the connector's own +X, so the reference finishes
     # pressing rather than merely arriving.  0 = stop exactly on the mate.  (Distinct from
     # final_insertion.preload_mm, which belongs to the estimate-mode commit.)
-    preload_mm: 0.0
-    preload_mm: 0.0
+    preload_mm: 15.0
 
     # Reference rebuild rate.  Must be >= 4x the highest active frequency or the sampled sine
     # aliases -- validated pre-motion.
@@ -794,7 +799,7 @@ assembly:
     # Reaching it ENDS THE ENGAGE, not the run -- meeting resistance partway is what the
     # bayonet search is for.  Axial rather than |f| is what lets it be set low: a magnitude
     # limit tight enough to catch real resistance also stops on every lateral graze.
-    max_axial_force_n: 10.0
+    max_axial_force_n: 5.0
     persistence_s: 0.10          # the limit must hold this long -- rides out contact spikes
 
     # ---- compliance overrides (else the top-level compliance:) ---
@@ -1016,7 +1021,7 @@ assembly:
     # "ring stands 30 mm from the JUNCTION": junction sits at -45.7 mm on this axis, so
     # collar = -45.7 + 30 = -15.7 mm.  If re-tuned on the bench, measure from the connector
     # frame origin.
-    collar_offset_mm: 0.0
+    collar_offset_mm: 3.0
     # COLLAR AXIS OFFSET, mm, in the SOCKET (target) frame's own axes: shifts the LINE the
     # whole collar maneuver works about (centring, unwind, advance, turn, and the tug
     # re-grip).  Y and Z move the line; X only slides the reference point along it.  Exists
@@ -1047,7 +1052,7 @@ assembly:
     # real seating motion.  A failed grasp skips the push rather than failing the run.
     seat_push:
       enabled: true
-      force_n: 1.0
+      force_n: 3.0
       persistence_s: 0.1
       max_travel_mm: 15.0
     # GRASP CLOCK ANGLE, deg: the ABSOLUTE roll about the socket +X to take the collar at
@@ -1219,7 +1224,7 @@ estimation:
   # configs/frames.yaml, parented to `fingertip`; the inline pose below is an override +
   # documentation, and the app warns if the two disagree.
   # UNITS: m / rad (NOT xyz_mm/rpy_deg -- mm/deg keys here are silently ignored).
-  initial_connector_frame: bnc_connector_in_fingerpads
+  # initial_connector_frame: bnc_connector_in_fingerpads
   initial_connector_in_fingertip:
     # Value = inverse(fingertip_grasp) @ frames[bnc_connector_in_fingerpads].
     xyz: [-0.0457, 0.0000, 0.0075]           # m

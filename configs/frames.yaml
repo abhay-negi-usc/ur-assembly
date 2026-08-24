@@ -26,7 +26,7 @@
 frames:
   # The gripper fingertip at the grasp (tool0 -> fingertip). Mirrors fingertip_grasp.
   fingertip:
-    xyz_mm:  [0.0, 0.0, 183.0]
+    xyz_mm:  [0.0, 0.0, 182.0]
     rpy_deg: [180.0, 0.0, -90.0]
 
   # The RealSense color optical frame (tool0 -> camera). Mirrors hand_eye.
@@ -70,9 +70,9 @@ frames:
   # eval apps treat as ground truth (the part clamped between closed fingers, no pick involved).
   # A picked connector does not sit where a fixtured one does, so the two are different frames for
   # different situations -- see the note under targets: about which one a target belongs to.
-  bnc_connector_in_fingerpads:
-    xyz_mm:  [0.0, +45.7, 175.5]
-    rpy_deg: [180.0, 0.0, +90.0]
+  # bnc_connector_in_fingerpads:
+  #   xyz_mm:  [0.0, +45.7, 175.5]
+  #   rpy_deg: [180.0, 0.0, +90.0]
 
 # ============================================================================
 # TARGETS -- recorded BASE_LINK poses of the frames above (base_link <- frame), e.g. the assembly
@@ -120,9 +120,9 @@ targets:
   # `base_link <- bnc_connector_in_fingerpads` off urlab.apps.monitor. This entry inherits every
   # error the finger_holder reading carried, including that it was itself re-derived arithmetically
   # on 2026-08-15 rather than measured.
-  bnc_connector_in_fingerpads:
-    xyz_mm:  [+120.81, +1088.60,  -155.02]
-    rpy_deg: [-0.61,   +0.04,  +89.54]
+  # bnc_connector_in_fingerpads:
+  #   xyz_mm:  [+120.81, +1088.60,  -155.02]
+  #   rpy_deg: [-0.61,   +0.04,  +89.54]
 
 marker_rigs:
   bnc_connector_finger_holder:

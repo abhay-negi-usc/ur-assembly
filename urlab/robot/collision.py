@@ -38,9 +38,10 @@ THE FINGERTIP EXCEPTION -- the one deliberate hole in the guard.
 import os
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from .. import log as urlog
-from ..transforms import BASE_LINK_FROM_UR_BASE, UR_JOINTS
+from ..transforms import BASE_LINK_FROM_UR_BASE, UR_JOINTS, inverse
 
 log = urlog.get('collision')
 
@@ -61,6 +62,13 @@ UR10E_RADII = (0.090, 0.085, 0.075, 0.060, 0.060, 0.058)
 # they cannot drift from the DH table above, and asserted in the tests.
 UR10E_LINK_LENGTHS = (UR10E_D[0], abs(UR10E_A[1]), abs(UR10E_A[2]),
                       UR10E_D[3], UR10E_D[4], UR10E_D[5])
+
+# Triangle inequality on the chain: tool0 cannot be further from the base than the links laid
+# end to end, whatever the joints do. Loose (the true maximum is ~1539 mm, since the links cannot
+# all align) but RIGOROUS, and derived rather than typed. Its job is to catch a "pose" that is not
+# a pose at all -- the failure that reads as a huge FK disagreement and gets blamed on the DH
+# table or on joint zeros, when in fact no pair of real tool0 positions can be even 3078 mm apart.
+UR10E_MAX_REACH = sum(UR10E_LINK_LENGTHS)
 
 
 def dh_matrix(theta, d, a, alpha):
@@ -539,6 +547,24 @@ class GroundCollisionModel:
         return (worst_name is None), worst_name, worst, worst_f
 
     # ------------------------------------------------------------------ trust
+    @staticmethod
+    def _tcp_offset(arm):
+        """The controller's flange->TCP transform, or identity if it is zero/unreadable.
+
+        getActualTCPPose reports the TCP; fk_links reports the FLANGE. They are the same point
+        only while the pendant TCP is all zeros, which is what this repo documents -- so divide
+        it out rather than assume it, and the check stays honest if someone sets one."""
+        try:
+            off = np.asarray(arm.rtde_c.getTCPOffset(), dtype=float)
+        except Exception:                              # noqa: BLE001 -- never fatal
+            return np.eye(4)
+        if off.size < 6 or not np.isfinite(off).all() or float(np.linalg.norm(off)) < 1e-9:
+            return np.eye(4)
+        T = np.eye(4)
+        T[:3, :3] = Rotation.from_rotvec(off[3:6]).as_matrix()
+        T[:3, 3] = off[0:3]
+        return T
+
     def verify_against_controller(self, arm, q=None, tol_mm=1.0):
         """Compare our DH forward kinematics against the CONTROLLER's for one configuration.
 
@@ -551,13 +577,73 @@ class GroundCollisionModel:
                         'ground check is running on our own DH chain with nothing to compare '
                         'it against.')
             return None
-        q = arm.q() if q is None else q
-        mine, theirs = fk_links(q)[6], arm.fk(q)
+
+        # THE REFERENCE IS THE MEASURED POSE, NOT getForwardKinematics.
+        #
+        # This compares FK at the joints the arm is at RIGHT NOW, so the controller's own
+        # getActualTCPPose is a direct answer to the same question -- and it is an RTDE RECEIVE
+        # field, read straight off the data stream. getForwardKinematics is not: ur_rtde
+        # implements it by writing the joints into RTDE registers, triggering the CONTROL SCRIPT
+        # on the robot, and polling an output register for the result. When that handshake breaks
+        # -- two control clients sharing one register range, the script not running, a crashed run
+        # that never disconnected -- it returns whatever was STALE in those registers and the next
+        # call blocks forever. That failure has been seen: a "tool0" 2957 mm from the base, which
+        # is not a pose, reported as a 3358 mm DH error.
+        #
+        # An explicit `q` cannot use the measured pose (the arm is not there), so it still pays
+        # the round trip and says so.
+        if q is None:
+            q = arm.q()
+            theirs, src = arm.tcp_pose(), 'getActualTCPPose (measured)'
+            theirs = theirs @ inverse(self._tcp_offset(arm))   # TCP -> flange
+        else:
+            theirs, src = arm.fk(q), 'getForwardKinematics (control-script round trip)'
+        mine = fk_links(q)[6]
+
+        for who, T in (('ours (fk_links)', mine), ('the controller', theirs)):
+            d = float(np.linalg.norm(T[:3, 3]))
+            if d > UR10E_MAX_REACH:
+                log.error('COLLISION MODEL FK CHECK ABORTED: %s puts tool0 %.0f mm from the base, '
+                          'past the %.0f mm the links can span -- so it is NOT A POSE, and the DH '
+                          'chain is not what is wrong. Source: %s. If it is the controller, its '
+                          'RTDE registers are stale or contested: make sure only ONE '
+                          'RTDEControlInterface is connected, the robot is in Remote Control, and '
+                          'no earlier run is still holding the connection.',
+                          who, d * 1000, UR10E_MAX_REACH * 1000, src)
+                return False
         err = float(np.linalg.norm(mine[:3, 3] - theirs[:3, 3])) * 1000.0
         if err > float(tol_mm):
+            # A bare distance cannot be diagnosed from a log. The three things that actually
+            # separate the causes are: the two POSITIONS (a mismatch that is a pure sign flip on
+            # x/y is the base-frame bridge; one that equals a known offset is the TCP), the JOINTS
+            # both were computed from, and the controller's TCP OFFSET -- because arm.fk() calls
+            # getForwardKinematics WITHOUT an explicit tcp_offset, so the controller applies
+            # whatever is configured on the pendant and returns the TCP, while fk_links returns
+            # the FLANGE. Those agree only while that offset is zero, which is what this repo
+            # documents (`tip_frame: tool0`, the pendant all-zeros TCP).
+            try:
+                off = np.asarray(arm.rtde_c.getTCPOffset(), dtype=float)[:3]
+                off_txt = '%s mm (|%.1f|)' % (np.round(off * 1000, 2).tolist(),
+                                              float(np.linalg.norm(off)) * 1000)
+            except Exception as exc:                   # noqa: BLE001 -- diagnostics never fatal
+                off_txt = 'unreadable (%s)' % exc
             log.error('COLLISION MODEL FK MISMATCH: our tool0 is %.2f mm from the controller\'s '
                       '(limit %.2f). The DH chain in urlab/robot/collision.py does not describe '
-                      'this robot -- every clearance it reports is suspect.', err, tol_mm)
+                      'this robot -- every clearance it reports is suspect.\n'
+                      '    our  fk_links(q)[6] = %s mm  (|%.1f| from base)\n'
+                      '    theirs arm.fk(q)    = %s mm  (|%.1f| from base)\n'
+                      '    q (deg)             = %s\n'
+                      '    controller TCP offset = %s\n'
+                      '    A UR10e cannot reach past ~1780 mm, so a position beyond that is not a '
+                      'pose at all; x/y negated with z equal is the base-frame bridge; a gap equal '
+                      'to the TCP offset is flange-vs-TCP.',
+                      err, tol_mm,
+                      np.round(mine[:3, 3] * 1000, 1).tolist(),
+                      float(np.linalg.norm(mine[:3, 3])) * 1000,
+                      np.round(theirs[:3, 3] * 1000, 1).tolist(),
+                      float(np.linalg.norm(theirs[:3, 3])) * 1000,
+                      np.round(np.degrees(np.asarray(q, dtype=float)), 1).tolist(),
+                      off_txt)
             return False
         log.info('Collision model FK agrees with the controller to %.3f mm.', err)
         return True

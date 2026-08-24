@@ -716,8 +716,17 @@ class GraspController:
             log.warning('pybullet is not installed, so the pick path is UNCHECKED against the '
                         'ground plane. `pip install pybullet` to turn the guard on.')
         except Exception as exc:                               # noqa: BLE001
-            log.warning('Ground-collision model could not be built (%s) -- the pick path is '
-                        'UNCHECKED.', exc)
+            # A GUARD THAT CANNOT BE BUILT MUST NOT BE SKIPPED QUIETLY. This used to warn and
+            # return None, so ANY fault in the collision code -- including a SyntaxError, which is
+            # an Exception -- downgraded the run to no checking at all with one WARNING line in a
+            # busy log. That happened: a corrupted collision.py made the module unimportable, the
+            # exception was swallowed here, and the arm drove a path into the floor. A missing
+            # OPTIONAL DEPENDENCY is a legitimate reason to run unguarded (above, and the operator
+            # can see it); our own code being broken is not.
+            log.error('Ground-collision model could not be built: %s: %s. REFUSING to run '
+                      'unguarded -- fix the model, or set pickup.collision.enabled: false to '
+                      'proceed deliberately without it.', type(exc).__name__, exc)
+            raise
         return self._collision
 
     def verify_collision_model(self, robot):

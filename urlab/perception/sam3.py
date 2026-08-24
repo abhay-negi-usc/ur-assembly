@@ -376,17 +376,18 @@ class JunctionDetector(_Base):
         """Draw each cable NUMBERED at its junction (#1, #2, ...) plus its ends, so the user can read
         the numbers and pick a target. Full opacity -- the numbers must be legible.
 
-        A cable carrying a tag score shows it as a percentage, and the one that CLEARED the
-        threshold is drawn in the tag's own colour. Seeing the number the ranking was made on is
-        what lets a wrong pick be diagnosed -- 4% on the intended cable means the tag is shadowed
-        or too small, which is a different problem from 40% on the wrong one."""
+        A cable carrying a tag score shows the NUMBER of its pixels wearing the colour, and the one
+        that CLEARED the threshold is drawn in the tag's own colour. Seeing the number the ranking
+        was made on is what lets a wrong pick be diagnosed -- 30 px on the intended cable means the
+        tag is shadowed, occluded or too far away, which is a different problem from 900 px on the
+        wrong one."""
         for i, cab in enumerate(cables, start=1):
             ju, jv, jyaw = cab['junction']
             for e in cab['ends']:
                 self._draw_end(vis, e[0], e[1], e[2], label='end', col=(255, 255, 0))
             label, col = f'#{i}', (0, 255, 0)
             if cab.get('tag_score') is not None:
-                label = f'#{i} tag {cab["tag_score"] * 100:.0f}%'
+                label = f'#{i} tag {int(cab["tag_score"])}px'
                 if cab.get('tag_pass'):
                     col = cab.get('tag_bgr') or (0, 0, 255)
             self._draw_end(vis, ju, jv, jyaw, label=label, col=col)

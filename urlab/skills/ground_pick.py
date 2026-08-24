@@ -128,12 +128,12 @@ class GroundPlaneScanner:
         """Detect every cable, then order them BEST TAG MATCH FIRST and renumber the image to suit.
 
         With no tag configured this is detection order (largest component first), exactly as
-        before. With one, each cable is scored on the fraction of its OWN cable-side pixels wearing
-        the colour -- so the ordering answers "which of these is wearing the marker", and the
-        numbers the user reads are the numbers that ranking produced.
+        before. With one, each cable is scored on HOW MANY of its OWN cable-side pixels wear the
+        colour -- so the ordering answers "which of these is wearing the marker", and the numbers
+        the user reads are the numbers that ranking produced.
 
-        Sorted by score, then by size, so equal scores (notably all-zero, when no cable is tagged)
-        keep the old largest-first order rather than shuffling between runs."""
+        Sorted by matching-pixel count, then by size, so equal scores (notably all-zero, when no
+        cable is tagged) keep the old largest-first order rather than shuffling between runs."""
         cables = self.detector.detect_all(frame, self.max_cables)
         if not cables or not self.tag.enabled:
             return cables
@@ -145,8 +145,8 @@ class GroundPlaneScanner:
             cab['tag_bgr'] = self._tag_bgr()
         cables.sort(key=lambda c: (c['tag_score'], c.get('size', 0)), reverse=True)
         self.detector.label_cables(frame, cables)      # numbers must match the new order
-        log.info('  %s -> scores %s', self.tag.describe(),
-                 ', '.join(f'#{i}={c["tag_score"] * 100:.0f}%%'
+        log.info('  %s -> %s', self.tag.describe(),
+                 ', '.join(f'#{i}={int(c["tag_score"])}px'
                            + ('*' if c['tag_pass'] else '')
                            for i, c in enumerate(cables, start=1)))
         return cables
@@ -171,19 +171,18 @@ class GroundPlaneScanner:
         hits = [i for i, c in enumerate(cables) if c.get('tag_pass')]
         if len(hits) == 1:
             i = hits[0]
-            log.info('  TAG MATCH: cable #%d wears %s on %.0f%% of its pixels and is the only one '
-                     'over the %.0f%% threshold -- selecting it without asking.',
-                     i + 1, self.tag.name, cables[i]['tag_score'] * 100,
-                     self.tag.min_fraction * 100)
+            log.info('  TAG MATCH: cable #%d wears %s on %d pixels and is the only one over the '
+                     '%d-pixel threshold -- selecting it without asking.',
+                     i + 1, self.tag.name, int(cables[i]['tag_score']), self.tag.min_pixels)
             print(f'\n[ground_plane] auto-selected cable #{i + 1} '
-                  f'({self.tag.name} tag, {cables[i]["tag_score"] * 100:.0f}%) '
+                  f'({self.tag.name} tag, {int(cables[i]["tag_score"])} px) '
                   f'-- see {self.labeled_path}')
             return i
-        best = cables[0]['tag_score'] * 100 if cables else 0.0
+        best = int(cables[0]['tag_score']) if cables else 0
         if not hits:
-            log.warning('  no cable clears the %.0f%% %s-tag threshold (best %.0f%%) -- asking. '
-                        'Check the tag is lit and unoccluded, or lower cable_tag.min_fraction.',
-                        self.tag.min_fraction * 100, self.tag.name, best)
+            log.warning('  no cable clears the %d-pixel %s-tag threshold (best %d px) -- asking. '
+                        'Check the tag is lit and unoccluded, or lower cable_tag.min_pixels.',
+                        self.tag.min_pixels, self.tag.name, best)
         else:
             log.warning('  %d cables clear the %s-tag threshold -- the tag is not distinguishing '
                         'them, so asking rather than guessing.', len(hits), self.tag.name)

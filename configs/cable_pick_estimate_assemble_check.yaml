@@ -62,18 +62,21 @@ connector_estimator:
 # `color` is NOT set here -- it comes from configs/cables.yaml <cable>.tag_color for whichever
 # cable is selected, so one marker is described in one place. These are the MATCHING windows.
 #
-# THE THRESHOLD IS THE ANTI-FALSE-POSITIVE. A cable is called tagged only when min_fraction of its
+# THE THRESHOLD IS THE ANTI-FALSE-POSITIVE. A cable is called tagged only when min_pixels of its
 # own cable-side pixels wear the colour, and the scan auto-selects only when EXACTLY ONE cable
 # clears it -- zero means the tag was not seen, two or more means it is not distinguishing them,
-# and both fall back to the numbered prompt rather than guessing. Raise min_fraction if something
-# untagged is being picked; lower it if the real tag is being missed (check the drawn percentage
-# on the saved image first -- it says which of the two is happening).
+# and both fall back to the numbered prompt rather than guessing. Raise min_pixels if something
+# untagged is being picked; lower it if the real tag is being missed (read the pixel counts drawn
+# on the saved image first -- they say which of the two is happening).
+#
+# A COUNT, NOT A FRACTION: the tag is a fixed-size object, so its pixel count depends on the tag
+# and the standoff. A fraction would depend on how much cable happens to be in frame, and would
+# need retuning every time the camera moved.
 cable_tag:
-  min_fraction: 0.06        # >= 6% of the cable's pixels must match to count as tagged
+  min_pixels: 300           # >= this many matching pixels on one cable to count as tagged
   hue_tolerance_deg: 18.0   # +/- around the named hue; widen for a faded or off-shade marker
   min_saturation: 0.35      # below this a pixel is grey and its hue is meaningless
   min_value: 0.20           # below this it is shadow, and its hue is noise
-  min_pixels: 40            # too few pixels to judge a fraction from -> score 0, never selected
 
 ground_plane:
   z_m: -0.760

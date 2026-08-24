@@ -5,10 +5,16 @@ grasp. That is fine once, and tedious every run: the answer is always "the one I
 coloured band on the target cable turns that question into a measurement -- and, unlike matching on
 shape or position, it survives the cable being moved, re-coiled, or lying next to identical ones.
 
-WHAT IS SCORED. The FRACTION of a cable's own pixels that match the colour, not the presence of a
-matching pixel anywhere. A single red pixel is noise; a band of them is a tag. And the fraction is
-taken over the CABLE-side pixels of one junction, so a red object lying in the background, or on a
-different cable, cannot lend its colour to this one.
+WHAT IS SCORED. The NUMBER of a cable's own pixels that match the colour. A handful of matching
+pixels is noise; a few hundred is a band of tape. The count is taken over the CABLE-side pixels of
+one junction, so a red object lying in the background, or on a different cable, cannot lend its
+colour to this one.
+
+WHY A COUNT AND NOT A FRACTION. A fraction sounds resolution-independent and is not: the tag is a
+fixed-size object, the denominator is HOW MUCH CABLE HAPPENS TO BE IN FRAME, so the same tag on the
+same cable scores half as much the moment more of the cable is visible. The threshold would then
+have to be retuned whenever the camera moved or the cable was re-coiled. A count of matching pixels
+depends on the tag and the standoff, which is what it is actually measuring.
 
 WHY HSV, AND WHY SATURATION AND VALUE GATE FIRST. Hue is the only channel that means "what colour
 is this", but it is meaningless where there is nothing to be coloured: at low saturation every grey
@@ -93,10 +99,10 @@ class TagMatcher:
         self.hue_tol = float(c.get('hue_tolerance_deg', 18.0))
         self.min_sat = float(c.get('min_saturation', 0.35))
         self.min_val = float(c.get('min_value', 0.20))
-        # The bar a cable must clear to be called TAGGED. A fraction, not a count, so it does not
-        # change meaning with camera resolution or how close the arm has approached.
-        self.min_fraction = float(c.get('min_fraction', 0.05))
-        self.min_pixels = int(c.get('min_pixels', 40))
+        # The bar a cable must clear to be called TAGGED: how many of its own pixels must be the
+        # colour. Tune it from the numbers drawn on the saved image -- it depends on the size of
+        # the tag and how close the camera is, and nothing else can guess those.
+        self.min_pixels = int(c.get('min_pixels', 300))
         self.name, self.hue = self._parse(color)
         self.enabled = self.hue is not None
 
@@ -127,24 +133,20 @@ class TagMatcher:
             (hue_distance(h, self.hue) <= self.hue_tol)
 
     def score(self, rgb, where):
-        """Fraction of the pixels in `where` that match. 0.0 if disabled or too few pixels to judge.
+        """NUMBER of pixels in `where` that are the tag colour. 0 if disabled.
 
-        A tiny region is refused rather than scored: 3 pixels of which 2 match is 67%, which would
-        outrank a real tag, and a distant or clipped cable is exactly where that happens."""
+        An integer count, so it says something physical -- roughly the visible area of the tag --
+        and does not move when more or less of the cable comes into frame."""
         if not self.enabled or where is None:
-            return 0.0
-        where = np.asarray(where, dtype=bool)
-        n = int(where.sum())
-        if n < self.min_pixels:
-            return 0.0
-        return float(np.count_nonzero(self.mask(rgb) & where)) / float(n)
+            return 0
+        return int(np.count_nonzero(self.mask(rgb) & np.asarray(where, dtype=bool)))
 
     def passes(self, score):
-        return bool(self.enabled and score >= self.min_fraction)
+        return bool(self.enabled and int(score) >= self.min_pixels)
 
     def describe(self):
         if not self.enabled:
             return 'no tag colour configured'
         return (f'tag {self.name} (hue {self.hue:.0f}+-{self.hue_tol:.0f} deg, '
                 f'sat>={self.min_sat:.2f}, val>={self.min_val:.2f}), '
-                f'selected at >={self.min_fraction * 100:.0f}% of the cable pixels')
+                f'selected at >={self.min_pixels} matching pixels')

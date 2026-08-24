@@ -34,10 +34,10 @@
 #                        detected_junction @ inverse(junction_in_fingertip).)
 #
 #   <cable>.tag_color -> cable_tag.color  (a COLOURED MARKER stuck on this cable, so the scan can
-#                        pick it out of several without being asked. The ground-plane scan scores
-#                        every detected cable by the fraction of ITS OWN pixels wearing that
-#                        colour, numbers them best-first, and selects automatically when exactly
-#                        ONE clears the threshold. `none` = no tag = the ordinary manual pick.
+#                        pick it out of several without being asked. The ground-plane scan counts,
+#                        for every detected cable, HOW MANY of ITS OWN pixels wear that colour,
+#                        numbers them best-first, and selects automatically when exactly ONE
+#                        clears the pixel threshold. `none` = no tag = the ordinary manual pick.
 #                        Named colours: red orange yellow green cyan blue purple magenta pink; or
 #                        a hue in degrees. The threshold and the hue/saturation windows are
 #                        PERCEPTION tuning, not cable identity, so they live in the app config

@@ -50,14 +50,14 @@ def test_grey_and_shadow_are_not_a_colour():
         assert not m.mask(patch(px)).any(), f'{name} must not read as a tag'
 
 
-def test_the_score_is_a_fraction_of_that_cables_own_pixels():
+def test_the_score_counts_that_cables_own_matching_pixels():
     img = np.zeros((100, 100, 3), dtype=np.uint8)
     img[:, :] = (30, 30, 30)
-    img[0:20, :] = (255, 0, 0)                      # 20% of the image is red
+    img[0:20, :] = (255, 0, 0)                      # 2000 red pixels
     where = np.zeros((100, 100), dtype=bool)
-    where[0:50, :] = True                           # ...and 40% of THIS region
+    where[0:50, :] = True                           # ...all of them inside this region
     m = TagMatcher('red', {'min_pixels': 10})
-    assert m.score(img, where) == pytest.approx(0.40, abs=1e-9)
+    assert m.score(img, where) == 2000
     # Red OUTSIDE the region cannot be credited to it -- that is what stops one cable's tag, or a
     # red object on the bench, from selecting a different cable.
     elsewhere = np.zeros((100, 100), dtype=bool)
@@ -65,14 +65,15 @@ def test_the_score_is_a_fraction_of_that_cables_own_pixels():
     assert m.score(img, elsewhere) == 0.0
 
 
-def test_a_region_too_small_to_judge_scores_zero():
-    """3 pixels of which 2 match is 67%, which would outrank a real tag. A clipped or distant
-    cable is exactly where that happens, so too-few-pixels is refused rather than scored."""
+def test_a_tiny_patch_of_colour_cannot_outrank_a_real_tag():
+    """The reason a COUNT is the right score. As a fraction, 3 pixels of which 2 match reads as
+    67% and beats a real tag; as a count it is 2, which is what it is worth."""
     img = patch((255, 0, 0), (10, 10))
     where = np.zeros((10, 10), dtype=bool)
     where[0, 0:3] = True
-    assert TagMatcher('red', {'min_pixels': 40}).score(img, where) == 0.0
-    assert TagMatcher('red', {'min_pixels': 2}).score(img, where) == pytest.approx(1.0)
+    m = TagMatcher('red', {'min_pixels': 300})
+    assert m.score(img, where) == 3
+    assert not m.passes(m.score(img, where))
 
 
 def test_no_tag_configured_is_disabled_not_a_colour_called_none():
@@ -81,8 +82,8 @@ def test_no_tag_configured_is_disabled_not_a_colour_called_none():
     for spec in (None, 'none', 'None', 'off', '', 'null'):
         m = TagMatcher(spec)
         assert not m.enabled, f'{spec!r} must mean NO tag'
-        assert m.score(patch((255, 0, 0)), np.ones((40, 40), bool)) == 0.0
-        assert not m.passes(1.0), 'a disabled matcher can never select'
+        assert m.score(patch((255, 0, 0)), np.ones((40, 40), bool)) == 0
+        assert not m.passes(10 ** 6), 'a disabled matcher can never select'
     assert TagMatcher('red').enabled
 
 
@@ -106,13 +107,13 @@ def test_selection_is_automatic_only_when_exactly_one_cable_is_tagged():
     gripper somewhere real, and the threshold exists to make that failure loud, not silent."""
     from urlab.skills.ground_pick import GroundPlaneScanner
 
-    m = TagMatcher('red', {'min_fraction': 0.06})
+    m = TagMatcher('red', {'min_pixels': 300})
     for scores, expect, why in (
-            ([0.42, 0.01, 0.00], 0, 'exactly one over -> take it'),
-            ([0.01, 0.00], None, 'none over -> ask'),
-            ([0.42, 0.31], None, 'two over -> ask, the tag is not distinguishing them'),
-            ([0.06], 0, 'exactly at the threshold counts as over'),
-            ([0.059], None, 'just under does not')):
+            ([1400, 20, 0], 0, 'exactly one over -> take it'),
+            ([20, 0], None, 'none over -> ask'),
+            ([1400, 900], None, 'two over -> ask, the tag is not distinguishing them'),
+            ([300], 0, 'exactly at the threshold counts as over'),
+            ([299], None, 'just under does not')):
         cables = _cables(scores)
         for c in cables:
             c['tag_pass'] = m.passes(c['tag_score'])
@@ -125,7 +126,7 @@ def test_selection_is_automatic_only_when_exactly_one_cable_is_tagged():
     scanner = GroundPlaneScanner.__new__(GroundPlaneScanner)
     scanner.tag = TagMatcher(None)
     scanner.labeled_path = '/tmp/x.png'
-    assert scanner._auto_pick(_cables([0.9, 0.0])) is None
+    assert scanner._auto_pick(_cables([9000, 0])) is None
 
 
 def test_the_bnc_carries_a_red_tag_and_the_others_carry_none():
@@ -197,7 +198,7 @@ def test_cables_are_reordered_best_match_first_and_the_image_is_renumbered():
     s.detector = StubDetector()
     s.max_cables = 8
     s.labeled_path = '/tmp/x.png'
-    s.tag = TagMatcher('red', {'min_fraction': 0.06, 'min_pixels': 10})
+    s.tag = TagMatcher('red', {'min_pixels': 100})
 
     ranked = s._detect_ranked(frame)
     assert [c['size'] for c in ranked] == [400, 900], \

@@ -14,6 +14,20 @@ _LAZY = {
     'ConnectorTracker': '.connector',
     'CableReconstructor': '.cable_recon',
     'Reconstruction': '.cable_recon',
+    # Junction geometry, vendored from sam3-abhay so it lives with the app. compute_junction
+    # and the renderers need cv2; the graph tracer is numpy/scipy only, hence the split.
+    'compute_junction': '.junction',
+    'find_junction_index': '.junction',
+    'render_overlay': '.junction',
+    'save_profile_plot': '.junction',
+    'trace_centerline_graph': '.cable_trace_graph',
+    'trace_strands': '.cable_trace_graph',
+    # Neck/tip geometry and the SAM3 segmentation wrapper, vendored alongside it. Sam3Backend is
+    # the only thing here that reaches for torch, and it does so inside __init__, so naming it
+    # costs nothing until it is built.
+    'compute_necks': '.neck',
+    'compute_tip': '.neck',
+    'Sam3Backend': '.sam3_backend',
 }
 
 __all__ = list(_LAZY)

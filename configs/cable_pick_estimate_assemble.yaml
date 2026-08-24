@@ -27,8 +27,15 @@ camera:
   fps: 15                          # D405 max at 1280x720 is 15 fps
 
 sam3:
-  repo_path: /abhay_ws/sam3-abhay
   mode: junction
+  # Centreline tracer for the junction geometry (urlab/perception/junction.py, vendored):
+  #   graph    -- build the skeleton's graph and walk THROUGH a self-crossing, pairing branches on
+  #               tangent continuity, flagging the fused samples so they cannot be mistaken for the
+  #               connector's diameter step. Falls back to geodesic on a shattered skeleton.
+  #   geodesic -- the ORIGINAL: shortest path between the shape's two farthest points. Shortcuts a
+  #               loop (skipping a lobe, sometimes the one the connector is on) and reports the
+  #               width spike at a crossing as a junction, with high contrast. Kept for A/B.
+  trace: graph
   cable_prompt: cable
   connector_prompt: connector
   adaptive: true

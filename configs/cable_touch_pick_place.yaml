@@ -29,7 +29,6 @@ camera:
   fps: 15                          # D405 max at 1280x720 is 15 fps
 
 sam3:
-  repo_path: /abhay_ws/sam3-abhay
   mode: tip                        # the TIP detector: classification-free
   cable_prompt: cable
   connector_prompt: connector

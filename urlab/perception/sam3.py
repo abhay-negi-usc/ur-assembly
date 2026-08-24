@@ -3,29 +3,34 @@
 The ROS versions were separate PROCESSES, each holding its own copy of SAM3 on a 6 GB GPU, talking
 to the demo over a PoseArray topic whose `position.x/y` were secretly pixel coordinates. All of
 that goes away: the detector is an object the demo calls, and it returns (u, v, yaw) tuples that
-say what they are. The sam3-abhay modules are imported UNCHANGED; point `sam3.repo_path` at the
-checkout (that is where the model, the venv and the GPU workarounds live).
+say what they are.
+
+WHERE THE LINE IS. Every line of detection code is in THIS repo -- the mask geometry
+(perception/junction.py, perception/neck.py, perception/cable_trace_graph.py) AND the SAM3 wrapper
+that produces the masks (perception/sam3_backend.py, which owns the per-prompt thresholds and the
+pre-Ampere GPU workarounds). What is EXTERNAL is the sam3 LIBRARY and its weights, a dependency
+like torch: `import sam3`, resolving its own tokenizer and checkpoint. So there is no
+`sam3.repo_path` any more -- if the import fails, INSTALL sam3 (pip install -e <checkout>) rather
+than pointing a config at a directory. Detection code used to live in that checkout, where the test
+suite could not reach it and a fix only got to the robot by pulling a second repo.
 
 FOUR names, THREE methods -- selected by `sam3.mode`:
 
   neck     -- cable/connector junction, from cable_neck_core.NeckDetector. Iterates over CONNECTOR
               masks, so a mislabelled connector starves it. Has an adaptive-threshold mode.
-  junction -- the SAME junction, but the DIAMETER-PROFILING method (cable_neck_diameter.
-              JunctionDetector): it unions the cable+connector masks, traces the assembly, and puts
-              the junction where the constant-diameter cable run ends -- classification-free, one
-              junction per frame, NO adaptive mode. "neck" and "junction" are the same physical
-              point by two different methods; the name in the log tells you which is live.
+  junction -- the SAME junction, but the DIAMETER-PROFILING method (perception.junction): it unions
+              the cable+connector masks, traces the assembly, and puts the junction where the
+              constant-diameter cable run ends -- classification-free, one junction per frame, NO
+              adaptive mode. "neck" and "junction" are the same physical point by two different
+              methods; the name in the log tells you which is live. `sam3.trace` picks its
+              centreline tracer: 'graph' (default) or 'geodesic' (the original).
   tip      -- the cable's free END (cable_neck_core.detect_tip). Also classification-free.
 
 All emit the SAME (u, v, yaw) tuple, so the ConnectorEstimator fuses any of them unchanged.
 
 Only ONE SAM3 model is ever loaded: each detector builds exactly one segmentation backend (the
-junction method reuses NeckDetector internally for segmentation), so the 6 GB card is not doubled.
+junction method reuses NeckDetector for segmentation), so the 6 GB card is not doubled.
 """
-
-import importlib
-import os
-import sys
 
 import numpy as np
 
@@ -51,18 +56,6 @@ def _num(x, default=-1.0):
     return float(x) if isinstance(x, (int, float)) else default
 
 
-def _import_from_repo(repo_path, module_name):
-    """Import a module from the sam3-abhay scripts/ checkout."""
-    scripts = os.path.join(repo_path, 'scripts')
-    if not os.path.isdir(scripts):
-        raise FileNotFoundError(
-            f'No scripts/ under {repo_path!r}. Set sam3.repo_path in the config to your '
-            f'sam3-abhay checkout.')
-    if scripts not in sys.path:
-        sys.path.insert(0, scripts)
-    return importlib.import_module(module_name)
-
-
 class _Base:
     """Common config + lifecycle. Subclasses build their own detector in _build() -- the base does
     NOT create one, so the junction method (which wraps its own NeckDetector) never loads SAM3
@@ -70,7 +63,6 @@ class _Base:
 
     def __init__(self, cfg):
         s = cfg.section('sam3')
-        self.repo_path = s.get('repo_path', '/abhay_ws/sam3-abhay')
         self.cable_prompt = s.get('cable_prompt', 'cable')
         self.connector_prompt = s.get('connector_prompt', 'connector')
         self.threshold = float(s.get('threshold', 0.5))
@@ -100,13 +92,17 @@ class _Base:
         raise NotImplementedError
 
     def _neck_backend(self):
-        """cable_neck_core + its NeckDetector -- shared by the neck and tip methods."""
-        core = _import_from_repo(self.repo_path, 'cable_neck_core')
-        det = core.NeckDetector(
+        """The neck geometry + the SAM3 segmentation backend -- shared by all three methods.
+
+        The junction method takes only the SEGMENTATION from this and swaps in its own geometry
+        module; the neck and tip methods use both halves."""
+        from . import neck
+        from .sam3_backend import Sam3Backend
+        det = Sam3Backend(
             cable_prompt=self.cable_prompt, connector_prompt=self.connector_prompt,
             threshold=self.threshold, connector_threshold=self.connector_threshold,
             mislabel_overlap=self.mislabel_overlap)
-        return core, det
+        return neck, det
 
     def _pil(self, frame):
         from PIL import Image
@@ -180,34 +176,58 @@ class NeckDetector(_Base):
 
 
 class JunctionDetector(_Base):
-    """Cable/connector JUNCTION detection by DIAMETER PROFILING -- cable_neck_diameter.JunctionDetector.
+    """Cable/connector JUNCTION detection by DIAMETER PROFILING -- geometry from perception.junction.
 
     Same physical point as the neck, a different method: classification-free (unions both prompts),
     ONE junction per frame, NO adaptive-threshold mode. `sam3.min_contrast` drops a junction whose
-    connector/cable diameter ratio is too weak to be a real cable->connector step (0 = keep all)."""
+    connector/cable diameter ratio is too weak to be a real cable->connector step (0 = keep all).
+
+    THE SPLIT. SAM3 supplies the cable + connector MASKS and nothing else; every measurement made
+    on those masks is `perception.junction`, in this repo. Previously the whole method came out of
+    the sam3-abhay checkout, so the geometry could not be tested here and reached the robot only by
+    pulling a second repo. `sam3.trace` picks which centreline tracer that geometry uses --
+    'graph' (default, walks through a self-crossing) or 'geodesic' (the original)."""
 
     def __init__(self, cfg):
         # Read before super().__init__ -- _build (called from it) needs work_dim.
         self.min_contrast = float(cfg.get_path('sam3.min_contrast', 0.0))
         self.work_dim = int(cfg.get_path('sam3.work_dim', 1024))
+        self.trace = str(cfg.get_path('sam3.trace', 'graph'))
+        if self.trace not in ('graph', 'geodesic'):
+            raise ValueError(f"sam3.trace must be 'graph' or 'geodesic', got {self.trace!r}")
         super().__init__(cfg)
         if not self.dry_run and self.adaptive:
             log.info('  (junction method has no adaptive-threshold mode; sam3.adaptive ignored.)')
 
     def _build(self):
-        core = _import_from_repo(self.repo_path, 'cable_neck_diameter')
-        det = core.JunctionDetector(
-            cable_prompt=self.cable_prompt, connector_prompt=self.connector_prompt,
-            threshold=self.threshold, connector_threshold=self.connector_threshold,
-            work_dim=self.work_dim)
-        return core, det
+        """SAM3 for segmentation only; the junction geometry is ours."""
+        from . import junction
+        _core, det = self._neck_backend()      # NeckDetector: the torch model + its GPU setup
+        log.info('  junction geometry: urlab.perception.junction, trace=%s.', self.trace)
+        return junction, det
+
+    def _detect_raw(self, frame):
+        """Segment with SAM3, union both prompts, and run the LOCAL junction geometry.
+
+        The union is what makes the method classification-free: it never has to decide which mask
+        is the cable and which the connector, only where the one shape changes diameter."""
+        cable_masks, conn_masks = self.detector._segment_both(self._pil(frame))
+        h, w = frame.rgb.shape[:2]
+        assembly = np.zeros((h, w), dtype=bool)
+        for m in cable_masks:
+            assembly |= m
+        for m in conn_masks:
+            assembly |= m
+        res = self.core.compute_junction(assembly, work_dim=self.work_dim, trace=self.trace)
+        return dict(junctions=[res] if res is not None else [], result=res, assembly=assembly,
+                    cables_raw=len(cable_masks), connectors_raw=len(conn_masks))
 
     def detect(self, frame):
         """[(u, v, yaw_rad)] -- at most one junction per frame."""
         if self.dry_run:
             return []
 
-        res = self.detector.detect(self._pil(frame))
+        res = self._detect_raw(frame)
         self.last_debug = self._overlay(frame, res)
 
         out, dropped = [], 0
@@ -233,7 +253,7 @@ class JunctionDetector(_Base):
         'conn 1/2/...' (numbered per cable) on the overlay."""
         if self.dry_run:
             return []
-        res = self.detector.detect(self._pil(frame))
+        res = self._detect_raw(frame)
         self.last_debug = self._raw_bgr(frame)        # markers on the RAW image, not the SAM3 render
         cands = self._component_junctions(res.get('assembly'), top_n)
         if self.last_debug is not None:
@@ -258,7 +278,8 @@ class JunctionDetector(_Base):
         sizes = ndimage.sum(m, lbl, index=np.arange(1, n + 1))
         out = []
         for i in np.argsort(sizes)[::-1][:max(1, int(top_n))]:
-            j = self.core.compute_junction(lbl == (i + 1), work_dim=self.work_dim)
+            j = self.core.compute_junction(lbl == (i + 1), work_dim=self.work_dim,
+                                       trace=self.trace)
             if j is None:
                 continue
             if self.min_contrast > 0.0 and float(j.get('contrast', 0.0)) < self.min_contrast:
@@ -291,7 +312,7 @@ class JunctionDetector(_Base):
         [{'junction': (u, v, yaw), 'ends': [(u, v, yaw), ...]}, ...]."""
         if self.dry_run:
             return []
-        res = self.detector.detect(self._pil(frame))
+        res = self._detect_raw(frame)
         self.last_debug = self._raw_bgr(frame)        # numbered markers on the RAW image, not SAM3
         assembly = res.get('assembly')
         if assembly is None:
@@ -305,7 +326,8 @@ class JunctionDetector(_Base):
         h, w = frame.rgb.shape[:2]
         cables = []
         for i in np.argsort(sizes)[::-1][:max(1, int(max_cables))]:
-            j = self.core.compute_junction(lbl == (i + 1), work_dim=self.work_dim)
+            j = self.core.compute_junction(lbl == (i + 1), work_dim=self.work_dim,
+                                       trace=self.trace)
             if j is None:
                 continue
             if self.min_contrast > 0.0 and float(j.get('contrast', 0.0)) < self.min_contrast:
@@ -354,7 +376,7 @@ class JunctionDetector(_Base):
         ends simply won't agree across views -> no approach (a built-in guard on the ambiguous case)."""
         if self.dry_run:
             return [], []
-        res = self.detector.detect(self._pil(frame))
+        res = self._detect_raw(frame)
         self.last_debug = self._raw_bgr(frame)        # markers on the RAW image, not the SAM3 render
         j = res.get('result')
         if j is None:
@@ -437,15 +459,20 @@ class JunctionDetector(_Base):
         Returns {'junction': (u,v), 'yaw': rad, 'skeleton': (N,2) full-res (u,v)} or None. The
         skeleton is the traced centreline restricted to the CABLE (thin) side of the junction,
         ordered from the junction (index 0) OUTWARD toward the free end, and recentred onto each
-        cross-section's midline (the geodesic trace hugs the inside of a bend). It is built entirely
-        from artefacts compute_junction already exposes (_path/_normals/_half_plus/_half_minus/
-        _scale/_junction_k), so cable_neck_diameter.py is untouched.
+        cross-section's midline (a geodesic trace hugs the inside of a bend; the graph tracer's
+        medial axis already sits centred, so the shift is small there). It is built entirely from
+        artefacts compute_junction already exposes (_path/_normals/_half_plus/_half_minus/_scale/
+        _junction_k), so perception/junction.py needs nothing added for it.
+
+        NOTE it does NOT yet consult `_crossing`: on a self-crossing cable the skeleton handed to
+        the reconstruction still contains the fused samples. That only matters in
+        scan.mode 'reconstruction'.
 
         Only this detector implements detect_cable: the reconstruction needs the full centreline,
         which the diameter-profiling method traces but the neck/tip methods do not."""
         if self.dry_run:
             return None
-        res = self.detector.detect(self._pil(frame))
+        res = self._detect_raw(frame)
         self.last_debug = self._overlay(frame, res)
         j = res.get('result')
         if j is None:

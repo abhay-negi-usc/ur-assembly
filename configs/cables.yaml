@@ -33,6 +33,16 @@
 #                        demo configs' connector_grasp -- the fingertip grasp target is
 #                        detected_junction @ inverse(junction_in_fingertip).)
 #
+#   <cable>.tag_color -> cable_tag.color  (a COLOURED MARKER stuck on this cable, so the scan can
+#                        pick it out of several without being asked. The ground-plane scan scores
+#                        every detected cable by the fraction of ITS OWN pixels wearing that
+#                        colour, numbers them best-first, and selects automatically when exactly
+#                        ONE clears the threshold. `none` = no tag = the ordinary manual pick.
+#                        Named colours: red orange yellow green cyan blue purple magenta pink; or
+#                        a hue in degrees. The threshold and the hue/saturation windows are
+#                        PERCEPTION tuning, not cable identity, so they live in the app config
+#                        under `cable_tag:` -- see urlab/perception/tag.py.)
+#
 # POSE UNITS. Pose blocks here (junction_in_fingertip) may be written in MONITOR UNITS --
 # `xyz_mm` (mm) + `rpy_deg` (deg) -- so a reading can be pasted straight off the monitor with no
 # conversion. `xyz`/`rpy` (m/rad, the repo-wide convention) still work. The unit is in the KEY
@@ -62,6 +72,7 @@ gripper:
 
 cables:
   banana:
+    tag_color: none         # no marker -- the scan asks which cable to take
     # PHYSICAL dimensions (preferred): the grasp-check count band is DERIVED from these through
     # the calibrated gripper kinematic model + groove_depth_mm. The measured count keys below
     # are kept as the recorded reference; when both are present the DIAMETERS win and the
@@ -79,6 +90,7 @@ cables:
     # frames: banana_connector_finger_holder + targets: banana_connector_finger_holder.)
 
   hose: # FIXME: add actual parameters 
+    tag_color: none         # no marker -- the scan asks which cable to take
     # PHYSICAL dimensions (preferred): the grasp-check count band is DERIVED from these through
     # the calibrated gripper kinematic model + groove_depth_mm. The measured count keys below
     # are kept as the recorded reference; when both are present the DIAMETERS win and the
@@ -96,6 +108,10 @@ cables:
     # frames: banana_connector_finger_holder + targets: banana_connector_finger_holder.)
 
   bnc:
+    # A RED band is stuck on this cable, so the scan can find it among others by itself. It only
+    # ever SELECTS on this -- the grasp geometry below is unchanged, and a run where the tag is
+    # missing, shadowed or ambiguous falls back to the numbered prompt rather than guessing.
+    tag_color: red
     connector: [191, 212]
     cable: 224
     # THIS YAW SETS WHICH WAY THE FINGERTIP FACES AT PICKUP. The grasp pose is
@@ -114,6 +130,7 @@ cables:
     # the assembly apps.)
 
   c13:
+    tag_color: none         # no marker -- the scan asks which cable to take
     connector: [195, 198]
     cable: 218
     junction_in_fingertip:    # MEASURE (see banana); zeros = junction exactly at the fingertip

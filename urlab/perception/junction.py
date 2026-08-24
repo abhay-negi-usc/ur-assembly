@@ -562,6 +562,10 @@ def compute_junction(assembly_mask, work_dim=1024, min_area_frac=0.0004, trace='
         contrast=float(info["contrast"]),
         arc_length_px=float(arclen[-1] * inv),
         junction_arc_frac=float(arclen[k] / max(arclen[-1], 1e-6)),
+        # Which end of the traced path is the CONNECTOR. Exposed because callers that want the
+        # cable side alone -- tag matching, the reconstruction skeleton -- would otherwise have to
+        # re-derive it from the diameter profile and could disagree with the junction it belongs to.
+        connector_on_right=bool(info['connector_on_right']),
         # Self-crossing report. n_crossings > 0 means the cable overlaps itself somewhere on
         # the traced strand; junction_on_crossing means the junction had to be backed off a
         # fused stretch, so treat the result as low confidence.
@@ -580,6 +584,36 @@ def compute_junction(assembly_mask, work_dim=1024, min_area_frac=0.0004, trace='
         _crossing=crossing,   # per-path-sample: this width reads TWO fused strands, not one
         _mask_small=small,
     )
+
+
+def cable_side_mask(res, shape, radius_px=None):
+    """Full-res boolean mask of the CABLE-side pixels of one detected assembly.
+
+    THE CONNECTOR IS DELIBERATELY EXCLUDED. A tag is stuck on the cable, so including the connector
+    body only dilutes the fraction with a large surface that is never tagged -- and if a connector
+    happens to be coloured, every cable of that type would score alike and the tag would select
+    nothing. Restricting to the cable side also keeps one junction's score from being lent colour
+    by anything else in the frame.
+
+    Built by stamping the traced centreline's cable-side samples at full resolution and taking
+    everything within `radius_px` of them (default: a little over half the measured cable
+    diameter, so the band covers the cable and not its surroundings). Intersect the result with
+    the component's own mask to drop anything that reaches past the cable's edge.
+    """
+    path = np.asarray(res['_path'], dtype=float)          # small-image (y, x)
+    k = int(res['_junction_k'])
+    inv = 1.0 / float(res['_scale'])
+    pts = path[:k + 1] if res.get('connector_on_right', True) else path[k:]
+    if len(pts) == 0:
+        return None
+    h, w = int(shape[0]), int(shape[1])
+    ys = np.clip(np.round(pts[:, 0] * inv).astype(int), 0, h - 1)
+    xs = np.clip(np.round(pts[:, 1] * inv).astype(int), 0, w - 1)
+    seed = np.zeros((h, w), dtype=bool)
+    seed[ys, xs] = True
+    r = (float(radius_px) if radius_px is not None
+         else max(2.0, 0.6 * float(res.get('cable_diameter_px', 6.0))))
+    return ndimage.distance_transform_edt(~seed) <= r
 
 
 def cable_outline(res):

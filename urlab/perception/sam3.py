@@ -307,9 +307,18 @@ class JunctionDetector(_Base):
 
     def detect_all(self, frame, max_cables=8):
         """For the GROUND-PLANE / manual-select mode: detect EVERY cable's junction AND its ends --
-        one entry per connected component (largest first, up to max_cables) -- and NUMBER them on the
-        overlay so the user can pick the target. Returns
-        [{'junction': (u, v, yaw), 'ends': [(u, v, yaw), ...]}, ...]."""
+        one entry per connected component (largest first, up to max_cables). Returns
+        [{'junction': (u, v, yaw), 'ends': [...], 'cable_mask': HxW bool, 'size': px}, ...].
+
+        `cable_mask` is the CABLE-side pixels of that component (the connector excluded) -- what a
+        tag is stuck to, and the region tag matching scores. It is per-junction, so colour found
+        elsewhere in the frame cannot be credited to this cable.
+
+        NUMBERING IS NOT DONE HERE. The caller may re-order these (tag matching ranks them by how
+        well each wears the configured colour), and the numbers drawn on the image have to be the
+        numbers the user is asked to choose between -- so labelling is `label_cables`, called after
+        the order is settled. This still labels in detection order, so a caller that does not
+        re-order gets the old behaviour."""
         if self.dry_run:
             return []
         res = self._detect_raw(frame)
@@ -326,8 +335,8 @@ class JunctionDetector(_Base):
         h, w = frame.rgb.shape[:2]
         cables = []
         for i in np.argsort(sizes)[::-1][:max(1, int(max_cables))]:
-            j = self.core.compute_junction(lbl == (i + 1), work_dim=self.work_dim,
-                                       trace=self.trace)
+            comp = lbl == (i + 1)
+            j = self.core.compute_junction(comp, work_dim=self.work_dim, trace=self.trace)
             if j is None:
                 continue
             if self.min_contrast > 0.0 and float(j.get('contrast', 0.0)) < self.min_contrast:
@@ -335,21 +344,52 @@ class JunctionDetector(_Base):
             u, v = j['junction']
             dx, dy = j['direction']
             end_a, end_b = self._assembly_ends(j, w, h)
+            try:
+                band = self.core.cable_side_mask(j, (h, w))
+                cable_px = None if band is None else (band & comp)
+            except Exception as exc:                   # noqa: BLE001 -- selection must still work
+                log.warning('  could not isolate the cable-side pixels (%s); tag matching will '
+                            'skip this cable.', exc)
+                cable_px = None
             cables.append({'junction': (float(u), float(v), float(np.arctan2(dy, dx))),
-                           'ends': [e for e in (end_a, end_b) if e is not None]})
-        if self.last_debug is not None:
-            self._draw_enumerated(self.last_debug, cables, w, h)
-        log.info('  detect_all: %d cable(s) numbered for selection.', len(cables))
+                           'ends': [e for e in (end_a, end_b) if e is not None],
+                           'cable_mask': cable_px,
+                           'size': int(comp.sum())})
+        self.label_cables(frame, cables)
+        log.info('  detect_all: %d cable(s) found.', len(cables))
         return cables
+
+    def label_cables(self, frame, cables):
+        """Redraw the selection overlay so the numbers match the CURRENT order of `cables`.
+
+        Separate from detection because the order is the caller's decision -- and a picture whose
+        numbers disagree with the prompt is worse than no picture."""
+        if self.dry_run:
+            return
+        self.last_debug = self._raw_bgr(frame)
+        if self.last_debug is None:
+            return
+        h, w = frame.rgb.shape[:2]
+        self._draw_enumerated(self.last_debug, cables, w, h)
 
     def _draw_enumerated(self, vis, cables, w, h):
         """Draw each cable NUMBERED at its junction (#1, #2, ...) plus its ends, so the user can read
-        the numbers and pick a target. Full opacity -- the numbers must be legible."""
+        the numbers and pick a target. Full opacity -- the numbers must be legible.
+
+        A cable carrying a tag score shows it as a percentage, and the one that CLEARED the
+        threshold is drawn in the tag's own colour. Seeing the number the ranking was made on is
+        what lets a wrong pick be diagnosed -- 4% on the intended cable means the tag is shadowed
+        or too small, which is a different problem from 40% on the wrong one."""
         for i, cab in enumerate(cables, start=1):
             ju, jv, jyaw = cab['junction']
             for e in cab['ends']:
                 self._draw_end(vis, e[0], e[1], e[2], label='end', col=(255, 255, 0))
-            self._draw_end(vis, ju, jv, jyaw, label=f'#{i}', col=(0, 255, 0))
+            label, col = f'#{i}', (0, 255, 0)
+            if cab.get('tag_score') is not None:
+                label = f'#{i} tag {cab["tag_score"] * 100:.0f}%'
+                if cab.get('tag_pass'):
+                    col = cab.get('tag_bgr') or (0, 0, 255)
+            self._draw_end(vis, ju, jv, jyaw, label=label, col=col)
 
     def _draw_candidates(self, vis, cands, w, h):
         """Draw junction candidates labelled 'conn 1/2/...' (a per-cable ID, 1 = nearest image

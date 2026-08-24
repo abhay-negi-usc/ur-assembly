@@ -194,6 +194,14 @@ def apply_cable_profile(cfg):
             f'junction_in_fingertip: {{xyz: [{-off}, 0.0, 0.0], rpy: [0.0, 0.0, 0.0]}}).')
     if entry.get('junction_in_fingertip'):
         cfg.set_path('junction_in_fingertip', _pose_si(entry['junction_in_fingertip']))
+    # A COLOURED TAG on this cable, so the ground-plane scan can pick it out of several by itself.
+    # `none` is written out per cable rather than left absent, because "no tag" is a decision worth
+    # seeing in the file. NOTE yaml parses bare `none` as the STRING 'none' (only null/~ are None),
+    # so it is normalised here -- a config saying "no tag" must never become a colour called "none".
+    tag = entry.get('tag_color')
+    if isinstance(tag, str) and tag.strip().lower() in ('none', 'null', 'nil', 'off', ''):
+        tag = None
+    cfg.set_path('cable_tag.color', tag)
     # The HOLDER chain (connector_in_holder / connector_holder_target) is RETIRED: held connectors
     # are specified directly wrt tool0 in configs/frames.yaml (frames: + targets:). Fail loudly so
     # a stale cables.yaml entry cannot silently feed a target nothing reads any more.

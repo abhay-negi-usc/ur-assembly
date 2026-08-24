@@ -42,6 +42,14 @@ class GroundPlaneScanner:
         if not hasattr(detector, 'detect_all'):
             raise ValueError("scan.mode 'ground_plane' needs the junction detector's detect_all -- "
                              "set sam3.mode: junction.")
+        # The coloured tag on the target cable, if the selected cable declares one. `color` comes
+        # from cables.yaml (<cable>.tag_color) via apply_cable_profile; the matching windows and
+        # the threshold are perception tuning and live in the app config's `cable_tag:` block.
+        from ..perception.tag import TagMatcher
+        tag_cfg = dict(cfg.section('cable_tag') or {})
+        self.tag = TagMatcher(tag_cfg.get('color'), tag_cfg)
+        log.info('Cable selection: %s.', self.tag.describe())
+
         gp = cfg.section('ground_plane')
         self.plane_z = float(gp.get('z_m', -0.758))
         self.max_cables = int(gp.get('max_cables', 8))
@@ -84,16 +92,22 @@ class GroundPlaneScanner:
         # RETRY: reuse the cached selection (re-detect + re-match the SAME cable, no prompt).
         if self._selection is not None:
             frame = self.camera.capture()
-            cables = self.detector.detect_all(frame, self.max_cables)
+            cables = self._detect_ranked(frame)
             self._save_labeled()
             return self._pose(self._match_cached(self._project_all(cables, frame)))
 
         # FIRST RUN: capture -> detect -> prompt, looping on new-view requests.
         while True:
             frame = self.camera.capture()
-            cables = self.detector.detect_all(frame, self.max_cables)
+            cables = self._detect_ranked(frame)
             self._save_labeled()
             projected = self._project_all(cables, frame)
+
+            auto = self._auto_pick(cables)
+            if auto is not None and projected[auto] is not None:
+                self._selection = projected[auto]['junction'].copy()
+                return self._pose(projected[auto])
+
             choice = self._prompt(len(cables))            # int index | 'new' | 'closer' | None
             if choice is None:
                 return None
@@ -108,6 +122,72 @@ class GroundPlaneScanner:
                 continue
             self._selection = projected[choice]['junction'].copy()
             return self._pose(projected[choice])
+
+    # ------------------------------------------------------------------ tag matching
+    def _detect_ranked(self, frame):
+        """Detect every cable, then order them BEST TAG MATCH FIRST and renumber the image to suit.
+
+        With no tag configured this is detection order (largest component first), exactly as
+        before. With one, each cable is scored on the fraction of its OWN cable-side pixels wearing
+        the colour -- so the ordering answers "which of these is wearing the marker", and the
+        numbers the user reads are the numbers that ranking produced.
+
+        Sorted by score, then by size, so equal scores (notably all-zero, when no cable is tagged)
+        keep the old largest-first order rather than shuffling between runs."""
+        cables = self.detector.detect_all(frame, self.max_cables)
+        if not cables or not self.tag.enabled:
+            return cables
+        rgb = frame.rgb
+        for cab in cables:
+            score = self.tag.score(rgb, cab.get('cable_mask'))
+            cab['tag_score'] = score
+            cab['tag_pass'] = self.tag.passes(score)
+            cab['tag_bgr'] = self._tag_bgr()
+        cables.sort(key=lambda c: (c['tag_score'], c.get('size', 0)), reverse=True)
+        self.detector.label_cables(frame, cables)      # numbers must match the new order
+        log.info('  %s -> scores %s', self.tag.describe(),
+                 ', '.join(f'#{i}={c["tag_score"] * 100:.0f}%%'
+                           + ('*' if c['tag_pass'] else '')
+                           for i, c in enumerate(cables, start=1)))
+        return cables
+
+    def _tag_bgr(self):
+        """The tag's own hue as a BGR triple, for drawing its label in the colour being matched."""
+        import colorsys
+        r, g, b = colorsys.hsv_to_rgb((self.tag.hue % 360.0) / 360.0, 1.0, 1.0)
+        return (int(b * 255), int(g * 255), int(r * 255))
+
+    def _auto_pick(self, cables):
+        """Index of the cable to take WITHOUT asking, or None to fall through to the prompt.
+
+        THE RULE IS 'EXACTLY ONE'. A tag identifies the target only while it is unambiguous: zero
+        cables over the threshold means the marker was not seen (shadow, occlusion, the cable is
+        not in frame), and two or more means the colour is not distinguishing them. Either way the
+        honest move is to ask, not to take the highest number -- an auto-pick that is wrong sends
+        the gripper somewhere real, and the whole point of the threshold is to make that failure
+        loud instead of silent."""
+        if not cables or not self.tag.enabled:
+            return None
+        hits = [i for i, c in enumerate(cables) if c.get('tag_pass')]
+        if len(hits) == 1:
+            i = hits[0]
+            log.info('  TAG MATCH: cable #%d wears %s on %.0f%% of its pixels and is the only one '
+                     'over the %.0f%% threshold -- selecting it without asking.',
+                     i + 1, self.tag.name, cables[i]['tag_score'] * 100,
+                     self.tag.min_fraction * 100)
+            print(f'\n[ground_plane] auto-selected cable #{i + 1} '
+                  f'({self.tag.name} tag, {cables[i]["tag_score"] * 100:.0f}%) '
+                  f'-- see {self.labeled_path}')
+            return i
+        best = cables[0]['tag_score'] * 100 if cables else 0.0
+        if not hits:
+            log.warning('  no cable clears the %.0f%% %s-tag threshold (best %.0f%%) -- asking. '
+                        'Check the tag is lit and unoccluded, or lower cable_tag.min_fraction.',
+                        self.tag.min_fraction * 100, self.tag.name, best)
+        else:
+            log.warning('  %d cables clear the %s-tag threshold -- the tag is not distinguishing '
+                        'them, so asking rather than guessing.', len(hits), self.tag.name)
+        return None
 
     # ------------------------------------------------------------------ geometry
     def _project_all(self, cables, frame):
@@ -191,20 +271,29 @@ class GroundPlaneScanner:
     # ------------------------------------------------------------------ user interaction
     def _prompt(self, n):
         """Ask for the target cable number (1..n), 'n' for a new view, 'z' to move toward the cable,
-        or 'q' to abort. Returns a 0-based index, 'new', 'closer', or None."""
+        or 'q' to abort. Returns a 0-based index, 'new', 'closer', or None.
+
+        EMPTY INPUT TAKES #1. The cables are ordered best-first -- by tag match when one is
+        configured, else largest -- so the top of the list is already the answer in the ordinary
+        case, and pressing Enter is how you say so. It is deliberately NOT a timeout or a default
+        applied in silence: a person is still confirming the pick, just with one key."""
         zmm = self.z_step * 1000
         if n == 0:
             print(f'\n[ground_plane] NO cable detected in this view -- see {self.labeled_path}')
             print(f'Enter "n" for a NEW view, "z" to move {zmm:.0f} mm toward the cable, or "q":')
         else:
             print(f'\n[ground_plane] {n} cable(s) detected -- see {self.labeled_path}')
-            print(f'Enter the target NUMBER (1-{n}), "n" for a new view, "z" to move {zmm:.0f} mm '
-                  'closer, or "q":')
+            ranked = ' (numbered best tag match first)' if self.tag.enabled else ''
+            print(f'Enter the target NUMBER (1-{n}){ranked}, ENTER for #1, "n" for a new view, '
+                  f'"z" to move {zmm:.0f} mm closer, or "q":')
         while True:
             try:
                 raw = input('target #> ').strip().lower()
             except EOFError:
                 return None
+            if raw == '' and n > 0:
+                print('  taking #1 (the top pick).')
+                return 0
             if raw in ('q', 'quit', 'abort'):
                 return None
             if raw in ('n', 'new', 'view'):
@@ -214,7 +303,8 @@ class GroundPlaneScanner:
             try:
                 idx = int(raw) - 1
             except ValueError:
-                print(f'  enter a number 1-{n}, "n" (new view), "z" (closer), or "q".')
+                print(f'  enter a number 1-{n}, ENTER for #1, "n" (new view), "z" (closer), '
+                      'or "q".')
                 continue
             if 0 <= idx < n:
                 return idx

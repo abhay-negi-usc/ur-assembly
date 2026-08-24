@@ -112,6 +112,45 @@ def test_the_trace_reaches_both_tips_of_a_looped_cable():
         assert d < 12.0, f'tip {tip.round(0)} is {d:.0f} px from the trace'
 
 
+def test_a_cable_running_out_of_frame_is_traced_without_stepping_off_the_array():
+    """REGRESSION: every fixture here draws the cable clear of the border, so nothing caught that
+    the spur walk indexed y+-1 / x+-1 raw. A real frame has the cable leaving the image, which puts
+    skeleton pixels on the last row/column -- and that was an IndexError, not a wrong answer, so it
+    took down the whole app on the first live frame.
+
+    Each edge is exercised separately: a bug guarding only one axis passes a single-edge test."""
+    def touches_edge(a):
+        return bool(a[0].any() or a[-1].any() or a[:, 0].any() or a[:, -1].any())
+
+    # A cable GRAZING the frame -- mostly outside it, leaving a thin sliver along the border --
+    # is what puts a skeleton pixel there. A cable merely running OUT of frame does not: the
+    # blunt end reads as an exposed end and thinning pulls the tip back about half a width.
+    lo, hi = 0.0, float(N - 1)
+    cases = {
+        'graze right': np.stack([np.linspace(60, 360, 300), np.full(300, hi)], axis=1),
+        'graze left': np.stack([np.linspace(60, 360, 300), np.full(300, lo)], axis=1),
+        'graze bottom': np.stack([np.full(300, hi), np.linspace(60, 360, 300)], axis=1),
+        'graze top': np.stack([np.full(300, lo), np.linspace(60, 360, 300)], axis=1),
+    }
+    covered = []
+    for name, pts in cases.items():
+        mask = stroke(pts, 5)
+        covered.append(touches_edge(thin(mask)))   # not every edge does: thinning is not
+        path, _crossing, info = trace_centerline_graph(mask)      # left/right symmetric
+        assert path is not None and info['n_strands'] >= 1, name
+    assert any(covered), 'no graze fixture reaches the border any more -- coverage has been lost'
+
+    # And with a branch, so prune_spurs actually walks (it does nothing on a 2-tip curve, which
+    # is what the walk that crashed lives inside).
+    m = np.zeros((N, N), dtype=bool)
+    m[100:300, -1] = True                      # a one-pixel sliver hard against the border
+    m[195:205, 260:] = True                    # joined to a cable running inward -> three tips
+    m |= stroke(np.stack([np.full(200, 200.0), np.linspace(60, 265, 200)], axis=1), 5)
+    assert touches_edge(thin(m)), 'branch fixture puts no skeleton pixel on the border'
+    path, _crossing, info = trace_centerline_graph(m)             # must not raise
+    assert path is not None, 'branched border shape traced nothing'
+
+
 def test_coverage_reports_a_shattered_skeleton():
     """Coverage is what compute_junction gates its fallback on, so it has to actually fall when
     the skeleton fragments. A mask chewed to pieces must not come back claiming full coverage."""

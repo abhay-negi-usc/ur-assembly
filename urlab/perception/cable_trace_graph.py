@@ -213,13 +213,18 @@ def prune_spurs(sk, min_len):
     reliably grows two or three. Every spur is a false tip and a false degree-3 node, so the
     graph is meaningless until they are gone. A twig is a spur if it runs from a tip to a NODE
     (not to another tip -- that would be the whole cable) and is shorter than `min_len`.
+
+    PADDED BY ONE, because the walk below indexes y+-1 / x+-1 raw. A cable that runs OUT OF FRAME
+    puts skeleton pixels on the last row or column, and stepping off the array there is an
+    IndexError rather than a wrong answer -- so it survived every synthetic test, where the cable
+    was always drawn clear of the border, and crashed on the first real frame.
     """
-    sk = sk.copy()
+    sk = np.pad(np.asarray(sk, dtype=bool), 1)
     for _ in range(12):
         deg = _nbr_count(sk)
         tips = list(zip(*np.nonzero(sk & (deg == 1))))
         if len(tips) <= 2:
-            return sk                              # a simple curve: nothing to prune
+            break                                  # a simple curve: nothing to prune
         doomed = []
         for tip in tips:
             run, cur, prev = [tip], tip, None
@@ -239,12 +244,12 @@ def prune_spurs(sk, min_len):
             if len(run) <= min_len and deg[cur] >= 3:
                 doomed.extend(run)
         if not doomed:
-            return sk
+            break
         if len(tips) - len({t for t in tips if t in set(doomed)}) < 2:
-            return sk                              # refuse to prune the shape into nothing
+            break                                  # refuse to prune the shape into nothing
         for y, x in doomed:
             sk[y, x] = False
-    return sk
+    return sk[1:-1, 1:-1]
 
 
 class SkeletonGraph:

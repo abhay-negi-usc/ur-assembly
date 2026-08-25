@@ -353,6 +353,62 @@ class _AxialForce:
         self._over_since = None
 
 
+class _RadialConfirm:
+    """Was there sustained force ACROSS the connector axis -- the signature of being IN a socket?
+
+    THE AXIAL LIMIT ALONE CANNOT TELL A SEAT FROM A FACE. Pushing a connector flat against any
+    surface -- the fixture body, the bench, the rim of the wrong hole -- develops axial reaction
+    exactly like a real insertion does, and stops the engage in the same way. What a SOCKET adds is
+    LATERAL constraint: once the barrel is inside, the walls resist sideways motion, so a connector
+    being wiggled inside a socket pushes back across its own axis. A connector resting on a flat
+    face does not; it just slides.
+
+    So this measures |force| in the connector's OWN Y-Z plane -- the two axes perpendicular to the
+    insertion direction -- and asks that it hold above a threshold CONTINUOUSLY. It is a
+    satisfaction detector, not a canceller: nothing is stopped when it trips, it simply records
+    that the condition was met."""
+
+    def __init__(self, robot, T_tool0_conn, min_force_n, persistence_s=0.0):
+        self.robot = robot
+        self.T_tool0_conn = np.asarray(T_tool0_conn, dtype=float)
+        self.min_force_n = float(min_force_n)
+        self.persistence_s = float(persistence_s)
+        self.peak_n = 0.0
+        self.held_s = 0.0                  # longest continuous stretch above the threshold
+        self.satisfied = False
+        self._over_since = None
+
+    def radial_n(self):
+        """|force across the connector +X|, in newtons -- the Y-Z magnitude in the CONNECTOR
+        frame, so it means the same thing whatever attitude the part is held at."""
+        T_base_tool0 = self.robot.tool0()
+        T_base_conn = T_base_tool0 @ self.T_tool0_conn
+        w = self.robot.arm.wrench_in(T_base_conn, T_base_tool0)
+        return float(np.linalg.norm(w[1:3]))
+
+    def check(self):
+        f = self.radial_n()
+        self.peak_n = max(self.peak_n, f)
+        if self.min_force_n <= 0.0:
+            self.satisfied = True                      # no bar set -> nothing to fail
+            return True
+        now = _t.time()
+        if f < self.min_force_n:
+            self._over_since = None
+            return False
+        if self._over_since is None:
+            self._over_since = now
+        self.held_s = max(self.held_s, now - self._over_since)
+        if self.held_s >= self.persistence_s:
+            self.satisfied = True
+        return self.satisfied
+
+    def reset(self):
+        self.satisfied = False
+        self._over_since = None
+        self.held_s = 0.0
+
+
 class _AnyGuard:
     """ORs several ForceGuard-shaped watchdogs onto one ramp, remembering WHICH one tripped.
 
@@ -381,7 +437,7 @@ class _AnyGuard:
 
 
 
-def _engage_report(status, s, depth_mm, det, guard, combo):
+def _engage_report(status, s, depth_mm, det, guard, combo, confirm=None):
     """Print WHICH condition ended the engage, and where every OTHER one stood when it did.
 
     THREE THINGS CAN END THIS MOTION and they mean completely different things:
@@ -397,13 +453,15 @@ def _engage_report(status, s, depth_mm, det, guard, combo):
     with the one that fired marked, and each shown against ITS OWN limit -- a bare number
     cannot be judged without the threshold it was tested against."""
     fired = {'complete': 'PATH COMPLETE', 'force': 'AXIAL FORCE LIMIT',
-             'guard': 'GENERAL FORCE GUARD'}.get(status, status.upper())
+             'guard': 'GENERAL FORCE GUARD',
+             'unconfirmed': 'AXIAL LIMIT MET, SEAT NOT CONFIRMED'}.get(status, status.upper())
     meaning = {
         'complete': 'the full path ran without meeting the axial limit',
         'force': 'a NORMAL end -- the clocking screw drives the rest',
         'guard': 'a JAM: the general wrench limit, not the axial one',
+        'unconfirmed': 'something resisted, but it does not behave like a SOCKET',
     }.get(status, '')
-    say = log.warning if status == 'guard' else log.info
+    say = log.warning if status in ('guard', 'unconfirmed') else log.info
 
     def mark(name):
         return '>>' if name == status else '  '
@@ -426,6 +484,23 @@ def _engage_report(status, s, depth_mm, det, guard, combo):
     else:
         say('   %s force guard     DISABLED -- nothing was watching for a jam', mark('guard'))
     say('      depth           %+.2f mm past the recorded mate', depth_mm)
+    # THE CONFIRMATION, when it ran. Both numbers against their own limits, like everything else
+    # here -- 'not confirmed' is unreadable without knowing WHICH of the two failed and by how far.
+    if confirm:
+        say('   %s radial force    %.1f N peak, held %.2f s (want >= %.1f N for %.2f s) -- %s',
+            '>>' if not confirm['radial_ok'] else '  ', confirm['radial_peak_n'],
+            confirm['radial_held_s'], confirm['radial_limit_n'],
+            confirm['radial_persist_s'],
+            'OK' if confirm['radial_ok'] else 'FAILED')
+        if confirm['travel_ok'] is None:
+            say('      wiggle travel   NOT TESTED -- no oscillation configured, so a captured '
+                'connector cannot be told from a free one by motion')
+        else:
+            say('   %s wiggle travel   %.2f mm over %.2f s (want < %.2f mm) -- %s',
+                '>>' if not confirm['travel_ok'] else '  ', confirm['travel_mm'],
+                confirm['cycles_s'], confirm['travel_limit_mm'],
+                'OK' if confirm['travel_ok'] else 'FAILED: it followed the wiggle, so it is '
+                'still free')
     if status != 'complete' and combo is not None and combo.tripped_by:
         say('      tripped by      %s', combo.tripped_by)
 
@@ -537,6 +612,15 @@ def build_and_run(cfg, robot, camera, args):
     # from by putting the cable down and re-picking. A budget, not a loop: a cell that keeps
     # missing has a wrong target pose or a wrong in-hand belief, and retrying wears the part.
     max_engage_misses = max(0, int(en.get('max_misses', 2)))
+    # CONFIRMATION -- the axial stop says "something resisted", not "it is in the socket". See
+    # _RadialConfirm and the confirm block in engage_insertion.
+    _cf = en.get('confirm', {}) or {}
+    cf_on = bool(_cf.get('enabled', True))
+    cf_radial_n = _num(_cf, 'radial_force_n', 1.0)
+    cf_radial_s = _num(_cf, 'radial_persistence_s', 0.10)
+    cf_max_mm = _num(_cf, 'max_wiggle_mm', 1.0)
+    cf_cycles = max(1, int(_cf.get('cycles', 1)))
+    cf_fallback_s = _num(_cf, 'fallback_s', 0.5)
     en_pre_mm = float(en.get('preload_mm', 0.0) or 0.0)
     # RETIRED: assembly.engage.speed_mm_s. The engage reference rate is now speed.phase_scale
     # .engage, so every phase's speed is set in one table instead of one phase carrying a private
@@ -1938,6 +2022,83 @@ def build_and_run(cfg, robot, camera, args):
             'torque_nm': float(np.linalg.norm(w_end[3:])),
         }
 
+        # ---- CONFIRM THE SEAT ---------------------------------------------------------------
+        # THE AXIAL STOP ONLY SAYS "SOMETHING RESISTED". Pushing a connector flat against the
+        # fixture body, the bench, or the rim of the wrong hole develops axial reaction exactly
+        # like a real insertion and stops the engage identically. Two things separate a socket
+        # from a face, and both are measured by WIGGLING IN PLACE at the stopped depth:
+        #
+        #   RADIAL FORCE -- a barrel inside a socket is laterally constrained, so rocking it
+        #       pushes back ACROSS its own axis. A connector resting on a flat face just slides.
+        #   CONSTRAINED MOTION -- the wiggle reference keeps commanding the same amplitude, but a
+        #       captured connector cannot follow it. Measured travel far below the commanded
+        #       amplitude IS the capture; travel that tracks the command means it is still free.
+        #
+        # Wiggling IN PLACE, not advancing: the depth is already decided, and driving further
+        # while testing would confound the two.
+        confirm = None
+        if status == 'force' and cf_on:
+            rad = _RadialConfirm(robot, T_tool0_conn, cf_radial_n, cf_radial_s)
+            live_f = [en_frq[i] * en_scale for i in range(6)
+                      if abs(en_amp[i]) > 0.0 and en_frq[i] > 0.0]
+            cyc_s = (cf_cycles / min(live_f)) if live_f else float(cf_fallback_s)
+            d_stop = float(np.clip(v_mm_s * t_end, 0.0, total_mm))
+            pts = []
+
+            def conf_step():
+                rad.check()
+                pts.append((robot.tool0() @ T_tool0_conn)[:3, 3])
+
+            log.info('  confirming the seat: wiggling in place for %.2f s (%d cycle%s) -- want '
+                     'radial >= %.1f N held %.2f s AND travel < %.2f mm.',
+                     cyc_s, cf_cycles, '' if cf_cycles == 1 else 's', cf_radial_n, cf_radial_s,
+                     cf_max_mm)
+            adm_en.reset()
+            prev_c = last_ref
+            t_c0 = _t.monotonic()
+            while True:
+                tc = _t.monotonic() - t_c0
+                if tc >= cyc_s:
+                    break
+                Tc = _corr_to_m(mats_from_vec6(path_at(d_stop)))
+                if en_wig is not None:
+                    Tc = Tc @ en_wig.delta(t_end + tc, dur_s)   # keep the wiggle phase continuous
+                cur_c = traj_ref(Tc, T_tool0_conn)
+                adm_en.ramp(prev_c, cur_c, dt, guard=None, on_step=conf_step)
+                prev_c = cur_c
+            robot.arm.servo_stop()
+
+            travel_mm = 0.0
+            if len(pts) >= 2:
+                P = np.asarray(pts, dtype=float)
+                travel_mm = float(np.max(P.max(axis=0) - P.min(axis=0))) * 1000.0
+            wiggled = bool(live_f)
+            confirm = {
+                'radial_ok': bool(rad.satisfied), 'radial_peak_n': rad.peak_n,
+                'radial_held_s': rad.held_s, 'radial_limit_n': cf_radial_n,
+                'radial_persist_s': cf_radial_s,
+                'travel_mm': travel_mm, 'travel_limit_mm': cf_max_mm,
+                'travel_ok': bool(travel_mm < cf_max_mm) if wiggled else None,
+                'cycles_s': cyc_s, 'wiggled': wiggled,
+            }
+            ok_r = confirm['radial_ok']
+            ok_t = confirm['travel_ok'] is not False
+            if ok_r and ok_t:
+                log.info('  SEAT CONFIRMED: radial %.1f N held %.2f s (>= %.1f N / %.2f s), '
+                         'travel %.2f mm (< %.2f mm).', rad.peak_n, rad.held_s, cf_radial_n,
+                         cf_radial_s, travel_mm, cf_max_mm)
+            else:
+                status = 'unconfirmed'
+                log.error('  SEAT NOT CONFIRMED -- the axial limit was met but the connector does '
+                          'not behave like it is IN a socket. radial peak %.1f N held %.2f s '
+                          '(want >= %.1f N for %.2f s): %s. travel %.2f mm (want < %.2f mm): %s.',
+                          rad.peak_n, rad.held_s, cf_radial_n, cf_radial_s,
+                          'OK' if ok_r else 'FAILED', travel_mm, cf_max_mm,
+                          'OK' if ok_t else 'FAILED (it followed the wiggle -- still free)')
+                if not wiggled:
+                    log.warning('  (no oscillation is configured, so the travel test could not '
+                                'run -- only the radial force was checked.)')
+
         stay = robot.tool0()
         adm_en.reset()
         if settle_shared > 0:
@@ -1947,7 +2108,7 @@ def build_and_run(cfg, robot, camera, args):
 
         depth = float(matrix_to_xyzrpy(
             inverse(T_base_tconn) @ (robot.tool0() @ T_tool0_conn))[0][0] * 1000.0)
-        _engage_report(status, end_state, depth, det, guard_en, combo)
+        _engage_report(status, end_state, depth, det, guard_en, combo, confirm)
         if obs:
             _save_observations(os.path.join(out_dir, 'engage_observations.csv'), obs)
         return status, last_ref, depth
@@ -3326,6 +3487,16 @@ def build_and_run(cfg, robot, camera, args):
                               'without reaching the %.1f N axial limit, so the connector never '
                               'met the socket. Treating this as a FAILED engagement.',
                               en_pre_mm, en_fmax)
+                    engage_missed = True
+                    success = False
+                elif en_status == 'unconfirmed':
+                    # The axial limit WAS met, so something resisted -- but the confirmation says
+                    # it does not behave like a socket. Same recovery as a clean miss: the cable
+                    # goes down and everything is measured again. Continuing would clock a
+                    # connector that is only leaning on something.
+                    log.error('ENGAGE UNCONFIRMED: the connector met resistance but failed the '
+                              'seat confirmation, so it is most likely against a face rather '
+                              'than in the socket. Treating this as a FAILED engagement.')
                     engage_missed = True
                     success = False
                 else:

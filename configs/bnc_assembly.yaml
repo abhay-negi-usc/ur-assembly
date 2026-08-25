@@ -294,7 +294,7 @@ pickup:
   # m / rad.  Both units for one triple is an error, not a silent preference.
   # ===========================================================================================
   fingertip_in_connector:
-    xyz_mm:  [22.0, 0.0, 0.0]
+    xyz_mm:  [23.0, 0.0, 0.0]
     rpy_deg: [0.0, -70.0, 0.0]
 
   # BELIEF OFFSET, mm in the CONNECTOR frame -- the one knob here that moves NOTHING at
@@ -332,7 +332,7 @@ pickup:
   # cylinder at a different depth along the approach -- is more naturally a hand-frame value,
   # and in this frame it will move as the pitch changes.  Re-measure after a large change of
   # approach angle either way.
-  belief_offset_mm: [5.0, 0.0, -11.0]
+  belief_offset_mm: [5.0, 0.0, -10.0]
   # PICKUP HEIGHT from the gripper kinematic model.  Assumes the connector rests ON THE GROUND
   # PLANE (ground_plane.z_m): grasp target = plane + connector d_max/2 (centerline) + the
   # fingertip ADVANCE between fingertip_ref_separation_mm (where fingertip_grasp z was
@@ -585,7 +585,7 @@ grasp_check:
 speed:
   max_joint_velocity_deg_s: 120.0
   max_joint_acceleration_deg_s2: 80.0
-  max_cartesian_translation_mm_s: 40.0
+  max_cartesian_translation_mm_s: 60.0
   max_cartesian_rotation_deg_s: 90.0
   retract_rotation_deg_s: 50.0
   # Per-PHASE scaling of ALL FOUR limits above (1.0 = the global limit itself), one entry per
@@ -599,7 +599,7 @@ speed:
     # BODY down toward the ground plane rather than just the fingers.  Falls back to `scan`
     # when unset, so other apps are unaffected.
     grasp_align: 1.0
-    pickup: 0.5      # the compliant grasp descent
+    pickup: 1.0      # the compliant grasp descent
     lift: 0.8        # the compliant lift (including the slip-check partial lift)
     standoff: 1.0    # the move to stand-off + the per-attempt realign moveJs
     # The marker-view -> pick-pose traverse (a ~70 deg wrist_1 swing, empty gripper, clear of
@@ -607,14 +607,14 @@ speed:
     # it: 1.5 -> ~8 s, 3.0 -> ~4 s, 5.0 -> ~2.4 s.  Raising it past 2.0 no longer buys joint
     # speed (the controller's own 180 deg/s ceiling), but it does keep raising the cartesian
     # caps, which are what actually bind here.
-    reconfigure: 3.0
+    reconfigure: 1.0
     assemble: 0.10      # the insertion reference ramp
     # THE ENGAGE reference rate: 0.05 x 50 mm/s = 2.5 mm/s.  Split from `assemble` because the
     # insertion is the slowest thing the arm does -- contact force scales hard with approach
     # speed, and whole oscillation cycles have to fit inside it -- so it has to be settable
     # without slowing every other move that runs under the assemble phase.  Absent -> assemble.
     engage: 0.05
-    retract: 4.0       # the between-attempt retract + the release escape
+    retract: 2.0       # the between-attempt retract + the release escape
     # POST-MATE CLOCKING, one scale per maneuver.  These pace the CONTACT ramps; free-space
     # moves inside a maneuver stay on standoff/retract.  A non-null speed_translation_mm_s /
     # speed_rotation_deg_s in the maneuver's own block overrides its scale entirely.
@@ -854,6 +854,32 @@ assembly:
     # condition can never fire, so every engage ends 'complete' and a miss looks like a seat.
     max_misses: 2
 
+    # ---- CONFIRM THE SEAT ------------------------------------------------------------------
+    # The axial limit only says SOMETHING RESISTED.  Pushing a connector flat against the
+    # fixture body, the bench, or the rim of the wrong hole develops axial reaction exactly like
+    # a real insertion and stops the engage identically.  Two things separate a socket from a
+    # face, and both are measured by WIGGLING IN PLACE at the stopped depth:
+    #
+    #   RADIAL FORCE   a barrel inside a socket is laterally constrained, so rocking it pushes
+    #                  back ACROSS its own axis.  A connector on a flat face just slides.
+    #   WIGGLE TRAVEL  the reference keeps commanding the same amplitude, but a captured
+    #                  connector cannot follow it.  Measured travel far below the commanded
+    #                  amplitude IS the capture; travel that tracks the command means free.
+    #
+    # Failing either is treated exactly like a MISS: the cable goes down, the arm returns to the
+    # pick view, and everything is measured again (see max_misses).  Continuing would clock a
+    # connector that is only leaning on something.
+    #
+    # NOTE the travel test needs an oscillation.  With every wiggle amplitude at 0 there is no
+    # cycle to measure, only the radial force is checked, and the run says so.
+    confirm:
+      enabled: true
+      radial_force_n: 1.0        # |force| across the connector axis, in its OWN Y-Z
+      radial_persistence_s: 0.10 # ...held continuously for this long
+      max_wiggle_mm: 1.0         # measured peak-to-peak travel must stay under this
+      cycles: 1                  # how many full wiggle cycles to watch
+      fallback_s: 0.5            # confirmation window when no oscillation is configured
+    
     max_axial_force_n: 5.0
     persistence_s: 0.5          # the limit must hold this long -- rides out contact spikes
 
@@ -1114,7 +1140,7 @@ assembly:
     # "ring stands 30 mm from the JUNCTION": junction sits at -45.7 mm on this axis, so
     # collar = -45.7 + 30 = -15.7 mm.  If re-tuned on the bench, measure from the connector
     # frame origin.
-    collar_offset_mm: -2.0
+    collar_offset_mm: 0.0
     # COLLAR AXIS OFFSET, mm, in the SOCKET (target) frame's own axes: shifts the LINE the
     # whole collar maneuver works about (centring, unwind, advance, turn, and the tug
     # re-grip).  Y and Z move the line; X only slides the reference point along it.  Exists

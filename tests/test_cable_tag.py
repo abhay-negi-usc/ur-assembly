@@ -448,3 +448,57 @@ def test_an_engage_that_never_makes_contact_is_a_failure_not_a_completion():
                    'move_j(q_pick'):
         assert body.index(marker) > i_gate, f'{marker} must not run before the operator gate'
     assert 'LEFT WHERE IT IS' in body, 'aborting must leave the arm put, not escape automatically'
+
+
+def test_a_seat_must_be_confirmed_radially_and_by_constrained_wiggle():
+    """The axial limit only says SOMETHING RESISTED -- a connector pushed flat against the fixture
+    body or the bench develops the same axial reaction and stops the engage identically. Two
+    measurements separate a socket from a face, and both are required."""
+    import os
+
+    import numpy as np
+
+    from urlab import config as urconfig
+    src = open(os.path.join(os.path.dirname(urconfig.__file__), 'apps',
+                            'bnc_assembly.py'), encoding='utf-8').read()
+
+    cfg = urconfig.load('bnc_assembly')
+    cf = cfg.get_path('assembly.engage.confirm') or {}
+    assert cf['radial_force_n'] == 1.0
+    assert cf['radial_persistence_s'] == 0.10
+    assert cf['max_wiggle_mm'] == 1.0
+    assert cf['cycles'] == 1 and cf['enabled'] is True
+
+    # RADIAL means the connector's OWN Y-Z, not |f| -- a magnitude test would be satisfied by the
+    # axial push itself and confirm nothing.
+    rc = src[src.index('class _RadialConfirm:'):src.index('class _AnyGuard:')]
+    assert 'w[1:3]' in rc, 'radial force must be the Y-Z components in the CONNECTOR frame'
+    assert 'wrench_in(T_base_conn, T_base_tool0)' in rc
+    assert 'self.held_s' in rc and 'persistence_s' in rc, 'it must be a sustained condition'
+
+    # The confirmation WIGGLES IN PLACE at the stopped depth -- advancing while testing would
+    # confound depth with capture.
+    eng = src[src.index('def engage_insertion():'):src.index('def connector_clocking():')]
+    assert 'path_at(d_stop)' in eng, 'the confirmation must hold the stopped depth'
+    assert 'en_wig.delta(t_end + tc, dur_s)' in eng, 'the wiggle phase must run on continuously'
+    assert "status = 'unconfirmed'" in eng
+
+    # Travel is peak-to-peak of the measured CONNECTOR origin, not of the commanded reference.
+    assert 'P.max(axis=0) - P.min(axis=0)' in eng
+    assert '(robot.tool0() @ T_tool0_conn)[:3, 3]' in eng
+
+    # Failing confirmation routes to the SAME recovery as a clean miss.
+    assert "elif en_status == 'unconfirmed':" in src
+    i_unconf = src.index("elif en_status == 'unconfirmed':")
+    assert 'engage_missed = True' in src[i_unconf:i_unconf + 900]
+
+    # With no oscillation the travel test cannot run; that must be stated, not silently passed.
+    assert "'travel_ok': bool(travel_mm < cf_max_mm) if wiggled else None" in eng
+    assert 'no oscillation is configured' in eng
+
+    # The report names WHICH condition failed and by how much -- 'not confirmed' alone is
+    # unreadable at 2am.
+    rep = src[src.index('def _engage_report('):src.index('def build_and_run(')]
+    assert 'radial force' in rep and 'wiggle travel' in rep
+    assert 'want >= %.1f N for %.2f s' in rep and 'want < %.2f mm' in rep
+    assert np.isclose(cf['radial_persistence_s'], 0.10)

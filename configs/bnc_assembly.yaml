@@ -602,7 +602,7 @@ speed:
     # insertion is the slowest thing the arm does -- contact force scales hard with approach
     # speed, and whole oscillation cycles have to fit inside it -- so it has to be settable
     # without slowing every other move that runs under the assemble phase.  Absent -> assemble.
-    engage: 0.01
+    engage: 0.05
     retract: 4.0       # the between-attempt retract + the release escape
     # POST-MATE CLOCKING, one scale per maneuver.  These pace the CONTACT ramps; free-space
     # moves inside a maneuver stay on standoff/retract.  A non-null speed_translation_mm_s /
@@ -656,7 +656,7 @@ reset:
 # THE PICK POSE, driven to after the start reset (and after the marker sweep, when
 # target_source is visual).  The scan, the grasp geometry and every retry offset are written
 # from HERE -- home above is only the marker view pose.  null = pick from home.
-pick_joints_deg: [-85, -145, -105, -205, -85, 180]
+pick_joints_deg: [-75, -155, -100, -190, -90, 195]
 
 # ===================================================================================================
 # ASSEMBLY -- the estimate-while-assemble loop
@@ -826,7 +826,24 @@ assembly:
     # Reaching it ENDS THE ENGAGE, not the run -- meeting resistance partway is what the
     # bayonet search is for.  Axial rather than |f| is what lets it be set low: a magnitude
     # limit tight enough to catch real resistance also stops on every lateral graze.
-    max_axial_force_n: 1.0
+    # A MISSED ENGAGEMENT -- the full path ran, preload included, without the axial limit ever
+    # being reached -- means the connector never touched the socket.  That is a FAILURE, not a
+    # completion: clocking from there would turn a connector that is not in a socket.
+    #
+    # The run recovers by putting the cable DOWN, returning to the pick view, and starting the
+    # cycle over -- so the target is re-localized, the in-hand belief is reset to nominal, and
+    # the cable is re-detected and re-grasped.  Every input to the engagement is measured
+    # afresh, which is the point: a miss usually means the target pose or the belief was wrong,
+    # and pushing again from the same place with the same numbers cannot fix that.
+    # A retried cycle does NOT consume one of the `cycles` asked for.
+    #
+    # A BUDGET for the whole run, not a loop -- a cell that keeps missing has a real setup
+    # problem and retrying wears the part.  0 = never recover, fail on the first miss.
+    # NOTE a miss is only DETECTABLE while max_axial_force_n > 0: with no limit the axial
+    # condition can never fire, so every engage ends 'complete' and a miss looks like a seat.
+    max_misses: 2
+
+    max_axial_force_n: 5.0
     persistence_s: 0.5          # the limit must hold this long -- rides out contact spikes
 
     # ---- compliance overrides (else the top-level compliance:) ---
@@ -853,6 +870,15 @@ assembly:
   # small, taken after the rise, and collision-checked like any other joint move.
   celebrate:
     enabled: false
+    # HOW OFTEN. A 50-cycle collection should not stop to dance 50 times, but finishing the set
+    # is worth marking -- so `last` is the default.
+    #   last     only after the FINAL cycle of the run completes successfully
+    #   every    after every successful cycle
+    #   every_n  after every `every_n`-th successful cycle
+    # `last` is safe against a mid-run failure for free: a failed cycle stops the loop, so the
+    # final cycle is never reached and nothing celebrates.
+    when: last
+    every_n: 5              # only read when `when: every_n`
     rise_mm: 100.0          # up in base +Z first, so the rest happens in open air
     nod_deg: 15.0           # wrist_1 rock, +/- this (the "bow")
     spin_deg: 180.0         # wrist_3 rock, +/- this (the flourish; cannot translate the tool)
@@ -1169,6 +1195,24 @@ assembly:
   # line up with the slots.  Turning further would ride them onto the rim.
   disassembly:
     enabled: true
+    # ---- SCATTER THE PLACE, so each cycle re-picks from a genuinely different pose ----------
+    # Without this a multi-cycle run puts the cable back in the SAME spot every time, so the
+    # pick is only ever tested against one presentation and the detector only ever sees one.
+    # The draw is UNIFORM and ADDED to reorient_recovery.place_offsets, so it is centred on the
+    # place the run would otherwise have used -- turning it off restores that exactly.
+    #
+    # x/y are in the TARGET CONNECTOR's frame (like the offsets they perturb), so the spread
+    # means the same thing whichever way the socket faces. An unreachable draw is redrawn up to
+    # 8 times and then falls back to the centre, so an unlucky draw cannot kill a long run.
+    #
+    # `seed` makes a scattered run reproducible -- without it you cannot re-create the run when
+    # something goes wrong on cycle 34. Leave null for a different scatter each run.
+    place_scatter:
+      enabled: false
+      x_mm: 50.0            # +/- this, uniform
+      y_mm: 50.0            # +/- this, uniform
+      yaw_deg: 30.0         # +/- this, uniform
+      seed: null
     # CYCLES: repeat the whole pass -- localize, pick, assemble, clock, verify, take apart,
     # place the cable back -- this many times.  Each cycle RE-LOCALIZES (the fixture may have
     # moved; that is what the marker rig buys) and RE-PICKS from wherever the last cycle put

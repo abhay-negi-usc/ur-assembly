@@ -956,22 +956,46 @@ class GraspController:
         return robot.move_fingertip(T_target, label, qnear=self.approach_seed)
 
     def _clear_between(self, q_from, q_to):
+        """(ok, body, over_m, frac) for the ground/self check between two configurations."""
         model = self.collision_model()
         if model is None:
             return True, None, 0.0, 0.0
         return model.check_path(q_from, q_to)
 
+    def plan_is_valid(self, q_from, q_to):
+        """(ok, reason) -- collision AND joint limits for a candidate joint move.
+
+        The single call a planner should ask. `reason` is a finished sentence, because the two
+        checks measure their violations in different units (mm of clearance, degrees past a stop)
+        and a caller should not have to know which one it got back."""
+        model = self.collision_model()
+        if model is None:
+            return True, None
+        return model.check_plan(q_from, q_to)
+
     def _path_is_clear(self, robot, q_goal, label, quiet=False):
-        """Refuse a move whose JOINT PATH puts the arm through the ground plane.
+        """Refuse a move whose JOINT PATH puts the arm through the ground plane OR outside the
+        joint limits.
 
         THE ENDPOINTS ARE NOT THE PATH. A moveJ interpolates in joint space, so the tool swings
         through an arc: both ends can be comfortably clear while the middle is not. That is the
         failure this exists for, and it is why the whole interpolation is sampled rather than
-        just the target."""
+        just the target.
+
+        JOINT LIMITS ARE CHECKED TOO, through the same call. A pose can be perfectly clear of the
+        bench and still be one the arm cannot hold -- a wrist wound past its stop -- and finding
+        that out from the controller mid-move is strictly worse than refusing while parked."""
         model = self.collision_model()
         if model is None:
             return True
         q_now = robot.arm.q()
+        plan_ok, why = model.check_plan(q_now, q_goal)
+        if not plan_ok and 'outside its limit' in (why or ''):
+            if not quiet:
+                self.last_refusal = 'unreachable'
+            (log.info if quiet else log.error)(
+                '%s: REFUSED before moving -- %s. Nothing has moved.', label, why)
+            return False
         ok, body, over, frac = model.check_path(q_now, q_goal)
         if ok:
             return True

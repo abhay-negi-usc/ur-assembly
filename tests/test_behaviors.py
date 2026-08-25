@@ -2272,3 +2272,63 @@ def test_the_fk_check_rejects_a_non_pose_instead_of_blaming_the_dh_chain():
             'the same shift with NO declared offset is a real 100 mm disagreement'
     finally:
         m.close()
+
+
+def test_planning_checks_joint_limits_as_well_as_collisions():
+    """A pose can be perfectly clear of the bench and still be one the arm cannot hold. Learning
+    that from the controller MID-MOVE is strictly worse than refusing while parked, so the plan
+    check covers both."""
+    import pytest
+    pytest.importorskip('pybullet')
+    import numpy as np
+    from urlab.robot.collision import GroundCollisionModel
+    from urlab.transforms import UR_JOINTS
+
+    m = GroundCollisionModel(
+        {'margin_mm': 0.0, 'fingertip_margin_mm': 5.0, 'joint_margin_deg': 5.0,
+         'joint_limits_deg': {'wrist_3_joint': [-180.0, 180.0]}}, ground_z_m=-0.760)
+    try:
+        q = np.radians([-90.0, -140.0, -130.0, -90.0, -90.0, 0.0])
+        ok, why = m.check_plan(q, q)
+        assert ok and why is None, why
+
+        # Inside the box but inside the MARGIN -> refused, so a plan never runs against the stop.
+        near = list(q)
+        near[5] = np.radians(179.0)
+        ok, why = m.check_plan(q, near)
+        assert not ok and 'wrist_3_joint' in why and 'outside its limit' in why
+
+        # Past the configured limit, reported in DEGREES (not the millimetres check_q speaks).
+        past = list(q)
+        past[5] = np.radians(200.0)
+        ok, why = m.check_plan(q, past)
+        assert not ok and '25.0 deg' in why, why
+
+        # The START configuration is checked too, not only the goal.
+        ok, why = m.check_plan(past, q)
+        assert not ok and why.startswith('start '), why
+
+        # check_joints names the joint and measures in radians; check_q keeps its metres contract
+        # so the two can never be confused by a caller formatting one as the other.
+        ok, joint, over = m.check_joints(past)
+        assert not ok and joint == 'wrist_3_joint'
+        assert abs(np.degrees(over) - 25.0) < 1e-6
+        assert UR_JOINTS.index(joint) == 5
+
+        # An unconstrained joint keeps the URDF's nominal range.
+        assert abs(np.degrees(m.joint_hi[0]) - 360.0) < 1e-9
+    finally:
+        m.close()
+
+
+def test_a_bad_joint_limit_block_fails_loudly():
+    """A typo'd joint name silently doing nothing is the failure mode this repo has most of."""
+    import pytest
+    pytest.importorskip('pybullet')
+    from urlab.robot.collision import GroundCollisionModel
+
+    with pytest.raises(ValueError, match='is not a UR joint'):
+        GroundCollisionModel({'joint_limits_deg': {'wrist3': [-180.0, 180.0]}}, ground_z_m=-0.76)
+    with pytest.raises(ValueError, match='must exceed lower'):
+        GroundCollisionModel({'joint_limits_deg': {'wrist_3_joint': [180.0, -180.0]}},
+                             ground_z_m=-0.76)

@@ -451,6 +451,17 @@ pickup:
     margin_mm: 0.0            # required clearance for EVERYTHING except the fingertips
     fingertip_margin_mm: 15.0  # allowed INTERSECTION, fingertips only (see above)
     path_samples: 25
+    # JOINT LIMITS, checked alongside the collision check on every planned joint move.
+    # A pose can be perfectly clear of the bench and still be one the arm cannot hold --
+    # a wrist wound past its stop -- and learning that from the controller MID-MOVE is
+    # strictly worse than refusing while the arm is parked.
+    #
+    # Defaults are the UR10e's nominal +/-360 deg. Override a joint by NAME to express a
+    # TIGHTER working range than the mechanism allows -- keeping wrist_3 inside +/-180 so
+    # the tool cable cannot wind up, for instance. joint_margin_deg backs EVERY limit off,
+    # so a plan that only just fits is refused rather than run against the stop.
+    joint_margin_deg: 2.0
+    joint_limits_deg: {}    # e.g. {wrist_3_joint: [-180.0, 180.0]}
     # SELF-COLLISION: the arm against itself, and the tool against the arm.
     #
     # WHAT IS NOT CHECKED, and why each exclusion is safe rather than convenient:

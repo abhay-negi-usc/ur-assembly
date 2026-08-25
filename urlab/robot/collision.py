@@ -235,6 +235,27 @@ class GroundCollisionModel:
         # one can never widen the other.
         self.fingertip_margin = float(c.get('fingertip_margin_mm', 5.0)) / 1000.0
         self.path_samples = int(c.get('path_samples', 25))
+        # JOINT LIMITS, as a per-joint box in radians. Defaults come from the URDF (the UR10e's
+        # nominal +/-360 deg); `joint_limits_deg` overrides any subset by joint NAME, which is how
+        # you express a TIGHTER working range than the mechanism allows -- keeping wrist_3 inside
+        # +/-180 to stop the tool cable winding up, say. `joint_margin_deg` backs every limit off,
+        # so a plan that only just fits is refused rather than run against the stop.
+        self.joint_margin = np.radians(float(c.get('joint_margin_deg', 0.0)))
+        self.joint_lo = np.full(6, -2.0 * np.pi)
+        self.joint_hi = np.full(6, +2.0 * np.pi)
+        self._joint_source = 'nominal +/-360 deg'
+        for name, lim in (c.get('joint_limits_deg', {}) or {}).items():
+            if name not in UR_JOINTS:
+                raise ValueError(
+                    'collision.joint_limits_deg: %r is not a UR joint. Expected one of %s.'
+                    % (name, ', '.join(UR_JOINTS)))
+            lo, hi = (float(v) for v in lim)
+            if hi <= lo:
+                raise ValueError('collision.joint_limits_deg.%s: upper (%g) must exceed lower (%g)'
+                                 % (name, hi, lo))
+            i = UR_JOINTS.index(name)
+            self.joint_lo[i], self.joint_hi[i] = np.radians(lo), np.radians(hi)
+            self._joint_source = 'URDF, overridden per joint'
         # SELF-COLLISION. Its own margin, and deliberately NOT the fingertip ground allowance:
         # a fingertip is meant to reach the work surface, it is never meant to reach the
         # forearm. Nothing about the tool gets an allowance against the arm.
@@ -526,6 +547,52 @@ class GroundCollisionModel:
             if not ok and over > worst:
                 worst_name, worst, worst_f = name, over, f
         return (worst_name is None), worst_name, worst, worst_f
+
+    def check_joints(self, q):
+        """(ok, joint_name, over_rad) for the per-joint box, `joint_margin` included.
+
+        Separate from check_q on purpose: that one reports a CLEARANCE IN METRES and every caller
+        formats it as mm, so folding radians into the same field would print nonsense at the one
+        moment someone is reading the log to find out why a move was refused."""
+        q = np.asarray(q, dtype=float)
+        lo = self.joint_lo + self.joint_margin
+        hi = self.joint_hi - self.joint_margin
+        under, over = lo - q, q - hi
+        worst_i, worst = None, 0.0
+        for i in range(6):
+            for amount in (under[i], over[i]):
+                if amount > worst:
+                    worst_i, worst = i, amount
+        return (worst_i is None), (None if worst_i is None else UR_JOINTS[worst_i]), float(worst)
+
+    def check_plan(self, q_from, q_to, samples=None):
+        """THE ONE CALL FOR 'MAY THE ARM DRIVE THIS?' -- collision AND joint limits.
+
+        Returns (ok, reason) where `reason` is a finished human sentence, or None. Formatting it
+        here rather than returning a bare number is what lets one entry point cover two checks
+        whose violations are measured in DIFFERENT UNITS (millimetres of clearance, degrees past a
+        stop) without a caller having to know which it got.
+
+        ON JOINT LIMITS AND SAMPLING, honestly: a per-joint box is CONVEX, and check_path walks a
+        straight line in joint space, so a path between two in-range endpoints cannot leave the
+        range. The endpoints are therefore where the joint test earns its keep -- and until now
+        nothing checked them here at all. The per-sample test is kept because it costs nothing and
+        it stops being redundant the moment a caller passes a path that is not a straight joint
+        line, or a limit that is not a box.
+        """
+        for label, q in (('start', q_from), ('end', q_to)):
+            ok, joint, over = self.check_joints(q)
+            if not ok:
+                return False, ('%s configuration puts %s %.1f deg outside its limit '
+                               '[%+.0f, %+.0f] deg' % (
+                                   label, joint, np.degrees(over),
+                                   np.degrees(self.joint_lo[UR_JOINTS.index(joint)]),
+                                   np.degrees(self.joint_hi[UR_JOINTS.index(joint)])))
+        ok, body, over, frac = self.check_path(q_from, q_to, samples)
+        if not ok:
+            return False, ('%s is %.1f mm past its allowance %.0f%% of the way along the path'
+                           % (body, over * 1000.0, frac * 100.0))
+        return True, None
 
     def check_path(self, q_from, q_to, samples=None):
         """Sample the STRAIGHT JOINT PATH -- which is what a moveJ actually drives.

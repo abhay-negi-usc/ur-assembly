@@ -879,6 +879,15 @@ assembly:
     # final cycle is never reached and nothing celebrates.
     when: last
     every_n: 5              # only read when `when: every_n`
+    # HOW OFTEN. A 50-cycle collection should not stop to dance 50 times, but finishing the set
+    # is worth marking -- so `last` is the default.
+    #   last     only after the FINAL cycle of the run completes successfully
+    #   every    after every successful cycle
+    #   every_n  after every `every_n`-th successful cycle
+    # `last` is safe against a mid-run failure for free: a failed cycle stops the loop, so the
+    # final cycle is never reached and nothing celebrates.
+    when: last
+    every_n: 5              # only read when `when: every_n`
     rise_mm: 100.0          # up in base +Z first, so the rest happens in open air
     nod_deg: 15.0           # wrist_1 rock, +/- this (the "bow")
     spin_deg: 180.0         # wrist_3 rock, +/- this (the flourish; cannot translate the tool)
@@ -1195,6 +1204,24 @@ assembly:
   # line up with the slots.  Turning further would ride them onto the rim.
   disassembly:
     enabled: true
+    # ---- SCATTER THE PLACE, so each cycle re-picks from a genuinely different pose ----------
+    # Without this a multi-cycle run puts the cable back in the SAME spot every time, so the
+    # pick is only ever tested against one presentation and the detector only ever sees one.
+    # The draw is UNIFORM and ADDED to reorient_recovery.place_offsets, so it is centred on the
+    # place the run would otherwise have used -- turning it off restores that exactly.
+    #
+    # x/y are in the TARGET CONNECTOR's frame (like the offsets they perturb), so the spread
+    # means the same thing whichever way the socket faces. An unreachable draw is redrawn up to
+    # 8 times and then falls back to the centre, so an unlucky draw cannot kill a long run.
+    #
+    # `seed` makes a scattered run reproducible -- without it you cannot re-create the run when
+    # something goes wrong on cycle 34. Leave null for a different scatter each run.
+    place_scatter:
+      enabled: false
+      x_mm: 50.0            # +/- this, uniform
+      y_mm: 50.0            # +/- this, uniform
+      yaw_deg: 30.0         # +/- this, uniform
+      seed: null
     # ---- SCATTER THE PLACE, so each cycle re-picks from a genuinely different pose ----------
     # Without this a multi-cycle run puts the cable back in the SAME spot every time, so the
     # pick is only ever tested against one presentation and the detector only ever sees one.

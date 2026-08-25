@@ -332,7 +332,7 @@ pickup:
   # cylinder at a different depth along the approach -- is more naturally a hand-frame value,
   # and in this frame it will move as the pitch changes.  Re-measure after a large change of
   # approach angle either way.
-  belief_offset_mm: [0.0, 0.0, -10.0]
+  belief_offset_mm: [5.0, 0.0, -11.0]
   # PICKUP HEIGHT from the gripper kinematic model.  Assumes the connector rests ON THE GROUND
   # PLANE (ground_plane.z_m): grasp target = plane + connector d_max/2 (centerline) + the
   # fingertip ADVANCE between fingertip_ref_separation_mm (where fingertip_grasp z was
@@ -827,7 +827,7 @@ assembly:
     # bayonet search is for.  Axial rather than |f| is what lets it be set low: a magnitude
     # limit tight enough to catch real resistance also stops on every lateral graze.
     max_axial_force_n: 1.0
-    persistence_s: 3.0          # the limit must hold this long -- rides out contact spikes
+    persistence_s: 0.5          # the limit must hold this long -- rides out contact spikes
 
     # ---- compliance overrides (else the top-level compliance:) ---
     stiffness: [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
@@ -838,6 +838,26 @@ assembly:
     # unexpected / jammed".  Keep it well above max_axial_force_n.
     max_force_n: 40.0
     max_torque_nm: 8.0
+
+  # ---- CELEBRATE: a flourish after a VERIFIED assembly, before disassembly -----------------
+  # Cosmetic and OFF BY DEFAULT -- nobody wants it firing 50 times in a data-collection run.
+  #
+  # It runs only when the run reached the end state it was CONFIGURED to reach (locked with
+  # collar clocking on, seated with only connector clocking, engaged with neither), and only
+  # after the escape has released the connector and backed the arm off -- so it cannot disturb
+  # what it is celebrating. A failure inside it is logged and ignored; it never fails a good
+  # assembly.
+  #
+  # WRIST-ONLY BY DESIGN. wrist_3 turns about tool0's own axis, so it moves the tool0 ORIGIN by
+  # exactly zero and cannot put the gripper into anything. wrist_1 does move the tool, so it is
+  # small, taken after the rise, and collision-checked like any other joint move.
+  celebrate:
+    enabled: false
+    rise_mm: 100.0          # up in base +Z first, so the rest happens in open air
+    nod_deg: 15.0           # wrist_1 rock, +/- this (the "bow")
+    spin_deg: 180.0         # wrist_3 rock, +/- this (the flourish; cannot translate the tool)
+    repeats: 2
+    gripper_flourish: true  # close/open between reps
 
   # ---- INSERTION MODE -----------------------------------------------------------------------
   # estimate  insert, observe, fit the contact manifold, correct the in-hand belief, repeat,
@@ -1048,7 +1068,7 @@ assembly:
     # "ring stands 30 mm from the JUNCTION": junction sits at -45.7 mm on this axis, so
     # collar = -45.7 + 30 = -15.7 mm.  If re-tuned on the bench, measure from the connector
     # frame origin.
-    collar_offset_mm: -3.0
+    collar_offset_mm: -2.0
     # COLLAR AXIS OFFSET, mm, in the SOCKET (target) frame's own axes: shifts the LINE the
     # whole collar maneuver works about (centring, unwind, advance, turn, and the tug
     # re-grip).  Y and Z move the line; X only slides the reference point along it.  Exists

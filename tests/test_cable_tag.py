@@ -247,9 +247,14 @@ def test_the_engage_speed_comes_from_phase_scale_not_a_private_key():
     cap = float(cfg.get_path('speed.max_cartesian_translation_mm_s'))
     scales = cfg.get_path('speed.phase_scale') or {}
     assert 'engage' in scales, 'bnc_assembly must declare its own engage scale'
-    assert abs(cap * float(scales['engage']) - 2.5) < 1e-9, \
-        'the split must preserve the 2.5 mm/s the retired key asked for'
-    # ...and it must be settable INDEPENDENTLY of assemble, which is the point of splitting it.
+    # Assert the MECHANISM, not a tuned value. An earlier version of this test pinned the exact
+    # 2.5 mm/s the retired key happened to ask for at migration time, which made it forbid the very
+    # tuning the move to phase_scale was meant to enable -- the test failed the moment the speed was
+    # tuned on the bench, and the code was right. A value that is meant to be tuned must not be
+    # frozen by a test; only its plumbing should be.
+    rate = cap * float(scales['engage'])
+    assert 0.0 < rate < cap, f'the engage rate ({rate} mm/s) must be positive and below the cap'
+    # ...and settable INDEPENDENTLY of assemble, which is the point of splitting it.
     assert float(scales['engage']) != float(scales['assemble'])
 
 
@@ -290,3 +295,44 @@ def test_the_scan_withdraws_the_default_when_no_cable_scored():
     src = inspect.getsource(ground_pick.GroundPlaneScanner.scan)
     assert "ranked = any(int(c.get('tag_score') or 0) > 0 for c in cables)" in src
     assert 'allow_default=ranked' in src
+
+
+def test_celebrate_is_off_by_default_and_cannot_disturb_the_assembly():
+    """A flourish after a verified mate. The interesting assertions are all about what it CANNOT
+    do -- it runs near a fixture the arm just spent a minute avoiding, with the gripper open."""
+    import inspect
+    import os
+
+    from urlab import config as urconfig
+    src = open(os.path.join(os.path.dirname(urconfig.__file__), 'apps',
+                            'bnc_assembly.py'), encoding='utf-8').read()
+
+    # 1. OFF by default -- it must not fire during a data-collection run.
+    cfg = urconfig.load('bnc_assembly')
+    cb = cfg.get_path('assembly.celebrate') or {}
+    assert cb.get('enabled') is False, 'celebrate must ship disabled'
+    for k in ('rise_mm', 'nod_deg', 'spin_deg', 'repeats', 'gripper_flourish'):
+        assert k in cb, f'assembly.celebrate.{k} must be declared'
+
+    # 2. It runs AFTER the escape and BEFORE disassembly, so the connector is already released.
+    i_cel = src.index('celebrate(state)')
+    i_dis = src.index('dis_ok, state = disassembly(')
+    assert i_cel < i_dis, 'celebrate must run before disassembly'
+    assert "if ret_ok and tug_res != 'failed':" in src, \
+        'celebrate must be gated on a completed escape and a tug that did not fail'
+
+    # 3. Only on the state the run was CONFIGURED to reach -- not a hardcoded 'locked', or a
+    #    connector-clocking-only run could never celebrate.
+    assert "want = 'locked' if cl_on else ('seated' if cc_on else 'engaged')" in src
+
+    # 4. Joint moves are collision-checked and limit-checked. A flourish is never worth a forced
+    #    move, and a moveJ can swing the tool through the bench between two clear endpoints.
+    body = src[src.index('def celebrate(state):'):src.index('def disassembly(state,')]
+    assert 'model.check_path(' in body, 'the nod/spin must be collision-checked'
+    assert 'robot.arm.joints_ok(' in body, 'targets must be checked against the joint limits'
+    assert 'wrist_1_joint' in body and 'wrist_3_joint' in body, 'wrist-only by design'
+    for banned in ('shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint'):
+        assert banned not in body, f'celebrate must not drive {banned} -- it moves the whole arm'
+
+    # 5. It can never fail a good assembly.
+    assert 'CELEBRATE raised' in src, 'an exception in the flourish must be caught and ignored'

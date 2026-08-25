@@ -106,8 +106,8 @@ from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImag
                            fingertip_in_connector, held_belief, offset_belief, retry_offset_x,
                            verify_cable_held)
 from ..skills.solution_check import CheckedManifoldEstimator
-from ..transforms import (from_cfg, inverse, matrix_to_xyzrpy, pose_error, rotate_about_axis,
-                          slerp_matrix, translation_matrix, xyzrpy_to_matrix)
+from ..transforms import (UR_JOINTS, from_cfg, inverse, matrix_to_xyzrpy, pose_error,
+                          rotate_about_axis, slerp_matrix, translation_matrix, xyzrpy_to_matrix)
 from ._cable import build_scanner, make_confirm
 from ._common import prompts_off
 from ._runner import run_app
@@ -1433,6 +1433,86 @@ def build_and_run(cfg, robot, camera, args):
         robot.gripper.open('release (failed cable, at home)')
         return 'failed'
 
+
+    def celebrate(state):
+        """CELEBRATE -- a short flourish after a VERIFIED assembly. Cosmetic, and built so it
+        cannot undo the work it is celebrating.
+
+        WHY IT IS WRIST-ONLY. It runs with the gripper open, near a fixture the arm has just spent
+        a minute carefully not hitting, so the design constraint is that it must be incapable of
+        translating the tool into anything. wrist_3 rotates about tool0's OWN axis, so it moves the
+        tool0 ORIGIN by exactly zero -- that is the same fact the collar prewind rests on. wrist_1
+        does move the tool, so it is small, taken after a rise into open air, and COLLISION-CHECKED
+        like any other joint move rather than assumed safe (a moveJ interpolates in joint space and
+        can swing the tool through the bench between two clear endpoints).
+
+        IT ONLY RUNS ON SUCCESS. Celebrating a failed mate is worse than not celebrating: it wastes
+        the diagnostic value of where the arm stopped, and it moves the evidence. The expected
+        terminal state depends on what was enabled -- 'locked' with collar clocking on, 'seated'
+        with only connector clocking, 'engaged' with neither -- so the bar is "the run reached the
+        end it was configured to reach", not a hardcoded state.
+
+        Off by default. Nobody wants this firing 50 times during a data-collection run."""
+        cb = a.get('celebrate', {}) or {}
+        if not bool(cb.get('enabled', False)):
+            return True
+        want = 'locked' if cl_on else ('seated' if cc_on else 'engaged')
+        if state != want:
+            log.info('CELEBRATE skipped: the run ended %r, not the configured %r.', state, want)
+            return True
+
+        rise_m = _num(cb, 'rise_mm', 100.0) / 1000.0
+        nod_deg = _num(cb, 'nod_deg', 15.0)
+        spin_deg = _num(cb, 'spin_deg', 180.0)
+        reps = max(1, int(cb.get('repeats', 2)))
+        flourish = bool(cb.get('gripper_flourish', True))
+
+        log.info('--- CELEBRATE --- %s: rise %.0f mm, nod %+.0f deg (wrist_1), spin %+.0f deg '
+                 '(wrist_3), x%d.', 'assembly verified', rise_m * 1000, nod_deg, spin_deg, reps)
+        phase('retract')
+
+        if rise_m > 0.0:
+            T_up = translation_matrix([0.0, 0.0, rise_m]) @ robot.tool0()
+            if not _guarded(robot, guard_shared,
+                            lambda: robot.arm.move_l(T_up, label='celebrate (rise)')):
+                log.warning('CELEBRATE: could not rise -- skipping the rest. The assembly is '
+                            'unaffected.')
+                return True
+
+        model = grasp.collision_model()
+        q0 = list(robot.arm.q())
+
+        def wiggle_joint(index, amplitude_deg, label):
+            """Rock one joint +amp, -amp, back to centre. Refuses on a collision or a joint limit
+            rather than clipping -- a flourish is never worth a forced move."""
+            for target in (+amplitude_deg, -amplitude_deg, 0.0):
+                q = list(q0)
+                q[index] = q0[index] + np.radians(target)
+                if not robot.arm.joints_ok(q):
+                    log.warning('CELEBRATE: %s %+.0f deg is outside the joint limits -- stopping '
+                                'the flourish here.', label, target)
+                    return False
+                if model is not None:
+                    ok, body, _over, _f = model.check_path(list(robot.arm.q()), q)
+                    if not ok:
+                        log.warning('CELEBRATE: %s %+.0f deg would put %s through the ground -- '
+                                    'stopping the flourish here.', label, target, body)
+                        return False
+                if not _guarded(robot, guard_shared,
+                                lambda _q=q: robot.arm.move_j(_q, label=f'celebrate ({label})')):
+                    return False
+            return True
+
+        for _ in range(reps):
+            if not wiggle_joint(UR_JOINTS.index('wrist_1_joint'), nod_deg, 'nod'):
+                break
+            if not wiggle_joint(UR_JOINTS.index('wrist_3_joint'), spin_deg, 'spin'):
+                break
+            if flourish:
+                robot.gripper.close('celebrate (clap)')
+                robot.gripper.open('celebrate (clap)')
+        log.info('--- CELEBRATE ENDED --- the arm is clear and the assembly is untouched.')
+        return True
 
     def disassembly(state, screw_deg, T_base_conn_d):
         """DISASSEMBLY -- unwind the clocking, pull the connector out, put the cable down.
@@ -3357,6 +3437,17 @@ def build_and_run(cfg, robot, camera, args):
                 else:
                     log.warning('Escape skipped by the user -- the arm is still at the connector '
                                 'with the gripper in whatever state clocking left it.')
+
+                # ---- CELEBRATE, between a verified assembly and taking it apart --------------
+                # Here and not earlier: the escape has released the connector and backed the arm
+                # off, so the flourish cannot drag or disturb what it is celebrating. Gated on the
+                # same conditions disassembly uses, plus the run having reached its configured end
+                # state. Never fatal -- a failed flourish must not fail a good assembly.
+                if ret_ok and tug_res != 'failed':
+                    try:
+                        celebrate(state)
+                    except Exception as exc:                   # noqa: BLE001 -- cosmetic only
+                        log.warning('CELEBRATE raised (%s) -- ignored; the assembly stands.', exc)
 
                 # ---- DISASSEMBLY, after the assembly has fully let go ------------------------
                 # It runs HERE, once the escape has released the connector and backed the arm off,

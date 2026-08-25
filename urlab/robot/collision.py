@@ -339,7 +339,6 @@ class GroundCollisionModel:
     @staticmethod
     def _segment_pose(p0, p1):
         """Place a capsule (its own axis is +z, centred) on the segment p0 -> p1."""
-        from scipy.spatial.transform import Rotation
         v = np.asarray(p1, dtype=float) - np.asarray(p0, dtype=float)
         n = float(np.linalg.norm(v))
         mid = (np.asarray(p0, dtype=float) + np.asarray(p1, dtype=float)) / 2.0
@@ -454,7 +453,6 @@ class GroundCollisionModel:
 
     def _pose_tool(self, T_base_tool0):
         """Place ONLY the tool bodies, from a tool0 pose. No joint angles needed."""
-        from scipy.spatial.transform import Rotation
         for name, z0, z1, _r, xoff in self.tool.segments():
             p0 = (T_base_tool0 @ np.array([xoff, 0.0, z0, 1.0]))[:3]
             p1 = (T_base_tool0 @ np.array([xoff, 0.0, z1, 1.0]))[:3]

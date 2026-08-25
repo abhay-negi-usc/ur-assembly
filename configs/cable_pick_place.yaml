@@ -163,8 +163,6 @@ fingertip_grasp:
 scan:
   # mode: fuse | reconstruction | ground_plane.
   #   ground_plane   -- ONE image, USER picks the cable by number, pose from the ground plane (above).
-  # mode: fuse | reconstruction | ground_plane.
-  #   ground_plane   -- ONE image, USER picks the cable by number, pose from the ground plane (above).
   #   fuse           -- fuse per-view junction detections into the connector pose (default).
   #   reconstruction -- ALSO reconstruct the 3D cable centreline and REFINE the junction pose from
   #                     it (measured axis tilt; optional roll from the cable's osculating plane).

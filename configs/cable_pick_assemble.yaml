@@ -134,7 +134,6 @@ fingertip_grasp:
 
 scan:
   # mode: fuse | reconstruction | ground_plane  (see the reconstruction + ground_plane blocks above).
-  # mode: fuse | reconstruction | ground_plane  (see the reconstruction + ground_plane blocks above).
   mode: ground_plane             # DEFAULT: single-image, user-selected cable, ground-plane pose
   require_detection: true
   min_good_views: 3

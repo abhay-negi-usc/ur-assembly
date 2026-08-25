@@ -34,17 +34,12 @@ hand_eye:
   xyz: [-0.009, -0.080, 0.031]
   rpy: [0.0, 0.0, 0.0]
 
-hand_eye: 
-  xyz: [-0.009, -0.080, 0.031]
-  rpy: [0.0, 0.0, 0.0]
-
 aruco:
   dictionary: DICT_4X4_50
   # Fallback side length for ids not named under markers: below. Every id the rig uses SHOULD be
   # named there instead -- solvePnP scales a marker's distance linearly with the size it is given,
   # so a marker solved at the wrong size lands at the wrong DEPTH with a perfect reprojection
   # behind it. There is nothing in the image to catch that.
-  marker_size_m: 0.0307
   marker_size_m: 0.0307
 
 # WHICH TARGET THE MARKERS ARE ATTACHED TO -- a `targets:` name in configs/frames.yaml. Its
@@ -56,8 +51,6 @@ target_frame: bnc_connector_finger_holder
 # quiet zone is not part of the marker, and including it inflates the size by ~14% on a typical
 # print, which is a ~14% depth error.
 markers:
-  24:  30.7
-  25:  30.7
   24:  30.7
   25:  30.7
 
@@ -138,7 +131,6 @@ marker_views:
   servo:
     enabled: true
     distance_m: 0.20
-    distance_m: 0.20
     max_iterations: 4
     pos_tol_mm: 5.0
     ang_tol_deg: 5.0
@@ -155,7 +147,6 @@ speed:
   # One factor for the whole visual-localization behavior (the sweep + servo moves) --
   # the same knob bnc_assembly's speed.phase_scale.visual_localize turns.
   phase_scale:
-    visual_localize: 2.0
     visual_localize: 2.0
 move_timeout_s: 60.0
 

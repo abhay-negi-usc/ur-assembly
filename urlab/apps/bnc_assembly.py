@@ -353,6 +353,43 @@ class _AxialForce:
         self._over_since = None
 
 
+class _TravelReached:
+    """Satisfied once the connector has ADVANCED far enough along its own +X since contact.
+
+    THE POSITIVE SUCCESS SIGNAL. A force limit says something is resisting, which is also what a
+    connector jammed on a rim does. Travel says the part actually WENT somewhere -- it is the one
+    condition a jam cannot fake, so a mate that slides home under low force is recognised as the
+    success it is instead of running until the force criterion eventually trips.
+
+    Measured from the MEASURED arm pose, never the commanded reference: under admittance the two
+    differ by the compliant deflection, and here it is the real motion that matters."""
+
+    def __init__(self, robot, T_tool0_conn, T_base_conn_contact, threshold_mm):
+        self.robot = robot
+        self.T_tool0_conn = np.asarray(T_tool0_conn, dtype=float)
+        self._inv_contact = inverse(np.asarray(T_base_conn_contact, dtype=float))
+        self.threshold_mm = float(threshold_mm)
+        self.peak_mm = 0.0
+        self.tripped_by = None
+
+    def travel_mm(self):
+        """Advance along the connector's own +X since contact, in mm. Signed, then clipped at 0 --
+        backing OFF is not progress and must never be counted as any."""
+        T_now = self.robot.tool0() @ self.T_tool0_conn
+        return max(0.0, float((self._inv_contact @ T_now)[0, 3]) * 1000.0)
+
+    def check(self):
+        d = self.travel_mm()
+        self.peak_mm = max(self.peak_mm, d)
+        if self.threshold_mm <= 0.0 or d < self.threshold_mm:
+            return False
+        self.tripped_by = f'travel {d:.2f} mm >= {self.threshold_mm:.2f} mm since contact'
+        return True
+
+    def reset(self):
+        self.tripped_by = None
+
+
 class _RadialConfirm:
     """Was there sustained force ACROSS the connector axis -- the signature of being IN a socket?
 
@@ -453,23 +490,34 @@ def _engage_report(status, s, depth_mm, det, guard, combo, confirm=None):
     with the one that fired marked, and each shown against ITS OWN limit -- a bare number
     cannot be judged without the threshold it was tested against."""
     fired = {'complete': 'PATH COMPLETE', 'force': 'AXIAL FORCE LIMIT',
+             'travel': 'TRAVEL REACHED', 'timeout': 'TIMED OUT',
              'guard': 'GENERAL FORCE GUARD',
-             'unconfirmed': 'AXIAL LIMIT MET, SEAT NOT CONFIRMED'}.get(status, status.upper())
+             'unconfirmed': 'SUCCEEDED BUT SEAT NOT CONFIRMED'}.get(status, status.upper())
     meaning = {
         'complete': 'the full path ran without meeting the axial limit',
         'force': 'a NORMAL end -- the clocking screw drives the rest',
         'guard': 'a JAM: the general wrench limit, not the axial one',
+        'travel': 'the part actually WENT somewhere -- the one thing a jam cannot fake',
+        'timeout': 'neither travel nor force arrived in the time allowed',
         'unconfirmed': 'something resisted, but it does not behave like a SOCKET',
     }.get(status, '')
-    say = log.warning if status in ('guard', 'unconfirmed') else log.info
+    say = log.warning if status in ('guard', 'unconfirmed', 'timeout') else log.info
 
-    def mark(name):
-        return '>>' if name == status else '  '
+    def mark(*names):
+        """'>>' against the condition that ended it. `elapsed` covers TWO outcomes -- the path
+        running out and the timeout -- because both mean the budget was spent without either
+        success condition arriving, and leaving neither marked would show a report with no
+        winner at all."""
+        return '>>' if status in names else '  '
 
     pct = 100.0 * s['elapsed_s'] / max(s['duration_s'], 1e-9)
     say('  --- ENGAGE ENDED: %s --- %s', fired, meaning)
-    say('   %s path complete   %.2f of %.2f s (%.0f%%) -- drove %.1f of %.1f mm',
-        mark('complete'), s['elapsed_s'], s['duration_s'], pct, s['driven_mm'], s['total_mm'])
+    say('   %s elapsed         %.2f of %.2f s (%.0f%%) -- drove %.1f of %.1f mm total',
+        mark('timeout', 'complete'), s['elapsed_s'], s['duration_s'], pct, s['driven_mm'],
+        s['total_mm'])
+    if 'travel_mm' in s:
+        say('   %s travel          %.2f mm of %.2f mm since contact (contact at %.2f mm)',
+            mark('travel'), s['travel_mm'], s['travel_limit_mm'], s.get('contact_mm', 0.0))
     if s['axial_limit_n'] > 0:
         say('   %s axial force     %.1f N of %.1f N limit (peak %.1f N%s)',
             mark('force'), s['axial_n'], s['axial_limit_n'], s['axial_peak_n'],
@@ -492,15 +540,8 @@ def _engage_report(status, s, depth_mm, det, guard, combo, confirm=None):
             confirm['radial_held_s'], confirm['radial_limit_n'],
             confirm['radial_persist_s'],
             'OK' if confirm['radial_ok'] else 'FAILED')
-        if confirm['travel_ok'] is None:
-            say('      wiggle travel   NOT TESTED -- no oscillation configured, so a captured '
-                'connector cannot be told from a free one by motion')
-        else:
-            say('   %s wiggle travel   %.2f mm over %.2f s (want < %.2f mm) -- %s',
-                '>>' if not confirm['travel_ok'] else '  ', confirm['travel_mm'],
-                confirm['cycles_s'], confirm['travel_limit_mm'],
-                'OK' if confirm['travel_ok'] else 'FAILED: it followed the wiggle, so it is '
-                'still free')
+        say('      wiggle travel   %.2f mm over %.2f s -- REPORTED ONLY, not a criterion',
+            confirm['travel_mm'], confirm['cycles_s'])
     if status != 'complete' and combo is not None and combo.tripped_by:
         say('      tripped by      %s', combo.tripped_by)
 
@@ -612,6 +653,21 @@ def build_and_run(cfg, robot, camera, args):
     # from by putting the cable down and re-picking. A budget, not a loop: a cell that keeps
     # missing has a wrong target pose or a wrong in-hand belief, and retrying wears the part.
     max_engage_misses = max(0, int(en.get('max_misses', 2)))
+    # ---- CONTACT: a separate, gentle phase that FINDS the socket before engaging into it ------
+    # Driving the whole insertion in one go means the wiggle and the full approach speed are
+    # already running when first contact happens, so the first touch is the least controlled
+    # moment of the phase. Splitting it puts a slow, un-oscillated approach in front: creep along
+    # the trajectory until a light force says the parts are touching, and let the engagement start
+    # from a KNOWN contact pose rather than from a guess about where the socket is.
+    _ct = en.get('contact', {}) or {}
+    ct_on = bool(_ct.get('enabled', True))
+    ct_force_n = _num(_ct, 'force_n', 1.0)
+    ct_pers_s = _num(_ct, 'persistence_s', 0.10)
+    # ENGAGE TERMINATION -- travel is the positive signal, force the resistive one, timeout the
+    # backstop. See engage_insertion.
+    en_travel_mm = _num(en, 'travel_mm', 5.0)
+    en_timeout_s = _num(en, 'timeout_s', 15.0)
+    en_align_s = _num(en, 'align_s', 2.0)
     # CONFIRMATION -- the axial stop says "something resisted", not "it is in the socket". See
     # _RadialConfirm and the confirm block in engage_insertion.
     _cf = en.get('confirm', {}) or {}
@@ -1547,22 +1603,38 @@ def build_and_run(cfg, robot, camera, args):
         # operator wants to look before the arm backs out and travels to the place. It is also
         # the cheapest diagnostic there is: the arm is still holding the failed pose, so the
         # geometry that caused the miss is there to be seen. Aborting leaves it exactly there.
-        if not phase_gate('FAILED ENGAGE -- RETRACT AND PLACE',
-                          'The engage ran the FULL path without meeting the socket, so the '
-                          'connector never made contact. Look at where it actually is. Next the '
-                          'arm will back out along the connector -X, lay the cable down and '
-                          'return to the pick view to try again.'):
-            log.error('Aborted after the missed engagement -- the arm is LEFT WHERE IT IS with '
-                      'the cable still held.')
-            return False
+        # NOT phase_gate: that one is silenced by `confirm_each_step: false` and by --yes, which
+        # is the right call for the routine step gates it was built for and the WRONG one here.
+        # This is a FAILURE recovery -- the arm is holding a part somewhere it did not expect to
+        # be -- so it asks on the same terms as the pre-contact stand-off prompt: unconditional,
+        # silenced only by --no-prompts, and never in a dry run.
+        if not robot.arm.dry_run and not no_prompts:
+            try:
+                ans = input('\n[FAILED ENGAGE] The engage ran the FULL path without meeting the '
+                            'socket, so the connector never made contact.\n'
+                            '    Look at where it actually is. Next the arm will back out along '
+                            'the connector -X, lay the cable down,\n'
+                            '    and return to the pick view to try again.\n'
+                            '    Enter to continue (q to abort): ')
+            except EOFError:
+                ans = ''
+            if ans.strip().lower() in ('q', 'quit', 'n', 'no'):
+                log.error('Aborted after the missed engagement -- the arm is LEFT WHERE IT IS '
+                          'with the cable still held.')
+                return False
 
         ok = True
         phase('retract')
+        log.info('FAILED ENGAGE: backing out %.0f mm along the connector -X before travelling.',
+                 retract_m * 1000.0)
         try:
             retract_from(miss_ref, T_tool0_conn_held)
         except Exception as exc:                       # noqa: BLE001 -- keep going to the place
-            log.warning('Could not back out after the failed engage (%s) -- placing from here.',
-                        exc)
+            # LOUD, not a warning tucked in a busy log: if the retract did not happen the arm is
+            # travelling to the place from inside/against the socket, which is worth seeing.
+            log.error('RETRACT FAILED after the missed engage (%s: %s) -- the arm will travel to '
+                      'the place from where it is, WITHOUT having backed out.',
+                      type(exc).__name__, exc)
             ok = False
 
         T_place = aligned_place_pose(dis_clear_m)
@@ -1989,33 +2061,121 @@ def build_and_run(cfg, robot, camera, args):
         # scale for every ordinary move that follows, until the next phase() call.
         adm_en.reset()
         adm_en.warmup(first, tare_fn=tare)
-        combo.reset()
-        # REAL ELAPSED TIME, not i*dt. The servo loop does not necessarily cycle at
-        # reference_rate_hz -- on 19 Aug it ran at ~332 Hz against a configured 125, which
+        prev = last_ref = first
+        # REAL ELAPSED TIME everywhere below, not i*dt. The servo loop does not necessarily cycle
+        # at reference_rate_hz -- on 19 Aug it ran at ~332 Hz against a configured 125, which
         # delivered every frequency 2.65x high. Reading the clock makes the delivered frequency
         # the configured one whatever the loop does.
         dur_s = total_mm / max(v_mm_s, 1e-9)
-        status, prev, last_ref = 'complete', first, first
+
+        # ================= STAGE 1: CONTACT -- find the socket, gently =====================
+        # Slow and UN-OSCILLATED. Driving the whole insertion in one go means the wiggle and the
+        # full approach speed are already running when the parts first touch, which makes first
+        # contact the least controlled moment of the phase. Creeping in first means the engagement
+        # starts from a MEASURED contact pose instead of a guess about where the socket is.
+        contact_d = 0.0
+        if ct_on:
+            ct_v = g_v * float(scales.get('contact', s_eng))
+            ct_dur = total_mm / max(ct_v, 1e-9)
+            ct_det = _AxialForce(robot, T_tool0_conn, ct_force_n, ct_pers_s)
+            ct_combo = _AnyGuard(ct_det, guard_en)
+            ct_combo.reset()
+            log.info('--- CONTACT --- creeping in at %.2f mm/s (no oscillation) until %.1f N '
+                     'holds for %.2f s, or %.1f mm of path runs out.',
+                     ct_v, ct_force_n, ct_pers_s, total_mm)
+            ct_status = 'no_contact'
+            t_c0 = _t.monotonic()
+            while True:
+                tc = _t.monotonic() - t_c0
+                if tc >= ct_dur:
+                    break
+                d = ct_v * tc
+                cur = traj_ref(_corr_to_m(mats_from_vec6(path_at(d))), T_tool0_conn)
+                res = adm_en.ramp(prev, cur, dt, ct_combo, on_step=log_cb)
+                prev = last_ref = cur
+                if res == 'seated':
+                    ct_status = 'contact' if ct_combo.tripped is ct_det else 'guard'
+                    contact_d = d
+                    break
+            if ct_status != 'contact':
+                robot.arm.servo_stop()
+                why = ('the general force guard tripped (%s)' % ct_combo.tripped_by
+                       if ct_status == 'guard' else
+                       'the whole %.1f mm path ran without %.1f N of axial reaction'
+                       % (total_mm, ct_force_n))
+                log.error('--- CONTACT FAILED --- %s. The connector never met the socket, so '
+                          'there is nothing to engage into.', why)
+                depth0 = float(matrix_to_xyzrpy(
+                    inverse(T_base_tconn) @ (robot.tool0() @ T_tool0_conn))[0][0] * 1000.0)
+                return ('guard' if ct_status == 'guard' else 'complete'), last_ref, depth0
+            log.info('--- CONTACT MADE --- %.2f mm along the path, %.1f N axial (peak %.1f N). '
+                     'Engaging from here.', contact_d, ct_det.axial_n(), ct_det.peak_n)
+
+        # ================= STAGE 2: ENGAGE -- align laterally AND insert ===================
+        # ALIGNMENT AND INSERTION RUN TOGETHER, not one then the other. Contact is made wherever
+        # the estimates said the socket was, which is not exactly on the trajectory; the reference
+        # therefore starts at the pose the arm is ACTUALLY at and fades onto the trajectory over
+        # `align_s` while it advances. Starting instead at the trajectory would be a step the
+        # admittance spring would have to absorb at the worst possible moment -- in contact.
+        #
+        # THE INSERTION AXIS IS EXCLUDED from the correction. x is DEPTH, and depth is what the
+        # advance is for; folding the depth error into the alignment would either shove the part
+        # in or pull it back out the instant contact was made.
+        T_meas = inverse(T_base_targetobj) @ (robot.tool0() @ T_tool0_conn)
+        cur6 = np.asarray(vec6_from_mats(T_meas), dtype=float)
+        cur6 = np.concatenate([cur6[:3] * 1000.0, cur6[3:]])
+        err6 = cur6 - path_at(contact_d)
+        err6[0] = 0.0                       # ignore the insertion axis
+        log.info('  aligning to the trajectory over %.1f s: lateral %+.2f, %+.2f mm, '
+                 'rot %+.2f, %+.2f, %+.2f deg (x excluded -- that is the advance).',
+                 en_align_s, err6[1], err6[2], err6[3], err6[4], err6[5])
+
+        def eng_ref(t):
+            """Trajectory at the advanced depth, plus the decaying lateral error, plus wiggle."""
+            fade = max(0.0, 1.0 - t / max(en_align_s, 1e-9))
+            v6 = path_at(contact_d + v_mm_s * t) + fade * err6
+            T = _corr_to_m(mats_from_vec6(v6))
+            if en_wig is not None:
+                T = T @ en_wig.delta(t, dur_s)
+            return traj_ref(T, T_tool0_conn)
+
+        T_base_conn_contact = robot.tool0() @ T_tool0_conn
+        trav = _TravelReached(robot, T_tool0_conn, T_base_conn_contact, en_travel_mm)
+        combo = _AnyGuard(trav, det, guard_en)
+        combo.reset()
+        log.info('--- ENGAGE --- from contact, advancing to the %.1f mm path end at %.2f mm/s '
+                 'with the wiggle running. SUCCESS on %.1f mm of travel OR %.1f N held %.2f s; '
+                 'TIMEOUT at %.1f s.',
+                 total_mm, v_mm_s, en_travel_mm, en_fmax, en_fpers, en_timeout_s)
+        status = 'timeout'
         t_wig0 = _t.monotonic()
         while True:
             t = _t.monotonic() - t_wig0
-            if t >= dur_s:
+            if t >= en_timeout_s:
                 break
-            cur = ref_at(t, dur_s)
+            if contact_d + v_mm_s * t >= total_mm:
+                status = 'complete'
+                break
+            cur = eng_ref(t)
             res = adm_en.ramp(prev, cur, dt, combo, on_step=log_cb)
             prev = last_ref = cur
             if res != 'seated':
                 continue
-            status = 'force' if combo.tripped is det else 'guard'
+            status = ('travel' if combo.tripped is trav
+                      else 'force' if combo.tripped is det else 'guard')
             break
 
         # SNAPSHOT EVERY CONDITION AT THE MOMENT IT STOPPED, before the settle hold moves
         # anything. Read once, here, rather than per servo cycle.
-        t_end = min(t, dur_s)
+        t_end = min(t, en_timeout_s)
         w_end = robot.arm.wrench()
         end_state = {
-            'elapsed_s': t_end, 'duration_s': dur_s,
-            'driven_mm': min(v_mm_s * t_end, total_mm), 'total_mm': total_mm,
+            # The ENGAGE stage is budgeted by TIME now (timeout), not by path length, so it is
+            # reported against that -- with the contact stage's advance folded into driven_mm so
+            # the depth figure still means "how far along the path we got".
+            'elapsed_s': t_end, 'duration_s': en_timeout_s,
+            'driven_mm': min(contact_d + v_mm_s * t_end, total_mm), 'total_mm': total_mm,
+            'contact_mm': contact_d, 'travel_mm': trav.peak_mm, 'travel_limit_mm': en_travel_mm,
             'axial_n': det.axial_n(), 'axial_peak_n': det.peak_n,
             'axial_limit_n': en_fmax, 'axial_persist_s': en_fpers,
             'force_n': float(np.linalg.norm(w_end[:3])),
@@ -2037,7 +2197,7 @@ def build_and_run(cfg, robot, camera, args):
         # Wiggling IN PLACE, not advancing: the depth is already decided, and driving further
         # while testing would confound the two.
         confirm = None
-        if status == 'force' and cf_on:
+        if status in ('force', 'travel') and cf_on:
             rad = _RadialConfirm(robot, T_tool0_conn, cf_radial_n, cf_radial_s)
             live_f = [en_frq[i] * en_scale for i in range(6)
                       if abs(en_amp[i]) > 0.0 and en_frq[i] > 0.0]
@@ -2081,23 +2241,22 @@ def build_and_run(cfg, robot, camera, args):
                 'travel_ok': bool(travel_mm < cf_max_mm) if wiggled else None,
                 'cycles_s': cyc_s, 'wiggled': wiggled,
             }
-            ok_r = confirm['radial_ok']
-            ok_t = confirm['travel_ok'] is not False
-            if ok_r and ok_t:
-                log.info('  SEAT CONFIRMED: radial %.1f N held %.2f s (>= %.1f N / %.2f s), '
-                         'travel %.2f mm (< %.2f mm).', rad.peak_n, rad.held_s, cf_radial_n,
-                         cf_radial_s, travel_mm, cf_max_mm)
+            # TRAVEL IS MEASURED AND REPORTED, BUT NO LONGER DECIDES. The commanded amplitude
+            # is only an upper bound on what a FREE connector would do, and the admittance spring
+            # already suppresses most of it -- so a small measured travel does not by itself mean
+            # captured, and the test rejected good seats. Radial force is the discriminating
+            # signal; the travel number stays in the log because it is useful to read.
+            if confirm['radial_ok']:
+                log.info('  SEAT CONFIRMED: radial %.1f N held %.2f s (>= %.1f N / %.2f s). '
+                         '(travel %.2f mm -- reported only, not a criterion.)',
+                         rad.peak_n, rad.held_s, cf_radial_n, cf_radial_s, travel_mm)
             else:
                 status = 'unconfirmed'
-                log.error('  SEAT NOT CONFIRMED -- the axial limit was met but the connector does '
-                          'not behave like it is IN a socket. radial peak %.1f N held %.2f s '
-                          '(want >= %.1f N for %.2f s): %s. travel %.2f mm (want < %.2f mm): %s.',
-                          rad.peak_n, rad.held_s, cf_radial_n, cf_radial_s,
-                          'OK' if ok_r else 'FAILED', travel_mm, cf_max_mm,
-                          'OK' if ok_t else 'FAILED (it followed the wiggle -- still free)')
-                if not wiggled:
-                    log.warning('  (no oscillation is configured, so the travel test could not '
-                                'run -- only the radial force was checked.)')
+                log.error('  SEAT NOT CONFIRMED -- the axial limit was met but there was no '
+                          'sustained RADIAL reaction, so the connector is most likely against a '
+                          'face rather than in a socket. radial peak %.1f N, longest hold %.2f s '
+                          '(want >= %.1f N for %.2f s). (travel %.2f mm -- reported only.)',
+                          rad.peak_n, rad.held_s, cf_radial_n, cf_radial_s, travel_mm)
 
         stay = robot.tool0()
         adm_en.reset()
@@ -3482,11 +3641,18 @@ def build_and_run(cfg, robot, camera, args):
                 # fail every run. _engage_report already says the condition is dead; here it just
                 # means the miss cannot be detected.
                 en_status, _last_ref_e, en_depth = engage_insertion()
-                if en_status == 'complete' and en_fmax > 0.0:
-                    log.error('ENGAGE MISSED: the full path ran (trajectory + %.0f mm preload) '
-                              'without reaching the %.1f N axial limit, so the connector never '
-                              'met the socket. Treating this as a FAILED engagement.',
-                              en_pre_mm, en_fmax)
+                # SUCCESS IS POSITIVE EVIDENCE ONLY: the part travelled, or it pushed back hard
+                # enough for long enough. Everything else -- the path running out, the timeout,
+                # a jam, a failed seat confirmation -- is a miss, and they all take the same
+                # recovery: put the cable down and measure everything again.
+                if en_status in ('complete', 'timeout', 'guard'):
+                    log.error('ENGAGE FAILED (%s): neither %.1f mm of travel nor %.1f N held '
+                              '%.2f s was reached, so the connector is not seated. Treating this '
+                              'as a FAILED engagement.',
+                              {'complete': 'the path ran out',
+                               'timeout': 'timed out after %.0f s' % en_timeout_s,
+                               'guard': 'the general force guard tripped -- a JAM'}[en_status],
+                              en_travel_mm, en_fmax, en_fpers)
                     engage_missed = True
                     success = False
                 elif en_status == 'unconfirmed':
@@ -3500,11 +3666,7 @@ def build_and_run(cfg, robot, camera, args):
                     engage_missed = True
                     success = False
                 else:
-                    success = en_status in ('complete', 'force')
-                    if en_status == 'complete':
-                        log.warning('ENGAGE ran the full path and no axial limit is set '
-                                    '(max_axial_force_n = 0), so a miss cannot be told from a '
-                                    'seat. Set a limit to make this detectable.')
+                    success = en_status in ('force', 'travel')
                 est_rows.append({'attempt': 'engage', 'status': en_status,
                                  'depth_mm': en_depth, 'success': bool(success)})
             for it in (range(1, max_attempts + 1) if ins_mode == 'estimate' else ()):

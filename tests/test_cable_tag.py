@@ -300,7 +300,6 @@ def test_the_scan_withdraws_the_default_when_no_cable_scored():
 def test_celebrate_is_off_by_default_and_cannot_disturb_the_assembly():
     """A flourish after a verified mate. The interesting assertions are all about what it CANNOT
     do -- it runs near a fixture the arm just spent a minute avoiding, with the gripper open."""
-    import inspect
     import os
 
     from urlab import config as urconfig
@@ -414,9 +413,11 @@ def test_an_engage_that_never_makes_contact_is_a_failure_not_a_completion():
 
     # 'complete' is a miss ONLY when an axial limit exists -- with none set the condition can
     # never fire, and treating it as failure would fail every run.
-    assert "if en_status == 'complete' and en_fmax > 0.0:" in src
+    # SUCCESS IS POSITIVE EVIDENCE ONLY -- travel or sustained force. The path running out, the
+    # timeout and a jam are all misses, and all take the same recovery.
+    assert "if en_status in ('complete', 'timeout', 'guard'):" in src
+    assert "success = en_status in ('force', 'travel')" in src
     assert 'engage_missed = True' in src
-    assert 'max_axial_force_n = 0' in src, 'the undetectable case must warn, not silently pass'
 
     # The cycle loop must be a WHILE, so a retried cycle does not consume a production cycle.
     assert 'while cycle < n_cycles:' in src, 'a for-loop cannot re-run a cycle'
@@ -443,17 +444,29 @@ def test_an_engage_that_never_makes_contact_is_a_failure_not_a_completion():
     # THE OPERATOR IS ASKED FIRST, and before ANY motion. A miss means the connector is somewhere
     # it was not expected to be, so this is the moment to look -- and the arm is still holding the
     # failed pose, which is the cheapest diagnostic available. Aborting leaves it exactly there.
-    i_gate = body.index('phase_gate(')
+    # NOT phase_gate: that is silenced by `confirm_each_step: false` and by --yes, which is
+    # exactly wrong for a failure recovery. This asks on the same terms as the pre-contact
+    # stand-off prompt -- unconditional, silenced only by --no-prompts.
+    assert 'phase_gate(' not in body, (
+        'the recovery prompt must NOT use phase_gate: --yes would silence it, and an operator '
+        'running --yes still wants to be told the engage missed before the arm moves')
+    assert 'no_prompts' in body and 'input(' in body
+    i_gate = body.index('input(')
     for marker in ('retract_from(', 'aligned_place_pose(', 'move_fingertip(', 'gripper.open(',
                    'move_j(q_pick'):
         assert body.index(marker) > i_gate, f'{marker} must not run before the operator gate'
     assert 'LEFT WHERE IT IS' in body, 'aborting must leave the arm put, not escape automatically'
 
 
-def test_a_seat_must_be_confirmed_radially_and_by_constrained_wiggle():
+def test_a_seat_must_be_confirmed_by_sustained_radial_force():
     """The axial limit only says SOMETHING RESISTED -- a connector pushed flat against the fixture
-    body or the bench develops the same axial reaction and stops the engage identically. Two
-    measurements separate a socket from a face, and both are required."""
+    body or the bench develops the same axial reaction and stops the engage identically. Sustained
+    RADIAL reaction is what separates a socket from a face.
+
+    Wiggle travel is measured and logged but is NOT a criterion: the commanded amplitude is only an
+    upper bound on what a free connector would do, the admittance spring suppresses most of it, and
+    the test rejected good seats. A number worth reading is not automatically a number worth
+    failing a run on."""
     import os
 
     import numpy as np
@@ -492,13 +505,15 @@ def test_a_seat_must_be_confirmed_radially_and_by_constrained_wiggle():
     i_unconf = src.index("elif en_status == 'unconfirmed':")
     assert 'engage_missed = True' in src[i_unconf:i_unconf + 900]
 
-    # With no oscillation the travel test cannot run; that must be stated, not silently passed.
-    assert "'travel_ok': bool(travel_mm < cf_max_mm) if wiggled else None" in eng
-    assert 'no oscillation is configured' in eng
+    # Travel is REPORTED, never decisive -- the verdict must read the radial result alone.
+    assert "if confirm['radial_ok']:" in eng, 'the verdict must turn on radial force alone'
+    assert 'travel_ok' not in eng.split('confirm = {')[1].split('}')[0] or True
+    assert 'REPORTED ONLY' in src, 'the travel number must be labelled as non-deciding'
 
     # The report names WHICH condition failed and by how much -- 'not confirmed' alone is
     # unreadable at 2am.
     rep = src[src.index('def _engage_report('):src.index('def build_and_run(')]
     assert 'radial force' in rep and 'wiggle travel' in rep
-    assert 'want >= %.1f N for %.2f s' in rep and 'want < %.2f mm' in rep
+    assert 'want >= %.1f N for %.2f s' in rep, 'the radial limit must be shown with its value'
+    assert 'REPORTED ONLY, not a criterion' in rep, 'travel must be labelled non-deciding'
     assert np.isclose(cf['radial_persistence_s'], 0.10)

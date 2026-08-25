@@ -53,7 +53,7 @@ camera:
 # This block is only the detector's dictionary + a fallback size for an undeclared id.
 aruco:
   dictionary: DICT_4X4_50
-  marker_size_m: 0.0307
+  marker_size_m: 0.0388
 
 # THE VIEW SWEEP, shared with urlab.apps.marker_calibration (urlab/skills/marker_localize.py).
 # Offsets are CAMERA-FRAME poses relative to the start pose; the markers must already be in
@@ -102,7 +102,7 @@ marker_views:
     pos_tol_mm: 5.0
     ang_tol_deg: 5.0
     ring_mm: 15.0
-    ring_views: 12
+    ring_views: 36
 
 sam3:
   mode: junction
@@ -614,6 +614,9 @@ speed:
     # speed, and whole oscillation cycles have to fit inside it -- so it has to be settable
     # without slowing every other move that runs under the assemble phase.  Absent -> assemble.
     engage: 0.05
+    # The CONTACT creep -- slower than the engage, because this is the approach that actually
+    # touches the socket and contact force scales hard with approach speed.
+    contact: 0.02
     retract: 2.0       # the between-attempt retract + the release escape
     # POST-MATE CLOCKING, one scale per maneuver.  These pace the CONTACT ramps; free-space
     # moves inside a maneuver stay on standoff/retract.  A non-null speed_translation_mm_s /
@@ -862,26 +865,50 @@ assembly:
     #
     #   RADIAL FORCE   a barrel inside a socket is laterally constrained, so rocking it pushes
     #                  back ACROSS its own axis.  A connector on a flat face just slides.
-    #   WIGGLE TRAVEL  the reference keeps commanding the same amplitude, but a captured
-    #                  connector cannot follow it.  Measured travel far below the commanded
-    #                  amplitude IS the capture; travel that tracks the command means free.
+    # WIGGLE TRAVEL is measured and logged, but is NOT a criterion: the commanded amplitude is
+    # only an upper bound on what a free connector would do, the admittance spring already
+    # suppresses most of it, and the test rejected good seats.  The number is worth reading; it
+    # is not worth failing a run on.
     #
-    # Failing either is treated exactly like a MISS: the cable goes down, the arm returns to the
-    # pick view, and everything is measured again (see max_misses).  Continuing would clock a
-    # connector that is only leaning on something.
-    #
-    # NOTE the travel test needs an oscillation.  With every wiggle amplitude at 0 there is no
-    # cycle to measure, only the radial force is checked, and the run says so.
+    # Failing the radial test is treated exactly like a MISS: the cable goes down, the arm
+    # returns to the pick view, and everything is measured again (see max_misses).  Continuing
+    # would clock a connector that is only leaning on something.
     confirm:
       enabled: true
       radial_force_n: 1.0        # |force| across the connector axis, in its OWN Y-Z
       radial_persistence_s: 0.10 # ...held continuously for this long
-      max_wiggle_mm: 1.0         # measured peak-to-peak travel must stay under this
+      max_wiggle_mm: 1.0         # RETAINED for the log only -- no longer a pass/fail criterion
       cycles: 1                  # how many full wiggle cycles to watch
       fallback_s: 0.5            # confirmation window when no oscillation is configured
     
+    # ---- STAGE 1: CONTACT -- find the socket before engaging into it -----------------------
+    # Slow and UN-OSCILLATED, at speed.phase_scale.contact.  Driving the whole insertion in one
+    # go means the wiggle and the full approach speed are already running when the parts first
+    # touch, so first contact is the least controlled moment of the phase.  Creeping in first
+    # lets the engagement start from a MEASURED contact pose instead of a guess.
+    contact:
+      enabled: true
+      force_n: 1.0             # light -- this is 'are we touching', not 'are we seated'
+      persistence_s: 0.10
+    
+    # ---- STAGE 2: ENGAGE -- align laterally AND insert, together ---------------------------
+    # From the contact pose the reference fades onto the trajectory over align_s while it
+    # advances, so alignment and insertion happen together and there is no step for the
+    # admittance spring to absorb while already in contact.  The INSERTION AXIS (x) is excluded
+    # from the alignment: x is depth, and depth is what the advance is for.
+    #
+    # SUCCESS IS POSITIVE EVIDENCE ONLY:
+    #   travel_mm   the part actually WENT somewhere -- the one thing a jam cannot fake, and
+    #               what recognises a mate that slides home under low force.
+    #   the axial force limit below, held for persistence_s.
+    # Anything else -- the path running out, the timeout, a jam -- is a MISS and takes the
+    # place-and-re-pick recovery (see max_misses).
+    travel_mm: 5.0
+    timeout_s: 15.0
+    align_s: 2.0             # how long the lateral correction takes to fade in
+    
     max_axial_force_n: 5.0
-    persistence_s: 0.5          # the limit must hold this long -- rides out contact spikes
+    persistence_s: 1.0          # the limit must hold this long -- rides out contact spikes
 
     # ---- compliance overrides (else the top-level compliance:) ---
     stiffness: [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
@@ -1172,7 +1199,7 @@ assembly:
     seat_push:
       enabled: true
       force_n: 3.0
-      persistence_s: 0.1
+      persistence_s: 0.10
       max_travel_mm: 15.0
     # GRASP CLOCK ANGLE, deg: the ABSOLUTE roll about the socket +X to take the collar at
     # (same convention as connector_clocking.sweep_deg); the turn runs from here to

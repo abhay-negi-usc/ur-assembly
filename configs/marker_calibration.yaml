@@ -51,8 +51,8 @@ target_frame: bnc_connector_finger_holder
 # quiet zone is not part of the marker, and including it inflates the size by ~14% on a typical
 # print, which is a ~14% depth error.
 markers:
-  24:  30.7
-  25:  30.7
+  24:  38.8
+  25:  38.8
 
 # Every declared marker must be seen, or the run fails. Set false to calibrate a partial rig (the
 # missing ids simply do not appear in the block, and the existing frames.yaml entries stand).
@@ -135,7 +135,7 @@ marker_views:
     pos_tol_mm: 5.0
     ang_tol_deg: 5.0
     ring_mm: 15.0
-    ring_views: 12
+    ring_views: 36
 
 # ---- Motion --------------------------------------------------------------------------------
 # Free space with nothing in the fingers, but the arm is carrying a camera near a fixture.

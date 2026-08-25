@@ -5673,9 +5673,10 @@ def test_engage_is_the_trajectory_plus_an_optional_oscillation():
         'engage must be a valid mode, and the standalone wiggle must NOT be -- it is retired, '
         'with its oscillation living inside engage')
     # a force stop ends the PHASE, not the run
-    assert "success = en_status in ('complete', 'force')" in src, (
+    assert "success = en_status in ('force', 'travel')" in src, (
         'hitting the axial force limit must NOT fail the run -- a connector meeting resistance '
-        'partway is what the clocking screw is for, so the sequence carries on')
+        'partway is what the clocking screw is for. TRAVEL is now a success too: a mate that '
+        'slides home under low force is a seat, and travel is the one signal a jam cannot fake')
     # and the limit is AXIAL, not |f|
     assert 'class _AxialForce' in src and 'wrench_in(T_base_conn, T_base_tool0)' in src, (
         'the engage limit must project onto the connector +X; a |f| limit tight enough to catch '

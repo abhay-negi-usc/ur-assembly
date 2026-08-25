@@ -1719,8 +1719,10 @@ def test_the_engage_report_shows_every_termination_condition():
         return '\n'.join(rec)
 
     out = render('force')
-    # EVERY condition present, whether or not it fired
-    for must in ('path complete', 'axial force', 'force guard', 'depth'):
+    # EVERY condition present, whether or not it fired. 'path complete' became 'elapsed' when the
+    # engage stopped being budgeted by path length and started being budgeted by TIME (timeout_s),
+    # with travel added as the positive success signal.
+    for must in ('elapsed', 'axial force', 'force guard', 'depth'):
         assert must in out, f'{must!r} missing -- all conditions are reported, not just the winner'
     # each against its own limit
     assert '6.42 of 8.00 s' in out and '16.1 of 20.0 mm' in out
@@ -1732,7 +1734,7 @@ def test_the_engage_report_shows_every_termination_condition():
     assert 'ENGAGE ENDED: AXIAL FORCE LIMIT' in out
 
     # the marker moves with the status
-    assert '>> path complete' in render('complete')
+    assert '>> elapsed' in render('complete')
     assert '>> force guard' in render('guard')
 
     # a condition that CANNOT fire says so, rather than printing a limit of zero

@@ -2178,7 +2178,10 @@ def build_and_run(cfg, robot, camera, args):
                     % (contact_d, ct_det.axial_n())):
                 return 'aborted', last_ref, float(matrix_to_xyzrpy(
                     inverse(T_base_tconn) @ (robot.tool0() @ T_tool0_conn))[0][0] * 1000.0)
-            adm_en.reset()
+            # REBASE, not reset: the arm is already touching (1 N -> ~2 mm of yield), so
+            # re-engaging on `last_ref` with a zeroed Delta would push in by that much. rebase()
+            # re-references onto the MEASURED pose, so the command does not move at all.
+            last_ref = prev = adm_en.rebase(robot.tool0())
             adm_en.warmup(last_ref)         # re-engage the servo where the arm actually is
 
         # ================= STAGE 2: ENGAGE -- align laterally AND insert ===================
@@ -2283,7 +2286,12 @@ def build_and_run(cfg, robot, camera, args):
                      'radial >= %.1f N held %.2f s AND travel < %.2f mm.',
                      cyc_s, cf_cycles, '' if cf_cycles == 1 else 's', cf_radial_n, cf_radial_s,
                      cf_max_mm)
-            adm_en.reset()
+            # NO reset() HERE. The spring is LOADED -- it is holding the contact equilibrium,
+            # and Delta is the difference between the deep reference and where the part actually
+            # is (w/S: at 15 N against 500 N/m that is 30 mm). Zeroing it while keeping
+            # `last_ref` would step the command by the whole 30 mm straight into the socket, then
+            # let it spring back out. Continue from the reference the engage ended on, with the
+            # deflection intact, so the wiggle rides on the equilibrium instead of through it.
             prev_c = last_ref
             t_c0 = _t.monotonic()
             while True:

@@ -2439,3 +2439,55 @@ def test_marker_ransac_is_deterministic_and_exhaustive():
     for _ in range(20):
         assert ml.marker_consensus(votes, w, 5.0, 5.0) == first, 'must not vary between runs'
     assert first[0] == [1, 2, 4] and first[1] == [3]
+
+
+def test_the_admittance_integrator_is_never_reset_under_load():
+    """`T_commanded = T_ref @ Delta`, so zeroing Delta moves the COMMAND by -Delta.
+
+    Resetting while the spring is loaded therefore steps the arm by the whole accumulated
+    deflection in one cycle -- into whatever it was pressing against. At 15 N against 500 N/m
+    that is 30 mm straight into the socket, followed by a spring-back out as it re-yields. That
+    is exactly the push-then-rebound seen on the bench.
+
+    reset() is only valid when Delta is already ~0 (free space), or when the caller re-references
+    onto the MEASURED pose in the same breath -- which is what rebase() does."""
+    import os
+
+    import numpy as np
+    from urlab import config as urconfig
+    from urlab.robot.admittance import AdmittanceController
+
+    # rebase clears the spring AND hands back the pose to reference it on, so the pair cannot be
+    # split. Its docstring must state what it costs, because forgetting the equilibrium means the
+    # tool drifts off the contact as the residual force decays.
+    adm = AdmittanceController.__new__(AdmittanceController)
+    adm._delta = np.ones(6) * 0.03
+    adm._vel = np.ones(6) * 0.1
+    T = np.eye(4)
+    T[0, 3] = 0.123
+    out = adm.rebase(T)
+    assert np.allclose(adm._delta, 0.0) and np.allclose(adm._vel, 0.0)
+    assert np.allclose(out, T), 'rebase returns the pose to re-reference on'
+    assert 'FORGETS the contact equilibrium' in AdmittanceController.rebase.__doc__
+    assert 'ASSERTION, NOT A MOTION' in AdmittanceController.reset.__doc__, (
+        "reset's precondition must be written down, not folklore")
+
+    src = open(os.path.join(os.path.dirname(urconfig.__file__), 'apps',
+                            'bnc_assembly.py'), encoding='utf-8').read()
+    eng = src[src.index('def engage_insertion():'):src.index('def connector_clocking():')]
+
+    # THE CONFIRMATION runs in hard contact -- it must inherit the equilibrium, not zero it.
+    conf = eng[eng.index('confirming the seat'):eng.index('robot.arm.servo_stop()',
+                                                          eng.index('confirming the seat'))]
+    assert 'adm_en.reset()' not in conf, (
+        'the seat confirmation must NOT reset the integrator: the spring is holding the contact '
+        'equilibrium, and zeroing it while keeping the deep reference steps the connector into '
+        'the socket by the whole deflection')
+
+    # THE CONTACT GATE interrupts a compliant motion while already touching -> rebase.
+    i_gate = eng.index("'ENGAGE (from contact)'")
+    resume = eng[i_gate:i_gate + 900]
+    assert 'adm_en.rebase(robot.tool0())' in resume, (
+        'resuming after the contact prompt must rebase onto the measured pose, not re-engage on '
+        'a reference the arm is no longer at'
+    )

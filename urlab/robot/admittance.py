@@ -69,9 +69,42 @@ class AdmittanceController:
         self._vel = np.zeros(6)
 
     def reset(self):
-        """Zero the integrator -- call before an insertion so it starts on the reference."""
+        """Zero the integrator -- call before an insertion so it starts on the reference.
+
+        THIS IS AN ASSERTION, NOT A MOTION: "the tool is AT the reference, and unloaded". The
+        commanded pose is `T_ref @ Delta`, so zeroing Delta moves the COMMAND by exactly -Delta.
+        Call it while the spring is loaded and the arm steps by the whole accumulated deflection
+        in one cycle -- into whatever it was pressing against.
+
+        SO IT IS ONLY VALID WHEN ONE OF THESE HOLDS:
+
+          1. Delta is already ~0 -- free space, nothing touching. The normal case: move_j to the
+             start, then reset() + warmup(start).
+          2. The caller re-references to where the tool ACTUALLY is in the same breath. That is
+             what `rebase()` does, and it is the only safe way to reset under load.
+
+        Neither is checked here, because the controller cannot know which pose the caller is about
+        to command. It has been got wrong: resetting mid-contact while keeping a reference 30 mm
+        deep drove the connector 30 mm further into the socket, then let it spring back out.
+        """
         self._delta = np.zeros(6)
         self._vel = np.zeros(6)
+
+    def rebase(self, T_measured):
+        """Re-reference the spring onto where the tool ACTUALLY is, and return that pose.
+
+        The safe way to clear the integrator UNDER LOAD: the deflection is discarded and the
+        reference becomes the deflected pose, so the commanded pose does not move at all. Use it
+        whenever a compliant motion is interrupted -- an operator prompt, a phase change -- and
+        the next one has to start from reality rather than from a stale reference.
+
+        The trade, stated plainly: this FORGETS the contact equilibrium, so the spring will begin
+        yielding again from zero against whatever force is still present, and the tool will drift
+        off the contact until that force decays. If the preload is meant to be HELD, keep the
+        reference and the deflection instead of rebasing.
+        """
+        self.reset()
+        return np.array(T_measured, dtype=float)
 
     def warmup(self, T_ref, seconds=None, tare_fn=None):
         """Hold T_ref via servoL for `seconds` (default warmup_s), engaging servo mode and letting

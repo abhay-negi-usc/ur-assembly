@@ -949,7 +949,7 @@ assembly:
     align_s: 2.0             # how long the lateral correction takes to fade in
     
     max_axial_force_n: 5.0
-    persistence_s: 1.0          # the limit must hold this long -- rides out contact spikes
+    persistence_s: 0.25          # the limit must hold this long -- rides out contact spikes
 
     # ---- compliance overrides (else the top-level compliance:) ---
     stiffness: [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
@@ -1208,7 +1208,7 @@ assembly:
     # "ring stands 30 mm from the JUNCTION": junction sits at -45.7 mm on this axis, so
     # collar = -45.7 + 30 = -15.7 mm.  If re-tuned on the bench, measure from the connector
     # frame origin.
-    collar_offset_mm: 0.0
+    collar_offset_mm: -2.0
     # COLLAR AXIS OFFSET, mm, in the SOCKET (target) frame's own axes: shifts the LINE the
     # whole collar maneuver works about (centring, unwind, advance, turn, and the tug
     # re-grip).  Y and Z move the line; X only slides the reference point along it.  Exists

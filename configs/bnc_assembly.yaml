@@ -688,6 +688,17 @@ pick_joints_deg: [-75, -155, -100, -190, -90, 195]
 # ASSEMBLY -- the estimate-while-assemble loop
 # ===================================================================================================
 assembly:
+  # PAUSE BETWEEN BEHAVIOURS.  Every boundary -- pick, contact, engage, connector clocking,
+  # the collar, the tug, the escape, disassembly -- stops and waits for Enter, so an operator can
+  # look at what just happened before the next thing starts.
+  #
+  # UNCONDITIONAL BY DESIGN: these do NOT read confirm_each_step, so `--yes` does not silence
+  # them.  --yes means "stop asking me to confirm each little step", not "drive the part into the
+  # socket without telling me" -- and a prompt that was asked for and never appeared is exactly
+  # how the failed-engage gate went missing.  Set this false, or run --no-prompts, for genuinely
+  # unattended runs.  Dry runs never prompt, and EOF continues so a headless run cannot hang.
+  gate_between_behaviors: true
+
   # The KNOWN target (where the CONNECTOR must end up, base_link): names a configs/frames.yaml
   # frame whose `targets:` entry is the recorded mate.  MEASURE: hand-guide to a good mate,
   # read `base_link <- <frame>` off the monitor, paste it under targets: (mm/deg).

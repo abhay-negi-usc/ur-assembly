@@ -1319,15 +1319,24 @@ def build_and_run(cfg, robot, camera, args):
         log.warning('skip_prompts: running with NO confirmations -- the reset, the pre-contact '
                     'stand-off and the success calls are all skipped (success falls back to '
                     'the tolerance check). Only the cable labelling still asks.')
-    gates_on = cfg.get('confirm_each_step', True) is not False and not no_prompts
+    # BEHAVIOUR GATES ARE UNCONDITIONAL, and deliberately do NOT read confirm_each_step / --yes.
+    # --yes means "stop asking me to confirm each little step"; it does not mean "drive the part
+    # into the socket without telling me". Every phase_gate here sits at a BEHAVIOUR boundary --
+    # contact, engage, clocking, the collar, the tug, the escape -- and each is a point where an
+    # operator wants to look at what just happened before the next thing starts. Silencing those
+    # with a convenience flag is how a prompt that was asked for never appears (which happened:
+    # the failed-engage prompt was invisible under --yes).
+    #
+    # The escapes are `--no-prompts` for genuinely unattended runs, and
+    # assembly.gate_between_behaviors: false to turn them off in config. Dry runs never prompt.
+    gates_on = bool(a.get('gate_between_behaviors', True)) and not no_prompts
 
     def phase_gate(name, ahead):
-        """Continue/abort between two phases. True = go on.
+        """Continue/abort between two BEHAVIOURS. True = go on.
 
-        Placed at the IRREVERSIBLE boundaries -- the screw cams the connector home, the collar
-        locks it. Aborting LEAVES THE ARM WHERE IT IS rather than escaping automatically: the
-        right recovery depends on how far the mate went and whether it will release, which this
-        cannot judge. EOF continues, so a headless run never hangs; dry runs skip the prompt."""
+        Aborting LEAVES THE ARM WHERE IT IS rather than escaping automatically: the right recovery
+        depends on how far the mate went and whether it will release, which this cannot judge. EOF
+        continues, so a headless run never hangs; dry runs skip the prompt."""
         if robot.arm.dry_run or not gates_on:
             return True
         try:
@@ -2161,6 +2170,16 @@ def build_and_run(cfg, robot, camera, args):
                 return ('guard' if ct_status == 'guard' else 'complete'), last_ref, depth0
             log.info('--- CONTACT MADE --- %.2f mm along the path, %.1f N axial (peak %.1f N). '
                      'Engaging from here.', contact_d, ct_det.axial_n(), ct_det.peak_n)
+            robot.arm.servo_stop()          # settle before asking; do not hold a servo open on a
+            if not phase_gate(              # prompt that may sit for minutes
+                    'ENGAGE (from contact)',
+                    'The connector is TOUCHING the socket %.2f mm along the path (%.1f N axial). '
+                    'Look at where it actually met before the alignment and the wiggle start.'
+                    % (contact_d, ct_det.axial_n())):
+                return 'aborted', last_ref, float(matrix_to_xyzrpy(
+                    inverse(T_base_tconn) @ (robot.tool0() @ T_tool0_conn))[0][0] * 1000.0)
+            adm_en.reset()
+            adm_en.warmup(last_ref)         # re-engage the servo where the arm actually is
 
         # ================= STAGE 2: ENGAGE -- align laterally AND insert ===================
         # ALIGNMENT AND INSERTION RUN TOGETHER, not one then the other. Contact is made wherever
@@ -3581,6 +3600,9 @@ def build_and_run(cfg, robot, camera, args):
         attempt = 0
         reoriented = False
         runner = StepRunner(log, confirm=confirm is not None)
+        if not phase_gate('PICK THE CABLE',
+                          'Next the arm localizes the cable and grasps it.'):
+            return False
         while True:
             phase('scan')
             result = _pick(cfg, robot, scanner, geom, check, recovery, grasp, confirm, recorder,
@@ -3696,7 +3718,12 @@ def build_and_run(cfg, robot, camera, args):
                 # enough for long enough. Everything else -- the path running out, the timeout,
                 # a jam, a failed seat confirmation -- is a miss, and they all take the same
                 # recovery: put the cable down and measure everything again.
-                if en_status in ('complete', 'timeout', 'guard'):
+                if en_status == 'aborted':
+                    log.warning('ENGAGE aborted by the operator at the contact gate -- the arm is '
+                                'LEFT WHERE IT IS with the cable held and touching the socket. '
+                                'No recovery motion is attempted; that is what abort means.')
+                    success = False
+                elif en_status in ('complete', 'timeout', 'guard'):
                     log.error('ENGAGE FAILED (%s): neither %.1f mm of travel nor %.1f N held '
                               '%.2f s was reached, so the connector is not seated. Treating this '
                               'as a FAILED engagement.',
@@ -4047,6 +4074,10 @@ def build_and_run(cfg, robot, camera, args):
                 # the disassembly starts by re-approaching and re-gripping like any other maneuver.
                 # Nothing it does depends on a grip inherited from the assembly.
                 if dis_on and ret_ok and tug_res != 'failed' and state in ('locked', 'seated'):
+                    if not phase_gate('DISASSEMBLE',
+                                      'The assembly is complete and the arm is clear. Next it '
+                                      're-approaches, re-grips and takes it apart.'):
+                        return False
                     dis_ok, state = disassembly(state, cc_screw_deg, T_base_conn)
                     if not dis_ok:
                         log.error('DISASSEMBLY did not finish -- the arm is LEFT WHERE IT IS and '

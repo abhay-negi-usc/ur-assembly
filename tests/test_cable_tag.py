@@ -534,3 +534,48 @@ def test_a_seat_must_be_confirmed_by_sustained_radial_force():
     assert 'want >= %.1f N for %.2f s' in rep, 'the radial limit must be shown with its value'
     assert 'REPORTED ONLY, not a criterion' in rep, 'travel must be labelled non-deciding'
     assert np.isclose(cf['radial_persistence_s'], 0.10)
+
+
+def test_every_behaviour_boundary_pauses_and_yes_cannot_silence_it():
+    """A pause between behaviours, so an operator can look at what just happened before the next
+    thing starts -- including between CONTACT and ENGAGE, which is the boundary where the part is
+    already touching the socket and the alignment and wiggle are about to start.
+
+    UNCONDITIONAL BY DESIGN. `--yes` means "stop asking me to confirm each little step"; it does
+    not mean "drive the part into the socket without telling me". Reading confirm_each_step here
+    is exactly how the failed-engage prompt became invisible."""
+    import os
+
+    from urlab import config as urconfig
+    src = open(os.path.join(os.path.dirname(urconfig.__file__), 'apps',
+                            'bnc_assembly.py'), encoding='utf-8').read()
+
+    # The gate must NOT consult confirm_each_step (which --yes sets false).
+    assert "gates_on = bool(a.get('gate_between_behaviors', True)) and not no_prompts" in src
+    assert "cfg.get('confirm_each_step'" not in src, (
+        'behaviour gates must not read confirm_each_step -- --yes would silence a prompt that '
+        'was deliberately asked for')
+
+    # ...but --no-prompts and dry runs still skip, so unattended and simulated runs never hang.
+    assert 'if robot.arm.dry_run or not gates_on:' in src
+    cfg = urconfig.load('bnc_assembly')
+    assert cfg.get_path('assembly.gate_between_behaviors') is True
+
+    # Every behaviour boundary has one.
+    for name in ('PICK THE CABLE', 'ENGAGE (from contact)', 'CONNECTOR CLOCKING (insert)',
+                 'COLLAR CLOCKING (lock)', 'TUG VERIFY', 'ESCAPE', 'DISASSEMBLE',
+                 'VISUAL LOCALIZATION', 'PLACE THE CABLE', 'UNLOCK', 'EXTRACT'):
+        assert f"'{name}'" in src, f'no behaviour gate before {name}'
+
+    # THE CONTACT/ENGAGE GATE stops the servo before asking and re-warms after -- a prompt can sit
+    # for minutes, and holding a servo stream open across it is not something to do to the arm.
+    eng = src[src.index('def engage_insertion():'):src.index('def connector_clocking():')]
+    i_gate = eng.index("'ENGAGE (from contact)'")
+    assert 'robot.arm.servo_stop()' in eng[:i_gate], 'settle before prompting'
+    assert 'adm_en.warmup(last_ref)' in eng[i_gate:], 're-engage the servo where the arm actually is'
+
+    # Aborting there is NOT a miss: no recovery motion, the arm is left where it is.
+    assert "if en_status == 'aborted':" in src
+    i_ab = src.index("if en_status == 'aborted':")
+    assert 'engage_missed' not in src[i_ab:i_ab + 400], (
+        'an operator abort must not trigger the place-and-re-pick recovery -- abort means stop')

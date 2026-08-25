@@ -101,6 +101,27 @@ _UNIT_EXEMPT = ('_per_m', '_per_mm', '_per_deg', '_per_rad')
 # `xyz_m`) -- letting the generic rule near them would mint a second, unread spelling.
 _POSE_KEYS = ('xyz_mm', 'rpy_deg')
 
+# PER-AXIS MAPS: `dim_weights: {x_mm: 1.0, ..., yaw_deg: 1.0}`, wiggle amplitudes, search ranges.
+# Here the suffix names the AXIS, not the value -- an x weight of 1.0 is not "1 mm", and the code
+# validates these key sets against its own DIMS vocabulary (urlab/skills/manifold.py,
+# urlab/skills/wiggle.py), so injecting `x_m` beside `x_mm` both means nothing and CRASHES the
+# validator with an unknown axis.
+#
+# The signature is a map whose keys are ALL axis labels AND which spans lengths and angles
+# together -- the shape of a 6-DOF map, and the thing no scalar quantity block looks like.
+# Deliberately not "any key is an axis label": `ground_plane: {z_mm: ...}` is a plain depth whose
+# `z_m` sibling IS read, and it must keep getting one even if it were the block's only key.
+_AXIS_LENGTHS = ('x_mm', 'y_mm', 'z_mm')
+_AXIS_ANGLES = ('roll_deg', 'pitch_deg', 'yaw_deg')
+_AXIS_LABELS = frozenset(_AXIS_LENGTHS + _AXIS_ANGLES)
+
+
+def _is_axis_map(node):
+    keys = set(node)
+    if not keys or not keys <= _AXIS_LABELS:
+        return False
+    return bool(keys & set(_AXIS_LENGTHS)) and bool(keys & set(_AXIS_ANGLES))
+
 
 class _DerivedFloat(float):
     """A float THIS MODULE computed from a mm/deg key, not one a human wrote in the yaml.
@@ -154,6 +175,8 @@ def _normalise_units(node, _path='', forced=()):
     says `linear_step_mm: 30.0` is not the two-spellings mistake -- it is a deliberate override, so
     it WINS and the mm sibling is rewritten to match rather than the load being refused."""
     if isinstance(node, dict):
+        if _is_axis_map(node):
+            return node                       # per-axis map: the suffix names the AXIS, not a value
         for key in list(node):
             _normalise_units(node[key], f'{_path}.{key}' if _path else str(key), forced)
         for key in list(node):

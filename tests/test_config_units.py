@@ -123,3 +123,81 @@ def test_every_config_still_loads():
     the set raises here instead of when that demo is next run on hardware."""
     for path in sorted(glob.glob(os.path.join(CONFIG_DIR, '*.yaml'))):
         C.load(path)
+
+
+# --------------------------------------------------------------------- per-axis maps
+# `dim_weights: {x_mm: 1.0, ..., yaw_deg: 1.0}` keys a map BY AXIS. The suffix names the axis, not
+# the value -- an x weight of 1.0 is not "1 mm" -- and the code validates these key sets against
+# its own DIMS vocabulary. Injecting `x_m` beside `x_mm` there is meaningless AND fatal: it reached
+# the robot as `ValueError: estimation.dim_weights keys ['x_m', ...] not in ['x_mm', ...]`.
+
+AXIS_SI_SIBLINGS = ('x_m', 'y_m', 'z_m', 'roll_rad', 'pitch_rad', 'yaw_rad')
+
+
+def _dicts(node):
+    if isinstance(node, dict):
+        yield node
+        for v in node.values():
+            yield from _dicts(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _dicts(v)
+
+
+def test_the_axis_vocabulary_matches_the_code_that_validates_it():
+    """config.py hard-codes the axis labels; the skills validate against their own DIMS. If those
+    ever drift apart the exemption silently stops covering a real block, so pin them together."""
+    from urlab.apps import insertion_tester, wiggle_sampling
+    from urlab.config import _AXIS_LABELS
+    from urlab.skills import manifold, wiggle
+    for owner, dims in (('manifold', manifold.DIMS), ('wiggle', wiggle.DIMS),
+                        ('wiggle_sampling', wiggle_sampling.DIMS),
+                        ('insertion_tester', insertion_tester._DIMS)):
+        assert set(dims) == set(_AXIS_LABELS), f'{owner}.DIMS drifted from config._AXIS_LABELS'
+
+
+AXIS_LENGTHS = {'x_mm', 'y_mm', 'z_mm', 'x_m', 'y_m', 'z_m'}
+AXIS_ANGLES = {'roll_deg', 'pitch_deg', 'yaw_deg', 'roll_rad', 'pitch_rad', 'yaw_rad'}
+AXIS_ANY = AXIS_LENGTHS | AXIS_ANGLES
+
+
+@pytest.mark.parametrize('path', sorted(glob.glob(os.path.join(CONFIG_DIR, '*.yaml'))),
+                         ids=lambda p: os.path.basename(p))
+def test_no_config_gains_a_bogus_axis_key(path):
+    """After loading, a per-axis map must contain ONLY axis labels -- the exact shape that crashed
+    CheckedManifoldEstimator on the robot with `dim_weights keys ['x_m', ...] not in ['x_mm', ...]`.
+
+    Identified independently of the loader's own predicate: a map whose keys are drawn purely from
+    the axis vocabulary AND span both a length and an angle. `ground_plane` (a plain depth sitting
+    beside `max_cables`) does not match, so its legitimate `z_m` sibling is not flagged.
+    """
+    for d in _dicts(C.load(path)):
+        keys = set(d)
+        if not keys <= AXIS_ANY or not (keys & AXIS_LENGTHS) or not (keys & AXIS_ANGLES):
+            continue
+        bogus = keys & set(AXIS_SI_SIBLINGS)
+        assert not bogus, (f'{os.path.basename(path)}: per-axis map gained SI twins '
+                           f'{sorted(bogus)} beside {sorted(keys - bogus)}')
+
+
+def test_a_plain_depth_still_gets_its_si_sibling():
+    """The counter-case the exemption must NOT swallow. `ground_plane.z_mm` is a depth, not an axis
+    map, and `ground_plane.z_m` is read with a default -- so losing it would be SILENT."""
+    cfg = C.load('bnc_assembly')
+    assert cfg.get_path('ground_plane.z_m') == pytest.approx(
+        cfg.get_path('ground_plane.z_mm') / 1000.0)
+    # ... and it must keep working even if the depth were the block's only key.
+    lone = _normalise_units({'ground_plane': {'z_mm': -760.0}})
+    assert lone['ground_plane']['z_m'] == pytest.approx(-0.76)
+
+
+def test_a_real_axis_map_is_left_exactly_as_written():
+    """Both halves: a 6-DOF map is untouched, and a mixed block that merely CONTAINS axis names
+    (place_scatter has `enabled`/`seed` too) is not mistaken for one."""
+    weights = {'x_mm': 1.0, 'y_mm': 1.0, 'z_mm': 1.0,
+               'roll_deg': 1.0, 'pitch_deg': 1.0, 'yaw_deg': 1.0}
+    assert _normalise_units({'dim_weights': dict(weights)})['dim_weights'] == weights
+    assert _normalise_units({'w': {'z_mm': 2.0, 'roll_deg': 5.0}})['w'] == {'z_mm': 2.0,
+                                                                           'roll_deg': 5.0}
+    scatter = _normalise_units({'s': {'enabled': True, 'seed': 7, 'x_mm': 50.0, 'yaw_deg': 30.0}})
+    assert scatter['s']['x_m'] == pytest.approx(0.05)      # not an axis map -- siblings are fine

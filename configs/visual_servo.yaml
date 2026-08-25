@@ -2,18 +2,18 @@
 robot:
   ip: 192.168.125.2
   dry_run: false
-  # Tool payload (gripper + coupler + camera): mass + CoG in the tool0 frame (m). REQUIRED so
+  # Tool payload (gripper + coupler + camera): mass + CoG in the tool0 frame (mm). REQUIRED so
   # getActualTCPForce() subtracts the tool weight and reports true EXTERNAL force.
   payload:
     mass_kg: 1.3
-    cog_m: [-0.026, 0.028, 0.030]
+    cog_mm: [-26.0, 28.0, 30.0]
 base_frame: base_link
 tip_frame: tool0
 camera_frame: camera1_color_optical_frame
 
 hand_eye:
-  xyz: [0.0, -0.080, 0.031]
-  rpy: [0.0, 0.0, 0.0]
+  xyz_mm: [0.0, -80.0, 31.0]
+  rpy_deg: [0.0, 0.0, 0.0]
 
 camera:
   serial_no: "218622272137"
@@ -23,25 +23,25 @@ camera:
 
 aruco:
   dictionary: DICT_4X4_50
-  marker_size_m: 0.0203
+  marker_size_mm: 20.3
 
 marker:
   id: 11
 
-standoff_m: 0.10
+standoff_mm: 100.0
 cam_rpy_in_marker: [3.14159, 0.0, 0.0]
 servo_gain: 0.4
-servo_max_linear_step_m: 0.02
+servo_max_linear_step_mm: 20.0
 servo_max_angular_step_deg: 15.0
-pos_deadband_m: 0.005
+pos_deadband_mm: 5.0
 ang_deadband_deg: 1.5
 rate_hz: 2.0
 marker_max_age_s: 0.5
 confirm_start: true
 
 speed:
-  max_joint_velocity_rad_s: 0.4
-  max_cartesian_velocity_m_s: 4.0
+  max_joint_velocity_deg_s: 22.91831180523
+  max_cartesian_velocity_mm_s: 4000.0
   # 2026-08-18: unified on the _common.yaml value. Four different accelerations were in
   # use across the fleet (30 / 57.3 / 68.8 / 286.5 deg/s^2) because the legacy
   # `joint_acceleration_rad_s2` spelling and the arm's built-in default were shadowing

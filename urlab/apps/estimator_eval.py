@@ -186,9 +186,12 @@ def _report_sampling_divergence(cfg, ref, ref_name='uncertain_sampling.yaml'):
               ('speed', 'max_cartesian_translation_mm_s'),
               ('speed', 'max_cartesian_rotation_deg_s'),
               ('speed', 'retract_translation_mm_s'), ('speed', 'retract_rotation_deg_s'),
-              (None, 'retract_distance_m'), (None, 'standoff_distance_m'),
+              # mm/deg spellings: `ref` is read RAW (no config.load), so it carries only the
+              # units the file is written in -- asking for the SI names would quietly match
+              # nothing and drop these checks instead of reporting a divergence.
+              (None, 'retract_distance_mm'), (None, 'standoff_distance_mm'),
               (None, 'standoff_axis'), (None, 'trajectory_csv'),
-              (None, 'translational_resolution_m'), (None, 'rotational_resolution_deg')]
+              (None, 'translational_resolution_mm'), (None, 'rotational_resolution_deg')]
     diffs = []
     for blk, key in checks:
         if blk is None:

@@ -2045,7 +2045,7 @@ def test_calibration_check_line_and_config():
     with open(os.path.join(os.path.dirname(__file__), '..', 'configs',
                            'calibration_check.yaml')) as fh:
         cfg = yaml.safe_load(fh)
-    assert cfg['cycles'] >= 1 and cfg['standoff_distance_m'] > 0
+    assert cfg['cycles'] >= 1 and cfg['standoff_distance_mm'] > 0
     assert float(cfg['force_guard'].get('persistence_s', 0.0)) == 0.0, \
         'calibration probes need an INSTANT guard -- persistence smears the contact pose'
     assert float(cfg['speed']['approach_translation_mm_s']) <= 5.0, \
@@ -3349,7 +3349,7 @@ def test_bnc_clocking_config():
     r = a['clocking_retract']
     for k in ('gripper_axis', 'target_axis'):
         assert len(r[k]) == 3 and any(abs(float(v)) > 1e-9 for v in r[k]), r[k]
-    for k in ('gripper_distance_m', 'target_distance_m'):
+    for k in ('gripper_distance_mm', 'target_distance_mm'):
         assert float(r[k]) > 0, k
     assert 'clock' not in ps, \
         'the single `clock` phase was split per maneuver -- a leftover entry paces nothing'

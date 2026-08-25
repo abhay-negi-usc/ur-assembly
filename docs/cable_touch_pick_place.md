@@ -30,8 +30,8 @@ Config: `configs/cable_touch_pick_place.yaml`
 | `sam3.mode` | `tip` (classification-free); `curve_px` = arc walked back for the axis |
 | `touch_offset` / `grasp_offset` | where to touch / grasp, relative to the tip (default: same point) |
 | `touch.force_n` | contact threshold — VERY low (3 N); it's a probe, not a push |
-| `touch.step_m` / `max_descent_m` | 1 mm steps, give up past this depth |
-| `touch.contact_z_offset_m` | added to the contact z for the grasp — **tune on the real part** |
+| `touch.step_mm` / `max_descent_mm` | 1 mm steps, give up past this depth |
+| `touch.contact_z_offset_mm` | added to the contact z for the grasp — **tune on the real part** |
 | `align.*` | closed-loop align deadbands over the touch point |
 | `scan.*` | same multi-view machinery as cable_pick_place (refines the tip axis) |
 

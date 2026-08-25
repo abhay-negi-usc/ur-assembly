@@ -16,7 +16,7 @@ Remote Control because they DRIVE the arm.)
 
 Every frame is in base_link. The tool0-attached frames come from the SHARED frames catalogue,
 configs/frames.yaml (urlab/tool_frames.py) -- ALL of its entries are shown, so adding a frame
-there (one yaml entry: parent + xyz/rpy or xyz_mm/rpy_deg) makes it appear here with no code
+there (one yaml entry: parent + xyz_mm/rpy_deg, the units this screen prints) makes it appear
 change; held connectors are declared there directly wrt tool0. 'tool0' itself (the flange /
 all-zeros pendant TCP; getActualTCPPose is this pose) is always first. If frames.yaml is
 missing, the legacy per-config sections (fingertip_grasp, hand_eye, grasp_tcp_offset) are used

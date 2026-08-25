@@ -13,14 +13,14 @@ robot:
   dry_run: false
   payload:
     mass_kg: 1.3
-    cog_m: [-0.026, 0.028, 0.030]
+    cog_mm: [-26.0, 28.0, 30.0]
 base_frame: base_link
 tip_frame: tool0
 camera_frame: camera1_color_optical_frame
 
 hand_eye:
-  xyz: [-0.009, -0.080, 0.031] # accounting for plate deformation
-  rpy: [0.0, 0.0, 0.0]
+  xyz_mm: [-9.0, -80.0, 31.0] # accounting for plate deformation
+  rpy_deg: [0.0, 0.0, 0.0]
 
 camera:
   serial_no: "218622272137"
@@ -50,9 +50,9 @@ connector_estimator:
   min_views: 3
   min_inlier_views: 3
   min_parallax_deg: 3.0
-  inlier_dist_m: 0.010
-  max_range_m: 0.10
-  reject_dist_m: 0.05
+  inlier_dist_mm: 10.0
+  max_range_mm: 100.0
+  reject_dist_mm: 50.0
   up_axis: [0.0, 0.0, 1.0]
   workspace_min: [-10.0, -10.0, -10.0]
   workspace_max: [10.0, 10.0, 10.0]
@@ -79,10 +79,10 @@ cable_tag:
   min_value: 0.20           # below this it is shadow, and its hue is noise
 
 ground_plane:
-  z_m: -0.760
+  z_mm: -760.0
   max_cables: 8
-  new_view_translation_m: 0.04
-  z_step_m: 0.05
+  new_view_translation_mm: 40.0
+  z_step_mm: 50.0
   # After the cable is REPLACED (new cycle, slip, or reorient), lift the camera this far in base
   # +Z before localizing again. The cable is no longer where it was picked from, so the old view
   # can clip it -- and a cable running out of frame is what the junction trace handles worst.
@@ -92,16 +92,16 @@ connector_frame: connector
 
 cable_end:
   enabled: true
-  switch_distance_m: 0.250
+  switch_distance_mm: 250.0
 
 # (The grasp pose comes from <cable>.junction_in_fingertip in cables.yaml -- the junction pose wrt
 # the fingertip at the grasp; the old connector_grasp block is obsolete.)
 grasp_tcp_offset:
-  xyz: [0.0, 0.0, 0.0]
-  rpy: [0.0, 0.0, 0.0]
+  xyz_mm: [0.0, 0.0, 0.0]
+  rpy_deg: [0.0, 0.0, 0.0]
 fingertip_grasp:
-  xyz: [0.0, 0.0, 0.183]
-  rpy: [3.14159, 0.0, -1.5708]
+  xyz_mm: [0.0, 0.0, 183.0]
+  rpy_deg: [179.9998479605, 0.0, -90.0002104591]
 
 scan:
   mode: ground_plane
@@ -109,19 +109,19 @@ scan:
   min_good_views: 3
   max_passes: 3
   view_settle_s: 0.5
-  max_view_distance_m: 0.250
+  max_view_distance_mm: 250.0
   approach:
     enabled: true
-    step_m: 0.250
-    min_distance_m: 0.250
-    nominal_distance_m: 0.23
+    step_mm: 250.0
+    min_distance_mm: 250.0
+    nominal_distance_mm: 230.0
     scale_offsets: true
     recenter: true
-    max_view_delta_m: 0.10
+    max_view_delta_mm: 100.0
     max_view_delta_deg: 45.0
   relative_bounds:
-    xyz: [0.08, 0.08, 0.05]
-    rpy: [0.35, 0.35, 0.10]
+    xyz_mm: [80.0, 80.0, 50.0]
+    rpy_deg: [20.05352282958, 20.05352282958, 5.72957795131]
   offsets:
     - {xyz: [ 0.000,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
     - {xyz: [ 0.040,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
@@ -136,7 +136,7 @@ scan:
     enabled: true
     orbit_deg: [12.0, -12.0, 20.0, -20.0]
     max_orbit_deg: 25.0
-    min_height_m: 0.12
+    min_height_mm: 120.0
 
 save_scan_images: true
 data_dir: data
@@ -146,9 +146,9 @@ overlay_debug: true
 save_last_camera_image: true
 save_junction_plot: true
 
-approach_distance_m: 0.10
+approach_distance_mm: 100.0
 approach_axis: [0.0, 0.0, 1.0]
-lift_distance_m: 0.10
+lift_distance_mm: 100.0
 lift_axis: [0.0, 0.0, 1.0]
 
 pickup:
@@ -158,7 +158,7 @@ pickup:
   # pre-assembly motion.
   settle_s: 0.5
   # PICKUP HEIGHT from the gripper kinematic model. Assumes the connector RESTS ON THE GROUND
-  # PLANE (ground_plane.z_m): the grasp target = plane + connector d_max/2 (centerline) + the
+  # PLANE (ground_plane.z_mm): the grasp target = plane + connector d_max/2 (centerline) + the
   # fingertip ADVANCE between fingertip_ref_separation_mm (where fingertip_grasp z was
   # calibrated: 0 = measured with the gripper closed; 83.56 = at full open) and the expected
   # stall separation. Separations are ZERO-COMPRESSION values -- real grasps squeeze the pads
@@ -178,8 +178,8 @@ pickup:
     reference_rate_hz: 125.0
     lookahead_time_s: 0.1
     servo_gain: 300.0
-    max_delta_m: 0.05
-    max_delta_rad: 0.5
+    max_delta_mm: 50.0
+    max_delta_deg: 28.64788975654
   force_guard:
     enabled: false
     max_force_n: 30.0
@@ -194,35 +194,35 @@ grasp_check:
   detect_empty: true
   settle_s: 1.0
   max_retries: 2
-  # LIFT SLIP CHECK: raise height_m, RE-CLOSE the gripper, and re-read the counts. (A slipped
+  # LIFT SLIP CHECK: raise height_mm, RE-CLOSE the gripper, and re-read the counts. (A slipped
   # cable is invisible without the re-close -- the fingers HOLD their stalled position when the
   # part vanishes.) Still held -> finish the lift; slipped -> open and retry the whole
   # scan->grasp from the start.
   lift_check:
     enabled: true
-    height_m: 0.020
+    height_mm: 20.0
     # After a detected slip: NO full reset -- open, rise this much straight up, and rescan from
     # there with a fresh operator prompt (the dropped cable moved; ground-plane scan re-numbers).
-    slip_raise_m: 0.10
+    slip_raise_mm: 100.0
   # Between FULL retries (rescan included), perturb the grasp along the junction +/-x by
   # 0, +d, -d, +2d, -2d, ... -- a deterministic scan->grasp->fail loop is a FIXED POINT (the
   # fresh scan reproduces the same junction estimate and therefore the same wrong grasp);
   # stepping along the connector axis breaks it. 0 disables.
-  retry_perturb_x_m: 0.003
+  retry_perturb_x_mm: 3.0
   capture_images: true
   capture_rate_hz: 1.0
   recovery:
     enabled: true
     max_tries: 25
-    finger_width_m: 0.02278
+    finger_width_mm: 22.78
     cable_shift_fraction: 0.8
-    empty_drop_m: 0.003
+    empty_drop_mm: 3.0
     # EDGE PINCH: a stall within this many counts of the model's FREE-CLOSURE point (~216 =
     # separation ~0, held width at the 2*groove floor -- thinner than any connector) means the
-    # grooves closed PAST the connector's fat section: too SHALLOW. Reseat edge_drop_m in -z,
+    # grooves closed PAST the connector's fat section: too SHALLOW. Reseat edge_drop_mm in -z,
     # IN toward the connector.
     edge_tolerance_counts: 1
-    edge_drop_m: 0.003
+    edge_drop_mm: 3.0
 
 # GLOBAL speed limits -- ONE set of four, all enforced simultaneously (whichever binds): the
 # joint caps bound every joint directly; the cartesian caps bound the TOOL (converted to an
@@ -259,8 +259,8 @@ reset:
     damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     selected_axes: [1, 1, 1, 1, 1, 1]
     reference_rate_hz: 125.0
-    max_delta_m: 0.05
-    max_delta_rad: 0.5
+    max_delta_mm: 50.0
+    max_delta_deg: 28.64788975654
 
 # ===================================================================================================
 # ASSEMBLY -- the estimate-while-assemble loop
@@ -275,16 +275,16 @@ assembly:
   # The ideal insertion path: CONNECTOR w.r.t. the TARGET connector, last row = identity (the mate).
   trajectory_csv: assembly_trajectory.csv
   trajectory_angles_deg: false
-  translational_resolution_m: 0.001
+  translational_resolution_mm: 1.0
   rotational_resolution_deg: 1.0
 
   # Stand-off beyond the trajectory START (target-connector frame), approached once after the lift.
   standoff:
     axis: [-1.0, 0.0, 0.0]
-    distance_m: 0.100
+    distance_mm: 100.0
 
   # Between attempts: back out along the CONNECTOR's OWN -X from wherever the insert stopped.
-  retract_distance_m: 0.050
+  retract_distance_mm: 50.0
 
   # (Assembly-phase speeds = the global speed: block x speed.phase_scale.assemble.)
 
@@ -330,8 +330,8 @@ assembly:
     settle_s: 0.5
     lookahead_time_s: 0.1
     servo_gain: 300.0
-    max_delta_m: 0.05
-    max_delta_rad: 0.5
+    max_delta_mm: 50.0
+    max_delta_deg: 28.64788975654
 
   force_guard:
     enabled: true
@@ -341,7 +341,7 @@ assembly:
   # AFTER SUCCESS: release, then back the fingertip out along the CONNECTOR's OWN -X by this
   # distance (peg-in-hole -- the escape direction follows the mated part, never a base-frame axis).
   # The end reset then takes the arm home.
-  release_retract_distance_m: 0.080
+  release_retract_distance_mm: 80.0
 
 # ===================================================================================================
 # ESTIMATION -- the contact-manifold ICP (urlab/skills/manifold.py; validated offline by

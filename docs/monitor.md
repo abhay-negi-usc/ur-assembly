@@ -22,7 +22,7 @@ uploads no control script and needs no Remote Control, unlike the demos (which *
 The frames are built from the **same config sections the demos use** (`hand_eye` → camera,
 `fingertip_grasp` → fingertip, `grasp_tcp_offset` → grasp), so what you read here is exactly what a
 demo would command. That makes this the tool to **measure the config values the hardware checklist
-leaves open** (`assembly.target`, a grasp pose, `touch.contact_z_offset_m`): freedrive to the spot,
+leaves open** (`assembly.target`, a grasp pose, `touch.contact_z_offset_mm`): freedrive to the spot,
 read the frame off here, paste it into the config.
 
 ```bash

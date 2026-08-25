@@ -11,17 +11,17 @@ robot:
   dry_run: false
   # Tool payload -- REQUIRED for correct force readings (guard, admittance, touch). Without
   # it, getActualTCPForce reads the tool's own weight as external force. MEASURE/estimate the
-  # mass + CoG of the gripper + coupler + camera (CoG in the tool0 frame, metres).
+  # mass + CoG of the gripper + coupler + camera (CoG in the tool0 frame, mm).
   payload:
     mass_kg: 1.3
-    cog_m: [-0.026, 0.028, 0.030]
+    cog_mm: [-26.0, 28.0, 30.0]
 base_frame: base_link
 tip_frame: tool0
 camera_frame: camera1_color_optical_frame
 
 hand_eye:
-  xyz: [-0.009, -0.080, 0.031] # accounting for plate deformation 
-  rpy: [0.0, 0.0, 0.0]
+  xyz_mm: [-9.0, -80.0, 31.0] # accounting for plate deformation 
+  rpy_deg: [0.0, 0.0, 0.0]
 
 camera:
   serial_no: "218622272137"
@@ -53,9 +53,9 @@ connector_estimator:
   min_views: 3
   min_inlier_views: 3
   min_parallax_deg: 3.0
-  inlier_dist_m: 0.010
-  max_range_m: 0.10
-  reject_dist_m: 0.05             # validation gate: reject a detection > this from the established
+  inlier_dist_mm: 10.0
+  max_range_mm: 100.0
+  reject_dist_mm: 50.0             # validation gate: reject a detection > this from the established
                                   # estimate (a background cable), so it can't divert the scan; 0 = off
   up_axis: [0.0, 0.0, 1.0]
   workspace_min: [-10.0, -10.0, -10.0]   # matches dev connector_pose_node default (no box)
@@ -65,17 +65,17 @@ connector_estimator:
 reconstruction:
   min_views: 3
   samples: 32
-  max_range_m: 0.80
+  max_range_mm: 800.0
   min_support_views: 4
-  junction_span_m: 0.04
+  junction_span_mm: 40.0
   use_curve_plane_roll: false
   curvature_min_per_m: 5.0
   max_reproj_error_px: 3.0
-  min_pose_shift_m: 0.003
+  min_pose_shift_mm: 3.0
 
 # ---- Ground-plane manual-select mode (only used when scan.mode: ground_plane) ----
 # ONE image: every cable's junction is NUMBERED for the user to pick; the pose is then estimated by
-# assuming the cable lies on a plane parallel to the robot XY plane at z_m (base frame), projecting
+# assuming the cable lies on a plane parallel to the robot XY plane at z_mm (base frame), projecting
 # the junction pixel onto it. HEADING = the connector's local direction (the one drawn/labelled),
 # projected to the plane -- robust for a curved cable. At the prompt: "n" takes a new image from a
 # small lateral move, "z" moves the camera toward the cable (closer view). Needs sam3.mode: junction;
@@ -101,10 +101,10 @@ cable_tag:
   min_value: 0.20           # below this it is shadow, and its hue is noise
 
 ground_plane:
-  z_m: -0.758             # plane height w.r.t. base_link (from the fingertip-touch calibration)
+  z_mm: -758.0             # plane height w.r.t. base_link (from the fingertip-touch calibration)
   max_cables: 8           # number the largest N cables for selection
-  new_view_translation_m: 0.04   # lateral camera step for a new view ('n')
-  z_step_m: 0.05          # camera step TOWARD the cable for a closer view ('z')
+  new_view_translation_mm: 40.0   # lateral camera step for a new view ('n')
+  z_step_mm: 50.0          # camera step TOWARD the cable for a closer view ('z')
   # After the cable is REPLACED (new cycle, slip, or reorient), lift the camera this far in base
   # +Z before localizing again. The cable is no longer where it was picked from, so the old view
   # can clip it -- and a cable running out of frame is what the junction trace handles worst.
@@ -114,20 +114,20 @@ ground_plane:
 connector_frame: connector
 
 # ---- Two-phase 'cable-end' approach (opt-in; see cable_pick_place.yaml for the full note) ----
-# Phase 1 steers on the robust connector ENDPOINT until the junction is within switch_distance_m,
+# Phase 1 steers on the robust connector ENDPOINT until the junction is within switch_distance_mm,
 # then switches to the junction scan. Needs sam3.mode: junction.
 cable_end:
   enabled: true
-  switch_distance_m: 0.250
+  switch_distance_mm: 250.0
 
 # (The grasp pose comes from <cable>.junction_in_fingertip in cables.yaml -- the junction pose wrt
 # the fingertip at the grasp; the old connector_grasp block is obsolete.)
 grasp_tcp_offset:
-  xyz: [0.0, 0.0, 0.0]
-  rpy: [0.0, 0.0, 0.0]
+  xyz_mm: [0.0, 0.0, 0.0]
+  rpy_deg: [0.0, 0.0, 0.0]
 fingertip_grasp:
-  xyz: [0.0, -0.01254, 0.183]
-  rpy: [3.14159, 0.0, -1.5708]
+  xyz_mm: [0.0, -12.54, 183.0]
+  rpy_deg: [179.9998479605, 0.0, -90.0002104591]
 
 # (The connector_holder chain is RETIRED -- a rigidly held connector is a configs/frames.yaml
 # frame declared directly wrt tool0.)
@@ -139,20 +139,20 @@ scan:
   min_good_views: 3
   max_passes: 3
   view_settle_s: 0.5
-  max_view_distance_m: 0.250      # a detected view is COUNTED and FUSED only within this range;
+  max_view_distance_mm: 250.0      # a detected view is COUNTED and FUSED only within this range;
                                   # farther detections still steer the approach in but are not fused
   approach:
     enabled: true
-    step_m: 0.250
-    min_distance_m: 0.250
-    nominal_distance_m: 0.23
+    step_mm: 250.0
+    min_distance_mm: 250.0
+    nominal_distance_mm: 230.0
     scale_offsets: true
     recenter: true
-    max_view_delta_m: 0.10        # cap the per-view change in the estimated origin (m); 0 = off
+    max_view_delta_mm: 100.0        # cap the per-view change in the estimated origin (m); 0 = off
     max_view_delta_deg: 45.0      # cap the per-view change in the estimated axis (deg); 0 = off
   relative_bounds:
-    xyz: [0.08, 0.08, 0.05]
-    rpy: [0.35, 0.35, 0.10]
+    xyz_mm: [80.0, 80.0, 50.0]
+    rpy_deg: [20.05352282958, 20.05352282958, 5.72957795131]
   offsets:
     - {xyz: [ 0.000,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
     # First two views: PURE TRANSLATION (tilt zeroed). Before a fit exists the range is unknown, so a
@@ -174,7 +174,7 @@ scan:
     enabled: true
     orbit_deg: [12.0, -12.0, 20.0, -20.0]
     max_orbit_deg: 25.0
-    min_height_m: 0.12
+    min_height_mm: 120.0
 
 save_scan_images: true
 data_dir: data
@@ -193,9 +193,9 @@ save_junction_plot: true              # also write a 3D plot of the junction FUS
                                       # cumulative estimate) each view, to <data_dir>/last_junction_plot.png
                                       # (+ per-view archive if save_scan_images); watch it converge live
 
-approach_distance_m: 0.10
+approach_distance_mm: 100.0
 approach_axis: [0.0, 0.0, 1.0]
-lift_distance_m: 0.10
+lift_distance_mm: 100.0
 lift_axis: [0.0, 0.0, 1.0]
 
 # ---- Pickup: the grasp DESCENT control mode (see cable_pick_place.yaml for the full notes) ----
@@ -215,8 +215,8 @@ pickup:
     reference_rate_hz: 125.0
     lookahead_time_s: 0.1
     servo_gain: 300.0
-    max_delta_m: 0.05
-    max_delta_rad: 0.5
+    max_delta_mm: 50.0
+    max_delta_deg: 28.64788975654
   force_guard:                   # optional hard backstop during the descent; off by default
     enabled: false
     max_force_n: 30.0
@@ -235,7 +235,7 @@ grasp_check:
   detect_empty: true
   settle_s: 1.0
   max_retries: 2                 # whole scan->grasp attempts (outer loop) if recovery still misses
-  retry_perturb_x_m: 0.003       # between FULL retries, perturb the grasp 0,+d,-d,+2d,... along the
+  retry_perturb_x_mm: 3.0       # between FULL retries, perturb the grasp 0,+d,-d,+2d,... along the
                                  # junction x -- breaks the deterministic scan->grasp->fail fixed point
   capture_images: true           # save wrist images during grasping: a timed record at
                                  # capture_rate_hz PLUS a count-labelled frame at each close
@@ -246,13 +246,13 @@ grasp_check:
   recovery:
     enabled: true
     max_tries: 25                # corrective retries before reporting a miss
-    finger_width_m: 0.02278      # fingertip width; the cable-grab shift is a fraction of this
+    finger_width_mm: 22.78      # fingertip width; the cable-grab shift is a fraction of this
     cable_shift_fraction: 0.8    # CABLE grabbed -> shift this * finger_width in +x, then retry
-    empty_drop_m: 0.003          # EMPTY close  -> drop this in -z (toward the object), then retry
+    empty_drop_mm: 3.0          # EMPTY close  -> drop this in -z (toward the object), then retry
 
 speed:
-  max_joint_velocity_rad_s: 0.5
-  max_cartesian_velocity_m_s: 4.0
+  max_joint_velocity_deg_s: 28.64788975654
+  max_cartesian_velocity_mm_s: 4000.0
   # 2026-08-18: unified on the _common.yaml value. Four different accelerations were in
   # use across the fleet (30 / 57.3 / 68.8 / 286.5 deg/s^2) because the legacy
   # `joint_acceleration_rad_s2` spelling and the arm's built-in default were shadowing
@@ -279,8 +279,8 @@ reset:
     damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     selected_axes: [1, 1, 1, 1, 1, 1]
     reference_rate_hz: 125.0
-    max_delta_m: 0.05
-    max_delta_rad: 0.5
+    max_delta_mm: 50.0
+    max_delta_deg: 28.64788975654
 
 # ===================================================================================================
 # ASSEMBLY
@@ -293,12 +293,12 @@ assembly:
   # MEASURE THIS: jog to a good mate and read the chosen frame off the robot, then paste it here.
   target:
     frame: fingertip
-    xyz: [0.1003, 1.0611, -0.1826]
-    rpy: [-0.0127, 0.0089, 1.5964]
+    xyz_mm: [100.3, 1061.1, -182.6]
+    rpy_deg: [-0.727656399816, 0.509932437666, 91.4669824147]
 
   standoff:
     axis: [-1.0, 0.0, 0.0]
-    distance_m: 0.25
+    distance_mm: 250.0
 
   lift_after_pick: true
 
@@ -320,8 +320,8 @@ assembly:
     reference_rate_hz: 125.0                                 # servoL streaming rate
     lookahead_time_s: 0.1
     servo_gain: 300.0
-    max_delta_m: 0.05                                        # clamp compliant translation (runaway guard)
-    max_delta_rad: 0.5
+    max_delta_mm: 50.0                                        # clamp compliant translation (runaway guard)
+    max_delta_deg: 28.64788975654
 
   # ---- Force guard (armed over the free-space moves; insert_chunked manages it itself) ----
   force_guard:
@@ -340,6 +340,6 @@ assembly:
   retract:
     frame: target
     steps:
-      - xyz: [ 0.00,  0.00,  0.08]   # 1) +8 cm along the mating axis -- back straight out
-      - xyz: [-0.50,  0.00,  0.00]   # 2) -50 cm -- clear the assembly laterally
-      - xyz: [ 0.00,  0.00, -0.25]   # 3) -25 cm -- come back down
+      - xyz_mm: [ 0.0,  0.0,  80.0]   # 1) +8 cm along the mating axis -- back straight out
+      - xyz_mm: [-500.0,  0.0,  0.0]   # 2) -50 cm -- clear the assembly laterally
+      - xyz_mm: [ 0.0,  0.0, -250.0]   # 3) -25 cm -- come back down

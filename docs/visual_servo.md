@@ -13,10 +13,10 @@ Config: `configs/visual_servo.yaml`
 | key | meaning |
 |---|---|
 | `marker.id` | the marker to track (11) |
-| `standoff_m` | distance to hold on the marker normal (0.10) |
+| `standoff_mm` | distance to hold on the marker normal (0.10) |
 | `cam_rpy_in_marker` | camera orientation in the marker frame (`[pi,0,0]` = look back down the normal) |
-| `servo_gain` / `servo_max_linear_step_m` / `servo_max_angular_step_deg` | clamped step per iteration |
-| `pos_deadband_m` / `ang_deadband_deg` | hold band |
+| `servo_gain` / `servo_max_linear_step_mm` / `servo_max_angular_step_deg` | clamped step per iteration |
+| `pos_deadband_mm` / `ang_deadband_deg` | hold band |
 | `rate_hz` | loop rate |
 | `marker_max_age_s` | a marker older than this counts as "not in view" |
 

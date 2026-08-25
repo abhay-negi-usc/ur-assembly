@@ -64,8 +64,8 @@ it — multi-start ICP across the 12-D pose+wrench space, correction restricted 
 | `assembly.target_frame` | names the **frames catalogue** entry (`configs/frames.yaml` `targets:`) recording the mate (the old `assembly.target_connector` / `connector_holder_target` keys are ignored with a warning) |
 | `assembly.max_attempts` | assemble→estimate loop budget |
 | `assembly.success_tolerance.pos_mm / rot_deg` | reference numbers at the check prompt; automatic decision only in `--dry-run` |
-| `assembly.release_retract_distance_m` | post-release escape along the **connector's own −X** (never a base-frame axis) |
-| `assembly.retract_distance_m` | between-attempt escape along the connector's own −X |
+| `assembly.release_retract_distance_mm` | post-release escape along the **connector's own −X** (never a base-frame axis) |
+| `assembly.retract_distance_mm` | between-attempt escape along the connector's own −X |
 | `assembly.log_decimation` | observation every Nth servo cycle |
 | `estimation.manifold_csv` | the contact manifold for this connector |
 | `estimation.estimate_dims` | which belief dims the grasp can be wrong in (only these are corrected) |
@@ -108,23 +108,23 @@ all four limits via `speed.phase_scale` (1.0 = the global limit itself; an absen
 
 Free-space moves inherit the current phase's scale through `arm.set_speed_scale` (the app marks
 each boundary); compliant ramps are paced directly from the scaled limits. All four limits are
-enforced simultaneously — whichever binds. (Legacy keys `max_joint_velocity_rad_s`,
-`joint_acceleration_rad_s2`, `max_cartesian_velocity_m_s` still parse for the older configs, and
+enforced simultaneously — whichever binds. (Legacy keys `max_joint_velocity_deg_s`,
+`joint_acceleration_rad_s2`, `max_cartesian_velocity_mm_s` still parse for the older configs, and
 `move_j`/`move_l` accept `caps=` as either a four-key mapping or a bare scale factor.)
 
 ## Grasp robustness
 Two failure modes are handled around the pick:
-- **Slip during the lift** (`grasp_check.lift_check`): the lift first raises `height_m`, then
+- **Slip during the lift** (`grasp_check.lift_check`): the lift first raises `height_mm`, then
   **re-closes** the gripper and re-runs the counts check — the fingers hold their stalled position
   when a part vanishes, so only a re-close can reveal the loss. Still held → finish the lift;
-  slipped → **no full reset**: open, rise `slip_raise_m` straight up, drop the cached cable
+  slipped → **no full reset**: open, rise `slip_raise_mm` straight up, drop the cached cable
   selection, and rescan from that vantage — the ground-plane scan re-images, re-numbers the
   junctions, and re-prompts the operator (the dropped cable landed somewhere new). Non-slip
   failures (missed/empty) keep the full home-reset retry.
-- **Deterministic grasp failure** (`grasp_check.retry_perturb_x_m`): a scan→grasp→fail loop is a
+- **Deterministic grasp failure** (`grasp_check.retry_perturb_x_mm`): a scan→grasp→fail loop is a
   fixed point (the fresh scan reproduces the same junction estimate). Full retries perturb the
   grasp along the junction x by 0, +d, −d, +2d, … to break it. `0` disables.
-- **Edge pinch** (`recovery.edge_tolerance_counts` / `edge_drop_m`): a close stalling within ±1
+- **Edge pinch** (`recovery.edge_tolerance_counts` / `edge_drop_mm`): a close stalling within ±1
   count of the calibrated model's **free-closure point** (~216 — separation ≈ 0, held width at the
   2×groove floor, thinner than any connector) means the grooves closed *past* the connector's fat
   section: the grasp is too shallow. Directed reseat −z, in toward the connector, like the other

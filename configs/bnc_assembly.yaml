@@ -16,14 +16,14 @@ robot:
   dry_run: false
   payload:
     mass_kg: 1.3
-    cog_m: [-0.026, 0.028, 0.030]
+    cog_mm: [-26.0, 28.0, 30.0]
 base_frame: base_link
 tip_frame: tool0
 camera_frame: camera1_color_optical_frame
 
 hand_eye:
-  xyz: [-0.009, -0.080, 0.031] # accounting for plate deformation
-  rpy: [0.0, 0.0, 0.0]
+  xyz_mm: [-9.0, -80.0, 31.0] # accounting for plate deformation
+  rpy_deg: [0.0, 0.0, 0.0]
 
 camera:
   serial_no: "218622272137"
@@ -53,7 +53,7 @@ camera:
 # This block is only the detector's dictionary + a fallback size for an undeclared id.
 aruco:
   dictionary: DICT_4X4_50
-  marker_size_m: 0.0388
+  marker_size_mm: 38.8
 
 # THE VIEW SWEEP, shared with urlab.apps.marker_calibration (urlab/skills/marker_localize.py).
 # Offsets are CAMERA-FRAME poses relative to the start pose; the markers must already be in
@@ -91,13 +91,13 @@ marker_views:
   # detection captured beyond it is never fused.  null disables.
   max_camera_distance_mm: 1000.0
   # VISUAL SERVOING: after the sweep, servo to each marker in turn -- centred on it at
-  # distance_m along its normal, re-detecting until two successive detections agree within
+  # distance_mm along its normal, re-detecting until two successive detections agree within
   # the tolerances -- then capture the vantage + an aimed parallax ring, which JOIN that
   # marker's sweep views (the closeness weighting makes them dominate).  The camera returns to the overview (all markers in frame) between
   # markers.  MUST match the block marker_calibration ran with, so the biases cancel.
   servo:
     enabled: true
-    distance_m: 0.20
+    distance_mm: 200.0
     max_iterations: 4
     pos_tol_mm: 5.0
     ang_tol_deg: 5.0
@@ -126,9 +126,9 @@ connector_estimator:
   min_views: 3
   min_inlier_views: 3
   min_parallax_deg: 3.0
-  inlier_dist_m: 0.010
-  max_range_m: 0.10
-  reject_dist_m: 0.05
+  inlier_dist_mm: 10.0
+  max_range_mm: 100.0
+  reject_dist_mm: 50.0
   up_axis: [0.0, 0.0, 1.0]
   workspace_min: [-10.0, -10.0, -10.0]
   workspace_max: [10.0, 10.0, 10.0]
@@ -155,10 +155,10 @@ cable_tag:
   min_value: 0.20           # below this it is shadow, and its hue is noise
 
 ground_plane:
-  z_m: -0.760
+  z_mm: -760.0
   max_cables: 8
-  new_view_translation_m: 0.04
-  z_step_m: 0.05
+  new_view_translation_mm: 40.0
+  z_step_mm: 50.0
   # After the cable is REPLACED (new cycle, slip, or reorient), lift the camera this far in base
   # +Z before localizing again. The cable is no longer where it was picked from, so the old view
   # can clip it -- and a cable running out of frame is what the junction trace handles worst.
@@ -168,15 +168,15 @@ connector_frame: connector
 
 cable_end:
   enabled: true
-  switch_distance_m: 0.250
+  switch_distance_mm: 250.0
 
 # (The grasp pose comes from <cable>.junction_in_fingertip in cables.yaml.)
 grasp_tcp_offset:
-  xyz: [0.0, 0.0, 0.0]
-  rpy: [0.0, 0.0, 0.0]
+  xyz_mm: [0.0, 0.0, 0.0]
+  rpy_deg: [0.0, 0.0, 0.0]
 fingertip_grasp:
-  xyz: [0.0, 0.0, 0.182]
-  rpy: [3.14159, 0.0, -1.5708]
+  xyz_mm: [0.0, 0.0, 182.0]
+  rpy_deg: [179.9998479605, 0.0, -90.0002104591]
 
 scan:
   mode: ground_plane
@@ -184,19 +184,19 @@ scan:
   min_good_views: 3
   max_passes: 3
   view_settle_s: 0.5
-  max_view_distance_m: 0.250
+  max_view_distance_mm: 250.0
   approach:
     enabled: true
-    step_m: 0.250
-    min_distance_m: 0.250
-    nominal_distance_m: 0.23
+    step_mm: 250.0
+    min_distance_mm: 250.0
+    nominal_distance_mm: 230.0
     scale_offsets: true
     recenter: true
-    max_view_delta_m: 0.10
+    max_view_delta_mm: 100.0
     max_view_delta_deg: 45.0
   relative_bounds:
-    xyz: [0.08, 0.08, 0.05]
-    rpy: [0.35, 0.35, 0.10]
+    xyz_mm: [80.0, 80.0, 50.0]
+    rpy_deg: [20.05352282958, 20.05352282958, 5.72957795131]
   offsets:
     - {xyz: [ 0.000,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
     - {xyz: [ 0.040,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
@@ -211,7 +211,7 @@ scan:
     enabled: false
     orbit_deg: [12.0, -12.0, 20.0, -20.0]
     max_orbit_deg: 25.0
-    min_height_m: 0.12
+    min_height_mm: 120.0
 
 save_scan_images: true
 data_dir: data
@@ -224,7 +224,7 @@ save_junction_plot: true
 # experiment folder as end_view.jpg -- the as-left record of the assembled fixture.
 end_view_image: true
 
-approach_distance_m: 0.10
+approach_distance_mm: 100.0
 approach_axis: [0.0, 0.0, 1.0]
 # WHICH FRAME approach_axis IS READ IN.
 #   grasp -- the gripper's own approach: stand off straight back along the tool axis and
@@ -240,7 +240,7 @@ approach_axis: [0.0, 0.0, 1.0]
 # direction moves.  It also matches lift_axis below, so the approach and the departure are
 # mirror images instead of two different directions.
 approach_frame: base
-lift_distance_m: 0.10
+lift_distance_mm: 100.0
 lift_axis: [0.0, 0.0, 1.0]
 
 pickup:
@@ -346,7 +346,7 @@ pickup:
     xyz_mm:  [5.0, 0.0, -10.0]
     rpy_deg: [0.0, 0.0, 0.0]
   # PICKUP HEIGHT from the gripper kinematic model.  Assumes the connector rests ON THE GROUND
-  # PLANE (ground_plane.z_m): grasp target = plane + connector d_max/2 (centerline) + the
+  # PLANE (ground_plane.z_mm): grasp target = plane + connector d_max/2 (centerline) + the
   # fingertip ADVANCE between fingertip_ref_separation_mm (where fingertip_grasp z was
   # calibrated) and the expected stall separation.  Separations are zero-compression values;
   # the calibrated groove depth absorbs the average pad squeeze, so pad_compression_mm
@@ -458,7 +458,7 @@ pickup:
   # ===========================================================================================
   collision:
     enabled: true
-    # Ground height comes from the top-level ground_plane.z_m -- ONE number for the bench, so
+    # Ground height comes from the top-level ground_plane.z_mm -- ONE number for the bench, so
     # the checker and the place-the-cable descent cannot disagree about where the floor is.
     margin_mm: 0.0            # required clearance for EVERYTHING except the fingertips
     fingertip_margin_mm: 15.0  # allowed INTERSECTION, fingertips only (see above)
@@ -531,8 +531,8 @@ pickup:
     reference_rate_hz: 125.0
     lookahead_time_s: 0.1
     servo_gain: 300.0
-    max_delta_m: 0.05
-    max_delta_rad: 0.5
+    max_delta_mm: 50.0
+    max_delta_deg: 28.64788975654
   force_guard:
     enabled: false
     max_force_n: 30.0
@@ -547,33 +547,33 @@ grasp_check:
   detect_empty: true
   settle_s: 1.0
   max_retries: 2
-  # LIFT SLIP CHECK: raise height_m, RE-CLOSE the gripper, and re-read the counts (a slipped
+  # LIFT SLIP CHECK: raise height_mm, RE-CLOSE the gripper, and re-read the counts (a slipped
   # cable is invisible without the re-close -- the fingers hold their stalled position when
   # the part vanishes).  Still held -> finish the lift; slipped -> open and retry the whole
   # scan->grasp.
   lift_check:
     enabled: true
-    height_m: 0.020
+    height_mm: 20.0
     # After a detected slip: no full reset -- open, rise this much straight up, and rescan
     # from there with a fresh operator prompt (the dropped cable moved).
-    slip_raise_m: 0.10
+    slip_raise_mm: 100.0
   # Between FULL retries, perturb the grasp along the junction +/-x by 0, +d, -d, +2d, ... --
   # a deterministic scan->grasp->fail loop is a fixed point; stepping along the connector
   # axis breaks it.  0 disables.
-  retry_perturb_x_m: 0.003
+  retry_perturb_x_mm: 3.0
   capture_images: true
   capture_rate_hz: 1.0
   recovery:
     enabled: true
     max_tries: 3
-    finger_width_m: 0.02278
+    finger_width_mm: 22.78
     cable_shift_fraction: 0.8
-    empty_drop_m: 0.003
+    empty_drop_mm: 3.0
     # EDGE PINCH: a stall within this many counts of the model's free-closure point means the
-    # grooves closed PAST the connector's fat section (grasp too shallow).  Reseat edge_drop_m
+    # grooves closed PAST the connector's fat section (grasp too shallow).  Reseat edge_drop_mm
     # in -z, IN toward the connector.
     edge_tolerance_counts: 1
-    edge_drop_m: 0.003
+    edge_drop_mm: 3.0
     # GROUND CONTACT (BNC): an EARLY stall -- 190 counts is ~17.4 mm of finger separation,
     # wider than the connector band -- means something stopped the fingers before they
     # reached the part.  On the bench that is a finger tip down on the work
@@ -589,7 +589,7 @@ grasp_check:
     # it stays a lift at any approach angle -- see GraspRecovery in urlab/skills/pick.py.
     ground_counts: 190
     ground_tolerance_counts: 1
-    ground_rise_m: 0.0005
+    ground_rise_mm: 0.5
 
 # GLOBAL speed limits -- ONE set of four, all enforced simultaneously (whichever binds): the
 # joint caps bound every joint directly; the cartesian caps bound the TOOL (converted to an
@@ -676,8 +676,8 @@ reset:
     damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     selected_axes: [1, 1, 1, 1, 1, 1]
     reference_rate_hz: 125.0
-    max_delta_m: 0.05
-    max_delta_rad: 0.5
+    max_delta_mm: 50.0
+    max_delta_deg: 28.64788975654
 
 # THE PICK POSE, driven to after the start reset (and after the marker sweep, when
 # target_source is visual).  The scan, the grasp geometry and every retry offset are written
@@ -814,16 +814,16 @@ assembly:
   # The ideal insertion path: CONNECTOR w.r.t. the TARGET connector, last row = identity (the mate).
   trajectory_csv: assembly_trajectory.csv
   trajectory_angles_deg: false
-  translational_resolution_m: 0.001
+  translational_resolution_mm: 1.0
   rotational_resolution_deg: 1.0
 
   # Stand-off beyond the trajectory START (target-connector frame), approached once after the lift.
   standoff:
     axis: [-1.0, 0.0, 0.0]
-    distance_m: 0.100
+    distance_mm: 100.0
 
   # Between attempts: back out along the CONNECTOR's OWN -X from wherever the insert stopped.
-  retract_distance_m: 0.030
+  retract_distance_mm: 30.0
 
   # The loop: assemble -> check -> estimate -> realign, at most this many attempts.  (An
   # attempt about to be RETRIED backs off first; one the operator calls successful holds the
@@ -1021,7 +1021,7 @@ assembly:
   # AFTER SUCCESS: release, then back the fingertip out along the CONNECTOR's OWN -X (the
   # escape direction follows the mated part, never a base-frame axis).  The end reset then
   # takes the arm home.
-  release_retract_distance_m: 0.080
+  release_retract_distance_mm: 80.0
   success_tolerance:
     pos_mm: 1.0
     rot_deg: 1.0
@@ -1367,7 +1367,7 @@ assembly:
     # configuration the cable was picked from, so it goes back the way it was taken.
     place:
       enabled: true
-      # The FINGERTIP stops this far above ground_plane.z_m -- the descent is guarded as well,
+      # The FINGERTIP stops this far above ground_plane.z_mm -- the descent is guarded as well,
       # so the pads stop short rather than pressing the cable into the table.
       clearance_mm: 25.0
       retreat_mm: 100.0          # rise this far after releasing, before going home
@@ -1378,11 +1378,11 @@ assembly:
     # Leg 1, in the GRIPPER's own (tool0) frame: -Z lifts the open fingers straight off the
     # connector (tool0 +Z points from the flange toward the fingertips).
     gripper_axis: [0.0, 0.0, -1.0]
-    gripper_distance_m: 0.100
+    gripper_distance_mm: 100.0
     # Leg 2, in the TARGET CONNECTOR frame: -X backs away from the socket along the
     # insertion axis.
     target_axis: [-1.0, 0.0, 0.0]
-    target_distance_m: 0.100
+    target_distance_mm: 100.0
 
   # ---- TUG VERIFICATION: does the lock actually hold? --------------------------------------
   # After the escape, the gripper returns to the engaged pose, closes on the seated connector
@@ -1450,8 +1450,8 @@ estimation:
   # initial_connector_frame: bnc_connector_in_fingerpads
   initial_connector_in_fingertip:
     # Value = inverse(fingertip_grasp) @ frames[bnc_connector_in_fingerpads].
-    xyz: [-0.0457, 0.0000, 0.0075]           # m
-    rpy: [0.0, 0.0, 3.14159265358979]       # rad (exactly 180 deg yaw)
+    xyz_mm: [-45.7, 0.0, 7.5]           # m
+    rpy_deg: [0.0, 0.0, 180.0]       # rad (exactly 180 deg yaw)
   manifold_csv: ./configs/data/bnc_manifold_v6.csv
   # WRENCH REPRESENTATION: unit | rawcap | raw.
   #   unit    direction only -- magnitude discarded.
@@ -1595,8 +1595,8 @@ compliance:
   hold_after_insertion_s: 1.0
   lookahead_time_s: 0.1
   servo_gain: 300.0
-  max_delta_m: 0.05
-  max_delta_rad: 0.5
+  max_delta_mm: 50.0
+  max_delta_deg: 28.64788975654
 
 force_guard:
   enabled: true

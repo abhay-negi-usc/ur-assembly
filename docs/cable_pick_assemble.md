@@ -45,7 +45,7 @@ Config: `configs/cable_pick_assemble.yaml` (pick half identical to cable_pick_pl
 |---|---|
 | `assembly.method` | `kinematic` (implemented) or `vision` (fails loudly) |
 | `assembly.target.frame` / `xyz` / `rpy` | where the assembly ends; `frame` ∈ `fingertip`/`tool0`/`connector` — **measure this** |
-| `assembly.standoff.axis` / `distance_m` | pre-insertion back-off, in the target frame |
+| `assembly.standoff.axis` / `distance_mm` | pre-insertion back-off, in the target frame |
 | `assembly.compliance.selected_axes` / `force_limits` / `target_wrench` | forceMode: which axes yield and how |
 | `assembly.force_guard.max_force_n` / `max_torque_nm` | collision / seat limits (30 N / 5 Nm) |
 | `assembly.insertion.chunk_fraction` / `chunk_time_s` | insertion granularity |

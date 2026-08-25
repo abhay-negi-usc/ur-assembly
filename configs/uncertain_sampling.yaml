@@ -12,11 +12,11 @@
 robot:
   ip: 192.168.125.2
   dry_run: false
-  # Tool payload (gripper + coupler + camera): mass + CoG in the tool0 frame (m). REQUIRED so
+  # Tool payload (gripper + coupler + camera): mass + CoG in the tool0 frame (mm). REQUIRED so
   # getActualTCPForce() subtracts the tool weight and reports true EXTERNAL force.
   payload:
     mass_kg: 1.3
-    cog_m: [-0.026, 0.028, 0.030]
+    cog_mm: [-26.0, 28.0, 30.0]
 base_frame: base_link
 tip_frame: tool0
 
@@ -37,15 +37,15 @@ trajectory_csv: assembly_trajectory.csv
 trajectory_angles_deg: false
 
 # Stand-off: the free-space pose approached ONCE before the trial loop. Measured from the START of
-# the assembly trajectory (its first row), backed off a further standoff_distance_m along
+# the assembly trajectory (its first row), backed off a further standoff_distance_mm along
 # standoff_axis -- so it is always clear of the path, whatever the trajectory's first row is.
-standoff_distance_m: 0.100        # 10 mm beyond the trajectory start
+standoff_distance_mm: 100.0        # 10 mm beyond the trajectory start
 standoff_axis: [-1.0, 0.0, 0.0]   # assembly is a direct -X -> 0 insertion
 
 # RETRACT: after each trial, back straight out along the CONNECTOR's OWN -X by this distance, from
 # wherever the insert stopped -- so a perturbed (tilted) part retreats along its own axis, not the
 # target's. Speed comes from speed.retract_* below.
-retract_distance_m: 0.005
+retract_distance_mm: 5.0
 
 # COMPLIANCE (software admittance): the arm FOLLOWS the assembly trajectory (position reference) and
 # YIELDS to contact via a virtual spring-mass-damper with finite restoring stiffness, springing back
@@ -137,7 +137,7 @@ force_guard:
 sampling:
   num_trials: 1_000             # IGNORED when mode: grid (the grid derives the count)
   chunk_fraction: 1.0            # fraction of the resampled trajectory to execute per trial
-  translational_resolution_m: 0.001
+  translational_resolution_mm: 1.0
   rotational_resolution_deg: 1.0
 
   # WHICH ERROR SOURCE the perturbation models:
@@ -210,7 +210,7 @@ speed:
   # `joint_acceleration_rad_s2` spelling and the arm's built-in default were shadowing
   # the modern key; 30.0 is the one every deliberately-maintained config already used.
   max_joint_acceleration_deg_s2: 30.0
-  max_cartesian_velocity_m_s: 0.25
+  max_cartesian_velocity_mm_s: 250.0
 
   # CARTESIAN limits for the COMPLIANT reference. Each ramp segment gets the time its own geometry
   # needs, so neither limit is exceeded. Set any to 0 to disable that limit.

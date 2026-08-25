@@ -66,7 +66,7 @@ computable, so every correction can be scored instead of eyeballed.
 | `estimation.*` | the estimator under test — same schema as `cable_pick_estimate_assemble` |
 | `estimation.aggregator` | `ransac` (residual-gated consensus vote, default) or `softmax` (residual-softmax weighted mean over all starts, `softmax_temp` relative to the best residual — the offline ablation's winner) |
 | `compliance` / `force_guard` / `speed` | mirror the pick app's assembly values so observations are production-like |
-| `retract_distance_m` | per-attempt escape along the believed connector's own −X; must exceed the insertion depth |
+| `retract_distance_mm` | per-attempt escape along the believed connector's own −X; must exceed the insertion depth |
 
 ## Output — `data/experiments/estimator_eval_<timestamp>/`
 - `trials.csv` — one row per attempt: injected error, ground-truth error before/after the update

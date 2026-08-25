@@ -13,7 +13,7 @@ Config: `configs/cartesian.yaml`
 
 | key | meaning |
 |---|---|
-| `linear_step_m` | translation nudge size (0.03) |
+| `linear_step_mm` | translation nudge size (0.03) |
 | `angular_step_deg` | rotation nudge size (30) |
 | `motion_frames` | frames to jog in, in order (`[world, tool0]`) |
 | `speed.*` | joint/Cartesian velocity caps |

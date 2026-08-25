@@ -24,7 +24,7 @@ Config: `configs/kinematic_assembly.yaml` (+ `configs/assembly_trajectory.csv`)
 |---|---|
 | `assembled_pose` | tool0 in base at the mate — **measure this** |
 | `held_object_pose` | the held part relative to tool0 |
-| `standoff_distance_m` / `standoff_axis` | pre-position back-off, in the target frame |
+| `standoff_distance_mm` / `standoff_axis` | pre-position back-off, in the target frame |
 | `trajectory_csv` / `trajectory_angles_deg` | the waypoints (x,y,z,r,p,y) and their angle unit |
 | `control_mode` | `position` or `admittance` (forceMode) |
 | `disassemble_after` | run the trajectory in reverse before homing |

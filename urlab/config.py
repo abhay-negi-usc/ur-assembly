@@ -5,12 +5,24 @@ The old stack had two overlapping mechanisms: a yaml file loaded by the node, pl
 declare. Here there is one: the yaml, with `--set key=value` able to reach ANY key, nested ones
 included:
 
-    python -m urlab.apps.cable_pick_place --set scan.approach.min_distance_m=0.15 --set debug=true
+    python -m urlab.apps.cable_pick_place --set scan.approach.min_distance_mm=150 --set debug=true
 
 Values parse as YAML, so `true`, `0.15`, `[1, 0, 0]` and `null` all mean what they look like.
+
+UNITS: every yaml in configs/ is written in **mm and deg**, with the unit IN THE KEY NAME
+(`standoff_mm`, `sweep_deg`, `max_speed_mm_s`, `xyz_mm`, `rpy_deg`). The code works in m and rad,
+so `load()` converts once, at the end, adding the SI-named sibling of every such key
+(`standoff_mm` -> `standoff_m`, `rpy_deg` -> `rpy`). Both spellings are readable afterwards, which
+is why `--set` accepts either:
+
+    python -m urlab.apps.cable_pick_place --set scan.approach.min_distance_mm=150
+
+See `_normalise_units` for the exact rules -- including the three shapes that keep a unit in the
+name WITHOUT being a quantity to scale (a flag, a per-joint mapping, a sweep spec).
 """
 
 import argparse
+import math
 import os
 
 import yaml
@@ -59,8 +71,130 @@ def load(name_or_path, overrides=()):
     _apply_common(cfg)                    # base layer: top-level blocks absent here come from _common
     _apply_overrides(cfg, overrides)      # 1st pass: a `--set cable=...` can select the profile
     apply_cable_profile(cfg)              # override gripper/grasp-check counts for the chosen cable
-    _apply_overrides(cfg, overrides)      # 2nd pass: an explicit `--set` still wins over the profile
+    forced = _apply_overrides(cfg, overrides)  # 2nd pass: an explicit `--set` beats the profile
+    _normalise_units(cfg, forced=forced)  # mm/deg in the file -> m/rad siblings for the code
     return cfg
+
+
+# ---------------------------------------------------------------------------- units
+# CONFIGS ARE WRITTEN IN mm AND deg. The code is written in m and rad, because that is what the
+# maths and the RTDE interface use. Rather than convert at ~250 read sites -- where one missed
+# division silently turns a 50 mm standoff into 50 m -- the conversion happens ONCE, here, at load
+# time: every `<name>_mm` key gains a `<name>_m` sibling holding the same value in metres, and
+# likewise `_deg` -> `_rad`, `_mm_s` -> `_m_s`, `xyz_mm` -> `xyz`, `rpy_deg` -> `rpy`.
+#
+# ADDITIVE, NEVER DESTRUCTIVE: the mm/deg key stays exactly as written, so the many readers that
+# already read `_mm` and divide by 1000 themselves are untouched. A reader asking for either unit
+# gets the right number, which is what lets the configs be converted without touching the code.
+#
+# WRITING BOTH SPELLINGS IS AN ERROR, not a silent preference -- the same rule _pose_si has always
+# enforced for poses, and for the same reason: quietly choosing one turns a 90 mm offset into 90 m.
+_UNIT_SUFFIXES = (
+    ('_mm_s2', '_m_s2', 1e-3), ('_deg_s2', '_rad_s2', math.pi / 180.0),
+    ('_mm_s', '_m_s', 1e-3), ('_deg_s', '_rad_s', math.pi / 180.0),
+    ('_mm', '_m', 1e-3), ('_deg', '_rad', math.pi / 180.0),
+)
+# Keys that END in a unit suffix but are NOT that quantity. `per_m` is an INVERSE length (1/m):
+# scaling it as if it were a length would be exactly backwards.
+_UNIT_EXEMPT = ('_per_m', '_per_mm', '_per_deg', '_per_rad')
+# The pose triples are handled by their own rule below, whose SI names carry no suffix (`xyz`, not
+# `xyz_m`) -- letting the generic rule near them would mint a second, unread spelling.
+_POSE_KEYS = ('xyz_mm', 'rpy_deg')
+
+
+class _DerivedFloat(float):
+    """A float THIS MODULE computed from a mm/deg key, not one a human wrote in the yaml.
+
+    The marker rides on the value's TYPE rather than an extra dict key, so it is invisible to
+    everything downstream -- it is a float to arithmetic, numpy, json and `==` alike -- while still
+    letting the both-units check tell "the sibling we derived" from "written twice by hand"."""
+
+
+class _DerivedList(list):
+    """See _DerivedFloat -- the list flavour, for xyz/rpy triples."""
+
+
+def _is_derived(value):
+    return isinstance(value, (_DerivedFloat, _DerivedList))
+
+
+def _convert_units(value, scale, where=''):
+    """Scale a scalar or a flat list of scalars.
+
+    A key whose NAME declares a unit but whose value is not a number is an error, not something to
+    pass through quietly. That silence is the dangerous case: `1e+02` is a STRING to YAML 1.1 (it
+    wants `1.0e+02`), so a mistyped number would keep its mm spelling, never gain its SI sibling,
+    and the reader would fall back to a default -- a 100 mm standoff becoming whatever the default
+    said, with nothing logged. Raising turns that into a startup failure naming the key."""
+    if value is None or isinstance(value, (bool, dict)):
+        # NOT every key ending `_deg`/`_mm` is a quantity to scale:
+        #   trajectory_angles_deg: false        -- a FLAG naming the unit of a CSV's columns
+        #   joint_limits_deg: {wrist_3: [...]}  -- a MAPPING, read in degrees as written
+        #   depth_mm: {lower:, upper:, ...}     -- a sweep SPEC, read in mm as written
+        # Nothing reads an SI sibling of these, so pass them through untouched.
+        return value
+    if isinstance(value, (int, float)):
+        return _DerivedFloat(float(value) * scale)
+    if isinstance(value, (list, tuple)):
+        bad = [v for v in value if isinstance(v, bool) or not isinstance(v, (int, float))]
+        if bad:
+            raise ValueError(f'{where or "value"} declares a unit in its name but contains '
+                             f'non-numeric entries {bad!r} (a YAML number needs a decimal point '
+                             f'in exponent form: 1.0e+02, not 1e+02)')
+        return _DerivedList(float(v) * scale for v in value)
+    raise ValueError(f'{where or "value"} declares a unit in its name but is not a number: '
+                     f'{value!r} (a YAML number needs a decimal point in exponent form: '
+                     f'1.0e+02, not 1e+02)')
+
+
+def _normalise_units(node, _path='', forced=()):
+    """Walk the config tree and add the SI sibling of every mm/deg key, in place.
+
+    `forced` holds paths an explicit `--set` wrote. `--set linear_step_m=0.05` against a file that
+    says `linear_step_mm: 30.0` is not the two-spellings mistake -- it is a deliberate override, so
+    it WINS and the mm sibling is rewritten to match rather than the load being refused."""
+    if isinstance(node, dict):
+        for key in list(node):
+            _normalise_units(node[key], f'{_path}.{key}' if _path else str(key), forced)
+        for key in list(node):
+            if not isinstance(key, str) or key.endswith(_UNIT_EXEMPT) or key in _POSE_KEYS:
+                continue
+            for suffix, si_suffix, scale in _UNIT_SUFFIXES:
+                if not key.endswith(suffix):
+                    continue
+                si = key[:-len(suffix)] + si_suffix
+                si_path = f'{_path}.{si}' if _path else si
+                if si in node and not _is_derived(node[si]):
+                    if si_path in forced:                 # an explicit --set in SI units wins
+                        back = _convert_units(node[si], 1.0 / scale, si_path)
+                        node[key] = back                  # keep the mm spelling consistent with it
+                        break
+                    raise ValueError(
+                        f'{_path or "<root>"}: both {key!r}={node[key]!r} and {si!r}={node[si]!r} '
+                        f'are set. They are the same quantity in different units -- silently '
+                        f'preferring one would turn a 90 mm value into 90 m. Keep the mm/deg '
+                        f'spelling and delete the other (or pass it as --set {si_path}=... to '
+                        f'override deliberately).')
+                converted = _convert_units(node[key], scale, f'{_path}.{key}' if _path else key)
+                if converted is not node[key]:
+                    node[si] = converted
+                break
+        # The pose triples, whose SI names carry no suffix at all.
+        for alt, si, scale in (('xyz_mm', 'xyz', 1e-3), ('rpy_deg', 'rpy', math.pi / 180.0)):
+            if alt not in node:
+                continue
+            if si in node and not _is_derived(node[si]):
+                if (f'{_path}.{si}' if _path else si) in forced:
+                    node[alt] = _convert_units(node[si], 1.0 / scale)
+                    continue
+                raise ValueError(
+                    f'{_path or "<root>"}: pose sets both {si!r}={node[si]!r} and '
+                    f'{alt!r}={node[alt]!r}. Use one unit, not both.')
+            node[si] = _convert_units(node[alt], scale, f'{_path}.{alt}' if _path else alt)
+    elif isinstance(node, list):
+        for item in node:
+            _normalise_units(item, _path)
+    return node
 
 
 COMMON_FILE = '_common.yaml'
@@ -90,11 +224,17 @@ def _apply_common(cfg):
 
 
 def _apply_overrides(cfg, overrides):
+    """Apply `key=value` overrides; returns the set of paths touched, so unit normalisation can
+    tell an EXPLICIT `--set linear_step_m=0.05` (which must win) from a file that carelessly wrote
+    the same quantity twice (which must raise)."""
+    touched = set()
     for item in overrides:
         if '=' not in item:
             raise ValueError(f'--set expects key=value, got {item!r}')
         key, _, raw = item.partition('=')
         cfg.set_path(key.strip(), yaml.safe_load(raw))
+        touched.add(key.strip())
+    return touched
 
 
 def _pose_si(pose):
@@ -113,9 +253,11 @@ def _pose_si(pose):
     p = dict(pose or {})
     for si, alt, scale in (('xyz', 'xyz_mm', 1e-3), ('rpy', 'rpy_deg', math.pi / 180.0)):
         if alt in p:
-            if si in p:
+            # A pose from config.load() ALREADY carries the SI sibling _normalise_units derived,
+            # so its mere presence is not a conflict; a HAND-WRITTEN second unit still is.
+            if si in p and not _is_derived(p[si]):
                 raise ValueError(f'pose block sets both {si!r} and {alt!r}; use one unit, not both')
-            p[si] = [float(v) * scale for v in p.pop(alt)]
+            p[si] = _DerivedList(float(v) * scale for v in p.pop(alt))
     return p
 
 

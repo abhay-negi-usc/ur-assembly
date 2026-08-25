@@ -14,17 +14,17 @@ robot:
   dry_run: false
   # Tool payload -- REQUIRED for correct force readings (guard, admittance, touch). Without
   # it, getActualTCPForce reads the tool's own weight as external force. MEASURE/estimate the
-  # mass + CoG of the gripper + coupler + camera (CoG in the tool0 frame, metres).
+  # mass + CoG of the gripper + coupler + camera (CoG in the tool0 frame, mm).
   payload:
     mass_kg: 1.3
-    cog_m: [-0.026, 0.028, 0.030]
+    cog_mm: [-26.0, 28.0, 30.0]
 base_frame: base_link
 tip_frame: tool0                 # the flange IK solves for; NOT the fingertip (~18 cm away)
 camera_frame: camera1_color_optical_frame
 
 hand_eye:                        # tool0 -> camera (eye-in-hand); replaces ur_tf_demo
-  xyz: [0.0, -0.080, 0.031]
-  rpy: [0.0, 0.0, 0.0]
+  xyz_mm: [0.0, -80.0, 31.0]
+  rpy_deg: [0.0, 0.0, 0.0]
 
 camera:
   serial_no: "218622272137"
@@ -65,9 +65,9 @@ connector_estimator:
   min_inlier_views: 3
   min_parallax_deg: 3.0            # rotating in place adds NO information; refuse a low-parallax fit
   ransac_iters: 200
-  inlier_dist_m: 0.005
-  max_range_m: 0.80
-  reject_dist_m: 0.05             # validation gate: once a confident estimate is established, reject
+  inlier_dist_mm: 5.0
+  max_range_mm: 800.0
+  reject_dist_mm: 50.0             # validation gate: once a confident estimate is established, reject
                                   # a detection whose ray misses it by more than this (a background
                                   # cable) so it can't drift the scan off target; 0 = off
   up_axis: [0.0, 0.0, 1.0]         # pins the roll about the axis (NOT a measurement)
@@ -78,24 +78,24 @@ connector_estimator:
 # Reconstructs the 3D cable centreline from the per-view skeletons (needs sam3.mode: junction) and
 # REFINES the junction pose from it. Correspondence is a monotone epipolar march anchored at the
 # junction landmark; the pose = the fitted curve's terminus + tangent (so the axis TILT is measured,
-# not inferred from 2D lines). Only the GOOD (within scan.max_view_distance_m) views are fused, the
+# not inferred from 2D lines). Only the GOOD (within scan.max_view_distance_mm) views are fused, the
 # same distance gate the point estimator uses.
 reconstruction:
   min_views: 3                    # >= 3 good views to reconstruct (2 is ambiguous at tangencies)
   samples: 32                     # points sampled along the reference (longest) skeleton
-  max_range_m: 0.80
+  max_range_mm: 800.0
   min_support_views: 2            # a curve point needs this many views' rays to triangulate
-  junction_span_m: 0.04           # arc window near the junction for the tangent/curvature fit (m)
+  junction_span_mm: 40.0           # arc window near the junction for the tangent/curvature fit (m)
   use_curve_plane_roll: false     # pin roll from the cable's OSCULATING PLANE (needs a curved cable;
                                   # a straight cable has no plane -> falls back to up_axis)
   curvature_min_per_m: 5.0        # only trust the plane roll above this curvature (1/radius, 1/m)
   # ---- convergence: the scan stops when BOTH hold, with >= scan.min_good_views banked ----
   max_reproj_error_px: 3.0        # reconstructed curve reprojects within this of every skeleton
-  min_pose_shift_m: 0.003         # adding a view moves the junction origin less than this (stable)
+  min_pose_shift_mm: 3.0         # adding a view moves the junction origin less than this (stable)
 
 # ---- Ground-plane manual-select mode (only used when scan.mode: ground_plane) ----
 # ONE image: every cable's junction is NUMBERED for the user to pick; the pose is then estimated by
-# assuming the cable lies on a plane parallel to the robot XY plane at z_m (base frame), projecting
+# assuming the cable lies on a plane parallel to the robot XY plane at z_mm (base frame), projecting
 # the junction pixel onto it. HEADING = the connector's local direction (the one drawn/labelled),
 # projected to the plane -- robust for a curved cable. At the prompt: "n" takes a new image from a
 # small lateral move, "z" moves the camera toward the cable (closer view). Needs sam3.mode: junction;
@@ -121,10 +121,10 @@ cable_tag:
   min_value: 0.20           # below this it is shadow, and its hue is noise
 
 ground_plane:
-  z_m: -0.758             # plane height w.r.t. base_link (from the fingertip-touch calibration)
+  z_mm: -758.0             # plane height w.r.t. base_link (from the fingertip-touch calibration)
   max_cables: 8           # number the largest N cables for selection
-  new_view_translation_m: 0.04   # lateral camera step for a new view ('n')
-  z_step_m: 0.05          # camera step TOWARD the cable for a closer view ('z')
+  new_view_translation_mm: 40.0   # lateral camera step for a new view ('n')
+  z_step_mm: 50.0          # camera step TOWARD the cable for a closer view ('z')
   # After the cable is REPLACED (new cycle, slip, or reorient), lift the camera this far in base
   # +Z before localizing again. The cable is no longer where it was picked from, so the old view
   # can clip it -- and a cable running out of frame is what the junction trace handles worst.
@@ -137,24 +137,24 @@ connector_frame: connector
 # Phase 1 STEERS the approach on the robust cable+connector ENDPOINT (the extreme tip on the
 # connector side -- well-conditioned to triangulate, unlike the subtle junction), while fusing the
 # junction only to measure its RANGE. It switches to the normal junction scan (Phase 2) once the
-# junction is within switch_distance_m. Rationale: junction detection is unreliable from far/oblique
+# junction is within switch_distance_mm. Rationale: junction detection is unreliable from far/oblique
 # views (foreshortening false junctions), so approach on the endpoint and only estimate the junction
 # up close. Needs sam3.mode: junction.
 cable_end:
   enabled: false                  # opt-in; true = run Phase 1 before the junction scan
-  switch_distance_m: 0.20         # switch to junction estimation once the junction is this close
+  switch_distance_mm: 200.0         # switch to junction estimation once the junction is this close
 
 # (The grasp pose comes from <cable>.junction_in_fingertip in cables.yaml -- the junction pose wrt
 # the fingertip at the grasp; the old connector_grasp block is obsolete.)
 
 grasp_tcp_offset:                # gripper frame relative to tool0 (identity here)
-  xyz: [0.0, 0.0, 0.0]
-  rpy: [0.0, 0.0, 0.0]
+  xyz_mm: [0.0, 0.0, 0.0]
+  rpy_deg: [0.0, 0.0, 0.0]
 
 # The FINGERTIP, relative to tool0. rpy is EXTRINSIC XYZ (sxyz); = [180, 0, 90] deg intrinsic.
 fingertip_grasp:
-  xyz: [0.0, -0.01254, 0.177]
-  rpy: [3.14159, 0.0, -1.5708]
+  xyz_mm: [0.0, -12.54, 177.0]
+  rpy_deg: [179.9998479605, 0.0, -90.0002104591]
 
 # (The connector_holder chain is RETIRED -- a rigidly held connector is a configs/frames.yaml
 # frame declared directly wrt tool0.)
@@ -172,27 +172,27 @@ scan:
   min_good_views: 4
   max_passes: 3
   view_settle_s: 0.5             # let the arm settle before capturing (a still frame is a good frame)
-  max_view_distance_m: 0.250      # a detected view is COUNTED and FUSED only within this range;
+  max_view_distance_mm: 250.0      # a detected view is COUNTED and FUSED only within this range;
                                   # farther detections still steer the approach in but are not
                                   # fused into the final pose (their depth error grows as Z^2)
 
   approach:
     enabled: true
-    step_m: 0.250
-    min_distance_m: 0.250        # the VIEW FLOOR -- inside the D405's ~70-500 mm working range
-    nominal_distance_m: 0.23
+    step_mm: 250.0
+    min_distance_mm: 250.0        # the VIEW FLOOR -- inside the D405's ~70-500 mm working range
+    nominal_distance_mm: 230.0
     scale_offsets: true          # xyz scales with range; tilts do not (invariant -- see the note)
     recenter: true               # aim the optical axis at the connector every step
     # Rate-limit on the ESTIMATE between views (the cable is fixed, so its estimate should barely
     # move view-to-view; a big jump = an outlier). Caps the per-view change in the estimated origin
     # and axis so one bad detection can't lunge the approach. 0 = off. Bounds the ESTIMATE, not the
-    # camera step_m.
-    max_view_delta_m: 0.10
+    # camera step_mm.
+    max_view_delta_mm: 100.0
     max_view_delta_deg: 45.0
 
   relative_bounds:               # safety clamp on |offset| from the scan-start pose, camera frame
-    xyz: [0.08, 0.08, 0.05]
-    rpy: [0.35, 0.35, 0.10]
+    xyz_mm: [80.0, 80.0, 50.0]
+    rpy_deg: [20.05352282958, 20.05352282958, 5.72957795131]
 
   # 12 views: start + an 8-point 4 cm ring + a 3-point 6.5 cm ring. Each tilts ~10 deg back toward
   # the target so the connector stays framed. tilt = atan(offset / 0.23 m).
@@ -219,7 +219,7 @@ scan:
     enabled: true
     orbit_deg: [12.0, -12.0, 20.0, -20.0]
     max_orbit_deg: 25.0
-    min_height_m: 0.12           # MUST be below approach.min_distance_m or every orbit is rejected
+    min_height_mm: 120.0           # MUST be below approach.min_distance_m or every orbit is rejected
 
 save_scan_images: true
 data_dir: data
@@ -239,9 +239,9 @@ save_junction_plot: true              # also write a 3D plot of the junction FUS
                                       # (+ per-view archive if save_scan_images); watch it converge live
 
 # ---- Pick approach / lift / place ----
-approach_distance_m: 0.10
+approach_distance_mm: 100.0
 approach_axis: [0.0, 0.0, 1.0]   # in the GRASP frame
-lift_distance_m: 0.10
+lift_distance_mm: 100.0
 lift_axis: [0.0, 0.0, 1.0]       # in the BASE frame (+Z up)
 
 # ---- Pickup: the grasp DESCENT (grasp-align -> grasp) control mode ----
@@ -263,8 +263,8 @@ pickup:
     reference_rate_hz: 125.0
     lookahead_time_s: 0.1
     servo_gain: 300.0
-    max_delta_m: 0.05                                        # runaway clamp (translation)
-    max_delta_rad: 0.5
+    max_delta_mm: 50.0                                        # runaway clamp (translation)
+    max_delta_deg: 28.64788975654
   force_guard:                   # optional hard backstop during the descent (a trip = stop early); off by default
     enabled: false
     max_force_n: 30.0
@@ -296,15 +296,15 @@ grasp_check:
   recovery:
     enabled: true
     max_tries: 10                # corrective retries before reporting a miss
-    finger_width_m: 0.02278      # fingertip width; the cable-grab shift is a fraction of this
+    finger_width_mm: 22.78      # fingertip width; the cable-grab shift is a fraction of this
     cable_shift_fraction: 0.8    # CABLE grabbed -> shift this * finger_width in +x, then retry
-    empty_drop_m: 0.003          # EMPTY close  -> drop this in -z (toward the object), then retry
+    empty_drop_mm: 3.0          # EMPTY close  -> drop this in -z (toward the object), then retry
                                   # (deeper along the approach); faces reseats along its NEGATIVE.
                                   # Uncomment + flip the sign if the reseat moves the wrong way.
 
 speed:
-  max_joint_velocity_rad_s: 0.5
-  max_cartesian_velocity_m_s: 4.0
+  max_joint_velocity_deg_s: 28.64788975654
+  max_cartesian_velocity_mm_s: 4000.0
   # 2026-08-18: unified on the _common.yaml value. Four different accelerations were in
   # use across the fleet (30 / 57.3 / 68.8 / 286.5 deg/s^2) because the legacy
   # `joint_acceleration_rad_s2` spelling and the arm's built-in default were shadowing
@@ -331,5 +331,5 @@ reset:
     damping_ratio: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     selected_axes: [1, 1, 1, 1, 1, 1]
     reference_rate_hz: 125.0
-    max_delta_m: 0.05
-    max_delta_rad: 0.5
+    max_delta_mm: 50.0
+    max_delta_deg: 28.64788975654

@@ -46,7 +46,7 @@ identical whichever you pick:
   reconstructed cable points in **base-frame axes**, with the refined junction triad.
 
 **Only close views are fused.** In both modes a detected view is fused into the final pose **only**
-while the camera is within `scan.max_view_distance_m` of the cable — farther detections still steer
+while the camera is within `scan.max_view_distance_mm` of the cable — farther detections still steer
 the approach in (via the rough origin) but are kept out of the fit, because their depth error grows
 as Z². (Previously every view was fused with equal weight.)
 
@@ -67,15 +67,15 @@ Config: `configs/cable_pick_place.yaml`
 | `sam3.mode` | `junction` (default) \| `neck` \| `tip` — see below; `adaptive` + `confidence_floor` (neck only) tune the threshold per image |
 | `scan.mode` | `fuse` (default) \| `reconstruction` — **which pose estimator**; reconstruction needs `sam3.mode: junction` |
 | `scan.min_good_views` / `max_passes` | keep scanning until this many close views detect |
-| `scan.max_view_distance_m` | a view is **fused** only within this range of the cable (farther ones only steer the approach) |
+| `scan.max_view_distance_mm` | a view is **fused** only within this range of the cable (farther ones only steer the approach) |
 | `scan.offsets` / `relative_bounds` | the viewpoints (camera frame) and their safety clamp |
-| `scan.approach.min_distance_m` | the **view floor** (inside the D405's ~70–500 mm range) |
-| `scan.refine.orbit_deg` / `max_orbit_deg` / `min_height_m` | axis-sharpening orbit + its guards |
+| `scan.approach.min_distance_mm` | the **view floor** (inside the D405's ~70–500 mm range) |
+| `scan.refine.orbit_deg` / `max_orbit_deg` / `min_height_mm` | axis-sharpening orbit + its guards |
 | `connector_estimator.*` | RANSAC / parallax / workspace gates for the fuse-mode fit |
 | `reconstruction.*` | curve reconstruction + its two convergence thresholds (`scan.mode: reconstruction`) |
 | `<cable>.junction_in_fingertip` (cables.yaml) | the junction pose wrt the **fingertip** at grasp — the fingertip is posed at detected junction @ its inverse before closing (replaces `connector_grasp` / `junction_offset_m`) |
 | `fingertip_grasp` | the fingertip relative to tool0 (the grasp reference) |
 | `grasp_check.closed_counts` | full-closure counts; stalling short = failed grasp |
 
-Needs the SAM3 environment (see `requirements/perception.txt`). `min_height_m` **must** stay below
-`approach.min_distance_m` or every orbit view is rejected once the camera closes in.
+Needs the SAM3 environment (see `requirements/perception.txt`). `min_height_mm` **must** stay below
+`approach.min_distance_mm` or every orbit view is rejected once the camera closes in.

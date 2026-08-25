@@ -42,7 +42,7 @@ robot:
   # weight and reports TRUE EXTERNAL force -- this experiment is entirely a wrench measurement.
   payload:
     mass_kg: 1.3
-    cog_m: [-0.026, 0.028, 0.030]
+    cog_mm: [-26.0, 28.0, 30.0]
 base_frame: base_link
 tip_frame: tool0
 
@@ -412,7 +412,7 @@ wiggle_guard:
 speed:
   max_joint_velocity_deg_s: 60.0
   max_joint_acceleration_deg_s2: 30.0
-  max_cartesian_velocity_m_s: 0.25
+  max_cartesian_velocity_mm_s: 250.0
   max_cartesian_translation_mm_s: 5.0
   max_cartesian_rotation_deg_s: 10.0
   retract_translation_mm_s: 50.0

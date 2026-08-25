@@ -4,24 +4,24 @@
 robot:
   ip: 192.168.125.2
   dry_run: false
-  # Tool payload (gripper + coupler + camera): mass + CoG in the tool0 frame (m). REQUIRED so
+  # Tool payload (gripper + coupler + camera): mass + CoG in the tool0 frame (mm). REQUIRED so
   # getActualTCPForce() subtracts the tool weight and reports true EXTERNAL force.
   payload:
     mass_kg: 1.3
-    cog_m: [-0.026, 0.028, 0.030]
+    cog_mm: [-26.0, 28.0, 30.0]
 base_frame: base_link
 tip_frame: tool0
 
 # ---- Ground-truth poses ----
 # assembled_pose: TOOL0 in base at a good mate. Jog there and read base_link->tool0 off the robot.
 assembled_pose:
-  xyz: [-0.103, -1.048, -0.068]
-  rpy: [-3.129, -0.011, -3.139]
+  xyz_mm: [-103.0, -1048.0, -68.0]
+  rpy_deg: [-179.2784940964, -0.630253574644, -179.8514518916]
 held_object_pose:                # the held part w.r.t. tool0
-  xyz: [0.0, -0.089, 0.010]
-  rpy: [-1.5708, 0.0, 0.0]
+  xyz_mm: [0.0, -89.0, 10.0]
+  rpy_deg: [-90.0002104591, 0.0, 0.0]
 
-standoff_distance_m: 0.200
+standoff_distance_mm: 200.0
 standoff_axis: [0.0, 0.0, 1.0]   # target-object frame
 
 trajectory_csv: assembly_trajectory.csv
@@ -35,7 +35,7 @@ admittance:                      # used only when control_mode == admittance
   max_torque_nm: 8.0
 
 speed:
-  max_joint_velocity_rad_s: 0.5
+  max_joint_velocity_deg_s: 28.64788975654
   # 2026-08-18: unified on the _common.yaml value. Four different accelerations were in
   # use across the fleet (30 / 57.3 / 68.8 / 286.5 deg/s^2) because the legacy
   # `joint_acceleration_rad_s2` spelling and the arm's built-in default were shadowing

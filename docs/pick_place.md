@@ -18,10 +18,10 @@ Config: `configs/pick_place.yaml`
 | key | meaning |
 |---|---|
 | `marker.id` | the ArUco id to pick (11) |
-| `aruco.marker_size_m` / `dictionary` | marker geometry / family |
+| `aruco.marker_size_mm` / `dictionary` | marker geometry / family |
 | `object_marker`, `object_grasp` | marker→object and object→grasp transforms |
 | `grasp_tcp_offset` | grasp TCP relative to tool0 |
-| `servo_standoff_m` / `servo_step_m` | visual approach standoff and step |
+| `servo_standoff_mm` / `servo_step_mm` | visual approach standoff and step |
 | `blind_pick` | `true`: home then grasp open-loop; `false`: closed-loop visual servo |
 | `place_offset_xyz` | place = grasp shifted by this |
 

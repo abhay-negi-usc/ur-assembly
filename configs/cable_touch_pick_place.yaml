@@ -10,17 +10,17 @@ robot:
   dry_run: false
   # Tool payload -- REQUIRED for correct force readings (guard, admittance, touch). Without
   # it, getActualTCPForce reads the tool's own weight as external force. MEASURE/estimate the
-  # mass + CoG of the gripper + coupler + camera (CoG in the tool0 frame, metres).
+  # mass + CoG of the gripper + coupler + camera (CoG in the tool0 frame, mm).
   payload:
     mass_kg: 1.3
-    cog_m: [-0.026, 0.028, 0.030]
+    cog_mm: [-26.0, 28.0, 30.0]
 base_frame: base_link
 tip_frame: tool0
 camera_frame: camera1_color_optical_frame
 
 hand_eye:
-  xyz: [0.0, -0.080, 0.031]
-  rpy: [0.0, 0.0, 0.0]
+  xyz_mm: [0.0, -80.0, 31.0]
+  rpy_deg: [0.0, 0.0, 0.0]
 
 camera:
   serial_no: "218622272137"
@@ -40,8 +40,8 @@ connector_estimator:
   min_views: 2
   min_inlier_views: 3
   min_parallax_deg: 3.0
-  inlier_dist_m: 0.010
-  max_range_m: 0.80
+  inlier_dist_mm: 10.0
+  max_range_mm: 800.0
   up_axis: [0.0, 0.0, 1.0]
   workspace_min: [-10.0, -10.0, -10.0]   # matches dev connector_pose_node default (no box)
   workspace_max: [10.0, 10.0, 10.0]
@@ -49,34 +49,34 @@ connector_estimator:
 connector_frame: connector_tip
 
 grasp_tcp_offset:
-  xyz: [0.0, 0.0, 0.0]
-  rpy: [0.0, 0.0, 0.0]
+  xyz_mm: [0.0, 0.0, 0.0]
+  rpy_deg: [0.0, 0.0, 0.0]
 fingertip_grasp:
-  xyz: [0.0, -0.01254, 0.18165]
-  rpy: [3.14159, 0.0, -1.5708]
+  xyz_mm: [0.0, -12.54, 181.65]
+  rpy_deg: [179.9998479605, 0.0, -90.0002104591]
 
 # WHERE TO TOUCH / GRASP, relative to the TIP frame (x = connector axis toward the tip; -x = back
 # along the cable). Grasp defaults to the touch point -- z is only KNOWN where we touched.
 touch_offset:
-  xyz: [-0.05, 0.0, 0.0]
-  rpy: [0.0, 0.0, 0.0]
+  xyz_mm: [-50.0, 0.0, 0.0]
+  rpy_deg: [0.0, 0.0, 0.0]
 grasp_offset:
-  xyz: [-0.05, 0.0, 0.0]
-  rpy: [0.0, 0.0, 0.0]
+  xyz_mm: [-50.0, 0.0, 0.0]
+  rpy_deg: [0.0, 0.0, 0.0]
 
 # ---- Touch probe: fingers fully closed, position-controlled descent, force checked BEFORE each step ----
 touch:
   force_n: 3.0                     # VERY low -- a probe, not a push. KEEP THE E-STOP IN HAND.
-  step_m: 0.001                    # 1 mm -> bounds the force overshoot to one step
-  max_descent_m: 0.06
+  step_mm: 1.0                    # 1 mm -> bounds the force overshoot to one step
+  max_descent_mm: 60.0
   settle_s: 0.25
-  hover_height_m: 0.05
-  contact_z_offset_m: 0.0          # added to the contact z for the grasp; tune on the real part
+  hover_height_mm: 50.0
+  contact_z_offset_mm: 0.0          # added to the contact z for the grasp; tune on the real part
   tare_before: true
 
 align:
   max_iterations: 8
-  pos_deadband_m: 0.002
+  pos_deadband_mm: 2.0
   ang_deadband_deg: 1.5
 
 # ---- Scan (refines the TIP axis; same machinery as cable_pick_place) ----
@@ -85,19 +85,19 @@ scan:
   min_good_views: 4
   max_passes: 3
   view_settle_s: 0.5
-  max_view_distance_m: 0.250      # a detected view counts toward min_good_views only
+  max_view_distance_mm: 250.0      # a detected view counts toward min_good_views only
                                   # within this range; farther detections still steer
                                   # the approach in but do not count (>= approach floor)
   approach:
     enabled: true
-    step_m: 0.010
-    min_distance_m: 0.200
-    nominal_distance_m: 0.23
+    step_mm: 10.0
+    min_distance_mm: 200.0
+    nominal_distance_mm: 230.0
     scale_offsets: true
     recenter: true
   relative_bounds:
-    xyz: [0.08, 0.08, 0.05]
-    rpy: [0.35, 0.35, 0.10]
+    xyz_mm: [80.0, 80.0, 50.0]
+    rpy_deg: [20.05352282958, 20.05352282958, 5.72957795131]
   offsets:
     - {xyz: [ 0.000,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
     # First two views: PURE TRANSLATION (tilt zeroed) -- see cable_pick_place.yaml for the rationale
@@ -117,15 +117,15 @@ scan:
     enabled: true
     orbit_deg: [12.0, -12.0, 20.0, -20.0]
     max_orbit_deg: 25.0
-    min_height_m: 0.12
+    min_height_mm: 120.0
 
 save_scan_images: true
 data_dir: data
 scan_images_subdir: cable_touch_pick_place
 
-approach_distance_m: 0.10
+approach_distance_mm: 100.0
 approach_axis: [0.0, 0.0, 1.0]
-lift_distance_m: 0.10
+lift_distance_mm: 100.0
 lift_axis: [0.0, 0.0, 1.0]
 place_offset_xyz: [0.050, 0.0, 0.0]
 place_offset_rpy: [0.0, 0.0, 0.0]
@@ -147,8 +147,8 @@ grasp_check:
 
 # Keep speeds MODEST: the descent is a stack of ~60 one-millimetre moves.
 speed:
-  max_joint_velocity_rad_s: 0.4
-  max_cartesian_velocity_m_s: 4.0
+  max_joint_velocity_deg_s: 22.91831180523
+  max_cartesian_velocity_mm_s: 4000.0
   # 2026-08-18: unified on the _common.yaml value. Four different accelerations were in
   # use across the fleet (30 / 57.3 / 68.8 / 286.5 deg/s^2) because the legacy
   # `joint_acceleration_rad_s2` spelling and the arm's built-in default were shadowing

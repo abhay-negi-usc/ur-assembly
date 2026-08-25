@@ -126,8 +126,8 @@ trial 4/9 took 31.2 s | mean cycle 30.8 s | 5 left, ETA 2:34 (done ~14:21:07)
 | `held_frame` | REQUIRED: the `configs/frames.yaml` frame naming the held connector (its `frames:` pose wrt tool0 + its `targets:` mate) |
 | `trajectory_csv` / `trajectory_angles_deg` | the ideal path (connector wrt target connector; last row identity) |
 | `standoff_axis` | approach/insertion axis in the target-connector frame (`[-1,0,0]` = direct −X → 0) |
-| `standoff_distance_m` | how far **beyond the trajectory's FIRST row** the one-time stand-off sits (measured from the path start, not the mate — so it is always clear of the path) |
-| `retract_distance_m` | how far to back out after each trial, straight along the **connector's own −X** from wherever the insert stopped (magnitude; compliant but un-guarded) |
+| `standoff_distance_mm` | how far **beyond the trajectory's FIRST row** the one-time stand-off sits (measured from the path start, not the mate — so it is always clear of the path) |
+| `retract_distance_mm` | how far to back out after each trial, straight along the **connector's own −X** from wherever the insert stopped (magnitude; compliant but un-guarded) |
 
 ### Sampling
 | key | meaning |
@@ -139,7 +139,7 @@ trial 4/9 took 31.2 s | mean cycle 30.8 s | 5 left, ETA 2:34 (done ~14:21:07)
 | `sampling.uncertainty.lower` / `.upper` | per-DOF **absolute bounds** `[x,y,z (m), r,p,y (deg)]` in the frame above. Hard limits, not σ; need not be symmetric |
 | `sampling.noise.lower` / `.upper` | extra jitter, same form but drawn **per waypoint** (usually all 0) |
 | `sampling.chunk_fraction` | fraction of the (resampled) trajectory to execute per trial |
-| `sampling.translational_resolution_m` / `rotational_resolution_deg` | densify the CSV to this spacing |
+| `sampling.translational_resolution_mm` / `rotational_resolution_deg` | densify the CSV to this spacing |
 | `sampling.log_decimation` | log every Nth servo cycle (125 Hz / N ≈ rows/s); `5` ≈ 25 Hz |
 | `sampling.random_seed` | `0` = nondeterministic; `>0` seeds a dedicated RNG for replayable trials |
 | `sampling.csv_path` | output stem; a `<cable>/` subfolder is inserted and a `_YYYYmmdd_HHMMSS` appended, so runs are grouped by cable and unique |
@@ -158,7 +158,7 @@ trial 4/9 took 31.2 s | mean cycle 30.8 s | 5 left, ETA 2:34 (done ~14:21:07)
 |---|---|
 | `speed.max_cartesian_translation_mm_s` / `max_cartesian_rotation_deg_s` | cartesian limits for the compliant **INSERT** (the contact phase). Each ramp segment gets the time its own geometry needs, so neither limit is exceeded; `0` disables that limit |
 | `speed.retract_translation_mm_s` / `retract_rotation_deg_s` | same, for the **RETRACT** — free-space escape, so it need not crawl at insertion speed. Omit to fall back to the insert limits |
-| `speed.max_joint_velocity_deg_s` / `max_cartesian_velocity_m_s` | the **free-space** `moveJ` caps (stand-off approach, per-trial reorient). `_rad_s` is still accepted for the joint cap |
+| `speed.max_joint_velocity_deg_s` / `max_cartesian_velocity_mm_s` | the **free-space** `moveJ` caps (stand-off approach, per-trial reorient). `_rad_s` is still accepted for the joint cap |
 | `speed.joint_acceleration_rad_s2` | free-space accel. **For short moves this binds, not the velocity cap** — a hop shorter than the accel/decel distance never reaches top speed, so raise this (not the cap) to speed up the per-trial reorient |
 
 ## Output columns (per sample)

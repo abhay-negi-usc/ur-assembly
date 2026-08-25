@@ -534,10 +534,14 @@ def build_and_run(cfg, robot, camera, args):
     en_frq = [float((en.get('frequency_hz') or {}).get(d, 0.0)) for d in DIM_KEYS]
     en_rate = float(en.get('sample_rate_hz', 25.0))
     en_pre_mm = float(en.get('preload_mm', 0.0) or 0.0)
-    en_speed = en.get('speed_mm_s')
+    # RETIRED: assembly.engage.speed_mm_s. The engage reference rate is now speed.phase_scale
+    # .engage, so every phase's speed is set in one table instead of one phase carrying a private
+    # mm/s that silently outranked its own scale. Fail loudly rather than ignore a stale key --
+    # a run that quietly ran at a different speed than the file says is the failure to avoid.
+    en_speed_retired = en.get('speed_mm_s')
     en_fmax = float(en.get('max_axial_force_n', 0.0) or 0.0)
     en_fpers = float(en.get('persistence_s', 0.0) or 0.0)
-    # OSCILLATION SPEED CAP. speed_mm_s paces the PATH; the oscillation adds its own velocity
+    # OSCILLATION SPEED CAP. phase_scale.engage paces the PATH; the oscillation adds its own velocity
     # (amplitude x 2*pi*f) on top. The cap dilates the oscillation CLOCK only, leaving amplitude
     # and the frequency ratio untouched, so it costs wall-clock and nothing else. null = uncapped.
     #
@@ -572,9 +576,17 @@ def build_and_run(cfg, robot, camera, args):
         if en_pre_mm < 0:
             log.error('assembly.engage.preload_mm must be >= 0.')
             return False
-        if en_speed is not None and float(en_speed) <= 0:
-            log.error('assembly.engage.speed_mm_s must be > 0 when set (null = the assemble '
-                      'phase scale).')
+        if en_speed_retired is not None:
+            # Read the cap here rather than using g_v: this validation runs long before the speed
+            # block is unpacked, and the whole point is to fail BEFORE anything moves.
+            _cap = float(cfg.get_path('speed.max_cartesian_translation_mm_s', 3.5))
+            log.error(
+                'assembly.engage.speed_mm_s is RETIRED -- the engage reference rate now comes '
+                'from speed.phase_scale.engage, like every other phase. Delete the key and set '
+                'speed.phase_scale.engage: %.4g to keep the %.2f mm/s it was asking for '
+                '(= %.2f / max_cartesian_translation_mm_s %.4g).',
+                float(en_speed_retired) / max(_cap, 1e-9), float(en_speed_retired),
+                float(en_speed_retired), _cap)
             return False
         for i, d in enumerate(DIM_KEYS):
             if abs(en_amp[i]) > 0.0 and en_frq[i] <= 0.0:
@@ -986,6 +998,12 @@ def build_and_run(cfg, robot, camera, args):
     g_v = float(spd.get('max_cartesian_translation_mm_s', 3.5))
     g_w = float(spd.get('max_cartesian_rotation_deg_s', 5.0))
     s_asm = float(scales.get('assemble', 1.0))
+    # ENGAGE HAS ITS OWN SCALE, falling back to `assemble`. The insertion is the slowest thing
+    # the arm does -- contact force scales hard with approach speed, and whole oscillation cycles
+    # have to fit inside the insertion -- so it needs to be settable without also slowing every
+    # other move that runs under the assemble phase. Absent -> assemble, so a config that never
+    # split them behaves exactly as before.
+    s_eng = float(scales.get('engage', scales.get('assemble', 1.0)))
     s_ret = float(scales.get('retract', 1.0))
     s_std = float(scales.get('standoff', 1.0))
     min_seg_s = 1.0 / adm.rate
@@ -1575,10 +1593,11 @@ def build_and_run(cfg, robot, camera, args):
         superimposes an oscillation on the way. With every amplitude at 0 it is a plain direct
         insertion, so direct and wiggle are one code path at two settings.
 
-        TWO CLOCKS, deliberately. The PATH advances by DISTANCE (speed_mm_s); the OSCILLATION
+        TWO CLOCKS, deliberately. The PATH advances by DISTANCE (speed.phase_scale.engage x the
+        global translation cap); the OSCILLATION
         advances by TIME, so its frequency is the frequency configured regardless of how fast the
         path is driven. Pacing both by distance would make the oscillation frequency a function of
-        the insert speed. MIND THE DURATION: the insertion lasts path_length / speed_mm_s, so a
+        the insert speed. MIND THE DURATION: the insertion lasts path_length / that rate, so a
         frequency chosen without reference to that can complete less than one cycle and act as a
         constant offset -- the start-up line reports cycles-per-insertion for that reason.
 
@@ -1606,7 +1625,7 @@ def build_and_run(cfg, robot, camera, args):
         cum = np.concatenate([[0.0], np.cumsum(seg)])
         total_mm = float(cum[-1])
 
-        v_mm_s = float(en_speed) if en_speed is not None else (g_v * s_asm)
+        v_mm_s = g_v * s_eng
         dt = 1.0 / en_rate
 
         def path_at(d_mm):
@@ -1647,7 +1666,7 @@ def build_and_run(cfg, robot, camera, args):
                 '  cycles completed during the %.1f s insertion: %s%s', dur,
                 {k: round(v, 2) for k, v in cyc.items()},
                 '.' if worst >= 1.0 else ' -- under one full cycle acts as a constant OFFSET, not '
-                'a wiggle. Raise the frequency or slow speed_mm_s.')
+                'a wiggle. Raise the frequency or lower speed.phase_scale.engage.')
 
         first = ref_at(0.0)
         phase('standoff')
@@ -1666,8 +1685,8 @@ def build_and_run(cfg, robot, camera, args):
             if cnt[0] % decim == 0:
                 obs.append(_observe(robot, T_tool0_conn, T_base_tconn))
 
-        phase('assemble')
-        adm_en.reset()
+        phase('engage')          # same scale the reference rate is derived from, so the arm's
+        adm_en.reset()           # own limits and the reference cannot disagree
         adm_en.warmup(first, tare_fn=tare)
         combo.reset()
         # REAL ELAPSED TIME, not i*dt. The servo loop does not necessarily cycle at
@@ -2934,7 +2953,6 @@ def build_and_run(cfg, robot, camera, args):
 
 
         attempt = 0
-        reoriented = False
         reoriented = False
         runner = StepRunner(log, confirm=confirm is not None)
         while True:

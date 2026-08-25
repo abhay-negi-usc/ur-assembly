@@ -162,7 +162,7 @@ ground_plane:
   # After the cable is REPLACED (new cycle, slip, or reorient), lift the camera this far in base
   # +Z before localizing again. The cable is no longer where it was picked from, so the old view
   # can clip it -- and a cable running out of frame is what the junction trace handles worst.
-  replace_view_raise_mm: 50.0
+  replace_view_raise_mm: 100.0
 
 connector_frame: connector
 
@@ -298,7 +298,6 @@ pickup:
     rpy_deg: [0.0, -70.0, 0.0]
 
   # BELIEF OFFSET, mm in the CONNECTOR frame -- the one knob here that moves NOTHING at
-  # BELIEF OFFSET, mm in the CONNECTOR frame -- the one knob here that moves NOTHING at
   # pickup.  This is the split between the two things that were previously tangled:
   #
   #   the GRASP COMMAND  (pitch_deg, grip_offset_mm, junction_in_fingertip) = where the
@@ -333,7 +332,7 @@ pickup:
   # cylinder at a different depth along the approach -- is more naturally a hand-frame value,
   # and in this frame it will move as the pitch changes.  Re-measure after a large change of
   # approach angle either way.
-  belief_offset_mm: [0.0, 0.0, -12.5]
+  belief_offset_mm: [0.0, 0.0, -15.0]
   # PICKUP HEIGHT from the gripper kinematic model.  Assumes the connector rests ON THE GROUND
   # PLANE (ground_plane.z_m): grasp target = plane + connector d_max/2 (centerline) + the
   # fingertip ADVANCE between fingertip_ref_separation_mm (where fingertip_grasp z was
@@ -589,7 +588,6 @@ speed:
     # BODY down toward the ground plane rather than just the fingers.  Falls back to `scan`
     # when unset, so other apps are unaffected.
     grasp_align: 1.0
-    grasp_align: 1.0
     pickup: 0.5      # the compliant grasp descent
     lift: 0.8        # the compliant lift (including the slip-check partial lift)
     standoff: 1.0    # the move to stand-off + the per-attempt realign moveJs
@@ -600,6 +598,11 @@ speed:
     # caps, which are what actually bind here.
     reconfigure: 3.0
     assemble: 0.10      # the insertion reference ramp
+    # THE ENGAGE reference rate: 0.05 x 50 mm/s = 2.5 mm/s.  Split from `assemble` because the
+    # insertion is the slowest thing the arm does -- contact force scales hard with approach
+    # speed, and whole oscillation cycles have to fit inside it -- so it has to be settable
+    # without slowing every other move that runs under the assemble phase.  Absent -> assemble.
+    engage: 0.05
     retract: 4.0       # the between-attempt retract + the release escape
     # POST-MATE CLOCKING, one scale per maneuver.  These pace the CONTACT ramps; free-space
     # moves inside a maneuver stay on standoff/retract.  A non-null speed_translation_mm_s /
@@ -795,14 +798,14 @@ assembly:
   # ===========================================================================================
   # Drives configs/assembly_trajectory.csv from its first row to the mate, extends it by
   # preload_mm, and superimposes an optional oscillation.  With every amplitude at 0 this is a
-  # plain DIRECT insertion.  TWO CLOCKS on purpose: the PATH advances by DISTANCE (speed_mm_s)
+  # plain DIRECT insertion.  TWO CLOCKS on purpose: the PATH advances by DISTANCE
+  # (speed.phase_scale.engage x the translation cap)
   # while the OSCILLATION advances by TIME, so the wiggle frequency does not depend on the
   # insert speed.
   engage:
-    # SPEED for this phase.  null = speed.max_cartesian_translation_mm_s x
-    # phase_scale.assemble.  Kept slow deliberately: contact force scales hard with approach
-    # speed, and whole oscillation cycles must fit INSIDE the insertion.
-    speed_mm_s: 2.5
+    # SPEED for this phase lives in speed.phase_scale.engage (0.05 x the 50 mm/s cap = 2.5
+    # mm/s).  Kept slow deliberately: contact force scales hard with approach speed, and whole
+    # oscillation cycles must fit INSIDE the insertion.
 
     # PRELOAD, mm past the mate along the connector's own +X, so the reference finishes
     # pressing rather than merely arriving.  0 = stop exactly on the mate.  (Distinct from
@@ -824,7 +827,7 @@ assembly:
     # bayonet search is for.  Axial rather than |f| is what lets it be set low: a magnitude
     # limit tight enough to catch real resistance also stops on every lateral graze.
     max_axial_force_n: 5.0
-    persistence_s: 0.10          # the limit must hold this long -- rides out contact spikes
+    persistence_s: 3.0          # the limit must hold this long -- rides out contact spikes
 
     # ---- compliance overrides (else the top-level compliance:) ---
     stiffness: [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]

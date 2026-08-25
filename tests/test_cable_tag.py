@@ -315,11 +315,14 @@ def test_celebrate_is_off_by_default_and_cannot_disturb_the_assembly():
         assert k in cb, f'assembly.celebrate.{k} must be declared'
 
     # 2. It runs AFTER the escape and BEFORE disassembly, so the connector is already released.
-    i_cel = src.index('celebrate(state)')
+    i_cel = src.index('celebrate(state, cycle, tug_res, ret_ok)')
     i_dis = src.index('dis_ok, state = disassembly(')
     assert i_cel < i_dis, 'celebrate must run before disassembly'
-    assert "if ret_ok and tug_res != 'failed':" in src, \
-        'celebrate must be gated on a completed escape and a tug that did not fail'
+    # A tug that TERMINATED verified nothing -- an earlier gate tested `!= 'failed'` and let that
+    # through. The bar is the same one the run uses for ok_cycle.
+    assert "tug_res not in (None, 'skipped', 'verified')" in src, \
+        'celebrate must refuse any tug outcome that is not verified/skipped/disabled'
+    assert 'if not ret_ok:' in src, 'celebrate must refuse when the escape did not complete'
 
     # 3. Only on the state the run was CONFIGURED to reach -- not a hardcoded 'locked', or a
     #    connector-clocking-only run could never celebrate.
@@ -327,7 +330,7 @@ def test_celebrate_is_off_by_default_and_cannot_disturb_the_assembly():
 
     # 4. Joint moves are collision-checked and limit-checked. A flourish is never worth a forced
     #    move, and a moveJ can swing the tool through the bench between two clear endpoints.
-    body = src[src.index('def celebrate(state):'):src.index('def disassembly(state,')]
+    body = src[src.index('def celebrate(state, cycle'):src.index('def disassembly(state,')]
     assert 'model.check_path(' in body, 'the nod/spin must be collision-checked'
     assert 'robot.arm.joints_ok(' in body, 'targets must be checked against the joint limits'
     assert 'wrist_1_joint' in body and 'wrist_3_joint' in body, 'wrist-only by design'
@@ -336,3 +339,103 @@ def test_celebrate_is_off_by_default_and_cannot_disturb_the_assembly():
 
     # 5. It can never fail a good assembly.
     assert 'CELEBRATE raised' in src, 'an exception in the flourish must be caught and ignored'
+
+    # 6. Cadence -- a 50-cycle collection must not stop to dance 50 times.
+    assert cb.get('when') == 'last', 'the default cadence must be once, at the end of the run'
+    assert 'every_n' in cb
+    assert 'due = (cycle >= n_cycles)' in body, "'last' means the final cycle of the run"
+    assert 'due = (cycle % every_n == 0)' in body, "'every_n' means every Nth cycle"
+    assert "treating it as 'last'" in body, 'an unknown cadence must warn, not silently do nothing'
+
+
+def test_place_scatter_is_bounded_centred_and_reproducible():
+    """The disassembly place can be scattered so each cycle re-picks from a fresh pose.
+
+    The properties that matter: it is OFF by default (a deterministic run must stay
+    deterministic), the draw never exceeds the configured range, it is CENTRED on the configured
+    place rather than replacing it, and a seed makes a long run re-creatable."""
+    import os
+
+    import numpy as np
+
+    from urlab import config as urconfig
+    cfg = urconfig.load('bnc_assembly')
+    sc = cfg.get_path('assembly.disassembly.place_scatter') or {}
+    assert sc.get('enabled') is False, 'scatter must ship off'
+    assert sc['x_mm'] == 50.0 and sc['y_mm'] == 50.0 and sc['yaw_deg'] == 30.0
+    assert 'seed' in sc, 'a scattered run must be reproducible'
+
+    # Bounded and centred: the mean of many uniform draws sits at 0, and no draw leaves the box.
+    rng = np.random.default_rng(7)
+    rx, ry = sc['x_mm'] / 1000.0, sc['y_mm'] / 1000.0
+    rw = np.radians(sc['yaw_deg'])
+    draws = np.array([[rng.uniform(-rx, rx), rng.uniform(-ry, ry), rng.uniform(-rw, rw)]
+                      for _ in range(4000)])
+    assert np.all(np.abs(draws[:, 0]) <= rx) and np.all(np.abs(draws[:, 1]) <= ry)
+    assert np.all(np.abs(draws[:, 2]) <= rw)
+    assert abs(draws[:, 0].mean()) < 0.1 * rx, 'the scatter must be CENTRED on the configured place'
+    assert abs(draws[:, 2].mean()) < 0.1 * rw
+
+    src = open(os.path.join(os.path.dirname(urconfig.__file__), 'apps',
+                            'bnc_assembly.py'), encoding='utf-8').read()
+    body = src[src.index('def place_scatter():'):src.index('def aligned_place_pose(')]
+    assert "if not bool(sc.get('enabled', False)):" in body and 'return 0.0, 0.0, 0.0' in body, \
+        'disabled must yield exactly zero offset, not a tiny random one'
+    assert 'rng.uniform(' in body, 'the draw must be uniform, as specified'
+
+    # ADDED to the configured offsets, not replacing them.
+    place = src[src.index('def aligned_place_pose('):src.index('def reorient_recovery(')]
+    assert "float(off.get('x_mm', 0.0)) / 1000.0 + s_x" in place, 'scatter ADDS to the offset'
+    assert '+ s_yaw' in place
+
+    # Only the DISASSEMBLY place is scattered -- reorient recovery must stay deterministic, since
+    # it exists to put a badly-presented cable somewhere the coaxial grasp is known to reach.
+    assert src.count('aligned_place_pose(dis_clear_m, scatter=') == 1
+    reorient = src[src.index('def reorient_recovery('):]
+    assert 'scatter=' not in reorient[:reorient.index('def ', 10)], \
+        'the reorient recovery place must not be scattered'
+
+    # An unlucky draw must not kill an unattended run.
+    assert 'no reachable draw in 8 tries' in src, 'unreachable draws must fall back to the centre'
+
+
+def test_an_engage_that_never_makes_contact_is_a_failure_not_a_completion():
+    """'complete' means the full path ran -- trajectory AND preload -- without the axial limit
+    ever being reached, i.e. the connector never touched anything. Clocking from there would turn
+    a connector that is not in a socket, so it must be treated as a MISS.
+
+    The recovery is a full re-pick, not a re-push: the likely causes are a wrong target pose or a
+    wrong in-hand belief, and neither improves by pushing again with the same numbers."""
+    import os
+
+    from urlab import config as urconfig
+    src = open(os.path.join(os.path.dirname(urconfig.__file__), 'apps',
+                            'bnc_assembly.py'), encoding='utf-8').read()
+
+    # 'complete' is a miss ONLY when an axial limit exists -- with none set the condition can
+    # never fire, and treating it as failure would fail every run.
+    assert "if en_status == 'complete' and en_fmax > 0.0:" in src
+    assert 'engage_missed = True' in src
+    assert 'max_axial_force_n = 0' in src, 'the undetectable case must warn, not silently pass'
+
+    # The cycle loop must be a WHILE, so a retried cycle does not consume a production cycle.
+    assert 'while cycle < n_cycles:' in src, 'a for-loop cannot re-run a cycle'
+    assert 'cycle -= 1' in src, 'a missed engagement must not consume one of the asked-for cycles'
+    assert 'repick_pending = True' in src
+
+    # The preamble that resets the belief and re-selects the cable must also run on a re-pick,
+    # not only on cycle > 1 -- otherwise a miss on cycle 1 would re-grasp with a stale belief.
+    assert 'if cycle > 1 or repick_pending:' in src
+
+    # Budgeted, not looped.
+    cfg = urconfig.load('bnc_assembly')
+    assert cfg.get_path('assembly.engage.max_misses') == 2
+    assert float(cfg.get_path('assembly.engage.max_axial_force_n')) > 0.0, \
+        'with no axial limit a miss cannot be detected at all'
+    assert 'engage_misses < max_engage_misses' in src
+
+    # The recovery puts the cable DOWN and returns to the pick pose.
+    body = src[src.index('def place_after_failed_engage('):src.index('def celebrate(')]
+    assert 'aligned_place_pose(' in body and "gripper.open(" in body, 'it must place and release'
+    assert "move_j(q_pick" in body, 'it must end at the pick pose, ready to start over'
+    assert 'retract_from(' in body, 'back the connector out before travelling to the place'

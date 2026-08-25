@@ -533,6 +533,10 @@ def build_and_run(cfg, robot, camera, args):
     en_amp = [float((en.get('amplitude') or {}).get(d, 0.0)) for d in DIM_KEYS]
     en_frq = [float((en.get('frequency_hz') or {}).get(d, 0.0)) for d in DIM_KEYS]
     en_rate = float(en.get('sample_rate_hz', 25.0))
+    # How many MISSED engagements (full path run, axial limit never reached) the run will recover
+    # from by putting the cable down and re-picking. A budget, not a loop: a cell that keeps
+    # missing has a wrong target pose or a wrong in-hand belief, and retrying wears the part.
+    max_engage_misses = max(0, int(en.get('max_misses', 2)))
     en_pre_mm = float(en.get('preload_mm', 0.0) or 0.0)
     # RETIRED: assembly.engage.speed_mm_s. The engage reference rate is now speed.phase_scale
     # .engage, so every phase's speed is set in one table instead of one phase carrying a private
@@ -988,6 +992,11 @@ def build_and_run(cfg, robot, camera, args):
     tn_da, tn_dt = float(tn.get('noise_decay_attempt', 0.0)), \
         float(tn.get('noise_decay_traj', 0.0))
     noise_rng = np.random.default_rng()
+    # The place-scatter RNG, in a list so the closures share ONE stream. Seeded when the config
+    # asks, so a scattered multi-cycle run can be re-created exactly when cycle 34 goes wrong.
+    _ps_seed = ((cfg.section('assembly').get('disassembly', {}) or {})
+                .get('place_scatter', {}) or {}).get('seed')
+    _place_rng = [np.random.default_rng(None if _ps_seed is None else int(_ps_seed))]
 
     spd = cfg.section('speed')
     scales = spd.get('phase_scale', {}) or {}
@@ -1434,9 +1443,63 @@ def build_and_run(cfg, robot, camera, args):
         return 'failed'
 
 
-    def celebrate(state):
+    def place_after_failed_engage(miss_ref, T_tool0_conn_held):
+        """After an engagement that never made contact: back out, lay the cable down, and leave the
+        arm at the pick pose so the sequence can start again from the view.
+
+        WHY A NO-CONTACT ENGAGE IS A FAILURE. The engage drives the recorded path and stops on the
+        axial force limit -- meeting the socket IS the success condition. Running the entire path,
+        preload included, without ever reaching that limit means the connector never touched
+        anything: it went past the socket, or beside it. Continuing to the bayonet search from
+        there would clock a connector that is not in a socket.
+
+        AND WHY THE RECOVERY IS A FULL RE-PICK, NOT A RE-TRY FROM HERE. The most likely causes are
+        a wrong target pose or a wrong in-hand belief, and neither is improved by pushing again
+        from the same place with the same numbers. Putting the cable down and starting over
+        re-localizes the target, resets the belief to nominal, re-detects the cable and re-grasps
+        it -- so every input to the engagement is measured again."""
+        ok = True
+        phase('retract')
+        try:
+            retract_from(miss_ref, T_tool0_conn_held)
+        except Exception as exc:                       # noqa: BLE001 -- keep going to the place
+            log.warning('Could not back out after the failed engage (%s) -- placing from here.',
+                        exc)
+            ok = False
+
+        T_place = aligned_place_pose(dis_clear_m)
+        T_ftip_place = T_place @ inverse(T_ftip_conn)
+        up = translation_matrix([0.0, 0.0, float(dis_rise_m)])
+        log.info('FAILED ENGAGE: laying the cable down at xyz %s mm, then back to the pick pose.',
+                 np.round(T_place[:3, 3] * 1000.0, 0).tolist())
+        phase('reconfigure')
+        if not _guarded(robot, guard_shared,
+                        lambda: robot.move_fingertip(up @ T_ftip_place, 'failed-engage place '
+                                                                       '(above)')):
+            log.error('Could not reach the place stand-off after a failed engage.')
+            return False
+        phase('lift')
+        if not _guarded(robot, guard_shared,
+                        lambda: robot.move_fingertip(T_ftip_place, 'failed-engage place (down)')):
+            log.error('Could not lower to the place pose after a failed engage.')
+            return False
+        robot.gripper.open('release (failed engage)')
+        if not _guarded(robot, guard_shared,
+                        lambda: robot.move_fingertip(up @ T_ftip_place, 'failed-engage place '
+                                                                       '(rise)')):
+            return False
+        phase('reconfigure')
+        if not robot.arm.move_j(q_pick, label='pick pose (after failed engage)'):
+            log.error('Could not return to the pick pose after a failed engage.')
+            return False
+        return ok
+
+    def celebrate(state, cycle, tug_res, ret_ok):
         """CELEBRATE -- a short flourish after a VERIFIED assembly. Cosmetic, and built so it
         cannot undo the work it is celebrating.
+
+        EVERY GATE LIVES HERE, not at the call site, so there is one place that decides whether a
+        run earned a celebration and one place to read when it did not happen.
 
         WHY IT IS WRIST-ONLY. It runs with the gripper open, near a fixture the arm has just spent
         a minute carefully not hitting, so the design constraint is that it must be incapable of
@@ -1456,9 +1519,43 @@ def build_and_run(cfg, robot, camera, args):
         cb = a.get('celebrate', {}) or {}
         if not bool(cb.get('enabled', False)):
             return True
+
+        # ---- 1. DID THIS CYCLE ACTUALLY SUCCEED? ------------------------------------------
+        # The same bar the run itself uses for ok_cycle. Note 'terminated' is NOT success: it
+        # means the tug verification aborted part-way, so nothing was verified -- an earlier
+        # version of this gate tested `!= 'failed'` and let that through.
+        if not ret_ok:
+            log.info('CELEBRATE skipped: the escape did not complete, so the arm is not in a '
+                     'known clear state.')
+            return True
+        if tug_res not in (None, 'skipped', 'verified'):
+            log.info('CELEBRATE skipped: tug verification returned %r -- the assembly is NOT '
+                     'verified, so there is nothing to celebrate.', tug_res)
+            return True
         want = 'locked' if cl_on else ('seated' if cc_on else 'engaged')
         if state != want:
             log.info('CELEBRATE skipped: the run ended %r, not the configured %r.', state, want)
+            return True
+
+        # ---- 2. IS THIS ONE OF THE CYCLES TO CELEBRATE? -----------------------------------
+        # `last` is the useful one for a long run: a 50-cycle collection should not stop to dance
+        # 50 times, but finishing the set is worth marking. It is safe against a mid-run failure
+        # for free -- a failed cycle stops the loop, so the final cycle is never reached.
+        when = str(cb.get('when', 'last')).strip().lower()
+        every_n = max(1, int(cb.get('every_n', 1)))
+        if when in ('last', 'end'):
+            due = (cycle >= n_cycles)
+        elif when in ('every', 'each', 'cycle'):
+            due = True
+        elif when in ('every_n', 'nth'):
+            due = (cycle % every_n == 0)
+        else:
+            log.warning("CELEBRATE: assembly.celebrate.when=%r is not one of "
+                        "last | every | every_n -- treating it as 'last'.", when)
+            due = (cycle >= n_cycles)
+        if not due:
+            log.info('CELEBRATE skipped: cycle %d/%d, when=%r%s.', cycle, n_cycles, when,
+                     f' (every {every_n})' if when in ('every_n', 'nth') else '')
             return True
 
         rise_m = _num(cb, 'rise_mm', 100.0) / 1000.0
@@ -1625,7 +1722,25 @@ def build_and_run(cfg, robot, camera, args):
         if not dis_place_on:
             log.info('DISASSEMBLY: place is off -- the cable stays in the fingers.')
             return True, state
+        # SCATTER THE PLACE, so each cycle re-picks from a genuinely different pose. Drawn with a
+        # REACHABILITY RETRY: an unlucky draw that lands outside the workspace would otherwise kill
+        # an unattended 50-cycle run, and falling back to the centre is always safe because that is
+        # the pose the run would have used anyway.
         T_place = aligned_place_pose(dis_clear_m)
+        for _try in range(8):
+            s = place_scatter()
+            if s == (0.0, 0.0, 0.0):
+                break                                   # scatter off: the centre IS the pose
+            T_try = aligned_place_pose(dis_clear_m, scatter=s)
+            if robot.arm.dry_run or robot.arm.ik(T_try @ inverse(T_ftip_conn)) is not None:
+                T_place = T_try
+                log.info('PLACE SCATTER: %+.1f, %+.1f mm and %+.1f deg about the configured place '
+                         '(draw %d/8).', s[0] * 1000, s[1] * 1000, np.degrees(s[2]), _try + 1)
+                break
+            log.info('  place scatter draw %d is unreachable -- redrawing.', _try + 1)
+        else:
+            log.warning('PLACE SCATTER: no reachable draw in 8 tries -- placing at the '
+                        'un-scattered centre instead. Reduce assembly.disassembly.place_scatter.')
         if not phase_gate('PLACE THE CABLE',
                           'Lay the cable down ALONG THE SOCKET AXIS at xyz %s mm, %.0f mm '
                           'clear of the ground, release and rise.'
@@ -2825,8 +2940,36 @@ def build_and_run(cfg, robot, camera, args):
         log.info('VISUAL TARGET: the run is now anchored on the MEASURED socket pose.')
         return True
 
-    def aligned_place_pose(extra_clearance_m=0.0):
+    def place_scatter():
+        """One uniform (dx_m, dy_m, dyaw_rad) draw for the disassembly place, or zeros.
+
+        WHY SCATTER AT ALL. Without it a multi-cycle run re-picks the cable from the SAME spot
+        every time, so the pick is only ever tested against one pose and the estimator only ever
+        sees one presentation. Scattering the place makes each cycle a genuinely fresh detection
+        and grasp, which is the whole value of running the loop repeatedly.
+
+        CENTRED ON THE CONFIGURED PLACE, not on a fresh guess: the draw is ADDED to
+        reorient_recovery.place_offsets, so turning the scatter off leaves the old behaviour
+        exactly. x/y are in the TARGET CONNECTOR's frame, like the offsets they perturb, so the
+        spread means the same thing whichever way the socket faces.
+
+        Off by default, and `seed` makes a scattered run reproducible -- an unseeded random place
+        is a run you cannot re-create when something goes wrong on cycle 34."""
+        sc = (a.get('disassembly', {}) or {}).get('place_scatter', {}) or {}
+        if not bool(sc.get('enabled', False)):
+            return 0.0, 0.0, 0.0
+        rx = abs(_num(sc, 'x_mm', 50.0)) / 1000.0
+        ry = abs(_num(sc, 'y_mm', 50.0)) / 1000.0
+        rw = np.radians(abs(_num(sc, 'yaw_deg', 30.0)))
+        rng = _place_rng[0]
+        return (float(rng.uniform(-rx, rx)), float(rng.uniform(-ry, ry)),
+                float(rng.uniform(-rw, rw)))
+
+    def aligned_place_pose(extra_clearance_m=0.0, scatter=(0.0, 0.0, 0.0)):
         """Where the cable is set down, in base_link -- LYING ALONG THE SOCKET AXIS.
+
+        `scatter` is a (dx_m, dy_m, dyaw_rad) perturbation ADDED to the configured offsets -- see
+        place_scatter(). The default of zeros is the deterministic pose.
 
         THE CONNECTOR +X COMES OUT PARALLEL TO THE TARGET CONNECTOR +X. That is the whole
         requirement and it is easy to lose: a place that simply descends from the pick pose
@@ -2849,11 +2992,13 @@ def build_and_run(cfg, robot, camera, args):
         r = a.get('reorient_recovery', {}) or {}
         off = r.get('place_offsets', {}) or {}
         z_mm = float(off.get('z_mm', -400.0))
-        d = np.array([float(off.get('x_mm', 0.0)), float(off.get('y_mm', 0.0)), z_mm],
-                     dtype=float) / 1000.0
+        s_x, s_y, s_yaw = (float(v) for v in scatter)
+        d = np.array([float(off.get('x_mm', 0.0)) / 1000.0 + s_x,
+                      float(off.get('y_mm', 0.0)) / 1000.0 + s_y,
+                      z_mm / 1000.0], dtype=float)
         p = T_base_tconn[:3, 3] + T_base_tconn[:3, :3] @ d      # offsets in the TARGET frame
         yaw = (float(np.arctan2(T_base_tconn[1, 0], T_base_tconn[0, 0]))
-               + float(np.radians(float(off.get('yaw_deg', 0.0)))))
+               + float(np.radians(float(off.get('yaw_deg', 0.0)))) + s_yaw)
         T = xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, 0.0, yaw])   # flat: roll = pitch = 0
         # THE GROUND DECIDES z, by default. A resting connector's AXIS sits one barrel-radius
         # up -- a property of the part, not a number to type twice -- and "place it on the
@@ -3002,12 +3147,19 @@ def build_and_run(cfg, robot, camera, args):
     # the scan re-finds the cable, which after a place is NOT where it was picked from.
     # ==================================================================================
     T_ftip_conn_nominal = np.array(T_ftip_conn, dtype=float)
-    for cycle in range(1, n_cycles + 1):
+    # A WHILE, NOT A FOR, so a missed engagement can start the cycle over without consuming one
+    # of the production cycles the operator asked for. `engage_misses` is the budget across the
+    # whole run -- a cell that keeps missing is a setup problem, and retrying it forever just
+    # wears the part.
+    cycle, engage_misses, repick_pending = 0, 0, False
+    while cycle < n_cycles:
+        cycle += 1
+        engage_missed = False
         if n_cycles > 1:
             log.info('=' * 78)
             log.info('CYCLE %d/%d', cycle, n_cycles)
             log.info('=' * 78)
-        if cycle > 1:
+        if cycle > 1 or repick_pending:
             # A FRESH PICK HAS A FRESH IN-HAND ERROR. The estimator spent the last cycle
             # correcting the belief for the PREVIOUS grasp; carrying that correction into a
             # new grasp would start the next insertion from a confidently wrong pose.
@@ -3016,6 +3168,7 @@ def build_and_run(cfg, robot, camera, args):
             # junction selection is stale -- the same reason the slip recovery re-prompts.
             if hasattr(scanner, 'reselect'):
                 scanner.reselect()
+            repick_pending = False
         if tgt_source == 'visual' and not locate_target_visually(q_home):
             return False
         # THE PICK POSE. Home is the marker VIEW pose (the sweep above, and the end-of-run
@@ -3141,10 +3294,32 @@ def build_and_run(cfg, robot, camera, args):
         trackc, trackr, trackg = [np.zeros(len(estimator.estimate_dims))], [], []
         try:
             if ins_mode == 'engage':
-                # ENGAGE replaces the estimate loop and the commit. A force stop is an ordinary
-                # outcome, so both endings continue to the clocking sequence.
+                # ENGAGE replaces the estimate loop and the commit.
+                #
+                # A FORCE STOP IS THE SUCCESS. Meeting the socket is what the phase is for, so
+                # 'force' continues to the bayonet search. 'complete' means the whole path ran --
+                # trajectory AND preload -- without ever reaching the axial limit, i.e. the
+                # connector never touched anything. That is a MISS, not a completion, and clocking
+                # from there would turn a connector that is not in a socket.
+                #
+                # UNLESS NO LIMIT IS SET: with max_axial_force_n at 0 the axial condition can never
+                # fire, so 'complete' is the only outcome possible and treating it as failure would
+                # fail every run. _engage_report already says the condition is dead; here it just
+                # means the miss cannot be detected.
                 en_status, _last_ref_e, en_depth = engage_insertion()
-                success = en_status in ('complete', 'force')
+                if en_status == 'complete' and en_fmax > 0.0:
+                    log.error('ENGAGE MISSED: the full path ran (trajectory + %.0f mm preload) '
+                              'without reaching the %.1f N axial limit, so the connector never '
+                              'met the socket. Treating this as a FAILED engagement.',
+                              en_pre_mm, en_fmax)
+                    engage_missed = True
+                    success = False
+                else:
+                    success = en_status in ('complete', 'force')
+                    if en_status == 'complete':
+                        log.warning('ENGAGE ran the full path and no axial limit is set '
+                                    '(max_axial_force_n = 0), so a miss cannot be told from a '
+                                    'seat. Set a limit to make this detectable.')
                 est_rows.append({'attempt': 'engage', 'status': en_status,
                                  'depth_mm': en_depth, 'success': bool(success)})
             for it in (range(1, max_attempts + 1) if ins_mode == 'estimate' else ()):
@@ -3334,6 +3509,25 @@ def build_and_run(cfg, robot, camera, args):
                 log.info('Per-attempt log: %s', os.path.join(out_dir, 'estimates.csv'))
 
         if not success:
+            # A MISSED ENGAGEMENT IS RECOVERABLE; anything else is not. Put the cable down, go
+            # back to the pick view, and run the cycle again from there -- re-localizing the
+            # target and re-grasping, so every input to the engagement is measured afresh.
+            if engage_missed and engage_misses < max_engage_misses:
+                engage_misses += 1
+                log.warning('ENGAGE MISS %d/%d -- placing the cable and starting this cycle over '
+                            'from the pick view.', engage_misses, max_engage_misses)
+                if not place_after_failed_engage(_last_ref_e,
+                                                 robot.T_tool0_fingertip @ T_ftip_conn):
+                    log.error('Could not put the cable down after the missed engagement -- the '
+                              'arm is LEFT WHERE IT IS and the part may still be held.')
+                    return False
+                cycle -= 1                      # this attempt does not count as a cycle
+                repick_pending = True
+                continue
+            if engage_missed:
+                log.error('ENGAGE missed %d times (budget %d) -- stopping. The target pose or the '
+                          'in-hand belief is wrong; re-running will not fix it.',
+                          engage_misses, max_engage_misses)
             return False
 
         # ---- POST-MATE: CONNECTOR CLOCKING, then COLLAR CLOCKING, then the shared escape -------------
@@ -3440,14 +3634,13 @@ def build_and_run(cfg, robot, camera, args):
 
                 # ---- CELEBRATE, between a verified assembly and taking it apart --------------
                 # Here and not earlier: the escape has released the connector and backed the arm
-                # off, so the flourish cannot drag or disturb what it is celebrating. Gated on the
-                # same conditions disassembly uses, plus the run having reached its configured end
-                # state. Never fatal -- a failed flourish must not fail a good assembly.
-                if ret_ok and tug_res != 'failed':
-                    try:
-                        celebrate(state)
-                    except Exception as exc:                   # noqa: BLE001 -- cosmetic only
-                        log.warning('CELEBRATE raised (%s) -- ignored; the assembly stands.', exc)
+                # off, so the flourish cannot drag or disturb what it is celebrating. Every
+                # condition -- success, end state, and how often to do it -- is decided inside
+                # celebrate(). Never fatal: a failed flourish must not fail a good assembly.
+                try:
+                    celebrate(state, cycle, tug_res, ret_ok)
+                except Exception as exc:                       # noqa: BLE001 -- cosmetic only
+                    log.warning('CELEBRATE raised (%s) -- ignored; the assembly stands.', exc)
 
                 # ---- DISASSEMBLY, after the assembly has fully let go ------------------------
                 # It runs HERE, once the escape has released the connector and backed the arm off,

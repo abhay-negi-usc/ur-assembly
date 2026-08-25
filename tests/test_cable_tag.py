@@ -439,7 +439,24 @@ def test_an_engage_that_never_makes_contact_is_a_failure_not_a_completion():
     body = src[src.index('def place_after_failed_engage('):src.index('def celebrate(')]
     assert 'aligned_place_pose(' in body and "gripper.open(" in body, 'it must place and release'
     assert "move_j(q_pick" in body, 'it must end at the pick pose, ready to start over'
-    assert 'retract_from(' in body, 'back the connector out before travelling to the place'
+    # THE RETRACT IS MANDATORY, VERIFIED, AND FIRST. The arm is about to travel sideways; a
+    # connector still in the socket levers it off its fixture. Failing to clear must ABORT, never
+    # fall through to the place -- an earlier version logged the failure and travelled anyway.
+    assert 'retract_along_target(' in body, 'the retract must use the TARGET axis, not the belief'
+    assert 'retract_from(' not in body, (
+        'retract_from pulls along the BELIEVED connector -X, and a missed engage is evidence the '
+        'belief is wrong -- pulling at an angle is how a recovery levers the socket')
+    i_ret = body.index('retract_along_target(')
+    for after in ('aligned_place_pose(', 'move_fingertip(', 'gripper.open('):
+        assert body.index(after) > i_ret, f'{after} must not run before the retract'
+    # ...and every failure path between the retract and the place returns rather than continuing.
+    seg = body[i_ret:body.index('aligned_place_pose(')]
+    assert seg.count('return False') >= 2, (
+        'both a raised retract and an under-travelled one must ABORT: stopping with the part '
+        'held is recoverable by hand, a snapped socket is not')
+    assert 'backed_out_mm' in body, 'the clearance must be MEASURED, not assumed from the command'
+    cfg_fr = urconfig.load('bnc_assembly').get_path('assembly.engage.fail_retract')
+    assert cfg_fr['distance_mm'] == 100.0 and cfg_fr['min_mm'] > 0.0
 
     # THE OPERATOR IS ASKED FIRST, and before ANY motion. A miss means the connector is somewhere
     # it was not expected to be, so this is the moment to look -- and the arm is still holding the
@@ -452,8 +469,8 @@ def test_an_engage_that_never_makes_contact_is_a_failure_not_a_completion():
         'running --yes still wants to be told the engage missed before the arm moves')
     assert 'no_prompts' in body and 'input(' in body
     i_gate = body.index('input(')
-    for marker in ('retract_from(', 'aligned_place_pose(', 'move_fingertip(', 'gripper.open(',
-                   'move_j(q_pick'):
+    for marker in ('retract_along_target(', 'aligned_place_pose(', 'move_fingertip(',
+                   'gripper.open(', 'move_j(q_pick'):
         assert body.index(marker) > i_gate, f'{marker} must not run before the operator gate'
     assert 'LEFT WHERE IT IS' in body, 'aborting must leave the arm put, not escape automatically'
 

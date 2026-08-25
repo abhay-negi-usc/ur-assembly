@@ -102,7 +102,7 @@ from ..skills import trajectory as traj
 from ..skills import wiggle as wigmod
 from ..skills.manifold import mats_from_vec6, vec6_from_mats
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
-                           GraspRecovery, belief_offset_m, connector_axis_height_m,
+                           GraspRecovery, belief_offset, connector_axis_height_m,
                            fingertip_in_connector, held_belief, offset_belief, retry_offset_x,
                            verify_cable_held)
 from ..skills.solution_check import CheckedManifoldEstimator
@@ -668,6 +668,12 @@ def build_and_run(cfg, robot, camera, args):
     en_travel_mm = _num(en, 'travel_mm', 5.0)
     en_timeout_s = _num(en, 'timeout_s', 15.0)
     en_align_s = _num(en, 'align_s', 2.0)
+    # THE FAILED-ENGAGE RETRACT. Much longer than the ordinary between-attempt back-off, because
+    # the arm is about to TRAVEL to the place: anything still in the socket levers it off its
+    # fixture. `min_mm` is the MEASURED clearance the recovery refuses to travel without.
+    _fr = en.get('fail_retract', {}) or {}
+    fail_retract_m = _num(_fr, 'distance_mm', 100.0) / 1000.0
+    fail_retract_min_m = _num(_fr, 'min_mm', 20.0) / 1000.0
     # CONFIRMATION -- the axial stop says "something resisted", not "it is in the socket". See
     # _RadialConfirm and the confirm block in engage_insertion.
     _cf = en.get('confirm', {}) or {}
@@ -1272,13 +1278,14 @@ def build_and_run(cfg, robot, camera, args):
              np.round(_oxyz * 1000.0, 2).tolist(), np.round(np.degrees(_orpy), 2).tolist())
     # THE MEASURED RESIDUAL, applied last and to the BELIEF ONLY: how the part actually seats
     # in the jaws at this approach angle, which no frame can predict. Moves nothing at pickup.
-    _bel_off = belief_offset_m(cfg)
-    if float(np.linalg.norm(_bel_off)) > 0.0:
+    _bel_off = belief_offset(cfg)
+    _bo_xyz, _bo_rpy = matrix_to_xyzrpy(_bel_off)
+    if float(np.linalg.norm(_bo_xyz)) > 0.0 or float(np.linalg.norm(_bo_rpy)) > 0.0:
         T_ftip_conn = offset_belief(T_ftip_conn, _bel_off)
-        log.info('Belief offset %s mm (CONNECTOR frame: +x along the connector axis) '
-                 'applied to the in-hand pose ONLY -- '
-                 'the grasp command is unchanged.',
-                 np.round(_bel_off * 1000.0, 2).tolist())
+        log.info('Belief offset %s mm / %s deg (CONNECTOR frame: +x along the connector axis) '
+                 'applied to the in-hand pose ONLY -- the grasp command is unchanged.',
+                 np.round(_bo_xyz * 1000.0, 2).tolist(),
+                 np.round(np.degrees(_bo_rpy), 2).tolist())
 
     live = a.get('live_plot', True)
     live_path = None
@@ -1583,6 +1590,25 @@ def build_and_run(cfg, robot, camera, args):
         return 'failed'
 
 
+    def retract_along_target(last_ref, distance_m):
+        """Pull straight out along the TARGET CONNECTOR's -X, compliantly and un-guarded.
+
+        NOT the believed connector's -X, which is what retract_from uses. The difference matters
+        precisely here: a missed engagement is EVIDENCE THAT THE BELIEF IS WRONG, and retracting
+        along a wrong axis pulls at an angle -- which is how a recovery levers the socket off its
+        fixture instead of freeing the part. The socket's own axis is the one direction that is
+        known good, because it is what the trajectory was recorded against.
+
+        A pure BASE-frame translation: the attitude is left exactly as it is, so nothing rotates
+        while the part is still inside anything."""
+        axis = np.asarray(T_base_tconn[:3, 0], dtype=float)
+        axis = axis / max(float(np.linalg.norm(axis)), 1e-12)
+        T_out = translation_matrix(-float(distance_m) * axis) @ np.asarray(last_ref, dtype=float)
+        adm.ramp(last_ref, T_out,
+                 seg_time(last_ref, T_out, g_v * s_ret, g_w * s_ret), guard=None)
+        robot.arm.servo_stop()
+        return T_out
+
     def place_after_failed_engage(miss_ref, T_tool0_conn_held):
         """After an engagement that never made contact: back out, lay the cable down, and leave the
         arm at the pick pose so the sequence can start again from the view.
@@ -1623,19 +1649,44 @@ def build_and_run(cfg, robot, camera, args):
                           'with the cable still held.')
                 return False
 
-        ok = True
+        # ---- RETRACT FIRST, AND PROVE IT ----------------------------------------------------
+        # THE ARM IS ABOUT TO TRAVEL SIDEWAYS. If the connector is still in or against the socket
+        # when that happens it levers the socket off its fixture -- the recovery breaks the very
+        # thing the run exists to mate into. So the retraction is MANDATORY here, not best-effort:
+        # a failure to back out ABORTS the recovery and leaves the arm where it is, because
+        # stopping with the part held is recoverable by hand and a snapped socket is not.
+        #
+        # And it is VERIFIED, not assumed. retract_from drives a compliant REFERENCE; a connector
+        # that is jammed can leave the reference free while the part has not moved at all. The
+        # measured depth before and after is the only thing that says it actually came out.
+        def conn_depth_mm():
+            return float((inverse(T_base_tconn)
+                          @ (robot.tool0() @ T_tool0_conn_held))[0, 3]) * 1000.0
+
+        depth_before = conn_depth_mm()
         phase('retract')
-        log.info('FAILED ENGAGE: backing out %.0f mm along the connector -X before travelling.',
-                 retract_m * 1000.0)
+        log.info('FAILED ENGAGE: backing out %.0f mm along the TARGET connector -X BEFORE '
+                 'travelling (depth now %+.2f mm).', fail_retract_m * 1000.0, depth_before)
         try:
-            retract_from(miss_ref, T_tool0_conn_held)
-        except Exception as exc:                       # noqa: BLE001 -- keep going to the place
-            # LOUD, not a warning tucked in a busy log: if the retract did not happen the arm is
-            # travelling to the place from inside/against the socket, which is worth seeing.
-            log.error('RETRACT FAILED after the missed engage (%s: %s) -- the arm will travel to '
-                      'the place from where it is, WITHOUT having backed out.',
+            retract_along_target(miss_ref, fail_retract_m)
+        except Exception as exc:                       # noqa: BLE001
+            log.error('RETRACT FAILED after the missed engage (%s: %s). REFUSING to travel to the '
+                      'place with the connector still in the socket -- that would break it. The '
+                      'arm is LEFT WHERE IT IS with the cable held; free it by hand.',
                       type(exc).__name__, exc)
-            ok = False
+            return False
+
+        backed_out_mm = depth_before - conn_depth_mm()
+        if backed_out_mm < fail_retract_min_m * 1000.0:
+            log.error('RETRACT DID NOT CLEAR: the connector came out only %.2f mm of the %.0f mm '
+                      'commanded (needed at least %.0f mm) -- it is most likely still engaged or '
+                      'jammed. REFUSING to travel to the place, which would lever the socket off '
+                      'its fixture. The arm is LEFT WHERE IT IS with the cable held.',
+                      backed_out_mm, fail_retract_m * 1000.0, fail_retract_min_m * 1000.0)
+            return False
+        ok = True
+        log.info('  retracted %.2f mm -- clear of the socket, travelling to the place.',
+                 backed_out_mm)
 
         T_place = aligned_place_pose(dis_clear_m)
         T_ftip_place = T_place @ inverse(T_ftip_conn)

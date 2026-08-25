@@ -102,8 +102,21 @@ def connector_axis_height_m(cfg):
     return 0.0
 
 
-def belief_offset_m(cfg):
-    """`pickup.belief_offset_mm` as a 3-vector in metres, in the CONNECTOR frame.
+def belief_offset(cfg):
+    """The belief offset as a FULL POSE (4x4) in the CONNECTOR frame.
+
+    `pickup.belief_offset` is a pose block in monitor units (`xyz_mm` + `rpy_deg`) or SI
+    (`xyz` + `rpy`). The older translation-only `pickup.belief_offset_mm: [x, y, z]` still works
+    and means the same thing with no rotation; setting both is an error rather than a silent
+    preference.
+
+    WHY ROTATION MATTERS AT LEAST AS MUCH AS TRANSLATION. The residual this carries is where the
+    part sits in the jaws, and a part that is TILTED in the grooves is the common case, not the
+    exotic one: the cable lies flat on the bench while the jaws come down at an angle, so the
+    barrel is captured across its axis. A tilt of a degree at the grip becomes a lateral error of
+    the connector's length times sin(theta) at the TIP -- which is the end that has to find the
+    socket. Expressing the belief as a translation only meant that error had to be smeared into an
+    xyz that was right at one depth and wrong at every other.
 
     THE MEASURED RESIDUAL, not a derived one -- and the reason this exists at all is that the
     two things it separates are genuinely different:
@@ -119,16 +132,29 @@ def belief_offset_m(cfg):
     JAWS tilt, so tilted grooves capture the cylinder at a different depth than square ones.
     That difference is a contact fact: measurable, not derivable from any frame. This is where
     the measurement goes, so it cannot be confused with the geometry it corrects."""
-    v = cfg.get_path('pickup.belief_offset_mm') or [0.0, 0.0, 0.0]
-    v = [float(x) for x in v]
+    from ..config import _pose_si
+    from ..transforms import from_cfg, translation_matrix
+    block = cfg.get_path('pickup.belief_offset')
+    legacy = cfg.get_path('pickup.belief_offset_mm')
+    if block is not None and legacy is not None:
+        raise ValueError(
+            'pickup.belief_offset and pickup.belief_offset_mm are both set. They are the same '
+            'quantity -- the full-pose form and the translation-only one -- and silently '
+            'preferring one would apply a rotation nobody asked for, or drop one they did. '
+            'Keep pickup.belief_offset.')
+    if block is not None:
+        return from_cfg(_pose_si(block))
+    if legacy is None:
+        return np.eye(4)
+    v = [float(x) for x in legacy]
     if len(v) != 3:
         raise ValueError('pickup.belief_offset_mm must be [x, y, z] mm in the connector frame, '
                          f'got {len(v)} entries')
-    return np.asarray(v, dtype=float) / 1000.0
+    return translation_matrix(np.asarray(v, dtype=float) / 1000.0)
 
 
-def offset_belief(T_ftip_conn, offset_m):
-    """Shift the believed connector along ITS OWN AXES by `offset_m`, orientation untouched.
+def offset_belief(T_ftip_conn, T_offset):
+    """Move the believed connector by a FULL POSE `T_offset`, read in ITS OWN frame.
 
     RIGHT-MULTIPLIED, so the delta is read in the CONNECTOR frame: +x along the connector axis,
     y and z its own transverse axes. "the part sits 10 mm further back along its own body",
@@ -147,8 +173,13 @@ def offset_belief(T_ftip_conn, offset_m):
     hand-frame quantity, and in the part frame it will move as the pitch changes. Which one a
     given measurement belongs in depends on where the error comes from. Re-measure after a
     large change of approach angle either way."""
-    from ..transforms import translation_matrix
-    return T_ftip_conn @ translation_matrix(np.asarray(offset_m, dtype=float))
+    T_offset = np.asarray(T_offset, dtype=float)
+    if T_offset.shape != (4, 4):
+        raise ValueError(
+            'offset_belief takes a 4x4 pose, not a %s. The belief offset carries a ROTATION now; '
+            'build it with belief_offset(cfg) rather than passing a translation vector, or a '
+            'tilt in the config would be silently dropped.' % (T_offset.shape,))
+    return T_ftip_conn @ T_offset
 
 
 def grasp_pose(T_base_connector, T_conn_ftip):

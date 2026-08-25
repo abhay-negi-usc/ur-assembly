@@ -332,7 +332,19 @@ pickup:
   # cylinder at a different depth along the approach -- is more naturally a hand-frame value,
   # and in this frame it will move as the pitch changes.  Re-measure after a large change of
   # approach angle either way.
-  belief_offset_mm: [5.0, 0.0, -10.0]
+  # A FULL POSE, not just a translation.  A tilted grip is the common case, not the exotic one:
+  # the cable lies flat on the bench while the jaws come down at an angle, so the barrel is
+  # captured across its axis.  One degree of tilt at the grip becomes (connector length x sin) of
+  # lateral error at the TIP -- the end that has to find the socket -- so a translation-only
+  # belief had to smear that into an xyz that was right at one depth and wrong at every other.
+  #
+  # Monitor units (xyz_mm / rpy_deg) so a reading pastes straight off urlab.apps.monitor; xyz /
+  # rpy (m / rad) also work.  The old translation-only `belief_offset_mm: [x, y, z]` is still
+  # accepted and means the same thing with no rotation -- setting BOTH is an error, not a
+  # silent preference.
+  belief_offset:
+    xyz_mm:  [5.0, 0.0, -10.0]
+    rpy_deg: [0.0, 0.0, 0.0]
   # PICKUP HEIGHT from the gripper kinematic model.  Assumes the connector rests ON THE GROUND
   # PLANE (ground_plane.z_m): grasp target = plane + connector d_max/2 (centerline) + the
   # fingertip ADVANCE between fingertip_ref_separation_mm (where fingertip_grasp z was
@@ -824,7 +836,7 @@ assembly:
     # PRELOAD, mm past the mate along the connector's own +X, so the reference finishes
     # pressing rather than merely arriving.  0 = stop exactly on the mate.  (Distinct from
     # final_insertion.preload_mm, which belongs to the estimate-mode commit.)
-    preload_mm: 10.0
+    preload_mm: 15.0
 
     # Reference rebuild rate.  Must be >= 4x the highest active frequency or the sampled sine
     # aliases -- validated pre-motion.
@@ -903,6 +915,24 @@ assembly:
     #   the axial force limit below, held for persistence_s.
     # Anything else -- the path running out, the timeout, a jam -- is a MISS and takes the
     # place-and-re-pick recovery (see max_misses).
+    # ---- THE FAILED-ENGAGE RETRACT ---------------------------------------------------------
+    # After a missed engagement the arm is about to TRAVEL SIDEWAYS to put the cable down.  If
+    # the connector is still in or against the socket when that happens it levers the socket off
+    # its fixture -- the recovery breaks the very thing the run exists to mate into.  So this
+    # retraction is MANDATORY: failing it ABORTS the recovery and leaves the arm where it is,
+    # because stopping with the part held is recoverable by hand and a snapped socket is not.
+    #
+    # ALONG THE TARGET CONNECTOR'S -X, not the believed connector's.  A missed engagement is
+    # evidence the BELIEF is wrong, and retracting along a wrong axis pulls at an angle -- which
+    # is how a recovery levers the socket instead of freeing the part.
+    #
+    # VERIFIED, not assumed: the retract drives a compliant REFERENCE, and a jammed connector can
+    # leave the reference free while the part has not moved.  min_mm is the MEASURED clearance
+    # the recovery refuses to travel without.
+    fail_retract:
+      distance_mm: 100.0
+      min_mm: 20.0
+    
     travel_mm: 5.0
     timeout_s: 15.0
     align_s: 2.0             # how long the lateral correction takes to fade in
@@ -1110,7 +1140,7 @@ assembly:
     # the far edge of the slot is found); only a sweep in which EVERY leg was guard-stopped is
     # reported NOT SEATED.  The app pre-samples the band and WARNS on poses with no IK
     # solution; more than two entries narrows in, one entry is a single stroke.
-    sweep_deg: [-100.0, +100.0]
+    sweep_deg: [-120.0, +120.0]
     # PUSH: how far past the engaged pose the virtual target aims, along the connector +X.
     # Too small and the cams never engage; too large and the spring loads the mate harder
     # than needed.

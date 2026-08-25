@@ -1094,7 +1094,7 @@ def test_belief_offset_moves_the_belief_and_never_the_grasp():
     """THE SEPARATION this knob exists for: `pickup.belief_offset_mm` is the MEASURED seating
     residual, and it must move only what we think we are holding -- never where the fingers go.
     Everything else in the pickup block is the command; this one alone is the belief."""
-    from urlab.skills.pick import belief_offset_m, grasp_pose, offset_belief
+    from urlab.skills.pick import belief_offset, grasp_pose, offset_belief
     from urlab.transforms import xyzrpy_to_matrix
 
     _t, _fj, nominal, J = _bnc_frames()
@@ -1105,13 +1105,13 @@ def test_belief_offset_moves_the_belief_and_never_the_grasp():
     # insertion axis and the clocking rotations are all written in.
     # x AND z: this nominal is yawed 180 deg about z, so a pure-z delta reads the SAME in
     # both frames and would not distinguish them at all.
-    delta = np.array([-0.010, 0.0, -0.0012])
+    delta = xyzrpy_to_matrix([-0.010, 0.0, -0.0012], [0.0, 0.0, 0.0])
     shifted = offset_belief(nominal, delta)
-    assert np.allclose(shifted[:3, :3], nominal[:3, :3]), 'a seating residual is a translation'
+    assert np.allclose(shifted[:3, :3], nominal[:3, :3]), 'a pure-translation offset must not rotate'
     got = shifted[:3, 3] - nominal[:3, 3]
-    assert np.allclose(nominal[:3, :3].T @ got, delta), (
+    assert np.allclose(nominal[:3, :3].T @ got, delta[:3, 3]), (
         'the delta must come back out as itself when read in the CONNECTOR frame')
-    assert not np.allclose(got, delta), (
+    assert not np.allclose(got, delta[:3, 3]), (
         'and it must NOT be a raw fingertip-frame add -- this nominal is yawed 180 deg, so the '
         'two readings differ, which is exactly what the change was for')
 
@@ -1122,7 +1122,7 @@ def test_belief_offset_moves_the_belief_and_never_the_grasp():
     for pitch in (0.0, -40.0, -75.0):
         held = _m([0, 0, 0], [0.0, np.radians(pitch), 0.0]) @ nominal
         moved = offset_belief(held, delta)[:3, 3] - held[:3, 3]
-        assert np.allclose(held[:3, :3].T @ moved, delta, atol=1e-12), (
+        assert np.allclose(held[:3, :3].T @ moved, delta[:3, 3], atol=1e-12), (
             f'at pitch {pitch} the connector-frame delta changed -- it must not')
 
     # the GRASP cannot even see it -- grasp_pose is not a function of the belief
@@ -1131,8 +1131,29 @@ def test_belief_offset_moves_the_belief_and_never_the_grasp():
     from urlab import config as urconfig
 
     cfg = urconfig.load('bnc_assembly')
-    v = belief_offset_m(cfg)
-    assert v.shape == (3,), 'belief_offset_mm is a 3-vector in the fingertip frame'
+    T_off = belief_offset(cfg)
+    assert T_off.shape == (4, 4), 'the belief offset is a FULL POSE, not a translation'
+
+    # A ROTATION IS CARRIED, and read in the connector frame like the translation. A tilted grip
+    # is the common case -- the cable lies flat while the jaws come down at an angle -- and one
+    # degree at the grip is (connector length x sin) of lateral error at the TIP.
+    tilt = xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.0, np.radians(3.0), 0.0])
+    spun = offset_belief(nominal, tilt)
+    assert not np.allclose(spun[:3, :3], nominal[:3, :3]), 'a rotation must survive'
+    assert np.allclose(spun[:3, 3], nominal[:3, 3]), 'a pure rotation must not translate'
+    assert np.allclose(nominal[:3, :3].T @ spun[:3, :3], tilt[:3, :3], atol=1e-12), (
+        'the rotation must read as itself in the CONNECTOR frame, like the translation')
+
+    # A bare 3-vector is REFUSED rather than silently dropping a configured tilt.
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match='4x4'):
+        offset_belief(nominal, np.array([0.005, 0.0, -0.01]))
+
+    # Both spellings of the same quantity at once is an error, not a silent preference.
+    cfg2 = urconfig.load('bnc_assembly')
+    cfg2.set_path('pickup.belief_offset_mm', [1.0, 2.0, 3.0])
+    with _pytest.raises(ValueError, match='both set'):
+        belief_offset(cfg2)
 
 
 def test_the_connector_axis_height_comes_from_the_greatest_diameter():

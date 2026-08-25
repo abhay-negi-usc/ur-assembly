@@ -42,7 +42,7 @@ from ..skills import trajectory as traj
 from ..skills.manifold import (FORCE_COLS, ManifoldEstimator, POSE_COLS, TORQUE_COLS,
                                vec6_from_mats)
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
-                           GraspRecovery, belief_offset_m, fingertip_in_connector,
+                           GraspRecovery, belief_offset, fingertip_in_connector,
                            held_belief, offset_belief, retry_offset_x, verify_cable_held)
 from ..transforms import from_cfg, inverse, matrix_to_xyzrpy, pose_error, translation_matrix
 from ._cable import build_scanner, make_confirm
@@ -147,11 +147,13 @@ class _AssemblyTask:
                  'connector) -> in-hand belief derived to match.',
                  np.round(oxyz * 1000.0, 2).tolist(), np.round(np.degrees(orpy), 2).tolist())
         # The measured seating residual -- BELIEF ONLY, nothing moves at pickup.
-        bel_off = belief_offset_m(cfg)
-        if float(np.linalg.norm(bel_off)) > 0.0:
+        bel_off = belief_offset(cfg)
+        bo_xyz, bo_rpy = matrix_to_xyzrpy(bel_off)
+        if float(np.linalg.norm(bo_xyz)) > 0.0 or float(np.linalg.norm(bo_rpy)) > 0.0:
             self.T_ftip_conn = offset_belief(self.T_ftip_conn, bel_off)
-            log.info('Belief offset %s mm (CONNECTOR frame) applied to the in-hand pose ONLY.',
-                     np.round(bel_off * 1000.0, 2).tolist())
+            log.info('Belief offset %s mm / %s deg (CONNECTOR frame) applied to the in-hand '
+                     'pose ONLY.', np.round(bo_xyz * 1000.0, 2).tolist(),
+                     np.round(np.degrees(bo_rpy), 2).tolist())
 
         # Speeds: ONE global speed: block, each phase applying its own scale to all four
         # limits (speed.phase_scale.<phase>).  Free-space moves inherit the scale from

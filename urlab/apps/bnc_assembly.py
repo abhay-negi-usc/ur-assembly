@@ -1458,6 +1458,20 @@ def build_and_run(cfg, robot, camera, args):
         from the same place with the same numbers. Putting the cable down and starting over
         re-localizes the target, resets the belief to nominal, re-detects the cable and re-grasps
         it -- so every input to the engagement is measured again."""
+        # ASK BEFORE MOVING. A missed engagement means the connector is somewhere it was not
+        # expected to be -- past the socket, or beside it -- so this is exactly the moment an
+        # operator wants to look before the arm backs out and travels to the place. It is also
+        # the cheapest diagnostic there is: the arm is still holding the failed pose, so the
+        # geometry that caused the miss is there to be seen. Aborting leaves it exactly there.
+        if not phase_gate('FAILED ENGAGE -- RETRACT AND PLACE',
+                          'The engage ran the FULL path without meeting the socket, so the '
+                          'connector never made contact. Look at where it actually is. Next the '
+                          'arm will back out along the connector -X, lay the cable down and '
+                          'return to the pick view to try again.'):
+            log.error('Aborted after the missed engagement -- the arm is LEFT WHERE IT IS with '
+                      'the cable still held.')
+            return False
+
         ok = True
         phase('retract')
         try:

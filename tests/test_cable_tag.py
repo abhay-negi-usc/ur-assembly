@@ -439,3 +439,12 @@ def test_an_engage_that_never_makes_contact_is_a_failure_not_a_completion():
     assert 'aligned_place_pose(' in body and "gripper.open(" in body, 'it must place and release'
     assert "move_j(q_pick" in body, 'it must end at the pick pose, ready to start over'
     assert 'retract_from(' in body, 'back the connector out before travelling to the place'
+
+    # THE OPERATOR IS ASKED FIRST, and before ANY motion. A miss means the connector is somewhere
+    # it was not expected to be, so this is the moment to look -- and the arm is still holding the
+    # failed pose, which is the cheapest diagnostic available. Aborting leaves it exactly there.
+    i_gate = body.index('phase_gate(')
+    for marker in ('retract_from(', 'aligned_place_pose(', 'move_fingertip(', 'gripper.open(',
+                   'move_j(q_pick'):
+        assert body.index(marker) > i_gate, f'{marker} must not run before the operator gate'
+    assert 'LEFT WHERE IT IS' in body, 'aborting must leave the arm put, not escape automatically'

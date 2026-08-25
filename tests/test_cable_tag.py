@@ -232,8 +232,15 @@ def test_the_engage_speed_comes_from_phase_scale_not_a_private_key():
         'engage needs its own scale, falling back to assemble so old configs are unchanged'
     assert "float(en_speed) if en_speed is not None" not in src, 'the private override is gone'
     assert "is RETIRED" in src, 'a stale speed_mm_s must fail loudly, not be ignored'
-    assert "phase('engage')" in src, \
-        "the phase must run under the scale its reference rate is derived from"
+    # The engage is servo-driven, and servo_l calls servoL directly -- it NEVER reads
+    # arm.speed_scale. So a phase() call cannot pace this motion; all it would do is leave the arm
+    # at engage's very low scale for every ordinary move that follows, until the next phase().
+    # v_mm_s is the single control.
+    assert "phase('engage')" not in src, (
+        'engage must not set an arm speed scale: servo_l ignores it, and it would leak a very '
+        'low scale onto every following move')
+    assert 'speed.phase_scale.engage x speed.max_cartesian_translation_mm_s' in src, \
+        'the resolved reference rate must be logged, so the speed is answerable from the log'
 
     cfg = urconfig.load('bnc_assembly')
     assert cfg.get_path('assembly.engage.speed_mm_s') is None, 'the key must be gone from the yaml'

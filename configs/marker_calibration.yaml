@@ -135,7 +135,7 @@ marker_views:
     pos_tol_mm: 5.0
     ang_tol_deg: 5.0
     ring_mm: 15.0
-    ring_views: 4
+    ring_views: 12
 
 # ---- Motion --------------------------------------------------------------------------------
 # Free space with nothing in the fingers, but the arm is carrying a camera near a fixture.

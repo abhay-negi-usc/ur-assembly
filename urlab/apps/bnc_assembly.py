@@ -1648,6 +1648,10 @@ def build_and_run(cfg, robot, camera, args):
 
         live = [f'{d} {en_amp[i]:+.2f}@{en_frq[i]:.2f}Hz'
                 for i, d in enumerate(DIM_KEYS) if abs(en_amp[i]) > 0.0]
+        log.info('  engage reference rate %.2f mm/s = %.4g x %.4g mm/s '
+                 '(speed.phase_scale.engage x speed.max_cartesian_translation_mm_s). The arm '
+                 'speed scale does NOT apply: this phase is servo-driven.',
+                 v_mm_s, s_eng, g_v)
         log.info('--- ENGAGE --- %s over %.1f mm (%.1f mm trajectory + %.1f mm preload) at '
                  '%.2f mm/s -> %.1f s; %s.',
                  'oscillating ' + ', '.join(live) if live else 'DIRECT (no oscillation)',
@@ -1685,8 +1689,12 @@ def build_and_run(cfg, robot, camera, args):
             if cnt[0] % decim == 0:
                 obs.append(_observe(robot, T_tool0_conn, T_base_tconn))
 
-        phase('engage')          # same scale the reference rate is derived from, so the arm's
-        adm_en.reset()           # own limits and the reference cannot disagree
+        # NO phase() HERE, deliberately. The engage is driven entirely by servo_l, and servo_l
+        # calls servoL directly -- it never reads arm.speed_scale. So a phase scale cannot pace
+        # this motion; the ONLY thing that does is v_mm_s (the reference rate, above). Setting the
+        # phase here would be worse than useless: it would leave the arm at engage's very low
+        # scale for every ordinary move that follows, until the next phase() call.
+        adm_en.reset()
         adm_en.warmup(first, tare_fn=tare)
         combo.reset()
         # REAL ELAPSED TIME, not i*dt. The servo loop does not necessarily cycle at

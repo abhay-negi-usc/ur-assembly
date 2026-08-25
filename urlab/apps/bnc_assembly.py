@@ -2238,6 +2238,11 @@ def build_and_run(cfg, robot, camera, args):
                       else 'force' if combo.tripped is det else 'guard')
             break
 
+        # The reference the loop actually ended on. The settle below holds THIS (see there for
+        # why it must not re-reference to the measured pose); the confirmation stage, if it runs,
+        # advances it further and updates this.
+        ref_live = last_ref
+
         # SNAPSHOT EVERY CONDITION AT THE MOMENT IT STOPPED, before the settle hold moves
         # anything. Read once, here, rather than per servo cycle.
         t_end = min(t, en_timeout_s)
@@ -2305,6 +2310,7 @@ def build_and_run(cfg, robot, camera, args):
                 adm_en.ramp(prev_c, cur_c, dt, guard=None, on_step=conf_step)
                 prev_c = cur_c
             robot.arm.servo_stop()
+            ref_live = prev_c            # the wiggle moved it; the settle holds where we ARE
 
             travel_mm = 0.0
             if len(pts) >= 2:
@@ -2336,10 +2342,22 @@ def build_and_run(cfg, robot, camera, args):
                           '(want >= %.1f N for %.2f s). (travel %.2f mm -- reported only.)',
                           rad.peak_n, rad.held_s, cf_radial_n, cf_radial_s, travel_mm)
 
-        stay = robot.tool0()
-        adm_en.reset()
+        # SETTLE ON THE LOADED EQUILIBRIUM, NOT ON A FRESH ZERO.
+        #
+        # `T_cmd = ref @ Delta`, and at the moment engage stops Delta IS the contact deflection --
+        # w/S, which at the 5 N exit force against 500 N/m is 10 mm of back-off. The old
+        # `stay = tool0(); reset(); hold(stay)` reads as safe, and it does not JUMP: re-referencing
+        # to the measured pose while zeroing Delta starts the hold exactly where the arm already
+        # is. But it has thrown the equilibrium away, so the integrator spends the whole settle
+        # RE-DERIVING it from the new zero -- driving Delta back to w/S and walking the connector
+        # that far out of the socket, a fraction of a mm per cycle. THAT is the rebound: not a
+        # step at the exit, but a 5 s unloading RAMP that begins the instant the exit fires.
+        #
+        # Holding the reference engage ended on, with Delta intact, commands the pose the arm is
+        # already at and keeps the preload. The loop still yields if the mate relaxes -- which is
+        # what a settle is for -- it just no longer double-counts the compliance.
         if settle_shared > 0:
-            adm_en.hold(stay, settle_shared, guard=None, on_step=log_cb)
+            adm_en.hold(ref_live, settle_shared, guard=None, on_step=log_cb)
         adm_en.stop()
         robot.arm.servo_stop()
 
@@ -2539,14 +2557,20 @@ def build_and_run(cfg, robot, camera, args):
                            'state_after': 'seated' if ok else 'engaged',
                            'stopped_by': ''})
 
-        # Settle at wherever the sweep actually ended. The integrator is zeroed first so the hold
-        # commands the pose the arm is AT rather than that pose plus the deflection already in it.
-        last = robot.tool0()
-        adm_cc.reset()
+        # Settle at wherever the sweep actually ended -- ON THE LIVE REFERENCE, Delta intact.
+        # `th_at`/`push_at` track where the REFERENCE stands, so arm_at() rebuilds it exactly.
+        #
+        # This block used to read `last = tool0(); reset(); hold(last)`, on the reasoning that
+        # zeroing made the hold command "the pose the arm is AT rather than that pose plus the
+        # deflection". It does -- for one cycle. Then the integrator re-derives the deflection
+        # from the new zero and unloads it, which is the same rebound the engage settle had. Here
+        # it is worse than cosmetic: this maneuver exists to PUSH +X and HOLD it (see the log
+        # above), and unloading is precisely what it must not do.
+        ref_live_cc = arm_at(th_at, push_at)
         if cc_settle > 0:
-            adm_cc.hold(last, cc_settle, guard=None)
+            adm_cc.hold(ref_live_cc, cc_settle, guard=None)
         if cc_hold > 0:
-            adm_cc.hold(last, cc_hold, guard=None)
+            adm_cc.hold(ref_live_cc, cc_hold, guard=None)
         adm_cc.stop()
         robot.arm.servo_stop()
 

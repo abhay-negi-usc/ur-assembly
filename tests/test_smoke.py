@@ -5922,6 +5922,11 @@ def test_a_marker_rig_round_trips_calibration_into_localization():
         min_views, min_markers, require_all = 3, 2, False
         max_view_spread_mm = max_view_spread_deg = 3.0
         max_disagreement_mm = max_disagreement_deg = 5.0
+        # RANSAC ON, as production runs it: a healthy rig must survive the consensus filter
+        # untouched, which is worth asserting on the round trip.
+        ransac = True
+        ransac_inlier_mm = ransac_inlier_deg = 5.0
+        ransac_min_inliers = 2
 
     rng = np.random.default_rng(7)
     T_target = T.xyzrpy_to_matrix([0.048, 1.087, -0.155], np.radians([-0.93, -0.41, 94.28]))
@@ -5960,16 +5965,32 @@ def test_a_marker_rig_round_trips_calibration_into_localization():
     assert lin * 1000.0 < 2.0 and np.degrees(ang) < 1.0, (
         f'the rig must follow the fixture, got {lin * 1000:.2f} mm / {np.degrees(ang):.2f} deg')
 
-    # ---- A STALE MARKER IS REFUSED, NOT AVERAGED ----
+    # ---- A STALE MARKER IS REJECTED, NOT AVERAGED ----
     # This is the failure the whole design is built around: a marker knocked or re-stuck still
     # produces a confident pose, and averaging it into two good ones splits the difference and
     # drives the insertion at a fixture that is not there.
+    #
+    # RANSAC answers it better than refusing did. The stale marker is OUTVOTED and named in the
+    # log, and the fused pose follows the two that agree -- so the assertion here is the stronger
+    # one: not merely "it declined to answer", but "the answer it gave is right".
     truth[8] = truth[8] @ T.xyzrpy_to_matrix([0.015, 0.0, 0.0], [0.0, 0.0, 0.0])
     T_bad, bad_votes = mloc.vote_target(rig, mloc.fuse_markers(views(truth), Plan), Plan)
     assert len(bad_votes) == 3, 'all three still VOTE -- the point is what happens next'
-    assert T_bad is None, (
-        'markers that disagree past max_disagreement_mm must REFUSE, not average: a 15 mm stale '
-        'marker averaged with two good ones is a 5 mm error with no symptom')
+    assert T_bad is not None, 'the two good markers must outvote the stale one'
+    lin, ang = T.pose_error(T_bad, moved @ T_target)      # the fixture moved further up
+    assert lin * 1000.0 < 2.0 and np.degrees(ang) < 1.0, (
+        'the fused pose must follow the two markers that AGREE, not split the difference with '
+        'the stale one: %.2f mm / %.2f deg from truth' % (lin * 1000.0, np.degrees(ang)))
+
+    # ...and the conservative behaviour is still available: requiring three agreeing markers
+    # makes a 3-marker rig with one outlier refuse, exactly as it did before RANSAC existed.
+    class StrictPlan(Plan):
+        ransac_min_inliers = 3
+
+    T_strict, _ = mloc.vote_target(rig, mloc.fuse_markers(views(truth), StrictPlan), StrictPlan)
+    assert T_strict is None, (
+        'ransac_min_inliers = 3 must refuse a 3-marker rig with an outlier, rather than '
+        'proceeding on a 2-marker consensus')
 
     # ---- A MARKER SEEN TOO FEW TIMES IS DROPPED, and min_markers then bites ----
     thin = views(truth, n=5)

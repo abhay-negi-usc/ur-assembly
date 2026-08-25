@@ -296,6 +296,11 @@ class _MarkerPlan:
     max_camera_distance_m = 0.5
     settle_s = 0.0
     frames_per_view = 1
+    # RANSAC OFF for these: they exercise the weighted AVERAGE with deliberately disagreeing
+    # markers, which is exactly what a consensus filter would remove. Its own tests cover it.
+    ransac = False
+    ransac_inlier_mm = ransac_inlier_deg = None
+    ransac_min_inliers = 2
 
 
 def test_fusion_weights_closer_views_more():
@@ -2332,3 +2337,82 @@ def test_a_bad_joint_limit_block_fails_loudly():
     with pytest.raises(ValueError, match='must exceed lower'):
         GroundCollisionModel({'joint_limits_deg': {'wrist_3_joint': [180.0, -180.0]}},
                              ground_z_m=-0.76)
+
+
+def test_marker_ransac_outvotes_a_moved_marker():
+    """A marker that has been knocked, re-stuck or reprinted produces a CONFIDENT pose that
+    disagrees with its neighbours. Before RANSAC that failed the whole localization on the
+    disagreement gate; with three or more markers the rig can outvote it instead -- which is the
+    entire reason for putting several on the fixture."""
+    import numpy as np
+    from urlab.skills.marker_localize import marker_consensus
+    from urlab.transforms import xyzrpy_to_matrix
+
+    def pose(x_mm=0.0, yaw_deg=0.0):
+        return xyzrpy_to_matrix([x_mm / 1000.0, 0.0, 0.0], [0.0, 0.0, np.radians(yaw_deg)])
+
+    votes = {24: pose(0.0), 25: pose(1.0), 26: pose(-0.5), 27: pose(40.0)}
+    even = {m: 1.0 for m in votes}
+    inl, rej, _ = marker_consensus(votes, even, 5.0, 5.0)
+    assert inl == [24, 25, 26] and rej == [27]
+
+    # SCORED BY COUNT, NOT WEIGHT -- one marker carrying a heavy view weight must not outvote
+    # three that agree with each other. (Same rule the connector estimator uses for views.)
+    heavy = {24: 1.0, 25: 1.0, 26: 1.0, 27: 99.0}
+    inl, rej, _ = marker_consensus(votes, heavy, 5.0, 5.0)
+    assert inl == [24, 25, 26] and rej == [27], 'weight must break ties only, never outvote count'
+
+    # A ROTATION outlier is caught too, not just translation.
+    spun = {24: pose(0.0), 25: pose(0.5), 26: pose(0.0, 30.0)}
+    inl, rej, _ = marker_consensus(spun, {m: 1.0 for m in spun}, 5.0, 5.0)
+    assert inl == [24, 25] and rej == [26]
+
+
+def test_two_markers_cannot_elect_an_outlier():
+    """If two disagree, each is a consensus of one and nothing says which moved. Picking the
+    heavier would be inventing an answer, so RANSAC stands aside and the all-or-nothing
+    disagreement gate handles it."""
+    import numpy as np
+    from urlab.skills.marker_localize import marker_consensus
+    from urlab.transforms import xyzrpy_to_matrix
+
+    def pose(x_mm):
+        return xyzrpy_to_matrix([x_mm / 1000.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+
+    inl, rej, why = marker_consensus({24: pose(0.0), 25: pose(40.0)},
+                                     {24: 1.0, 25: 99.0}, 5.0, 5.0)
+    assert inl == [24, 25] and rej == [] and 'fewer than 3' in why
+
+    # And when NOTHING agrees, it refuses rather than returning a singleton as "the consensus".
+    three = {1: pose(0.0), 2: pose(40.0), 3: pose(80.0)}
+    inl, rej, why = marker_consensus(three, {m: 1.0 for m in three}, 5.0, 5.0)
+    assert inl == [] and sorted(rej) == [1, 2, 3] and 'no set of 2 or more' in why
+
+
+def test_marker_ransac_is_deterministic_and_exhaustive():
+    """One marker plus its calibrated T_marker_target already fixes the full 6-DOF target, so the
+    minimal sample is ONE and there are only N hypotheses -- they can all be tried. That makes the
+    result reproducible run to run, with no iteration count to tune."""
+    import inspect
+
+    import numpy as np
+    from urlab.skills import marker_localize as ml
+    from urlab.transforms import xyzrpy_to_matrix
+
+    # Check for a random SAMPLER, not for the word -- the docstring says "not random" and a
+    # substring test would catch its own explanation.
+    src = inspect.getsource(ml.marker_consensus)
+    body = src[src.index('"""', src.index('"""') + 3) + 3:]        # past the docstring
+    for sampler in ('np.random', 'random.', 'default_rng', 'shuffle', 'choice('):
+        assert sampler not in body, f'this RANSAC must be exhaustive, found {sampler}'
+    assert 'for h in ids:' in body, 'every marker is tried as a hypothesis'
+
+    def pose(x_mm):
+        return xyzrpy_to_matrix([x_mm / 1000.0, 0.0, 0.0], [0.0, 0.0, 0.0])
+
+    votes = {1: pose(0.0), 2: pose(0.4), 3: pose(30.0), 4: pose(-0.3)}
+    w = {m: 1.0 for m in votes}
+    first = ml.marker_consensus(votes, w, 5.0, 5.0)
+    for _ in range(20):
+        assert ml.marker_consensus(votes, w, 5.0, 5.0) == first, 'must not vary between runs'
+    assert first[0] == [1, 2, 4] and first[1] == [3]

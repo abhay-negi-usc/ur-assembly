@@ -100,6 +100,16 @@ class ViewPlan:
         self.max_view_spread_deg = _opt_float(b.get('max_view_spread_deg', 3.0))
         self.max_disagreement_mm = _opt_float(b.get('max_disagreement_mm', 5.0))
         self.max_disagreement_deg = _opt_float(b.get('max_disagreement_deg', 5.0))
+        # RANSAC over the per-marker votes: outvote a marker that has moved, been re-stuck or
+        # been reprinted, instead of failing the whole localization on the disagreement gate.
+        # Needs THREE markers to mean anything -- with two, each is a consensus of one and there
+        # is nothing to say which of them moved, so the all-or-nothing gate is the honest answer.
+        # The inlier band defaults to the disagreement gate: a marker the run would have accepted
+        # in the average is one the consensus should accept too.
+        self.ransac = bool(b.get('ransac', True))
+        self.ransac_inlier_mm = _opt_float(b.get('ransac_inlier_mm', self.max_disagreement_mm))
+        self.ransac_inlier_deg = _opt_float(b.get('ransac_inlier_deg', self.max_disagreement_deg))
+        self.ransac_min_inliers = max(2, int(b.get('ransac_min_inliers', 2)))
         # Certainty weighting: a view at distance d fuses with weight d^-power (0 = unweighted).
         self.view_weight_power = float(b.get('view_weight_power', 2.0))
         # The STANDOFF CAP: the camera never plans a view farther than this from the markers,
@@ -563,6 +573,53 @@ def fuse_markers(seen, plan):
     return out
 
 
+def marker_consensus(votes, weights, inlier_mm, inlier_deg, min_inliers=2):
+    """RANSAC over the per-marker target votes: (inliers, rejected, why).
+
+    EXHAUSTIVE, NOT RANDOM, and that is not a shortcut -- it is the correct algorithm here. RANSAC
+    samples a MINIMAL SET, fits a hypothesis and counts agreement; the minimal set for this problem
+    is ONE MARKER, because a marker plus its calibrated T_marker_target already determines the full
+    6-DOF target pose. With N markers there are therefore exactly N hypotheses, so they can all be
+    tried. Enumerating them is deterministic, reproducible run to run, needs no iteration count to
+    tune, and is GUARANTEED to find the largest consensus -- none of which a random sampler offers.
+
+    SCORED BY HOW MANY MARKERS AGREE, not by total weight, for the same reason the connector
+    estimator scores by distinct views rather than raw detections: one marker that happens to carry
+    a heavy view weight must not be able to outvote two that agree with each other. Weight breaks
+    ties only, and spread breaks those.
+
+    TWO MARKERS CANNOT ELECT AN OUTLIER. If they disagree, each is a consensus of one and there is
+    nothing to say which moved -- so this refuses rather than picking the heavier. That is what
+    min_inliers >= 2 means, and why a 2-marker rig gets the old all-or-nothing gate instead.
+    """
+    ids = sorted(votes)
+    if len(ids) < 3:
+        return ids, [], 'fewer than 3 markers: no consensus is possible, all kept'
+
+    def agrees(a, b):
+        d_lin, d_ang = pose_error(votes[a], votes[b])
+        return ((inlier_mm is None or d_lin * 1000.0 <= inlier_mm)
+                and (inlier_deg is None or np.degrees(d_ang) <= inlier_deg))
+
+    best = None
+    for h in ids:                                   # every marker is a hypothesis in turn
+        inl = [m for m in ids if agrees(h, m)]
+        if len(inl) < 2:
+            continue
+        _T, lin, ang = average_pose([votes[m] for m in inl],
+                                    weights=[weights[m] for m in inl])
+        # more markers > more weight > tighter spread
+        key = (len(inl), sum(weights[m] for m in inl), -(lin * 1000.0 + np.degrees(ang)))
+        if best is None or key > best[0]:
+            best = (key, inl)
+
+    if best is None or len(best[1]) < max(2, int(min_inliers)):
+        return [], ids, ('no set of %d or more markers agrees within %s mm / %s deg'
+                         % (max(2, int(min_inliers)), inlier_mm, inlier_deg))
+    inl = best[1]
+    return inl, [m for m in ids if m not in inl], ''
+
+
 def vote_target(rig, fused, plan):
     """(T_base_target, votes) from every fused marker that the rig knows.
 
@@ -594,16 +651,48 @@ def vote_target(rig, fused, plan):
                   len(votes), '' if len(votes) == 1 else 's', plan.min_markers)
         return None, votes
 
-    order = sorted(votes)
+    # ---- RANSAC: drop markers that do not agree with the consensus ---------------------------
+    # WHY THIS EXISTS. Before it, one marker that had been knocked, re-stuck or reprinted at the
+    # wrong size failed the WHOLE localization on the disagreement gate below -- the error message
+    # even said which failure it was, and then refused to proceed anyway. With three or more
+    # markers the rig can outvote the bad one and carry on, which is the entire point of putting
+    # several on the fixture.
+    rejected = []
+    if plan.ransac and len(votes) >= 3:
+        inliers, rejected, why = marker_consensus(
+            votes, weights, plan.ransac_inlier_mm, plan.ransac_inlier_deg, plan.ransac_min_inliers)
+        if not inliers:
+            log.error('MARKER RANSAC FAILED: %s. Every marker disagrees with every other, so '
+                      'there is no consensus to trust -- this is a rig or calibration problem, '
+                      'not noise. Re-run the marker calibration.', why)
+            return None, votes
+        for mid in rejected:
+            d_lin, d_ang = pose_error(votes[inliers[0]], votes[mid])
+            log.error('  MARKER %d REJECTED as an outlier: %.2f mm / %.2f deg from the consensus '
+                      'of %d marker(s), outside the %s mm / %s deg inlier band. It has most '
+                      'likely moved, been re-stuck, or been reprinted at a different size -- '
+                      're-run its calibration.', mid, d_lin * 1000.0, np.degrees(d_ang),
+                      len(inliers), plan.ransac_inlier_mm, plan.ransac_inlier_deg)
+        if rejected and len(inliers) < plan.min_markers:
+            log.error('  only %d marker(s) survived RANSAC (min_markers %d).',
+                      len(inliers), plan.min_markers)
+            return None, votes
+        if rejected:
+            log.warning('  proceeding on the %d-marker consensus %s; %s excluded.',
+                        len(inliers), inliers, rejected)
+        order = inliers
+    else:
+        order = sorted(votes)
+
     T, lin, ang = average_pose([votes[m] for m in order],
                                weights=[weights[m] for m in order])
-    total_w = sum(weights.values())
+    total_w = sum(weights[m] for m in order)      # over the AVERAGED set, not the rejected ones
     for mid in order:
         d_lin, d_ang = pose_error(T, votes[mid])
         log.info('    marker %d votes %+.2f mm / %+.2f deg from the fused target '
                  '(weight %.0f%%).', mid, d_lin * 1000.0, np.degrees(d_ang),
                  100.0 * weights[mid] / total_w)
-    if len(votes) > 1:
+    if len(order) > 1:
         level = log.info
         bad = ((plan.max_disagreement_mm is not None
                 and lin * 1000.0 > plan.max_disagreement_mm)
@@ -614,11 +703,12 @@ def vote_target(rig, fused, plan):
                       'target, over the %s mm / %s deg gate. That is not noise to average -- one '
                       'marker has most likely moved, been re-stuck or been reprinted at a '
                       'different size. Re-run the calibration for the outlier above.',
-                      len(votes), lin * 1000.0, np.degrees(ang),
+                      len(order), lin * 1000.0, np.degrees(ang),
                       plan.max_disagreement_mm, plan.max_disagreement_deg)
             return None, votes
-        level('  %d markers agree to %.2f mm / %.2f deg.', len(votes), lin * 1000.0,
-              np.degrees(ang))
+        level('  %d markers agree to %.2f mm / %.2f deg%s.', len(order), lin * 1000.0,
+              np.degrees(ang),
+              ' (after rejecting %s)' % rejected if rejected else '')
     else:
         log.warning('  only ONE marker voted -- the fused pose carries no cross-check at all. '
                     'Its view spread (above) measures pixel noise, NOT whether the marker is '

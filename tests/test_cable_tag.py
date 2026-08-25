@@ -217,3 +217,69 @@ def test_cables_are_reordered_best_match_first_and_the_image_is_renumbered():
     s2.tag = TagMatcher(None)
     assert [c['size'] for c in s2._detect_ranked(frame)] == [900, 400]
     assert s2.detector.labelled is None, 'no tag -> no re-labelling pass'
+
+
+def test_the_engage_speed_comes_from_phase_scale_not_a_private_key():
+    """assembly.engage.speed_mm_s is retired: one phase carrying a private mm/s that silently
+    outranked its own phase scale meant the speed table did not describe the run."""
+    import os
+
+    from urlab import config as urconfig
+    src = open(os.path.join(os.path.dirname(urconfig.__file__), 'apps',
+                            'bnc_assembly.py'), encoding='utf-8').read()
+    assert "v_mm_s = g_v * s_eng" in src, 'the engage rate must be the cap x its phase scale'
+    assert "s_eng = float(scales.get('engage', scales.get('assemble', 1.0)))" in src, \
+        'engage needs its own scale, falling back to assemble so old configs are unchanged'
+    assert "float(en_speed) if en_speed is not None" not in src, 'the private override is gone'
+    assert "is RETIRED" in src, 'a stale speed_mm_s must fail loudly, not be ignored'
+    assert "phase('engage')" in src, \
+        "the phase must run under the scale its reference rate is derived from"
+
+    cfg = urconfig.load('bnc_assembly')
+    assert cfg.get_path('assembly.engage.speed_mm_s') is None, 'the key must be gone from the yaml'
+    cap = float(cfg.get_path('speed.max_cartesian_translation_mm_s'))
+    scales = cfg.get_path('speed.phase_scale') or {}
+    assert 'engage' in scales, 'bnc_assembly must declare its own engage scale'
+    assert abs(cap * float(scales['engage']) - 2.5) < 1e-9, \
+        'the split must preserve the 2.5 mm/s the retired key asked for'
+    # ...and it must be settable INDEPENDENTLY of assemble, which is the point of splitting it.
+    assert float(scales['engage']) != float(scales['assemble'])
+
+
+def test_enter_only_defaults_to_number_one_when_something_actually_scored():
+    """With every cable at 0 px there is no evidence: the order is merely largest-first, so #1 is
+    not a "top pick" and Enter must not take it. Requiring a number is the honest answer -- the
+    alternative is grabbing whichever cable happens to be biggest."""
+    import builtins
+
+    from urlab.skills.ground_pick import GroundPlaneScanner
+
+    def run(allow_default, keys):
+        s = GroundPlaneScanner.__new__(GroundPlaneScanner)
+        s.tag = TagMatcher('red', {'min_pixels': 300})
+        s.labeled_path = '/tmp/x.png'
+        s.z_step = 0.05
+        it = iter(keys)
+        real = builtins.input
+        builtins.input = lambda *_a: next(it)
+        try:
+            return s._prompt(3, allow_default=allow_default)
+        finally:
+            builtins.input = real
+
+    assert run(True, ['']) == 0, 'with a real match behind it, Enter takes the top pick'
+    # All-zero: Enter is refused and the prompt keeps asking until a number arrives.
+    assert run(False, ['', '', '2']) == 1, 'Enter must be ignored, then the typed number wins'
+    # The other verbs still work with the default withdrawn.
+    assert run(False, ['q']) is None
+    assert run(False, ['n']) == 'new'
+
+
+def test_the_scan_withdraws_the_default_when_no_cable_scored():
+    """The caller decides: `allow_default` comes from whether ANY cable has a non-zero count."""
+    import inspect
+
+    from urlab.skills import ground_pick
+    src = inspect.getsource(ground_pick.GroundPlaneScanner.scan)
+    assert "ranked = any(int(c.get('tag_score') or 0) > 0 for c in cables)" in src
+    assert 'allow_default=ranked' in src

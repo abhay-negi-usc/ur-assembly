@@ -126,7 +126,13 @@ class GroundPlaneScanner:
                 self._selection = projected[auto]['junction'].copy()
                 return self._pose(projected[auto])
 
-            choice = self._prompt(len(cables))            # int index | 'new' | 'closer' | None
+            # THE ENTER DEFAULT NEEDS EVIDENCE. #1 is only meaningfully "the top pick" when
+            # something actually scored -- with every cable at 0 px the order is just largest
+            # first, which says nothing about which cable was asked for. Pressing Enter then
+            # would grab whichever happens to be biggest, so the shortcut is withdrawn and a
+            # number is required.
+            ranked = any(int(c.get('tag_score') or 0) > 0 for c in cables)
+            choice = self._prompt(len(cables), allow_default=ranked)
             if choice is None:
                 return None
             if choice == 'new':
@@ -305,14 +311,16 @@ class GroundPlaneScanner:
         return C + t * g
 
     # ------------------------------------------------------------------ user interaction
-    def _prompt(self, n):
+    def _prompt(self, n, allow_default=True):
         """Ask for the target cable number (1..n), 'n' for a new view, 'z' to move toward the cable,
         or 'q' to abort. Returns a 0-based index, 'new', 'closer', or None.
 
-        EMPTY INPUT TAKES #1. The cables are ordered best-first -- by tag match when one is
-        configured, else largest -- so the top of the list is already the answer in the ordinary
-        case, and pressing Enter is how you say so. It is deliberately NOT a timeout or a default
-        applied in silence: a person is still confirming the pick, just with one key."""
+        EMPTY INPUT TAKES #1, BUT ONLY WHEN #1 MEANS SOMETHING. `allow_default` is set by the
+        caller from whether any cable actually scored: with a tag match behind it, the top of the
+        list IS the answer and Enter is how you say so -- still a person confirming, just with one
+        key. With every cable at 0 px there is no evidence at all, the order is merely largest
+        first, and Enter would grab whatever happens to be biggest. So the shortcut is withdrawn
+        and a number is required. Refusing to guess is the whole point of the threshold."""
         zmm = self.z_step * 1000
         if n == 0:
             print(f'\n[ground_plane] NO cable detected in this view -- see {self.labeled_path}')
@@ -320,16 +328,24 @@ class GroundPlaneScanner:
         else:
             print(f'\n[ground_plane] {n} cable(s) detected -- see {self.labeled_path}')
             ranked = ' (numbered best tag match first)' if self.tag.enabled else ''
-            print(f'Enter the target NUMBER (1-{n}){ranked}, ENTER for #1, "n" for a new view, '
+            dflt = 'ENTER for #1, ' if allow_default else ''
+            print(f'Enter the target NUMBER (1-{n}){ranked}, {dflt}"n" for a new view, '
                   f'"z" to move {zmm:.0f} mm closer, or "q":')
+            if not allow_default and self.tag.enabled:
+                print(f'  NO cable is wearing the {self.tag.name} tag (all 0 px), so the '
+                      f'numbering is only largest-first and there is no top pick to default to '
+                      f'-- type a number.')
         while True:
             try:
                 raw = input('target #> ').strip().lower()
             except EOFError:
                 return None
-            if raw == '' and n > 0:
-                print('  taking #1 (the top pick).')
-                return 0
+            if raw == '':
+                if allow_default and n > 0:
+                    print('  taking #1 (the top pick).')
+                    return 0
+                print('  no top pick to default to -- type a number, "n", "z" or "q".')
+                continue
             if raw in ('q', 'quit', 'abort'):
                 return None
             if raw in ('n', 'new', 'view'):
@@ -339,8 +355,8 @@ class GroundPlaneScanner:
             try:
                 idx = int(raw) - 1
             except ValueError:
-                print(f'  enter a number 1-{n}, ENTER for #1, "n" (new view), "z" (closer), '
-                      'or "q".')
+                print(f'  enter a number 1-{n}, {"ENTER for #1, " if allow_default else ""}'
+                      '"n" (new view), "z" (closer), or "q".')
                 continue
             if 0 <= idx < n:
                 return idx

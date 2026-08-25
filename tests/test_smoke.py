@@ -3169,18 +3169,19 @@ def test_bnc_engage_config():
     mats = traj_mod.load_csv(os.path.join(ROOT, 'configs', 'assembly_trajectory.csv'))
     span = abs(T.matrix_to_xyzrpy(mats[0])[0][0] - T.matrix_to_xyzrpy(mats[-1])[0][0]) * 1000.0
     total = span + float(e['preload_mm'])
-    v = e['speed_mm_s']
-    if v is None:
-        with open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')) as fh:
-            spd = yaml.safe_load(fh)['speed']
-        v = float(spd['max_cartesian_translation_mm_s']) * float(
-            (spd.get('phase_scale') or {}).get('assemble', 1.0))
+    # The engage rate is speed.phase_scale.engage x the translation cap -- engage carries no
+    # private mm/s any more (falls back to `assemble` when the split is not declared).
+    with open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')) as fh:
+        spd = yaml.safe_load(fh)['speed']
+    _sc = spd.get('phase_scale') or {}
+    v = float(spd['max_cartesian_translation_mm_s']) * float(
+        _sc.get('engage', _sc.get('assemble', 1.0)))
     dur = total / float(v)
     for d in active:
         assert frq[d] * dur >= 1.0, (
             f'{d} completes {frq[d] * dur:.2f} cycles in the {dur:.2f} s insertion '
             f'({total:.1f} mm at {float(v):.2f} mm/s) -- under one cycle it acts as a constant '
-            'OFFSET. Raise the frequency or lower engage.speed_mm_s')
+            'OFFSET. Raise the frequency or lower speed.phase_scale.engage')
 
     # the axial limit must be BELOW the general guard, or the jam limit fires first and the
     # normal early stop never happens
@@ -5650,9 +5651,13 @@ def test_engage_is_the_trajectory_plus_an_optional_oscillation():
     en = cfg['engage']
     # amplitude/frequency are NOT declared here any more -- they come from the tuned file, and
     # test_every_app_resolves_to_the_tuned_wiggle checks that resolution.
-    for k in ('speed_mm_s', 'preload_mm', 'sample_rate_hz',
+    for k in ('preload_mm', 'sample_rate_hz',
               'max_axial_force_n', 'persistence_s', 'stiffness'):
         assert k in en, f'assembly.engage.{k} must be declared'
+    # RETIRED: the phase's speed is in the speed table with every other phase's, so that one
+    # place describes how fast the run goes.
+    assert 'speed_mm_s' not in en, (
+        'assembly.engage.speed_mm_s is retired -- set speed.phase_scale.engage instead')
     assert float(en['preload_mm']) >= 0.0
     _r = _resolved_wiggle('bnc_assembly', 'assembly', 'engage')
     _amp, _frq = _r.get('amplitude') or {}, _r.get('frequency_hz') or {}

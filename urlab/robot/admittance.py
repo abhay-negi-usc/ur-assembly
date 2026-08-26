@@ -67,6 +67,27 @@ class AdmittanceController:
         self.max_delta_rot = float(c.get('max_delta_rad', 0.5))
         self._delta = np.zeros(6)
         self._vel = np.zeros(6)
+        # LAST CYCLE, FOR DIAGNOSIS. The commanded pose is `ref @ Delta`, and when an
+        # insertion misbehaves the first question is always WHICH OF THE TWO MOVED: the
+        # reference (a trajectory/waypoint problem) or Delta (a controller/compliance one).
+        # A log of the measured pose alone cannot tell those apart, so record both.
+        self._last_ref = None
+        self._last_cmd = None
+
+    @property
+    def delta(self):
+        """The compliant offset in the tool0 frame, [m,m,m,rad,rad,rad]. Read-only copy."""
+        return self._delta.copy()
+
+    @property
+    def last_ref(self):
+        """The reference pose commanded on the most recent cycle (None before the first)."""
+        return None if self._last_ref is None else self._last_ref.copy()
+
+    @property
+    def last_cmd(self):
+        """The pose actually sent to servoL last cycle -- `last_ref @ Delta`."""
+        return None if self._last_cmd is None else self._last_cmd.copy()
 
     def reset(self):
         """Zero the integrator -- call before an insertion so it starts on the reference.
@@ -150,7 +171,9 @@ class AdmittanceController:
         self._delta += self._vel * dt
         self._delta[:3] = np.clip(self._delta[:3], -self.max_delta, self.max_delta)
         self._delta[3:] = np.clip(self._delta[3:], -self.max_delta_rot, self.max_delta_rot)
-        self.arm.servo_l(self._command_pose(T_ref), dt, self.lookahead, self.gain)
+        T_cmd = self._command_pose(T_ref)
+        self._last_ref, self._last_cmd = np.array(T_ref, dtype=float), T_cmd
+        self.arm.servo_l(T_cmd, dt, self.lookahead, self.gain)
         if on_step is not None:
             on_step()
 

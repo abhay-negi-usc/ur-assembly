@@ -127,6 +127,84 @@ CLOCK_STATES = ('engaged', 'seated', 'locked')
 UNCLOCK_STATES = ('locked', 'seated', 'engaged', 'removed')
 
 
+ENGAGE_TRACE_COLS = ['t_s', 'stage', 'ref_x_mm', 'cmd_x_mm', 'meas_x_mm',
+                     'delta_x_mm', 'delta_y_mm', 'delta_z_mm', 'delta_rot_deg',
+                     'flange_x_mm', 'flange_y_mm', 'flange_z_mm', 'fx_n', 'fy_n', 'fz_n']
+
+
+def _save_engage_trace(path, rows):
+    """Per-cycle reference / delta / commanded / measured, so a rebound can be attributed."""
+    import csv as _csv2
+    with open(path, 'w', newline='') as fh:
+        w = _csv2.writer(fh)
+        w.writerow(ENGAGE_TRACE_COLS)
+        w.writerows(rows)
+
+
+def _report_engage_trace(trace):
+    """Say WHAT MOVED, per stage, in one table.
+
+    `T_cmd = ref @ Delta`, so an axial retreat is exactly one of three faults and they need
+    different fixes. Printing the decomposition means a run answers that on the console
+    instead of needing the CSV opened and cross-plotted:
+
+      ref_x falls              -> the TRAJECTORY asked for it (waypoints, or a wiggle
+                                  rotation levered into axial travel by a bad connector
+                                  belief -- watch for it OSCILLATING, not just drifting)
+      delta_x falls            -> the CONTROLLER yielded (compliance unloading by w/S)
+      ref and cmd flat but
+      meas/flange fall         -> the ARM did not track the command
+      meas falls, flange does not -> the connector BELIEF moved, not the connector
+    """
+    if not trace:
+        log.info('  (no engage trace collected)')
+        return
+    by_stage = {}
+    for r in trace:
+        by_stage.setdefault(r[1], []).append(r)
+    log.info('  ENGAGE TRACE -- what moved, per stage (mm along the insertion axis):')
+    log.info('    %-8s %7s  %8s %8s %8s %8s %9s', 'stage', 'cycles',
+             'd_ref', 'd_delta', 'd_cmd', 'd_meas', 'd_flange')
+    for name in ('contact', 'engage', 'confirm', 'settle'):
+        rs = by_stage.get(name)
+        if not rs:
+            continue
+        a, b = rs[0], rs[-1]
+
+        def d(i, a=a, b=b):
+            try:
+                return float(b[i]) - float(a[i])
+            except (TypeError, ValueError):
+                return float('nan')
+        flange = float(np.linalg.norm([d(9), d(10), d(11)]))
+        log.info('    %-8s %7d  %+8.2f %+8.2f %+8.2f %+8.2f %9.2f',
+                 name, len(rs), d(2), d(5), d(3), d(4), flange)
+    xs = [float(r[4]) for r in trace if r[4] == r[4]]
+    if xs:
+        peak = max(xs)
+        log.info('    deepest measured %.2f mm; ended %.2f mm -- BACKED OUT %.2f mm.',
+                 peak, xs[-1], peak - xs[-1])
+
+
+COMPLIANCE_KEYS = ('stiffness', 'mass', 'damping_ratio')
+
+
+def _compliance_override(shared, block):
+    """The shared `compliance:` with a maneuver's own physics laid over it.
+
+    A maneuver sets `stiffness` (and optionally `mass`/`damping_ratio`) in its OWN block to
+    run at a different compliance from everything else -- STATIC for that whole behaviour.
+    `null`, or the key omitted, inherits; it is not the same as writing zeros.
+
+    Returns a NEW dict: the shared section is read by every other maneuver, so overriding one
+    must not quietly retune the rest."""
+    comp = dict(shared or {})
+    for k in COMPLIANCE_KEYS:
+        if (block or {}).get(k) is not None:
+            comp[k] = [float(v) for v in block[k]]
+    return comp
+
+
 def _retreat_state(state, expected):
     """The state BELOW `expected`, asserting that is where we actually are -- the mirror of
     _advance_state, so a disassembly step cannot claim a rung it never undid."""
@@ -948,10 +1026,7 @@ def build_and_run(cfg, robot, camera, args):
         """(AdmittanceController, ForceGuard) for one clocking maneuver -- every compliance key
         inheriting compliance: and every guard key force_guard: when absent or null, the same
         inheritance rule final_insertion uses."""
-        comp = dict(cfg.section('compliance'))
-        for k in ('stiffness', 'mass', 'damping_ratio'):
-            if block.get(k) is not None:
-                comp[k] = [float(v) for v in block[k]]
+        comp = _compliance_override(cfg.section('compliance'), block)
         gsec = dict(cfg.section('force_guard'))
         over = {k: block[k] for k in ('max_force_n', 'max_torque_nm', 'persistence_s')
                 if block.get(k) is not None}
@@ -960,8 +1035,21 @@ def build_and_run(cfg, robot, camera, args):
         if block.get('force_guard_enabled') is not None:
             over['enabled'] = bool(block['force_guard_enabled'])
         g = ForceGuard(robot.arm, {**gsec, **over})
+        # SAY WHAT THE STIFFNESS MEANS, not just what it is. This is an ADMITTANCE loop: to hold
+        # any force it must deflect by w/S, so the commanded pose necessarily backs off the
+        # contact by exactly that much. Printing the give next to the limit that provokes it
+        # makes the trade visible at the moment it is chosen -- a soft axial stiffness against a
+        # modest force limit can give more than the whole insertion is trying to travel, which
+        # reads on the bench as "it pushed in, then came back out".
+        stiff = [float(v) for v in (comp.get('stiffness') or [2000.0] * 3 + [15.0] * 3)]
+        lim = block.get('max_axial_force_n')
+        lim = float(lim) if lim is not None else float(g.max_force)
+        give_mm = (lim / stiff[0] * 1000.0) if stiff[0] > 0 else float('inf')
         log.info('%s ON: stiffness %s, guard %.1f N / %.1f Nm.', name, comp.get('stiffness'),
                  g.max_force, g.max_torque)
+        log.info('    axial give %.1f mm at %.1f N (= force / stiffness %.0f N/m) -- the '
+                 'commanded pose backs off by this much to hold that force.',
+                 give_mm, lim, stiff[0])
         return AdmittanceController(robot.arm, comp), g
 
     adm_cc = guard_cc = adm_cl = guard_cl = None
@@ -2109,10 +2197,50 @@ def build_and_run(cfg, robot, camera, args):
         combo = _AnyGuard(det, guard_en)
         obs, cnt = [], [0]
 
+        # ---- ENGAGE TRACE ------------------------------------------------------------
+        # `obs` records only where the connector was BELIEVED to be, plus the wrench. That
+        # cannot answer the question a rebound actually poses -- WHAT MOVED? The commanded
+        # pose is `ref @ Delta`, so a retreat is one of three different faults:
+        #
+        #   ref_x falls          -> the TRAJECTORY commanded it (waypoints//wiggle lever arm)
+        #   delta_x falls        -> the CONTROLLER yielded (compliance unloading, w/S)
+        #   both flat, meas falls-> the ARM did not track, or the belief frame is moving
+        #
+        # flange_* is read straight off the arm and does NOT depend on T_tool0_conn, so it
+        # stays honest even when the connector-wrt-fingertip belief is well off -- which is
+        # exactly the case where meas_x and the truth part company.
+        stage = ['contact']
+        trace = []
+        t_trace0 = [_t.monotonic()]
+
+        def _conn_x_mm(T_base_tool0):
+            """Insertion depth of the connector wrt the TARGET frame, for any tool0 pose."""
+            if T_base_tool0 is None:
+                return float('nan')
+            rel = inverse(T_base_tconn) @ (T_base_tool0 @ T_tool0_conn)
+            return float(matrix_to_xyzrpy(rel)[0][0] * 1000.0)
+
         def log_cb():
             cnt[0] += 1
-            if cnt[0] % decim == 0:
-                obs.append(_observe(robot, T_tool0_conn, T_base_tconn))
+            if cnt[0] % decim != 0:
+                return
+            row = _observe(robot, T_tool0_conn, T_base_tconn)
+            obs.append(row)
+            d = adm_en.delta
+            flange = robot.tool0()
+            trace.append([
+                round(_t.monotonic() - t_trace0[0], 4), stage[0],
+                round(_conn_x_mm(adm_en.last_ref), 4),
+                round(_conn_x_mm(adm_en.last_cmd), 4),
+                round(float(row[0]), 4),
+                round(float(d[0]) * 1000.0, 4), round(float(d[1]) * 1000.0, 4),
+                round(float(d[2]) * 1000.0, 4),
+                round(float(np.degrees(np.linalg.norm(d[3:]))), 4),
+                round(float(flange[0, 3]) * 1000.0, 4),
+                round(float(flange[1, 3]) * 1000.0, 4),
+                round(float(flange[2, 3]) * 1000.0, 4),
+                round(float(row[6]), 3), round(float(row[7]), 3), round(float(row[8]), 3),
+            ])
 
         # NO phase() HERE, deliberately. The engage is driven entirely by servo_l, and servo_l
         # calls servoL directly -- it never reads arm.speed_scale. So a phase scale cannot pace
@@ -2213,6 +2341,7 @@ def build_and_run(cfg, robot, camera, args):
             return traj_ref(T, T_tool0_conn)
 
         T_base_conn_contact = robot.tool0() @ T_tool0_conn
+        stage[0] = 'engage'
         trav = _TravelReached(robot, T_tool0_conn, T_base_conn_contact, en_travel_mm)
         combo = _AnyGuard(trav, det, guard_en)
         combo.reset()
@@ -2297,6 +2426,7 @@ def build_and_run(cfg, robot, camera, args):
             # `last_ref` would step the command by the whole 30 mm straight into the socket, then
             # let it spring back out. Continue from the reference the engage ended on, with the
             # deflection intact, so the wiggle rides on the equilibrium instead of through it.
+            stage[0] = 'confirm'
             prev_c = last_ref
             t_c0 = _t.monotonic()
             while True:
@@ -2356,6 +2486,7 @@ def build_and_run(cfg, robot, camera, args):
         # Holding the reference engage ended on, with Delta intact, commands the pose the arm is
         # already at and keeps the preload. The loop still yields if the mate relaxes -- which is
         # what a settle is for -- it just no longer double-counts the compliance.
+        stage[0] = 'settle'
         if settle_shared > 0:
             adm_en.hold(ref_live, settle_shared, guard=None, on_step=log_cb)
         adm_en.stop()
@@ -2364,6 +2495,9 @@ def build_and_run(cfg, robot, camera, args):
         depth = float(matrix_to_xyzrpy(
             inverse(T_base_tconn) @ (robot.tool0() @ T_tool0_conn))[0][0] * 1000.0)
         _engage_report(status, end_state, depth, det, guard_en, combo, confirm)
+        _report_engage_trace(trace)
+        if trace:
+            _save_engage_trace(os.path.join(out_dir, 'engage_trace.csv'), trace)
         if obs:
             _save_observations(os.path.join(out_dir, 'engage_observations.csv'), obs)
         return status, last_ref, depth

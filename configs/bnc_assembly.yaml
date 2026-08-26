@@ -952,9 +952,28 @@ assembly:
     persistence_s: 0.25          # the limit must hold this long -- rides out contact spikes
 
     # ---- compliance overrides (else the top-level compliance:) ---
+    # STATIC FOR THE WHOLE ENGAGE (contact, insertion, confirm and settle all share it).
+    # Order is [x, y, z, rx, ry, rz]; translations N/m, rotations Nm/rad. x IS THE INSERTION
+    # AXIS -- these are connector-frame axes, not base.
+    #
+    # HOW MUCH THE PART GIVES: this is an admittance loop, so holding a force REQUIRES
+    # deflecting by force/stiffness, and the commanded pose backs off the contact by exactly
+    # that much. At the max_axial_force_n above:
+    #
+    #     500 N/m  ->  5 N / 500  = 10.0 mm of give     (more than travel_mm: 5.0)
+    #    2000 N/m  ->  5 N / 2000 =  2.5 mm
+    #    5000 N/m  ->  5 N / 5000 =  1.0 mm
+    #
+    # so an axial stiffness low against the force limit can give back more than the insertion
+    # is trying to travel. The run logs the resulting give on the `Engage insertion ON:` line.
+    # RAISE x ALONE to firm up the insertion while keeping the lateral/rotational compliance
+    # that lets a misaligned connector find the socket -- worth keeping soft when the
+    # connector-wrt-fingertip belief carries error, since stiffness turns that error into force.
+    # Damping tracks stiffness automatically (D = zeta * 2*sqrt(M*S)), so raising S stays
+    # critically damped at damping_ratio 1.0; no need to retune mass with it.
     stiffness: [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
-    mass: null
-    damping_ratio: null
+    mass: null               # null = inherit the top-level compliance:
+    damping_ratio: null      # null = inherit
     # ---- force guard overrides (else force_guard:) ---
     # The general guard still runs alongside the axial one and means "hit something
     # unexpected / jammed".  Keep it well above max_axial_force_n.
@@ -1155,7 +1174,7 @@ assembly:
     # PUSH: how far past the engaged pose the virtual target aims, along the connector +X.
     # Too small and the cams never engage; too large and the spring loads the mate harder
     # than needed.
-    push_mm: 10.0
+    push_mm: 15.0
     # SUCCESS: measured advance along the ENGAGED frame's +X, read from the MEASURED arm pose
     # (under admittance the commanded reference is not where the arm is).  Checked every
     # servo cycle; EARLY-OUT ONLY -- a sweep that runs its legs is assumed seated.

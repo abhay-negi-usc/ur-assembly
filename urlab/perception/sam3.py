@@ -195,6 +195,18 @@ class JunctionDetector(_Base):
         self.trace = str(cfg.get_path('sam3.trace', 'graph'))
         if self.trace not in ('graph', 'geodesic'):
             raise ValueError(f"sam3.trace must be 'graph' or 'geodesic', got {self.trace!r}")
+        # HOW the junction is picked off the diameter profile. 'slope' finds the cable-side flank
+        # of the thickest transition; 'longest_run' is the original (find the longest constant
+        # stretch, take whichever end borders a rise). See perception/junction.py for why the
+        # default changed. `connector_peak_min` is how many times the cable diameter a feature
+        # must reach to count as a connector at all -- it also decides how many junctions a cable
+        # reports, since every qualifying feature gets one.
+        from . import junction as _j
+        self.select = str(cfg.get_path('sam3.junction_select', _j.JUNCTION_SELECT))
+        if self.select not in ('slope', 'longest_run'):
+            raise ValueError("sam3.junction_select must be 'slope' or 'longest_run', "
+                             f'got {self.select!r}')
+        self.peak_min = float(cfg.get_path('sam3.connector_peak_min', _j.CONNECTOR_PEAK_MIN))
         super().__init__(cfg)
         if not self.dry_run and self.adaptive:
             log.info('  (junction method has no adaptive-threshold mode; sam3.adaptive ignored.)')
@@ -203,7 +215,8 @@ class JunctionDetector(_Base):
         """SAM3 for segmentation only; the junction geometry is ours."""
         from . import junction
         _core, det = self._neck_backend()      # NeckDetector: the torch model + its GPU setup
-        log.info('  junction geometry: urlab.perception.junction, trace=%s.', self.trace)
+        log.info('  junction geometry: urlab.perception.junction, trace=%s, select=%s '
+                 '(connector >= %.2f x cable).', self.trace, self.select, self.peak_min)
         return junction, det
 
     def _detect_raw(self, frame):
@@ -218,7 +231,8 @@ class JunctionDetector(_Base):
             assembly |= m
         for m in conn_masks:
             assembly |= m
-        res = self.core.compute_junction(assembly, work_dim=self.work_dim, trace=self.trace)
+        res = self.core.compute_junction(assembly, work_dim=self.work_dim, trace=self.trace,
+                                         select=self.select, peak_min=self.peak_min)
         return dict(junctions=[res] if res is not None else [], result=res, assembly=assembly,
                     cables_raw=len(cable_masks), connectors_raw=len(conn_masks))
 
@@ -279,7 +293,8 @@ class JunctionDetector(_Base):
         out = []
         for i in np.argsort(sizes)[::-1][:max(1, int(top_n))]:
             j = self.core.compute_junction(lbl == (i + 1), work_dim=self.work_dim,
-                                       trace=self.trace)
+                                       trace=self.trace, select=self.select,
+                                       peak_min=self.peak_min)
             if j is None:
                 continue
             if self.min_contrast > 0.0 and float(j.get('contrast', 0.0)) < self.min_contrast:
@@ -336,7 +351,8 @@ class JunctionDetector(_Base):
         cables = []
         for i in np.argsort(sizes)[::-1][:max(1, int(max_cables))]:
             comp = lbl == (i + 1)
-            j = self.core.compute_junction(comp, work_dim=self.work_dim, trace=self.trace)
+            j = self.core.compute_junction(comp, work_dim=self.work_dim, trace=self.trace,
+                                           select=self.select, peak_min=self.peak_min)
             if j is None:
                 continue
             if self.min_contrast > 0.0 and float(j.get('contrast', 0.0)) < self.min_contrast:

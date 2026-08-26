@@ -197,7 +197,7 @@ def test_a_self_crossing_is_no_longer_reported_as_the_junction(b):
     from urlab.perception.junction import compute_junction
     mask, true_uv = cable_with_connector(figure_eight(b))
 
-    old = compute_junction(mask, work_dim=1024, trace='geodesic')
+    old = compute_junction(mask, work_dim=1024, trace='geodesic', select='longest_run')
     new = compute_junction(mask, work_dim=1024, trace='graph')
     assert old is not None and new is not None
 
@@ -205,6 +205,15 @@ def test_a_self_crossing_is_no_longer_reported_as_the_junction(b):
         return float(np.hypot(r['junction'][0] - true_uv[0], r['junction'][1] - true_uv[1]))
 
     assert err(new) < 30.0, f'graph tracing put the junction {err(new):.0f} px out'
-    assert err(old) > 100.0, ('the geodesic tracer is expected to fail here -- if it stopped '
-                              'failing, this fixture no longer reproduces the bug')
+    assert err(old) > 100.0, ('geodesic tracing AND the longest-run selector together are expected '
+                              'to fail here -- if they stopped, this fixture no longer reproduces '
+                              'the bug')
     assert new['n_crossings'] >= 1, 'the crossing must be reported'
+
+    # The SELECTOR fixes this independently of the tracer: slope selection measures the transition
+    # and treats the crossing as transparent, so it lands on the connector even down the geodesic
+    # shortcut that defeats longest_run. Neither fix now depends on the other.
+    geo_slope = compute_junction(mask, work_dim=1024, trace='geodesic', select='slope')
+    assert geo_slope is not None and err(geo_slope) < 30.0, (
+        'slope selection should survive the geodesic shortcut '
+        f'(got {err(geo_slope):.0f} px out)')

@@ -301,7 +301,7 @@ def _spread_crossing(crossing, dia, hi, d0):
     return out
 
 
-def find_junction_index(dia, tol_frac=0.30, crossing=None):
+def _longest_run_index(dia, tol_frac=0.30, crossing=None):
     """Index of the cable<->connector JUNCTION = the END of the constant-diameter cable.
 
     Per the cable geometry: the cable has a CONSTANT diameter d0; the connector is thicker.
@@ -416,6 +416,170 @@ def find_junction_index(dia, tol_frac=0.30, crossing=None):
     return int(j), info
 
 
+# ---------------------------------------------------------------------------- slope selection
+# WHY A SECOND SELECTOR. `_longest_run_index` finds the CABLE (the longest constant-diameter run)
+# and infers the connector from whichever end of it borders a rise. That inference fails whenever
+# something else on the cable is thick enough to break the run -- a strain-relief boot, a moulded
+# sleeve, a wrapped marker. The run then splits into unequal halves, the longer half wins, and the
+# junction is placed at the intervening feature instead of at the connector. Measured over 18 test
+# photos (56 cables) the junction sat a median 23% of the arc away from the connector.
+#
+# Slope selection measures the TRANSITION instead, which is what a junction physically is:
+#
+#   1. candidates = every local maximum of |d'(s)| -- crossing samples excluded, since a fused
+#      crossing is a width artefact and not a real change of part;
+#   2. rank them by the HEIGHT OF THE FEATURE each climbs into, so a sharp thin connector cannot
+#      outvote a broad thick one (the same rule `_longest_run_index` applies when both ends of the
+#      cable border a connector);
+#   3. put the junction on the CABLE-SIDE flank of that feature -- walk off both sides of the peak
+#      to its feet and keep the side whose remaining run is longer, because that run is the cable.
+#
+# Step 3 is not optional. A connector has a slope on BOTH sides; taking the steeper one alone puts
+# the junction on the far side of the connector from the cable about a third of the time, which
+# silently inverts `connector_on_right` and therefore `cable_side_mask`. The same 56 cables land a
+# median 2.8% of the arc from the connector with all three steps, and the tag -- which is stuck on
+# the cable, so it must fall on the cable side -- is scored correctly on 17 of 18 tagged cables,
+# against 10 of 18 for the longest-run selector.
+JUNCTION_SELECT = 'slope'        # 'slope' | 'longest_run'
+CONNECTOR_PEAK_MIN = 1.8         # a connector is at least this many times the cable diameter
+_PROFILE_SIGMA = 6.0             # samples; the profile is differentiated, so it must be smoothed
+# The tracer flags where strands MEET; the width stays fused for a little either side, and the
+# smoothing then carries the spike further still. A FIXED pad covers that without the data-driven
+# growth of _spread_crossing, which walks outward while the profile stays wide -- and a connector
+# IS wide, so on a cable whose plug is crossed it swallows the connector too.
+_CROSSING_PAD = 10               # samples of margin added around every crossing flag
+
+
+def _smooth_profile(y, sigma=_PROFILE_SIGMA):
+    """Gaussian smoothing along the arc. Differentiating a raw ray-cast width profile amplifies
+    its quantisation noise -- at these resolutions the cable is only ~7 px across internally."""
+    y = np.asarray(y, dtype=float)
+    n = max(3, int(sigma * 4) | 1)
+    x = np.arange(n) - n // 2
+    k = np.exp(-0.5 * (x / sigma) ** 2)
+    k /= k.sum()
+    return np.convolve(np.pad(y, n // 2, mode='edge'), k, mode='valid')[:len(y)]
+
+
+def connector_candidates(dia, crossing=None, peak_min=None):
+    """Every connector-like feature on the profile, cable-side junction included.
+
+    Returns a list of dicts, ordered along the path, one per feature:
+        index                 -- the junction: steepest point on the feature's CABLE-side flank
+        peak_idx, thick       -- where the feature peaks, and how wide it is there
+        connector_on_right    -- the feature lies toward the END of the path
+        cable_baseline        -- the cable diameter this was measured against
+
+    A cable with a connector at each end yields TWO entries, which is what it physically has.
+    Callers wanting a single answer take the thickest (see find_junction_index).
+    """
+    dia = np.asarray(dia, dtype=float)
+    n = len(dia)
+    peak_min = CONNECTOR_PEAK_MIN if peak_min is None else float(peak_min)
+    cross = (np.zeros(n, dtype=bool) if crossing is None
+             else np.asarray(crossing, dtype=bool)[:n])
+    if n < 5:
+        return []
+    # REPAIR ACROSS CROSSINGS BEFORE SMOOTHING. A crossing is not a measurement of anything --
+    # the ray runs through two fused strands -- so it is interpolated away, exactly as the cable
+    # is allowed to continue straight through one. Doing this BEFORE the smoothing matters: a
+    # 13-sample spike blurred with sigma 6 still stands 4.6x the cable diameter twelve samples
+    # away, on samples that are not themselves flagged, and would out-thicken any real connector.
+    # The tracer flags where strands MEET, but the width stays fused for a stretch either side --
+    # at 75 degrees the profile peaked one sample OUTSIDE the flagged run. _spread_crossing grows
+    # the flags over the whole widened stretch; the original selector already relies on it, and
+    # without it the interpolation below repairs the middle of the spike and leaves its shoulders.
+    if cross.any():
+        pad = int(_CROSSING_PAD)
+        cross = np.convolve(cross.astype(float), np.ones(2 * pad + 1), 'same') > 0
+    good = ~cross
+    if cross.any() and int(good.sum()) >= 2:
+        idx = np.arange(n, dtype=float)
+        dia = np.interp(idx, idx[good], dia[good])
+    d = _smooth_profile(dia)
+    grad = np.gradient(d)
+    if not np.any(np.abs(grad) > 0):
+        return []
+    base = float(np.median(d[d <= np.percentile(d, 60)]))
+    if base <= 0:
+        return []
+    win = max(5, n // 12)
+
+    # ENDPOINTS COUNT. The strand is traced tip to tip, so a connector at the end of the path
+    # peaks at sample 0 or n-1 with only one neighbour to compare against. Excluding them (an
+    # interior-only `range(1, n-1)`) drops the commonest case of all -- a plug at the end of a
+    # cable -- and silently falls through to the longest-run selector.
+    def _is_peak(i):
+        lo = d[i - 1] if i > 0 else -np.inf
+        hi_ = d[i + 1] if i < n - 1 else -np.inf
+        return d[i] >= lo and d[i] >= hi_
+
+    peaks = [i for i in range(n) if _is_peak(i) and d[i] >= base * peak_min]
+    kept = []                                        # non-max suppression, tallest first
+    for i in sorted(peaks, key=lambda i: -d[i]):
+        if all(abs(i - j) > win for j in kept):
+            kept.append(i)
+
+    out = []
+    for pk in sorted(kept):
+        li = pk
+        while li > 0 and d[li] > base * 1.15:        # walk off the peak to its feet
+            li -= 1
+        ri = pk
+        while ri < n - 1 and d[ri] > base * 1.15:
+            ri += 1
+        if li >= (n - 1 - ri):                       # the cable runs further to the LEFT
+            lo, hi, conn_right = max(0, li), pk, True
+        else:
+            lo, hi, conn_right = pk, min(n - 1, ri), False
+        seg = np.abs(grad[lo:hi + 1])
+        j = lo + int(np.argmax(seg)) if seg.size else pk
+        out.append(dict(index=int(j), peak_idx=int(pk), thick=float(d[pk]),
+                        connector_on_right=bool(conn_right), cable_baseline=base))
+
+    ded = []                                         # two flanks of one feature -> one junction
+    for c in sorted(out, key=lambda c: -c['thick']):
+        if all(abs(c['index'] - e['index']) > win for e in ded):
+            ded.append(c)
+    return sorted(ded, key=lambda c: c['index'])
+
+
+def _candidate_info(cand, dia, crossing):
+    n = len(dia)
+    cross = (np.zeros(n, dtype=bool) if crossing is None
+             else np.asarray(crossing, dtype=bool)[:n])
+    base = cand['cable_baseline']
+    return dict(junction_k=cand['index'], peak_idx=cand['peak_idx'],
+                cable_baseline=float(base), thin_diameter=float(base),
+                thick_diameter=float(cand['thick']),
+                contrast=float(cand['thick'] / max(base, 1e-6)),
+                connector_on_right=bool(cand['connector_on_right']),
+                n_crossing_px=int(cross.sum()),
+                junction_on_crossing=bool(cross[cand['index']]))
+
+
+def find_junction_index(dia, tol_frac=0.30, crossing=None, select=None, peak_min=None):
+    """Index of the cable<->connector JUNCTION, plus an `info` dict describing it.
+
+    `select` picks the strategy -- 'slope' (default, see above) or 'longest_run' (the original,
+    kept so a run can be reproduced and so a scene that defeats the slope method has a fallback).
+    With 'slope', the THICKEST candidate is returned; `connector_candidates` exposes them all.
+
+    Falls back to 'longest_run' when the profile yields no connector-like feature at all, so a
+    flat or degenerate profile still returns the same shape it always did.
+    """
+    select = JUNCTION_SELECT if select is None else str(select)
+    if select not in ('slope', 'longest_run'):
+        raise ValueError(f"junction select must be 'slope' or 'longest_run', got {select!r}")
+    if select == 'longest_run':
+        return _longest_run_index(dia, tol_frac, crossing)
+    cands = connector_candidates(dia, crossing, peak_min)
+    if not cands:
+        return _longest_run_index(dia, tol_frac, crossing)
+    best = max(cands, key=lambda c: c['thick'])
+    return int(best['index']), _candidate_info(best, np.asarray(dia, dtype=float), crossing)
+
+
 def connector_direction(small, junction_yx, normal_k, conn_tip_yx, min_area=15):
     """Direction from the CONNECTOR's principal axis -- the same rule the neck node uses.
 
@@ -464,7 +628,42 @@ def connector_direction(small, junction_yx, normal_k, conn_tip_yx, min_area=15):
     return float(d[0]), float(d[1])
 
 
-def compute_junction(assembly_mask, work_dim=1024, min_area_frac=0.0004, trace='graph'):
+def _junction_pose(small, path, normals, d_plus, d_minus, k, connector_on_right, scale):
+    """(junction_uv, dx, dy) for path sample `k` -- full-res pixels, direction toward the
+    connector. Split out of compute_junction so EVERY candidate junction is built the same way."""
+    # Recentre the origin onto the MIDDLE of the cable cross-section. The traced centreline
+    # can hug one edge (a geodesic path cuts the inside of a bend), so shift along the local
+    # normal by half the difference of the two ray reaches: +d_plus and -d_minus edges ->
+    # their midpoint is at offset (d_plus - d_minus)/2.
+    center_off = 0.5 * (d_plus[k] - d_minus[k])
+    junction_yx = path[k].astype(np.float64) + center_off * normals[k]
+
+    # Orientation = the CONNECTOR's principal axis (same rule as the neck node / compute_necks),
+    # which is far more stable than the floppy cable's tangent at the junction.
+    conn_tip = path[-1] if connector_on_right else path[0]
+    cdir = connector_direction(small, junction_yx, normals[k], conn_tip)
+    if cdir is not None:
+        dx, dy = cdir  # pixel frame, already signed junction -> connector
+    else:
+        # fallback: local cable tangent toward the connector side
+        span = max(2, int(0.04 * len(path)))
+        a = max(0, k - span)
+        b = min(len(path) - 1, k + span)
+        tangent = (path[b] - path[a]).astype(np.float64)  # (dy, dx)
+        if not connector_on_right:
+            tangent = -tangent
+        nrm = float(np.linalg.norm(tangent))
+        if nrm < 1e-6:
+            tangent = np.array([0.0, 1.0])
+            nrm = 1.0
+        tangent /= nrm
+        dy, dx = tangent
+    inv = 1.0 / scale
+    return [float(junction_yx[1] * inv), float(junction_yx[0] * inv)], float(dx), float(dy)
+
+
+def compute_junction(assembly_mask, work_dim=1024, min_area_frac=0.0004, trace='graph',
+                     select=None, peak_min=None):
     """Full diameter-based JUNCTION detection on a boolean assembly mask (cable U connector).
 
     Runs the geometry on a downscaled copy for speed, then maps everything back to
@@ -521,39 +720,34 @@ def compute_junction(assembly_mask, work_dim=1024, min_area_frac=0.0004, trace='
     max_r = max(8, int(0.25 * max(small.shape)))
     width, d_plus, d_minus = perp_width(small, path, normals, max_r)
     arclen, dia = diameter_profile(path, width)
-    k, info = find_junction_index(dia, crossing=crossing)
+    k, info = find_junction_index(dia, crossing=crossing, select=select, peak_min=peak_min)
 
     inv = 1.0 / scale  # small-image px -> full-res px
-    # Recentre the origin onto the MIDDLE of the cable cross-section. The traced centreline
-    # can hug one edge (a geodesic path cuts the inside of a bend), so shift along the local
-    # normal by half the difference of the two ray reaches: +d_plus and -d_minus edges ->
-    # their midpoint is at offset (d_plus - d_minus)/2.
-    center_off = 0.5 * (d_plus[k] - d_minus[k])
-    junction_yx = path[k].astype(np.float64) + center_off * normals[k]
+    junction_uv, dx, dy = _junction_pose(small, path, normals, d_plus, d_minus, k,
+                                         bool(info["connector_on_right"]), scale)
+    # EVERY connector-like feature, not just the winner. A cable with a plug at each end has two
+    # junctions; forcing one made the caller guess which end it got. The top-level keys still
+    # describe the THICKEST, so existing callers are unchanged.
+    others = []
+    if (select or JUNCTION_SELECT) == 'slope':
+        for cand in connector_candidates(dia, crossing, peak_min):
+            ck = int(cand['index'])
+            cuv, cdx, cdy = _junction_pose(small, path, normals, d_plus, d_minus, ck,
+                                           cand['connector_on_right'], scale)
+            others.append(dict(
+                junction=cuv, direction=[cdx, cdy],
+                angle_deg=float(math.degrees(math.atan2(-cdy, cdx))),
+                cable_diameter_px=float(cand['cable_baseline'] * inv),
+                connector_diameter_px=float(cand['thick'] * inv),
+                contrast=float(cand['thick'] / max(cand['cable_baseline'], 1e-6)),
+                connector_on_right=bool(cand['connector_on_right']),
+                junction_arc_frac=float(arclen[ck] / max(arclen[-1], 1e-6)),
+                _junction_k=ck))
+    if not others:
+        others = None
 
-    # Orientation = the CONNECTOR's principal axis (same rule as the neck node / compute_necks),
-    # which is far more stable than the floppy cable's tangent at the junction.
-    conn_tip = path[-1] if info["connector_on_right"] else path[0]
-    cdir = connector_direction(small, junction_yx, normals[k], conn_tip)
-    if cdir is not None:
-        dx, dy = cdir  # pixel frame, already signed junction -> connector
-    else:
-        # fallback: local cable tangent toward the connector side
-        span = max(2, int(0.04 * len(path)))
-        a = max(0, k - span)
-        b = min(len(path) - 1, k + span)
-        tangent = (path[b] - path[a]).astype(np.float64)  # (dy, dx)
-        if not info["connector_on_right"]:
-            tangent = -tangent
-        nrm = float(np.linalg.norm(tangent))
-        if nrm < 1e-6:
-            tangent = np.array([0.0, 1.0])
-            nrm = 1.0
-        tangent /= nrm
-        dy, dx = tangent
-
-    junction_uv = [float(junction_yx[1] * inv), float(junction_yx[0] * inv)]  # (u, v)
     return dict(
+        junctions=others,
         junction=junction_uv,
         direction=[float(dx), float(dy)],
         angle_deg=float(math.degrees(math.atan2(-dy, dx))),

@@ -45,6 +45,20 @@ sam3:
   adaptive: true                    # (neck only)
   confidence_floor: 0.2
   # ---- junction method only ----
+  # HOW the junction is picked off the diameter profile.
+  #   slope       -- (default) the cable-side flank of the thickest TRANSITION. A junction IS a
+  #                  transition, so an intermediate feature -- a strain-relief boot, a moulded
+  #                  sleeve, a wrapped marker -- no longer decides the answer by splitting the
+  #                  cable into unequal halves. Over 18 test photos (56 cables) this moved the
+  #                  junction from a median 23% of the arc away from the connector to 2.8%.
+  #   longest_run -- the ORIGINAL: find the longest constant-diameter run, take whichever end
+  #                  borders a rise. Kept to reproduce a past run, and as a fallback.
+  junction_select: slope
+  # How many times the cable diameter a feature must reach to count as a connector. This also
+  # decides HOW MANY junctions a cable reports: every qualifying feature gets one, so a cable
+  # with a plug at each end reports two. Lower it and cable bends start reading as connectors
+  # (~1.6 on these cables); raise it and a low-profile plug is missed (a real USB-A read 1.82).
+  connector_peak_min: 1.8
   min_contrast: 0.0                 # drop junctions with too weak a connector/cable diameter step; 0 = off
   work_dim: 1024
   overlay_opacity: 0.5              # opacity of the drawn overlay (lines/arrows/dots/tint), 0..1 (1 = unchanged)

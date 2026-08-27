@@ -7,7 +7,7 @@
 # the compliance block below is the forceMode parameterisation instead.
 
 robot:
-  ip: 192.168.125.2
+  ip: 192.168.10.106
   dry_run: false
   # Tool payload -- REQUIRED for correct force readings (guard, admittance, touch). Without
   # it, getActualTCPForce reads the tool's own weight as external force. MEASURE/estimate the

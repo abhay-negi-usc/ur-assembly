@@ -10,7 +10,7 @@
 # the retract is the reverse translation along that same axis.
 
 robot:
-  ip: 192.168.125.2
+  ip: 192.168.10.106
   dry_run: false
   # Tool payload (gripper + coupler + camera + the fixtured connector) so getActualTCPForce()
   # reports true EXTERNAL force. Same values as cable_pick_estimate_assemble.

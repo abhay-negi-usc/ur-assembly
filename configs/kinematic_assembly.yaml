@@ -2,7 +2,7 @@
 # stand-off to the mate. The assembled tool0 pose is ground truth; the target frame is back-derived.
 # Ported from ur_kinematic_assembly_demo. control_mode: admittance now uses UR forceMode.
 robot:
-  ip: 192.168.125.2
+  ip: 192.168.10.106
   dry_run: false
   # Tool payload (gripper + coupler + camera): mass + CoG in the tool0 frame (mm). REQUIRED so
   # getActualTCPForce() subtracts the tool weight and reports true EXTERNAL force.

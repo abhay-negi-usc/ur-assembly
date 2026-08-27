@@ -9,7 +9,7 @@
 # the retract between attempts is the reverse translation along that same axis.
 
 robot:
-  ip: 192.168.125.2
+  ip: 192.168.10.106
   dry_run: false
   payload:
     mass_kg: 1.3

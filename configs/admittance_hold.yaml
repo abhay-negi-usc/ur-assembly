@@ -1,6 +1,6 @@
 # Admittance hold -- make the arm compliant in place (UR forceMode, all axes soft, seek 0 force).
 robot:
-  ip: 192.168.125.2
+  ip: 192.168.10.106
   dry_run: false
   # Tool payload (gripper + coupler + camera): mass + CoG in the tool0 frame (mm). REQUIRED so
   # getActualTCPForce() subtracts the tool weight and reports true EXTERNAL force.

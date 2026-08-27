@@ -36,7 +36,7 @@
 # ===================================================================================================
 
 robot:
-  ip: 192.168.125.2
+  ip: 192.168.10.106
   dry_run: false
   # Tool payload (gripper + coupler + camera). REQUIRED so getActualTCPForce() subtracts the tool
   # weight and reports TRUE EXTERNAL force -- this experiment is entirely a wrench measurement.

@@ -47,7 +47,7 @@ servo_pos_deadband_mm: 10.0
 servo_ang_deadband_deg: 5.0
 
 gripper:
-  port: /dev/ttyUSB0
+  port: COM3
   open_counts: 0
   closed_counts: 200
   speed_counts: 255

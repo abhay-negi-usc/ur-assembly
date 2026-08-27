@@ -75,6 +75,9 @@ class _Base:
         # frame so the cable underneath stays visible. Applied in _blend, after the detector renders.
         self.overlay_opacity = float(np.clip(s.get('overlay_opacity', 1.0), 0.0, 1.0))
         self.dry_run = bool(cfg.get_path('robot.dry_run', False))
+        # Where the model runs: 'auto' | 'cpu' | 'cuda'. A MACHINE fact, so it lives in
+        # configs/_common.yaml (compute:) with the robot IP and camera serial.
+        self.compute_device = str(cfg.get_path('compute.device', 'auto'))
         self.last_debug = None
         self.core = None
         self.detector = None
@@ -101,7 +104,8 @@ class _Base:
         det = Sam3Backend(
             cable_prompt=self.cable_prompt, connector_prompt=self.connector_prompt,
             threshold=self.threshold, connector_threshold=self.connector_threshold,
-            mislabel_overlap=self.mislabel_overlap)
+            mislabel_overlap=self.mislabel_overlap, device=self.compute_device)
+        log.info('  SAM3 device: %s (compute.device: %s).', det.device, self.compute_device)
         return neck, det
 
     def _pil(self, frame):

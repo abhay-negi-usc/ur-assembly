@@ -22,6 +22,16 @@ base_frame: base_link            # ROS base_link; transforms.py bridges to the U
 tip_frame: tool0                 # the pendant all-zeros TCP; NOT `flange` (that is 90 deg twisted)
 camera_frame: camera1_color_optical_frame
 
+# ---- Compute ----
+# Where SAM3 (and future torch models) run.
+#   auto -- cuda when available, else cpu. Right for configs shared between the GPU robot host
+#           and CPU-only laptops.
+#   cpu  -- force CPU even with a GPU present (GPU busy with other software, reproducible timing).
+#   cuda -- REQUIRE the GPU: fails at startup with a clear message if missing, instead of
+#           crashing deep inside the first inference.
+compute:
+  device: auto
+
 # ---- Camera (RealSense D405) ----
 camera:
   serial_no: "218622272137"

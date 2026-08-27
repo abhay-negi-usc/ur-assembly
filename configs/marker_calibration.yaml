@@ -26,7 +26,7 @@ aruco:
   # named there instead -- solvePnP scales a marker's distance linearly with the size it is given,
   # so a marker solved at the wrong size lands at the wrong DEPTH with a perfect reprojection
   # behind it. There is nothing in the image to catch that.
-  marker_size_mm: 30.7
+  marker_size_mm: 38.8
 
 # WHICH TARGET THE MARKERS ARE ATTACHED TO -- a `targets:` name in configs/frames.yaml. Its
 # recorded base_link pose is what gets transferred onto the markers.
@@ -38,7 +38,6 @@ target_frame: bnc_connector_finger_holder
 # print, which is a ~14% depth error.
 markers:
   24:  38.8
-  25:  38.8
 
 # Every declared marker must be seen, or the run fails. Set false to calibrate a partial rig (the
 # missing ids simply do not appear in the block, and the existing frames.yaml entries stand).

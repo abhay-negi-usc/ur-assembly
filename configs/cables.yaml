@@ -57,7 +57,7 @@
 # Gripper hardware + endpoints (identical for all cables). These live SOLELY here now -- the cable
 # demo configs no longer carry a `gripper:` block; a selected `cable:` supplies all of it.
 gripper:
-  port: /dev/ttyUSB0
+  port: COM3
   open: 3
   closed: 228            # fully closed on nothing
   speed: 255

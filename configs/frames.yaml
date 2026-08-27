@@ -99,8 +99,8 @@ targets:
   # Prefer a FRESH monitor reading when there is bench time -- this is arithmetic, not a
   # measurement.  (was xyz_mm [+108.52, +1013.93, -141.11])
   bnc_connector_finger_holder:
-    xyz_mm:  [+122.29, +1088.65,  -138.25]
-    rpy_deg: [+0.58,   +0.21,  +90.98]
+    xyz_mm:  [-195.25, +1117.48,  +446.57]
+    rpy_deg: [-0.40,   -2.37,  +88.89]
 
   # bnc_connector_in_fingerpads at the mate -- the target bnc_assembly drives to.
   #
@@ -123,27 +123,18 @@ targets:
   # bnc_connector_in_fingerpads:
   #   xyz_mm:  [+120.81, +1088.60,  -155.02]
   #   rpy_deg: [-0.61,   +0.04,  +89.54]
-
 marker_rigs:
   bnc_connector_finger_holder:
     dictionary: DICT_4X4_50
     markers:
       24:
         size_mm: 38.80
-        xyz_mm:  [+229.57, +33.11, +28.59]
-        rpy_deg: [+63.65, +87.58, +151.99]
+        xyz_mm:  [-153.55, -76.74, +28.76]
+        rpy_deg: [-79.42, +86.15, +10.91]
         views: 38
-        residual_mm: 0.87
-        residual_deg: 3.86
-        measured: 2026-08-25
-      25:
-        size_mm: 38.80
-        xyz_mm:  [-216.57, +31.44, +29.73]
-        rpy_deg: [+12.51, +89.29, +102.62]
-        views: 38
-        residual_mm: 0.93
-        residual_deg: 5.16
-        measured: 2026-08-25
+        residual_mm: 0.67
+        residual_deg: 5.43
+        measured: 2026-08-27
 
 # ============================================================================
 # MARKER RIGS -- the fiducials bolted around a target, each carrying the TARGET's pose in ITS OWN

@@ -112,7 +112,7 @@ place_offset_xyz: [0.050, 0.0, 0.0]
 place_offset_rpy: [0.0, 0.0, 0.0]
 
 gripper:
-  port: /dev/ttyUSB0
+  port: COM3
   open_counts: 0
   closed_counts: 255
   speed_counts: 255

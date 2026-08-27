@@ -432,7 +432,12 @@ def test_cable_profile_applies_counts():
 
     cfg = Config({'cable': 'banana', '_config_dir': CONFIG_DIR})
     apply_cable_profile(cfg)
-    assert cfg.get_path('gripper.port') == '/dev/ttyUSB0'              # ALL gripper params from cables.yaml
+    # ALL gripper params from cables.yaml -- compare against the FILE, not a literal: the port is
+    # platform-specific (/dev/ttyUSB0 on Linux, COMx on Windows) and pinning one spelling makes the
+    # test fail on the other host without testing anything more.
+    import yaml as _y
+    _shared = (_y.safe_load(open('configs/cables.yaml')) or {}).get('gripper') or {}
+    assert cfg.get_path('gripper.port') == _shared['port']
     assert cfg.get_path('gripper.open_counts') == 3
     assert cfg.get_path('gripper.closed_counts') == 228
     assert cfg.get_path('gripper.speed_counts') == 255

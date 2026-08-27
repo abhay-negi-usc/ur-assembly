@@ -1,6 +1,6 @@
 # Gripper cycle demo (Robotiq 2F-85 over Modbus RTU).
 gripper:
-  port: /dev/ttyUSB0
+  port: COM3
   baud: 115200
   open_counts: 0
   closed_counts: 255

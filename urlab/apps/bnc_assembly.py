@@ -370,7 +370,10 @@ class _ScrewAdvance:
     def check(self):
         d = self.advance_m()
         self.peak_m = max(self.peak_m, d)
-        if self.threshold_m > 0.0 and d >= self.threshold_m:
+        # 1e-12 of slack: the advance comes out of a matmul chain, and an advance short of the
+        # threshold by float rounding (numpy 2.x lands ~1e-17 BELOW on an exactly-threshold screw
+        # where 1.x landed on it) is measurement noise, not a shorter screw.
+        if self.threshold_m > 0.0 and d >= self.threshold_m - 1e-12:
             self.tripped_by = (f'advance {d * 1000.0:.2f} mm >= '
                                f'{self.threshold_m * 1000.0:.2f} mm')
             return True

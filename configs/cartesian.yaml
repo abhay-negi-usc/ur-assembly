@@ -1,15 +1,4 @@
 # Cartesian jog demo. See _common.yaml for the robot block's meaning.
-robot:
-  ip: 192.168.125.2
-  dry_run: false
-  # Tool payload (gripper + coupler + camera): mass + CoG in the tool0 frame (mm). REQUIRED so
-  # getActualTCPForce() subtracts the tool weight and reports true EXTERNAL force.
-  payload:
-    mass_kg: 1.3
-    cog_mm: [-26.0, 28.0, 30.0]
-base_frame: base_link
-tip_frame: tool0
-
 speed:
   max_joint_velocity_deg_s: 28.64788975654
   max_cartesian_velocity_mm_s: 4000.0

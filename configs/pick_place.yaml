@@ -1,25 +1,7 @@
 # Fiducial pick-and-place (ArUco). Detect a marker, visually approach, grasp, place.
-robot:
-  ip: 192.168.125.2
-  dry_run: false
-  # Tool payload (gripper + coupler + camera): mass + CoG in the tool0 frame (mm). REQUIRED so
-  # getActualTCPForce() subtracts the tool weight and reports true EXTERNAL force.
-  payload:
-    mass_kg: 1.3
-    cog_mm: [-26.0, 28.0, 30.0]
-base_frame: base_link
-tip_frame: tool0
-camera_frame: camera1_color_optical_frame
-
 hand_eye:
   xyz_mm: [0.0, -80.0, 31.0]
   rpy_deg: [0.0, 0.0, 0.0]
-
-camera:
-  serial_no: "218622272137"
-  width: 1280
-  height: 720
-  fps: 15                          # D405 max at 1280x720 is 15 fps
 
 aruco:
   dictionary: DICT_4X4_50

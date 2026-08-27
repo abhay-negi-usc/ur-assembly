@@ -14,15 +14,6 @@
 #       python -m urlab.apps.insertion_tester --set insertion.insertion_mode=wiggle
 # ===================================================================================================
 
-robot:
-  ip: 192.168.125.2
-  dry_run: false
-  payload:                       # same values as estimator_eval -- true EXTERNAL force readout
-    mass_kg: 1.3
-    cog_mm: [-26.0, 28.0, 30.0]
-base_frame: base_link
-tip_frame: tool0
-
 # WHAT IS HELD, and WHAT IT IS INSERTED INTO -- both names from configs/frames.yaml.
 #   held_frame    a frames: entry -- tool0 -> the part fixtured between the closed fingers. This
 #                 is the GROUND TRUTH every seated/not-seated verdict is measured against.

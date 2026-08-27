@@ -9,17 +9,6 @@
 # connector's +X. The trajectory is a straight -X -> 0 approach and the retract is the reverse
 # translation along that same axis. A curved / multi-axis / twist-to-lock mate is NOT supported.
 
-robot:
-  ip: 192.168.125.2
-  dry_run: false
-  # Tool payload (gripper + coupler + camera): mass + CoG in the tool0 frame (mm). REQUIRED so
-  # getActualTCPForce() subtracts the tool weight and reports true EXTERNAL force.
-  payload:
-    mass_kg: 1.3
-    cog_mm: [-26.0, 28.0, 30.0]
-base_frame: base_link
-tip_frame: tool0
-
 # The CONNECTOR under test -- selects grasp params from configs/cables.yaml.
 # Change it here, or on the CLI: --set cable=bnc
 cable: bnc

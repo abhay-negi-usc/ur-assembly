@@ -11,16 +11,6 @@
 # and success is the OPERATOR's call at the check.  assembly.target_frame is the recorded mate
 # (frames.yaml targets:); the in-hand belief starts from the grasp geometry.
 
-robot:
-  ip: 192.168.125.2
-  dry_run: false
-  payload:
-    mass_kg: 1.3
-    cog_mm: [-26.0, 28.0, 30.0]
-base_frame: base_link
-tip_frame: tool0
-camera_frame: camera1_color_optical_frame
-
 hand_eye:
   xyz_mm: [-9.0, -80.0, 31.0] # accounting for plate deformation
   rpy_deg: [0.0, 0.0, 0.0]

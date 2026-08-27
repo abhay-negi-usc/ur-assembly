@@ -10,15 +10,6 @@
 # constructed. NO estimation, NO belief updates -- pure geometry + force.
 # ===================================================================================================
 
-robot:
-  ip: 192.168.125.2
-  dry_run: false
-  payload:                       # same values as estimator_eval -- true EXTERNAL force readout
-    mass_kg: 1.3
-    cog_mm: [-26.0, 28.0, 30.0]
-base_frame: base_link
-tip_frame: tool0
-
 # WHAT IS HELD, and WHAT IT IS PROBED AGAINST -- both names from configs/frames.yaml.
 #   held_frame    a frames: entry -- tool0 -> the part fixtured between the closed fingers.
 #   target_frame  a targets: entry -- base_link <- the recorded mate to probe. null = held_frame.

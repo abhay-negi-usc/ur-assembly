@@ -35,17 +35,6 @@
 # Full run:  python -m urlab.apps.wiggle_sampling --config configs/wiggle_sampling.yaml
 # ===================================================================================================
 
-robot:
-  ip: 192.168.125.2
-  dry_run: false
-  # Tool payload (gripper + coupler + camera). REQUIRED so getActualTCPForce() subtracts the tool
-  # weight and reports TRUE EXTERNAL force -- this experiment is entirely a wrench measurement.
-  payload:
-    mass_kg: 1.3
-    cog_mm: [-26.0, 28.0, 30.0]
-base_frame: base_link
-tip_frame: tool0
-
 cable: bnc
 
 # The connector under test: its pose wrt tool0 (frames:) and its recorded mate (targets:) both

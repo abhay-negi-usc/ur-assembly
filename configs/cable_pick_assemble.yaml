@@ -6,28 +6,9 @@
 # switch_settle_s / reference_rate_hz / apply_params keys the ROS version needed are simply gone;
 # the compliance block below is the forceMode parameterisation instead.
 
-robot:
-  ip: 192.168.125.2
-  dry_run: false
-  # Tool payload -- REQUIRED for correct force readings (guard, admittance, touch). Without
-  # it, getActualTCPForce reads the tool's own weight as external force. MEASURE/estimate the
-  # mass + CoG of the gripper + coupler + camera (CoG in the tool0 frame, mm).
-  payload:
-    mass_kg: 1.3
-    cog_mm: [-26.0, 28.0, 30.0]
-base_frame: base_link
-tip_frame: tool0
-camera_frame: camera1_color_optical_frame
-
 hand_eye:
   xyz_mm: [-9.0, -80.0, 31.0] # accounting for plate deformation 
   rpy_deg: [0.0, 0.0, 0.0]
-
-camera:
-  serial_no: "218622272137"
-  width: 1280
-  height: 720
-  fps: 15                          # D405 max at 1280x720 is 15 fps
 
 sam3:
   mode: junction                        # neck | junction | tip  (junction = diameter-profiling method,

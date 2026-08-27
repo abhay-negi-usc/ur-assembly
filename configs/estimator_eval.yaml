@@ -9,17 +9,6 @@
 # ASSUMPTION: LINEAR (PEG-IN-HOLE) ASSEMBLY -- single-axis insertion along the connector's +X;
 # the retract is the reverse translation along that same axis.
 
-robot:
-  ip: 192.168.125.2
-  dry_run: false
-  # Tool payload (gripper + coupler + camera + the fixtured connector) so getActualTCPForce()
-  # reports true EXTERNAL force. Same values as cable_pick_estimate_assemble.
-  payload:
-    mass_kg: 1.3
-    cog_mm: [-26.0, 28.0, 30.0]
-base_frame: base_link
-tip_frame: tool0
-
 # ---- GROUND TRUTH from the SHARED catalogue (configs/frames.yaml) ----
 # frames: entry  = the true tool0 -> connector pose of the fixtured part;
 # targets: entry = the recorded base_link mate. Both REQUIRED -- this app cannot run without them.

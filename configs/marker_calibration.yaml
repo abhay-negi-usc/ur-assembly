@@ -14,21 +14,7 @@
 # Run with the markers ALREADY IN VIEW. The sweep is a small local ring around wherever it starts.
 # ===================================================================================================
 
-robot:
-  ip: 192.168.125.2
-  dry_run: false
-  payload:
-    mass_kg: 1.3
-    cog_mm: [-26.0, 28.0, 30.0]
-base_frame: base_link
-tip_frame: tool0
 data_dir: data
-
-camera:
-  serial_no: "218622272137"
-  width: 1280
-  height: 720
-  fps: 15                          # D405 max at 1280x720 is 15 fps
 
 hand_eye: 
   xyz_mm: [-9.0, -80.0, 31.0]

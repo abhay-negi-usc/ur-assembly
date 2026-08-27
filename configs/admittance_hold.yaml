@@ -1,15 +1,4 @@
 # Admittance hold -- make the arm compliant in place (UR forceMode, all axes soft, seek 0 force).
-robot:
-  ip: 192.168.125.2
-  dry_run: false
-  # Tool payload (gripper + coupler + camera): mass + CoG in the tool0 frame (mm). REQUIRED so
-  # getActualTCPForce() subtracts the tool weight and reports true EXTERNAL force.
-  payload:
-    mass_kg: 1.3
-    cog_mm: [-26.0, 28.0, 30.0]
-base_frame: base_link
-tip_frame: tool0
-
 admittance:
   selected_axes: [1, 1, 1, 1, 1, 1]     # all six compliant -> hand-guidable in every direction
   force_limits: [0.10, 0.10, 0.10, 0.35, 0.35, 0.35]   # compliant-axis speed caps (m/s, rad/s)

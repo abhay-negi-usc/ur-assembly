@@ -57,9 +57,9 @@
 # Gripper hardware + endpoints (identical for all cables). These live SOLELY here now -- the cable
 # demo configs no longer carry a `gripper:` block; a selected `cable:` supplies all of it.
 gripper:
-  port: COM3
+  port: /dev/ttyUSB0
   open: 3
-  closed: 228            # fully closed on nothing
+  closed: 255            # fully closed on nothing
   speed: 255
   force: 255
   # Per-fingertip V-groove depth (mm) -- lets the gripper kinematic model convert PHYSICAL object
@@ -112,7 +112,7 @@ cables:
     # ever SELECTS on this -- the grasp geometry below is unchanged, and a run where the tag is
     # missing, shadowed or ambiguous falls back to the numbered prompt rather than guessing.
     tag_color: red
-    connector: [191, 212]
+    connector: [191, 255]
     cable: 224
     # THIS YAW SETS WHICH WAY THE FINGERTIP FACES AT PICKUP. The grasp pose is
     # T_conn @ inverse(junction_in_fingertip), so 0 lays the fingertip +X ALONG the detected

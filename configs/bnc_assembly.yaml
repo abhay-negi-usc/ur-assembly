@@ -614,7 +614,7 @@ speed:
     # happens near the work surface, and at a large pickup.pitch_deg it swings the gripper
     # BODY down toward the ground plane rather than just the fingers.  Falls back to `scan`
     # when unset, so other apps are unaffected.
-    grasp_align: 2.0
+    grasp_align: 1.0
     pickup: 0.2      # the compliant grasp descent
     lift: 0.8        # the compliant lift (including the slip-check partial lift)
     standoff: 1.0    # the move to stand-off + the per-attempt realign moveJs
@@ -670,7 +670,7 @@ reset:
   # HOME = the MARKER VIEW pose: the reset drives here at the start and end of every run,
   # the visual localisation sweeps the markers from here, and the end-of-run image is
   # captured from here.  (The pick itself runs from pick_joints_deg below.)
-  home_joints_deg: [80, -30, 115, 5, 90, 170]
+  home_joints_deg: [95, -85, 120, -25, 100, 180]
   # [70, -75, 140, -155, -90, -20] 
   # [70, -85, 140, -240, 285, 0] # target viewing joints deg 
   # (the home move is a guarded position moveJ, paced by the speed caps above)
@@ -854,7 +854,7 @@ assembly:
     # PRELOAD, mm past the mate along the connector's own +X, so the reference finishes
     # pressing rather than merely arriving.  0 = stop exactly on the mate.  (Distinct from
     # final_insertion.preload_mm, which belongs to the estimate-mode commit.)
-    preload_mm: 25.0
+    preload_mm: 30.0
 
     # Reference rebuild rate.  Must be >= 4x the highest active frequency or the sampled sine
     # aliases -- validated pre-motion.
@@ -1138,7 +1138,7 @@ assembly:
     # row) so it survives anchoring and applies only to the COMMIT -- probing passes end on
     # the mate, where the map is.  It buys the break-in spike; what it can HOLD is
     # stiffness x preload.  0 = off.
-    preload_mm: 25.0
+    preload_mm: 30.0
     # NOISE on the commit trajectory, OFF deliberately: the jitter exists to gather varied
     # contact while PROBING and has no place in the attempt meant to seat.
     trajectory_noise:
@@ -1234,7 +1234,7 @@ assembly:
     # "ring stands 30 mm from the JUNCTION": junction sits at -45.7 mm on this axis, so
     # collar = -45.7 + 30 = -15.7 mm.  If re-tuned on the bench, measure from the connector
     # frame origin.
-    collar_offset_mm: -4.0
+    collar_offset_mm: -1.0
     # COLLAR AXIS OFFSET, mm, in the SOCKET (target) frame's own axes: shifts the LINE the
     # whole collar maneuver works about (centring, unwind, advance, turn, and the tug
     # re-grip).  Y and Z move the line; X only slides the reference point along it.  Exists
@@ -1388,7 +1388,7 @@ assembly:
     # already mated and the arm is already clear of it, and the collar station is absolute, so
     # driving the open gripper back onto the connector would only be a pose to leave again.
     unlock_collar: true
-    extract_mm: 60.0             # pull along the socket -X once the bayonet is free
+    extract_mm: 250.0             # pull along the socket -X once the bayonet is free
     # PLACE: back to the PICK pose, straight down, release ABOVE the ground, rise.  The same
     # configuration the cable was picked from, so it goes back the way it was taken.
     place:

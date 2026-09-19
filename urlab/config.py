@@ -68,7 +68,8 @@ def load(name_or_path, overrides=()):
     cfg['_config_path'] = os.path.abspath(path)
     cfg['_config_dir'] = os.path.dirname(os.path.abspath(path))
 
-    _apply_common(cfg)                    # base layer: top-level blocks absent here come from _common
+    _apply_machine_layers(cfg)            # robot_config:/camera_config: explicit machine files
+    _apply_common(cfg)                    # legacy base layer (no-op unless a _common.yaml exists)
     _apply_overrides(cfg, overrides)      # 1st pass: a `--set cable=...` can select the profile
     apply_cable_profile(cfg)              # override gripper/grasp-check counts for the chosen cable
     forced = _apply_overrides(cfg, overrides)  # 2nd pass: an explicit `--set` beats the profile
@@ -218,6 +219,36 @@ def _normalise_units(node, _path='', forced=()):
         for item in node:
             _normalise_units(item, _path)
     return node
+
+
+def _apply_machine_layers(cfg):
+    """Fill top-level blocks from the EXPLICIT machine files a config names:
+
+        robot_config: robot.yaml          # the arm/host (robot:, speed:, base/tip frames, compute:)
+        camera_config: camera.yaml        # the sensor (camera:, camera_frame)
+
+    Same rules as _apply_common -- whole-block fill of anything the config does not define, in the
+    order listed above -- but by EXPLICIT reference instead of directory magic, so a config states
+    which machine it runs on and swapping cells is editing one line. Paths resolve beside the
+    config file. A layer file naming itself (or a missing key) is a no-op; a DANGLING reference is
+    an error, not a silent skip -- a config that says robot.yaml and quietly gets no robot block
+    would fail hundreds of lines later with a bare KeyError."""
+    for key in ('robot_config', 'camera_config'):
+        name = cfg.get(key)
+        if not name:
+            continue
+        path = os.path.join(cfg.get('_config_dir', CONFIG_DIR), str(name))
+        if os.path.abspath(path) == os.path.abspath(cfg.get('_config_path', '')):
+            continue
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f'{key}: {name!r} not found beside '
+                                    f'{cfg.get("_config_path", "the config")!r}')
+        with open(path, 'r') as f:
+            layer = yaml.safe_load(f) or {}
+        for k, v in layer.items():
+            if k not in cfg:
+                cfg[k] = v
+    return cfg
 
 
 COMMON_FILE = '_common.yaml'
@@ -422,3 +453,25 @@ def from_args(args):
     if args.debug:
         cfg.set_path('debug', True)
     return cfg
+
+def parse_block(cls, mapping, path):
+    """Build the frozen dataclass `cls` from a config mapping, REJECTING unknown keys.
+
+    The silent alternative -- ignore what you don't recognise -- is how a typo'd tuning key
+    ships: the run uses the default and nothing says so. Nested dataclass fields recurse, so a
+    whole behaviour block parses in one call and an error names the exact dotted key."""
+    import dataclasses
+    if not dataclasses.is_dataclass(cls):
+        raise TypeError(f'{cls!r} is not a dataclass')
+    mapping = dict(mapping or {})
+    fields = {f.name: f for f in dataclasses.fields(cls)}
+    unknown = sorted(set(mapping) - set(fields))
+    if unknown:
+        raise ValueError(f'{path}: unknown key(s) {unknown} -- known: {sorted(fields)}')
+    kwargs = {}
+    for name, value in mapping.items():
+        f = fields[name]
+        if dataclasses.is_dataclass(f.type) and isinstance(value, dict):
+            value = parse_block(f.type, value, f'{path}.{name}')
+        kwargs[name] = value
+    return cls(**kwargs)

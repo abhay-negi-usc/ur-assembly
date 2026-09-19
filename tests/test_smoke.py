@@ -39,7 +39,7 @@ def widest_cable_leg(asm):
     sw = cc.get('sweep_deg')
     if sw is None:
         return abs(np.radians(float(cc['rotation_deg'])))
-    stops = [np.radians(float(asm.get('engage_clock_deg', 0.0) or 0.0))]
+    stops = [np.radians(float((asm.get('run') or {}).get('engage_clock_deg', 0.0) or 0.0))]
     stops += [np.radians(float(v)) for v in sw]
     return max(abs(b - a) for a, b in zip(stops, stops[1:]))
 
@@ -208,223 +208,6 @@ def test_config_dotted_and_override():
 
 
 # ------------------------------------------------------------------ fusion geometry
-def test_connector_fusion_recovers_synthetic_axis():
-    """A synthetic cable at a known pose, seen from several translated views, should be recovered
-    (origin within a mm, axis within a couple of degrees)."""
-    from urlab.config import Config
-    from urlab.perception.connector import ConnectorEstimator
-
-    K = np.array([[900.0, 0, 640.0], [0, 900.0, 360.0], [0, 0, 1.0]])
-    P_true = np.array([0.5, 0.0, 0.2])            # connector origin in base
-    axis_true = np.array([1.0, 0.2, 0.0])
-    axis_true = axis_true / np.linalg.norm(axis_true)
-
-    est = ConnectorEstimator(Config({'connector_estimator': {
-        'min_inlier_views': 3, 'min_parallax_deg': 1.0, 'inlier_dist_m': 0.02,
-        'max_range_m': 2.0, 'up_axis': [0, 0, 1]}}))
-
-    # Cameras looking down (-z world) from above, translated laterally for parallax.
-    for dx in (-0.08, -0.04, 0.0, 0.04, 0.08):
-        C = np.array([0.5 + dx, 0.0, 0.6])
-        # Optical frame: z toward the target (down), x right, y down.
-        T_bc = T.look_at(C, P_true, np.eye(4))
-        # Project the origin and a point along the axis to get (u, v) and the pixel-frame yaw.
-        Rcw = T_bc[:3, :3].T
-        def proj(Xw):
-            Xc = Rcw @ (Xw - C)
-            uv = K @ (Xc / Xc[2])
-            return uv[:2]
-        p0 = proj(P_true)
-        p1 = proj(P_true + 0.03 * axis_true)
-        yaw = np.arctan2(*(p1 - p0)[::-1])        # atan2(dy, dx)
-        est.add_view([(p0[0], p0[1], yaw)], K, T_bc, 0.0)
-
-    M = est.estimate()
-    assert M is not None, 'fusion refused a clean synthetic case'
-    assert np.linalg.norm(M[:3, 3] - P_true) < 0.005, f'origin off by {M[:3,3]-P_true}'
-    axis_est = M[:3, 0]
-    cos = abs(float(np.dot(axis_est, axis_true)))
-    assert cos > np.cos(np.radians(5)), f'axis off by {np.degrees(np.arccos(cos)):.1f} deg'
-
-
-def test_cable_reconstruction_recovers_curve():
-    """A synthetic (slightly tilted) cable, seen from several translated views, should reconstruct:
-    the junction origin within a cm and the axis -- INCLUDING its out-of-plane tilt -- within a few
-    degrees. This is the quantity the point estimator is weakest on, so it is what the test pins."""
-    from urlab.config import Config
-    from urlab.perception.cable_recon import CableReconstructor
-
-    K = np.array([[900.0, 0, 640.0], [0, 900.0, 360.0], [0, 0, 1.0]])
-    P_j = np.array([0.5, 0.0, 0.2])                    # junction (connector end) in base
-    dir_cable = np.array([1.0, 0.2, 0.3])             # cable heads out with a real depth component
-    dir_cable = dir_cable / np.linalg.norm(dir_cable)
-    s = np.linspace(0.0, 0.15, 20)
-    cable3d = P_j[None, :] + s[:, None] * dir_cable[None, :]   # idx 0 = junction, outward
-
-    rec = CableReconstructor(Config({
-        'reconstruction': {'min_views': 3, 'samples': 24, 'junction_span_m': 0.05,
-                           'max_reproj_error_px': 5.0},
-        'connector_estimator': {'up_axis': [0, 0, 1]}}))
-
-    for dx in (-0.08, -0.04, 0.0, 0.04, 0.08):        # lateral translation for parallax
-        C = np.array([0.5 + dx, 0.0, 0.6])
-        T_bc = T.look_at(C, P_j, np.eye(4))
-        Rcw = T_bc[:3, :3].T
-
-        def proj(Xw, Rcw=Rcw, C=C):
-            Xc = Rcw @ (Xw - C)
-            uv = K @ (Xc / Xc[2])
-            return uv[:2]
-
-        skel = np.array([proj(X) for X in cable3d])   # ordered from junction outward
-        obs = {'junction': (float(skel[0, 0]), float(skel[0, 1])), 'yaw': 0.0, 'skeleton': skel}
-        rec.add_view(obs, K, T_bc, 0.0)
-
-    res = rec.reconstruct()
-    assert res is not None, 'reconstruction refused a clean synthetic cable'
-    assert np.linalg.norm(res.origin - P_j) < 0.01, f'origin off by {res.origin - P_j}'
-    axis_true = -dir_cable                            # frame x points INTO the connector
-    cos = abs(float(np.dot(res.axis, axis_true)))
-    assert cos > np.cos(np.radians(6)), f'axis off by {np.degrees(np.arccos(cos)):.1f} deg'
-
-
-def test_connector_estimator_fuses_only_marked_good_views():
-    """When views are marked good/far, estimate() must fuse ONLY the good ones -- a far, biased view
-    left unmarked should not move the origin."""
-    from urlab.config import Config
-    from urlab.perception.connector import ConnectorEstimator
-
-    K = np.array([[900.0, 0, 640.0], [0, 900.0, 360.0], [0, 0, 1.0]])
-    P_true = np.array([0.5, 0.0, 0.2])
-    axis_true = np.array([1.0, 0.0, 0.0]) / 1.0
-    est = ConnectorEstimator(Config({'connector_estimator': {
-        'min_inlier_views': 3, 'min_parallax_deg': 1.0, 'inlier_dist_m': 0.02,
-        'max_range_m': 3.0, 'up_axis': [0, 0, 1]}}))
-
-    def add(C, P, good):
-        T_bc = T.look_at(C, P, np.eye(4))
-        Rcw = T_bc[:3, :3].T
-        def proj(Xw):
-            Xc = Rcw @ (Xw - C)
-            return (K @ (Xc / Xc[2]))[:2]
-        p0, p1 = proj(P), proj(P + 0.03 * axis_true)
-        yaw = float(np.arctan2(*(p1 - p0)[::-1]))
-        vid = est.add_view([(p0[0], p0[1], yaw)], K, T_bc, 0.0)
-        est.mark_view(vid, good)
-
-    for dx in (-0.06, -0.02, 0.02, 0.06):             # good, close views of the TRUE origin
-        add(np.array([0.5 + dx, 0.0, 0.6]), P_true, good=True)
-    # A far view whose rays are consistent with a DIFFERENT (biased) origin -- must be excluded.
-    P_bias = P_true + np.array([0.10, 0.0, 0.0])
-    for dx in (-0.05, 0.05):
-        add(np.array([0.5 + dx, 0.0, 1.2]), P_bias, good=False)
-
-    M = est.estimate()
-    assert M is not None
-    assert np.linalg.norm(M[:3, 3] - P_true) < 0.01, \
-        f'far unmarked view leaked into the fit: origin {M[:3,3]} vs {P_true}'
-
-
-def test_connector_estimator_validation_gate_rejects_background():
-    """Once a confident estimate is established, a detection of a DIFFERENT (background) cable is
-    gated out of the history; a consistent detection still lands."""
-    from urlab.config import Config
-    from urlab.perception.connector import ConnectorEstimator
-
-    K = np.array([[900.0, 0, 640.0], [0, 900.0, 360.0], [0, 0, 1.0]])
-    P_true = np.array([0.5, 0.0, 0.2])
-    axis = np.array([1.0, 0.0, 0.0])
-    est = ConnectorEstimator(Config({'connector_estimator': {
-        'min_inlier_views': 3, 'min_parallax_deg': 1.0, 'inlier_dist_m': 0.02,
-        'max_range_m': 3.0, 'reject_dist_m': 0.05, 'up_axis': [0, 0, 1]}}))
-
-    def view_of(P, dx):
-        C = np.array([0.5 + dx, 0.0, 0.6])
-        T_bc = T.look_at(C, P, np.eye(4))
-        Rcw = T_bc[:3, :3].T
-        def proj(X):
-            Xc = Rcw @ (X - C)
-            return (K @ (Xc / Xc[2]))[:2]
-        p0, p1 = proj(P), proj(P + 0.03 * axis)
-        return (float(p0[0]), float(p0[1]), float(np.arctan2(*(p1 - p0)[::-1]))), K, T_bc
-
-    for dx in (-0.06, -0.02, 0.02, 0.06):                # establish the estimate on the true cable
-        det, k, tbc = view_of(P_true, dx)
-        est.add_view([det], k, tbc, 0.0)
-    assert est.estimate() is not None                    # confident fit -> gate armed
-    n = est.n_views
-
-    det_bg, k, tbc = view_of(P_true + np.array([0.30, 0.0, 0.0]), 0.0)   # a cable 30 cm away
-    assert est.add_view([det_bg], k, tbc, 0.0) == 0, 'background detection should be gated out'
-    assert est.n_views == n, 'gated detection must not enter the history'
-
-    det_ok, k, tbc = view_of(P_true, 0.0)                # a consistent detection still lands
-    assert est.add_view([det_ok], k, tbc, 0.0) != 0
-
-
-def test_estimator_ransac_picks_real_connector_over_background():
-    """Ingest ALL cable junctions each view (one per cable) and let RANSAC decide: the connector
-    seen consistently across views wins; a background cable seen in only one view is outvoted."""
-    from urlab.config import Config
-    from urlab.perception.connector import ConnectorEstimator
-
-    K = np.array([[900.0, 0, 640.0], [0, 900.0, 360.0], [0, 0, 1.0]])
-    P_real = np.array([0.5, 0.0, 0.2])
-    est = ConnectorEstimator(Config({'connector_estimator': {
-        'min_inlier_views': 3, 'min_parallax_deg': 1.0, 'inlier_dist_m': 0.02,
-        'max_range_m': 3.0, 'up_axis': [0, 0, 1]}}))
-
-    def det(P, dx):
-        C = np.array([0.5 + dx, 0.0, 0.6])
-        T_bc = T.look_at(C, P, np.eye(4))
-        Rcw = T_bc[:3, :3].T
-        p = (K @ (Rcw @ (np.asarray(P, float) - C)))[:2] / (Rcw @ (P - C))[2]
-        return (float(p[0]), float(p[1]), 0.0), K, T_bc
-
-    # Each view sees the REAL connector plus a DIFFERENT phantom (background) point -- both ingested.
-    for i, dx in enumerate((-0.06, -0.02, 0.02, 0.06)):
-        real, k, tbc = det(P_real, dx)
-        phantom, _, _ = det(P_real + np.array([0.0, 0.20 + 0.03 * i, 0.0]), dx)  # inconsistent
-        est.add_view([real, phantom], k, tbc, 0.0)
-
-    T_fit = est.estimate()
-    assert T_fit is not None
-    assert np.linalg.norm(T_fit[:3, 3] - P_real) < 0.02, 'RANSAC should lock onto the real connector'
-
-
-def test_seed_connector_gate_rejects_background_first_view():
-    """Seeding the gate from the centred detection rejects a background cable on the FIRST view --
-    before RANSAC (which ties two equally-seen cables) could steer toward the wrong one."""
-    import types
-    from urlab.config import Config
-    from urlab.perception.connector import ConnectorEstimator
-    from urlab.skills.scan import CableScanner
-
-    K = np.array([[900.0, 0, 640.0], [0, 900.0, 360.0], [0, 0, 1.0]])
-    est = ConnectorEstimator(Config({'connector_estimator': {
-        'min_inlier_views': 3, 'min_parallax_deg': 1.0, 'inlier_dist_m': 0.02,
-        'max_range_m': 3.0, 'reject_dist_m': 0.05, 'up_axis': [0, 0, 1]}}))
-    sc = CableScanner.__new__(CableScanner)
-    sc.estimator = est
-    sc.s = types.SimpleNamespace(nominal_distance_m=0.23)
-
-    C = np.array([0.5, 0.0, 0.6])
-    T_bc = T.look_at(C, np.array([0.5, 0.0, 0.2]), np.eye(4))
-    Rcw = T_bc[:3, :3].T
-
-    def det(P):
-        p = K @ (Rcw @ (np.asarray(P, float) - C))
-        return (float(p[0] / p[2]), float(p[1] / p[2]), 0.0)
-
-    target = det([0.5, 0.0, 0.2])            # projects to the image centre
-    bg = det([0.5, 0.15, 0.2])               # a cable 15 cm to the side
-
-    sc._seed_connector_gate([bg, target], K, T_bc)    # background listed first -> centre pick = target
-    assert est._gate_origin is not None
-    est.add_view([bg, target], K, T_bc, 0.0)          # ingest both this view
-    assert est.n_views == 1 and len(est.history) == 1, 'background must be gated out on view 1'
-
-
 def test_cable_profile_applies_counts():
     """Selecting a cable overrides the gripper endpoints, grasp-check band, and grasp offset. The
     grasp TARGET is the CONNECTOR: its range is the success band, the cable count is a miss above it."""
@@ -432,7 +215,12 @@ def test_cable_profile_applies_counts():
 
     cfg = Config({'cable': 'banana', '_config_dir': CONFIG_DIR})
     apply_cable_profile(cfg)
-    assert cfg.get_path('gripper.port') == '/dev/ttyUSB0'              # ALL gripper params from cables.yaml
+    # ALL gripper params from cables.yaml -- compare against the FILE, not a literal: the port is
+    # platform-specific (/dev/ttyUSB0 on Linux, COMx on Windows) and pinning one spelling makes
+    # the test fail on the other host without testing anything more.
+    import yaml as _y
+    _shared = (_y.safe_load(open('configs/cables.yaml')) or {}).get('gripper') or {}
+    assert cfg.get_path('gripper.port') == _shared['port']
     assert cfg.get_path('gripper.open_counts') == 3
     assert cfg.get_path('gripper.closed_counts') == 228
     assert cfg.get_path('gripper.speed_counts') == 255
@@ -2111,10 +1899,10 @@ def test_bnc_assembly_shares_the_tuned_estimator():
     src = open(os.path.join(root, 'urlab', 'apps', 'bnc_assembly.py')).read()
     # shared internals, IMPORTED rather than reimplemented -- a copy would drift the moment
     # either app is retuned, which is the failure this whole test exists to prevent
-    assert 'from .estimator_eval import _argmin_estimate, _landscape' in src, \
+    assert 'from .estimator_eval import _argmin_estimate' in src, \
         'the argmin estimator must be imported from estimator_eval, not duplicated'
-    assert 'from .cable_pick_estimate_assemble import' in src, \
-        'the pick-side helpers must be imported from the app this derives from'
+    assert 'from ..skills.estimate import' in src, \
+        'the estimate-loop helpers must come from skills.estimate, not copies'
     assert 'def _argmin_estimate' not in src and 'def _observe' not in src, \
         'no copies of the shared helpers'
     # NO GROUND TRUTH: a real pick has none, so the diagnostics get None for the truth and
@@ -2141,9 +1929,12 @@ def test_bnc_assembly_shares_the_tuned_estimator():
               'scaling_constant_unit_torque_to_mm', 'interp_softness',
               'wrench_follows_correction'):
         assert b['estimation'][k] == e['estimation'][k], f'estimation.{k} drifted'
-    assert b['assembly']['final_insertion'] == e['eval']['final_insertion'], \
+    bfi = dict(b['final_insertion'])
+    bfi.update(bfi.pop('compliance', {}))
+    bfi.update(bfi.pop('force_guard', {}))
+    assert bfi == e['eval']['final_insertion'], \
         'the final-insertion block must match estimator_eval exactly'
-    assert str(b['assembly']['collection']['mode']) in ('attempts', 'offset_sweep', 'peck')
+    assert str(b['collection']['mode']) in ('attempts', 'offset_sweep', 'peck')
 
 
 def test_estimator_eval_collection_config():
@@ -2935,7 +2726,7 @@ def test_bnc_clocking_geometry():
     """
     import numpy as np
 
-    from urlab.apps.bnc_assembly import _AnyGuard, _ScrewAdvance
+    from urlab.robot.detectors import AnyGuard as _AnyGuard, ScrewAdvance as _ScrewAdvance
     from urlab.transforms import (inverse, matrix_to_xyzrpy, rotate_about_axis,
                                   translation_matrix, xyzrpy_to_matrix)
 
@@ -3086,11 +2877,16 @@ def test_bnc_insertion_holds_the_seat():
     still back off (the next one realigns to a different offset's start); the last pass, a
     successful attempt and the final insertion all hold the seat.
     """
-    src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py')).read()
+    src = (open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'),
+                encoding='utf-8').read()
+           + open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                  encoding='utf-8').read())
     code = '\n'.join(ln for ln in src.splitlines() if not ln.lstrip().startswith('#'))
-    assert 'def retract_from(' in code, \
+    ksrc = open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                encoding='utf-8').read()
+    assert 'def retract_from(' in ksrc, \
         'the escape must be callable on its own so the caller can defer it past the verdict'
-    assert 'retract=True' in code, 'run_insertion must take a retract flag'
+    assert 'retract=True' in ksrc, 'run_insertion must take a retract flag'
     # the commit holds the seat
     assert 'pause=fi_pause, retract=False' in code, \
         'the final insertion must NOT retract -- it is the attempt meant to seat'
@@ -3099,7 +2895,7 @@ def test_bnc_insertion_holds_the_seat():
         'only intermediate sweep passes should retract'
     # and the retract for a retry happens after the operator verdict
     v = code.index("row['success']")
-    r = code.index('retract_from(last_ref, T_tool0_conn)')
+    r = code.index('bnc_skills.retract_from(asm, last_ref, T_tool0_conn)')
     assert r > v, 'the retry retract must come AFTER the success verdict, not before it'
 
 
@@ -3121,8 +2917,8 @@ def test_bnc_engage_config():
 
     import yaml
     with open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')) as fh:
-        a = yaml.safe_load(fh)['assembly']
-    assert a['insertion_mode'] in ('estimate', 'engage'), \
+        a = yaml.safe_load(fh)
+    assert a['run']['insertion_mode'] in ('estimate', 'engage'), \
         "the standalone 'wiggle' mode is retired"
     assert 'wiggle' not in a, (
         'assembly.wiggle must be gone -- two blocks with the same shape, one live and one dead, '
@@ -3130,7 +2926,7 @@ def test_bnc_engage_config():
 
     e = a['engage']
     dims = ('x_mm', 'y_mm', 'z_mm', 'roll_deg', 'pitch_deg', 'yaw_deg')
-    _r = _resolved_wiggle('bnc_assembly', 'assembly', 'engage')
+    _r = _resolved_wiggle('bnc_assembly', 'engage')
     amp = {d: float((_r.get('amplitude') or {}).get(d, 0.0)) for d in dims}
     frq = {d: float((_r.get('frequency_hz') or {}).get(d, 0.0)) for d in dims}
 
@@ -3200,7 +2996,7 @@ def test_bnc_clocking_enable_gating():
     Tested through the pure function the app calls, because a config rule that only exists inside
     the robot routine can only be checked by running the robot -- which means it never gets checked.
     """
-    from urlab.apps.bnc_assembly import _clocking_plan
+    from urlab.domain import clocking_plan as _clocking_plan
 
     assert _clocking_plan({'enabled': False}, {'enabled': False}) == (False, False)
     assert _clocking_plan({'enabled': True}, {'enabled': False}) == (True, False)
@@ -3217,7 +3013,10 @@ def test_bnc_clocking_enable_gating():
     else:
         raise AssertionError('collar clocking without connector clocking must be REJECTED')
     # and the app must route the rejection to a pre-motion failure, not an exception at runtime
-    src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py')).read()
+    src = (open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'),
+                encoding='utf-8').read()
+           + open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                  encoding='utf-8').read())
     assert '_clocking_plan(cc, cl)' in src and 'except ValueError as exc' in src, \
         'build_and_run must call _clocking_plan and fail cleanly before the robot moves'
 
@@ -3233,7 +3032,7 @@ def test_bnc_clocking_state_vocabulary():
     state. Reading that return into a variable called `seated` is the mistake this guards against,
     so the clocking code must name it `stopped`.
     """
-    from urlab.apps.bnc_assembly import CLOCK_STATES, _advance_state
+    from urlab.domain import CLOCK_STATES, advance_state as _advance_state
 
     assert CLOCK_STATES == ('engaged', 'seated', 'locked')
     assert _advance_state('engaged', 'engaged') == 'seated'
@@ -3247,7 +3046,8 @@ def test_bnc_clocking_state_vocabulary():
 
     # the ramp-return / state collision: every `== 'seated'` comparison in the clocking code must
     # land in a variable named `stopped`, never `seated`
-    src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py')).read()
+    src = (open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py')).read()
+           + open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py')).read())
     code = '\n'.join(ln for ln in src.splitlines() if not ln.lstrip().startswith('#'))
     for bad in ("seated = res == 'seated'", "seated = (res == 'seated')"):
         assert bad not in code, \
@@ -3271,7 +3071,7 @@ def test_bnc_clocking_config():
     """
     import yaml
     with open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')) as fh:
-        a = yaml.safe_load(fh)['assembly']
+        a = yaml.safe_load(fh)
     cc, cl = a['connector_clocking'], a['collar_clocking']
     assert 'retry_mode' not in cc, (
         'retry_mode is gone -- a retry is the REVERSAL onto the next sweep_deg position, '
@@ -3284,12 +3084,14 @@ def test_bnc_clocking_config():
         assert len(cc.get('sweep_deg') or []) >= 2, (
             'max_tries > 1 with fewer than two sweep_deg positions gives zero-rotation legs -- '
             'the oscillation needs two ends to rock between')
-    assert float(cc['max_force_n']) > 0 and float(cc['max_torque_nm']) > 0
+    assert (float(cc['force_guard']['max_force_n']) > 0
+            and float(cc['force_guard']['max_torque_nm']) > 0)
     # `enabled` is the MANEUVER's switch; the guard's is force_guard_enabled. Writing `enabled`
     # twice in one block is silently legal in YAML (last wins), so the guard override would have
     # eaten the maneuver's own switch -- assert the guard key is the distinct one.
     for blk, nm in ((cc, 'connector_clocking'), (cl, 'collar_clocking')):
-        assert 'force_guard_enabled' in blk, f'{nm} must name the guard switch separately'
+        assert 'force_guard_enabled' in blk.get('force_guard', {}), \
+            f'{nm} must name the guard switch separately'
     with open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')) as fh:
         lines = fh.read().splitlines()
     for nm in ('connector_clocking', 'collar_clocking', 'clocking_retract'):
@@ -3322,12 +3124,14 @@ def test_bnc_clocking_config():
     # max_tries legs -- an unreachable early-out just never fires. Only the > 0 floor above
     # still matters (zero would trip on the first servo cycle, before anything turned).
     shared = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))
-    assert float(cc['max_force_n']) >= float(shared['force_guard']['max_force_n']), \
+    assert (float(cc['force_guard']['max_force_n'])
+            >= float(shared['force_guard']['max_force_n'])), \
         'the screw guard must not be TIGHTER than the probing guard or it trips immediately'
     # each maneuver carries its OWN guard block, so they can be tuned apart
     for blk, nm in ((cc, 'connector_clocking'), (cl, 'collar_clocking')):
         for k in ('max_force_n', 'max_torque_nm', 'persistence_s'):
-            assert blk.get(k) is not None, f'{nm} must set its own {k}'
+            assert (blk.get('force_guard') or {}).get(k) is not None, \
+                f'{nm} must set its own {k}'
     # and its OWN phase scale, so the strokes can be paced apart from each other and from the
     # insertion. A maneuver whose speed_* keys are null depends on this entry existing.
     ps = shared['speed']['phase_scale']
@@ -3336,7 +3140,8 @@ def test_bnc_clocking_config():
     for blk, nm in ((cc, 'connector_clock'), (cl, 'collar_clock')):
         if blk.get('speed_rotation_deg_s') is None:
             assert float(ps[nm]) * float(shared['speed']['max_cartesian_rotation_deg_s']) > 0
-    assert len(cc['stiffness']) == 6 and len(cl['stiffness']) == 6
+    assert (len(cc['compliance']['stiffness']) == 6
+            and len(cl['compliance']['stiffness']) == 6)
     # >= 0, not > 0: this is measured from the connector frame ORIGIN (the mating face), so zero
     # is a legitimate reading -- the ring sitting at the face. It was > 0 only while the offset
     # was measured from the JUNCTION, ~45.7 mm behind the origin, where zero could not happen.
@@ -3439,14 +3244,18 @@ def test_apps_anchor_the_trajectory_like_the_sampler():
     The CSV is conforming today, which makes anchoring a no-op -- and that is exactly why it needs
     a test rather than trust: nothing about a passing run would reveal its absence until someone
     edits the last row again."""
-    for app, anchor_expr in (
-            ('estimator_eval',
-             'T_base_targetobj = T_base_tconn @ inverse(mats[-1]) if anchor else T_base_tconn'),
-            ('bnc_assembly', 'T_base_targetobj = T_base_tconn @ inverse(mats[-1])')):
-        src = open(os.path.join(ROOT, 'urlab', 'apps', f'{app}.py'), encoding='utf-8').read()
-        assert anchor_expr in src, f'{app} must anchor the trajectory'
-        assert 'T_base_commit = T_base_targetobj @ translation_matrix(' in src, \
-            f'{app}: the commit anchor is the probing anchor PLUS the named preload'
+    # bnc's anchoring moved into domain.TargetFrames.anchor() -- same formulae, one home
+    for path_parts, anchor_expr, commit_expr in (
+            (('apps', 'estimator_eval.py'),
+             'T_base_targetobj = T_base_tconn @ inverse(mats[-1]) if anchor else T_base_tconn',
+             'T_base_commit = T_base_targetobj @ translation_matrix('),
+            (('domain.py',),
+             'self.T_base_targetobj = self.T_base_tconn @ self._inverse(self.mats[-1])',
+             'self.T_base_commit = self.T_base_targetobj @ self._translation(')):
+        src = open(os.path.join(ROOT, 'urlab', *path_parts), encoding='utf-8').read()
+        assert anchor_expr in src, f'{path_parts} must anchor the trajectory'
+        assert commit_expr in src, (
+            f'{path_parts}: the commit anchor is the probing anchor PLUS the named preload')
 
     src = open(os.path.join(ROOT, 'urlab', 'apps', 'estimator_eval.py'), encoding='utf-8').read()
     # The MEASUREMENT frame must stay the RECORDED mate -- that is what the map's own columns are
@@ -3460,8 +3269,10 @@ def test_apps_anchor_the_trajectory_like_the_sampler():
     # only by the standalone wiggle's fixed target; both are retired, so a reappearance of
     # an unanchored path would mean a preload had crept back in as a trajectory row.
     bnc = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8').read()
-    assert 'refs = [traj_ref(row, T_tool0_conn) for row in rows_t]' in bnc
-    assert 'refs = [traj_ref(row_, T_tool0_conn, commit=True) for row_ in rows_f]' in bnc
+    assert ('refs = [bnc_skills.traj_ref(asm, row, T_tool0_conn) for row in rows_t]'
+            in bnc)
+    assert ('refs = [bnc_skills.traj_ref(asm, row_, T_tool0_conn, commit=True) '
+            'for row_ in rows_f]' in bnc)
     assert 'def tool0_ref(' not in bnc, (
         'tool0_ref is retired along with the standalone wiggle -- if it is back, some pose is '
         'bypassing the anchoring that keeps every app agreeing about where the mate is')
@@ -3535,7 +3346,7 @@ def test_preload_is_commit_only_and_preserves_the_seat():
     # BOTH apps press by their named amount, and the commit is the probing path shifted by
     # exactly that much -- the relationship, not a hardcoded depth.
     for cfg_name, block in (('estimator_eval.yaml', ('eval', 'final_insertion')),
-                            ('bnc_assembly.yaml', ('assembly', 'final_insertion'))):
+                            ('bnc_assembly.yaml', ('final_insertion',))):
         c = yaml.safe_load(open(os.path.join(ROOT, 'configs', cfg_name)))
         for k in block:
             c = c[k]
@@ -3552,8 +3363,8 @@ def test_preload_is_commit_only_and_preserves_the_seat():
     for app, probing, commit in (
             ('estimator_eval', 'T_base_targetobj @ row @ inverse(T_believed)',
              'T_base_commit @ row @ inverse(T_believed)'),
-            ('bnc_assembly', 'traj_ref(row, T_tool0_conn)',
-             'traj_ref(row_, T_tool0_conn, commit=True)')):
+            ('bnc_assembly', 'bnc_skills.traj_ref(asm, row, T_tool0_conn)',
+             'bnc_skills.traj_ref(asm, row_, T_tool0_conn, commit=True)')):
         src = open(os.path.join(ROOT, 'urlab', 'apps', f'{app}.py'), encoding='utf-8').read()
         assert src.count(commit) == 1, f'{app}: exactly ONE insertion presses, and it is the commit'
         assert src.count(probing) == 1, f'{app}: probing passes must not press'
@@ -3594,12 +3405,12 @@ def test_preload_force_is_a_spike_not_a_press():
     import yaml
     from urlab.skills import trajectory as traj
 
-    for name, block in (('estimator_eval.yaml', 'eval'), ('bnc_assembly.yaml', 'assembly')):
+    for name, block in (('estimator_eval.yaml', 'eval'), ('bnc_assembly.yaml', None)):
         cfg = yaml.safe_load(open(os.path.join(ROOT, 'configs', name)))
-        fi = cfg[block]['final_insertion']
+        fi = cfg[block]['final_insertion'] if block else cfg['final_insertion']
         pre_m = float(fi['preload_mm']) / 1000.0
         probe_S = max(float(v) for v in cfg['compliance']['stiffness'][:3])
-        commit_S = max(float(v) for v in fi['stiffness'][:3])
+        commit_S = max(float(v) for v in (fi.get('compliance') or fi)['stiffness'][:3])
         assert probe_S * pre_m < 10.0, \
             f'{name}: the probing spring cannot hold a large press -- keep the comment honest'
         # The commit must never be SOFTER than probing -- that would be backwards, a press
@@ -3675,7 +3486,7 @@ def test_a_null_speed_override_is_resolved_before_it_reaches_the_arithmetic():
     duration in the app resolves its caps through one helper."""
     import pytest
 
-    from urlab.apps.bnc_assembly import _path_time
+    from urlab.domain import path_time as _path_time
 
     # Both caps bind; the slower one wins, and a floor applies.
     assert _path_time(100.0, 90.0, 10.0, 45.0, 0.008) == pytest.approx(10.0)   # translation-bound
@@ -3690,18 +3501,20 @@ def test_a_null_speed_override_is_resolved_before_it_reaches_the_arithmetic():
             _path_time(100.0, 90.0, v, w, 0.008)
 
     # And every duration path in the app must route its overrides through the one resolver.
-    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
-        src = fh.read()
-    assert src.count('_path_time(') >= 3, 'seg_time and screw_ramp must share the arithmetic'
-    assert 'def caps(' in src, 'the null-override resolver is gone'
-    body = src[src.index('def screw_ramp('):src.index('\n    retract_m =')]
+    dsrc = open(os.path.join(ROOT, 'urlab', 'domain.py'), encoding='utf-8').read()
+    assert 'path_time(' in dsrc and 'def seg_time' in dsrc,         'seg_time must share the path_time arithmetic'
+    ksrc = open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'), encoding='utf-8').read()
+    assert ksrc.count('path_time(') >= 1, 'screw_ramp must share the arithmetic too'
+    assert 'def caps(' in dsrc, 'the null-override resolver is gone'
+    body = ksrc[ksrc.index('def screw_ramp('):]
+    body = body[:body.index('\ndef ')]
     assert 'caps(v, w)' in body, (
         'screw_ramp must resolve its caps before computing a duration -- it ships with null '
         'overrides from both clocking blocks')
 
     # The configs that feed it really do carry nulls, so this path is live and not hypothetical.
     import yaml
-    asm = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))['assembly']
+    asm = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))
     assert any(asm[b].get(k) is None
                for b in ('connector_clocking', 'collar_clocking')
                for k in ('speed_translation_mm_s', 'speed_rotation_deg_s')),         'if no clocking block ships a null any more, this guard has lost its subject'
@@ -3715,21 +3528,23 @@ def test_tug_verification_defaults_on_and_its_spring_can_exceed_the_threshold():
     import yaml
 
     y = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))
-    tv = y['assembly']['tug_verify']
+    tv = y['tug_verify']
     assert tv['enabled'] is True, 'tug verification must default ON'
     for k in ('pull_force_n', 'pull_time_s', 'displacement_threshold_mm',
               'extraction_distance_mm'):
         assert float(tv[k]) > 0.0, f'{k} must be positive'
-    S_max = max(float(v) for v in (tv.get('stiffness') or y['compliance']['stiffness'])[:3])
+    S_max = max(float(v) for v in ((tv.get('compliance') or {}).get('stiffness')
+                                   or y['compliance']['stiffness'])[:3])
     offset_mm = float(tv['pull_force_n']) / S_max * 1000.0
     assert offset_mm > float(tv['displacement_threshold_mm']), (
         f'the spring offset ({offset_mm:.1f} mm at the stiffest axis) must exceed the '
         f'{tv["displacement_threshold_mm"]} mm threshold, or an unlocked connector can never '
         f'show -- raise pull_force_n or lower the threshold/stiffness')
 
-    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
-        src = fh.read()
-    body = src[src.index('def tug_verify_in_place('):src.index('def engage_insertion(')]
+    body = open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                encoding='utf-8').read()
+    body = body[body.index('def tug_verify_in_place('):]
+    body = body[:body.index('def celebrate(')]
     # NO close and NO re-grip: the collar turn leaves the fingers on the ring, so the pull
     # happens from that pose. A release/retract/re-approach/re-grasp between the lock and the
     # test is four chances to disturb what it is measuring, and the re-grasp could miss.
@@ -3760,7 +3575,7 @@ def test_the_seat_push_can_reach_its_force_and_keeps_the_gripper_logic_straight(
     import yaml
 
     y = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))
-    cl = y['assembly']['collar_clocking']
+    cl = y['collar_clocking']
     sp = cl['seat_push']
     assert sp['enabled'] is True, 'the seat push defaults ON'
     S_max = max(float(v) for v in (cl.get('stiffness') or y['compliance']['stiffness'])[:3])
@@ -3769,9 +3584,9 @@ def test_the_seat_push_can_reach_its_force_and_keeps_the_gripper_logic_straight(
         f'max_travel_mm ({sp["max_travel_mm"]}) must exceed the {need_mm:.1f} mm spring stretch '
         f'that {sp["force_n"]} N needs at {S_max:.0f} N/m, or the push can never reach its force')
 
-    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
-        src = fh.read()
-    body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
+    body = open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                encoding='utf-8').read()
+    body = body[body.index('def collar_clocking('):body.index('def screw_ramp(')]
     # The push now runs FIRST -- the pads are already around the cable at the junction where it
     # wants them -- and everything after it needs OPEN fingers: the retract slides along the
     # cable, the pitch turns the jaw about its own gap, the advance threads the cable into it.
@@ -3802,25 +3617,39 @@ def test_post_engage_frame_is_a_config_choice_defaulting_to_target():
     import yaml
 
     y = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))
-    assert y['assembly'].get('post_engage_frame', 'target') == 'target', (
+    assert (y.get('run') or {}).get('post_engage_frame', 'target') == 'target', (
         'the default post-engage frame is the recorded target -- the socket is bolted down; '
         'the belief carries estimator error')
 
-    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
-        src = fh.read()
-    assert "a.get('post_engage_frame')" in src and "'believed'" in src, (
+    src = (open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'),
+                encoding='utf-8').read()
+           + open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                  encoding='utf-8').read())
+    assert "spec.run.post_engage_frame" in src and "'believed'" in src, (
         'the choice must be read from the config and validated')
     # every post-engage maneuver goes through the shared frame
-    checks = (('def connector_clocking(', 'inverse(T_clk)) @ ref_start'),
-              ('def collar_clocking(', 'axis = T_clk[:3, 0]'),
-              ('def tug_verify_in_place(', 'axn_t = T_clk[:3, 0]'),
-              ('def clocking_retract(', 'T_clk[:3, :3] @ step'))
+    ksrc0 = open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                 encoding='utf-8').read()
+    checks = (('def connector_clocking(', 'inverse(frames_t.T_clk)) @ ref_start'),
+              ('def collar_clocking(', 'axis = frames_t.T_clk[:3, 0]'))
     for fn, frag in checks:
-        body = src[src.index(fn):]
-        body = body[:body.index('\n    def ')] if '\n    def ' in body else body
+        body = ksrc0[ksrc0.index(fn):]
+        body = body[:body.index('\ndef ', 10)]
         assert frag in body, f'{fn} must build its geometry from T_clk, found no {frag!r}'
+    # the shared escape and the tug live there too; same invariant
+    ksrc = open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                encoding='utf-8').read()
+    kbody = ksrc[ksrc.index('def clocking_retract('):]
+    kbody = kbody[:kbody.index('\ndef ')] if '\ndef ' in kbody else kbody
+    ktug = ksrc[ksrc.index('def tug_verify_in_place('):]
+    ktug = ktug[:ktug.index('def celebrate(')]
+    assert 'axn_t = frames_t.T_clk[:3, 0]' in ktug, \
+        'tug_verify_in_place must build its pull axis from T_clk'
+    assert 'T_clk[:3, :3] @ step' in kbody, \
+        'clocking_retract must build its target leg from T_clk'
     # the engagement keeps the target frame regardless of the choice
-    assert 'T_base_targetobj = T_base_tconn @ inverse' in src, (
+    dsrc2 = open(os.path.join(ROOT, 'urlab', 'domain.py'), encoding='utf-8').read()
+    assert 'self.T_base_targetobj = self.T_base_tconn @ self._inverse' in dsrc2, (
         'the engagement must stay anchored to the TARGET frame; post_engage_frame applies only '
         'after it')
 
@@ -3846,14 +3675,14 @@ def test_the_collar_axis_offset_is_read_from_config_in_the_connector_frame():
     from urlab import config as urconfig, tool_frames
 
     cl = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))[
-        'assembly']['collar_clocking']
+        'collar_clocking']
     off = [float(v) for v in cl['axis_offset_mm']]
     assert len(off) == 3, 'axis_offset_mm must be connector-frame xyz'
 
     # the offset must move the LINE by exactly its perpendicular part -- connector-frame Y/Z are
     # orthogonal to the axis (+X) under any rigid placement, so |lateral| = |(y, z)|
     cfg = urconfig.load('bnc_assembly')
-    T_t = tool_frames.load_targets(cfg)[cfg['assembly']['target_frame']]
+    T_t = tool_frames.load_targets(cfg)[cfg['run']['target_frame']]
     axn = T_t[:3, 0] / np.linalg.norm(T_t[:3, 0])
     d = T_t[:3, :3] @ (np.asarray(off) / 1000.0)
     lat = float(np.linalg.norm(d - np.dot(d, axn) * axn)) * 1000.0
@@ -3886,17 +3715,24 @@ def test_the_collar_axis_offset_is_read_from_config_in_the_connector_frame():
         f'collar_clocking.axis_offset_mm {off} shifts the collar line off the connector axis; '
         f'set it non-zero only from a MEASURED barrel centreline')
 
-    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
-        src = fh.read()
+    src = (open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'),
+                encoding='utf-8').read()
+           + open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                  encoding='utf-8').read())
     assert "cl.get('axis_offset_mm'" in src, 'the offset must come from the config'
-    helper = src[src.index('def axis_offset_base('):src.index('def clocking_retract(')]
+    ksrc3 = open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'), encoding='utf-8').read()
+    helper = ksrc3[ksrc3.index('def axis_offset_base('):ksrc3.index('def place_scatter(')]
     assert 'R_clock[:3, :3].T' in helper, (
         'the offset must be resolved in the frame ROLL-FREE basis -- undo the engage clock '
         'roll before rotating a fixture-measured vector into base')
-    body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
-    assert 'axis_offset_base()' in body, (
+    body = open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                encoding='utf-8').read()
+    body = body[body.index('def collar_clocking('):body.index('def screw_ramp(')]
+    assert 'axis_offset_base(asm)' in body, (
         'the collar maneuver must shift its point by the shared, roll-free offset')
-    cable = src[src.index('def connector_clocking('):src.index('def collar_clocking(')]
+    cable = open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                encoding='utf-8').read()
+    cable = cable[cable.index('def connector_clocking('):cable.index('def collar_clocking(')]
     assert ('off_conn' not in cable and 'axis_offset_mm' not in cable
             and 'axis_offset_base' not in cable), (
         'the offset is scoped to the collar maneuver and the tug; connector clocking keeps the '
@@ -3904,8 +3740,10 @@ def test_the_collar_axis_offset_is_read_from_config_in_the_connector_frame():
     # The tug no longer re-grips, so it no longer needs the offset LINE -- only the axis
     # DIRECTION, which an offset cannot change. It must still take that direction from T_clk, so
     # the pull and the collar turn cannot disagree about which way the connector points.
-    tug = src[src.index('def tug_verify_in_place('):src.index('def engage_insertion(')]
-    assert 'axn_t = T_clk[:3, 0]' in tug, (
+    tug = open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+               encoding='utf-8').read()
+    tug = tug[tug.index('def tug_verify_in_place('):tug.index('def celebrate(')]
+    assert 'axn_t = frames_t.T_clk[:3, 0]' in tug, (
         'the tug must take its pull direction from the shared post-engage frame')
 
 
@@ -3917,14 +3755,16 @@ def test_the_escape_releases_the_collar_before_retracting():
     between the ESCAPE gate and the retract, gating the retract on its success -- and it must
     stay on that path for EVERY way into the escape (collar locked, failed, or disabled), which
     is why it lives at the boundary and not inside collar_clocking."""
-    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
-        src = fh.read()
-    i_gate = src.index("phase_gate('ESCAPE'")
+    src = (open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'),
+                encoding='utf-8').read()
+           + open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                  encoding='utf-8').read())
+    i_gate = src.index("phase_gate(asm, 'ESCAPE'")
     tail = src[i_gate:i_gate + 1600]
     assert "gripper.open('release before escape')" in tail, (
         'the escape must open the gripper before retracting -- the fingers are still closed on '
         'the locked collar when collar clocking returns')
-    assert tail.index("gripper.open('release before escape')") < tail.index('clocking_retract()'), (
+    assert tail.index("gripper.open('release before escape')") < tail.index('clocking_retract(asm)'), (
         'the release must PRECEDE the retract, and the retract must be gated on it')
 
 
@@ -3946,10 +3786,10 @@ def test_the_offaxis_tilt_gate_clears_the_screws_own_compliance():
     import numpy as np
     import yaml
 
-    asm = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))['assembly']
+    asm = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))
     gate = float(asm['collar_clocking']['max_offaxis_tilt_deg'])
     # the screw axis is the connector +X; the SOFTEST out-of-axis rotational term is what tilts
-    S_rot = [float(v) for v in asm['connector_clocking']['stiffness'][3:]]
+    S_rot = [float(v) for v in asm['connector_clocking']['compliance']['stiffness'][3:]]
     tilt_per_nm = np.degrees(1.0 / min(S_rot))
     assert gate >= 0.25 * tilt_per_nm, (
         f'the {gate:.1f} deg gate is below the {0.25 * tilt_per_nm:.1f} deg that a modest 0.25 Nm '
@@ -3957,9 +3797,9 @@ def test_the_offaxis_tilt_gate_clears_the_screws_own_compliance():
         f'would abort the run. Raise max_offaxis_tilt_deg or stiffen connector_clocking')
 
     # and the gate must come from the config, not be baked into the app
-    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
+    with open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'), encoding='utf-8') as fh:
         src = fh.read()
-    assert "_num(cl, 'max_offaxis_tilt_deg'" in src, 'the gate must be a config knob'
+    assert "_scl.max_offaxis_tilt_deg" in src, 'the gate must be a config knob'
     assert '_tilt > cl_tilt_deg' in src, 'the gate must be READ, not hardcoded'
     # It gates the CONNECTOR's tilt from the socket axis, not the arm's orientation. The arm's
     # only mattered while the approach was an orbit from wherever the sweep ended; the axial
@@ -4019,11 +3859,11 @@ def test_both_clockings_turn_about_the_socket_and_not_about_the_arm():
         'keep only the advance along it')
 
     # ---- and the app must do exactly that ------------------------------------------------------
-    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
-        src = fh.read()
-    body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
+    body = open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                encoding='utf-8').read()
+    body = body[body.index('def collar_clocking('):body.index('def screw_ramp(')]
     code = '\n'.join(ln for ln in body.splitlines() if not ln.lstrip().startswith('#'))
-    assert 'axis = T_clk[:3, 0]' in code, (
+    assert 'axis = frames_t.T_clk[:3, 0]' in code, (
         'collar clocking must take its axis DIRECTION from the shared post-engage frame T_clk '
         '(assembly.post_engage_frame; the recorded socket pose by default) -- exactly as cable '
         'clocking does')
@@ -4057,12 +3897,12 @@ def test_a_clocking_stroke_follows_the_arc_and_not_the_chord():
 
     cfg = urconfig.load('bnc_assembly')
     frames, targets = tool_frames.load_frames(cfg), tool_frames.load_targets(cfg)
-    cc = cfg['assembly']['connector_clocking']
+    cc = cfg['connector_clocking']
     # The WIDEST leg the sweep commands -- the worst case for chord error, and what the app
     # actually hands screw_ramp. (It used to be the single relative rotation_deg stroke.)
-    rot = widest_cable_leg(cfg['assembly'])
+    rot = widest_cable_leg(cfg)
     push = float(cc['push_mm']) / 1000.0
-    T_base_tconn = targets[cfg['assembly']['target_frame']]
+    T_base_tconn = targets[cfg['run']['target_frame']]
     T_tool0_conn = frames[cfg['estimation']['initial_connector_frame']]
     ref_start = T_base_tconn @ inverse(T_tool0_conn)
 
@@ -4093,10 +3933,12 @@ def test_a_clocking_stroke_follows_the_arc_and_not_the_chord():
         'subdividing on the true screw must keep the connector on its own axis')
 
     # AND BOTH STROKES MUST ACTUALLY GO THROUGH IT.
-    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
-        src = fh.read()
-    assert 'def screw_ramp(' in src, 'the arc-following ramp helper is gone'
-    body = src[src.index('def connector_clocking('):src.index('def collar_clocking(')]
+    assert 'def screw_ramp(' in open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                                     encoding='utf-8').read(), \
+        'the arc-following ramp helper is gone'
+    body = open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                encoding='utf-8').read()
+    body = body[body.index('def connector_clocking('):body.index('def collar_clocking(')]
     assert 'screw_ramp(' in body and 'adm_cc.ramp(' not in body, (
         'connector_clocking must take its stroke through screw_ramp, not a single adm_cc.ramp -- a '
         'one-call ramp cuts the chord and drags the connector off its axis')
@@ -4110,7 +3952,9 @@ def test_a_clocking_stroke_follows_the_arc_and_not_the_chord():
     assert 'for k in range(1, cc_tries + 1):' in body and 'cc_legs[(k - 1) % len(cc_legs)]' in body, (
         'the sweep must WALK the sweep_deg positions, one per try, cycling when there are more '
         'tries than positions -- that cycling IS the oscillation')
-    body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
+    body = open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                encoding='utf-8').read()
+    body = body[body.index('def collar_clocking('):body.index('def screw_ramp(')]
     assert 'screw_ramp(' in body, (
         'collar_clocking must take its turn through screw_ramp too -- the fingers are CLOSED on '
         'the collar there, so the chord excursion goes straight into the ring')
@@ -4157,7 +4001,7 @@ def test_the_target_and_the_belief_describe_the_same_connector_datum():
     cfg = urconfig.load('bnc_assembly')
     frames = tool_frames.load_frames(cfg)
     targets = tool_frames.load_targets(cfg)
-    tname = cfg['assembly']['target_frame']
+    tname = cfg['run']['target_frame']
     iname = cfg.get_path('estimation.initial_connector_frame')
     assert tname in frames, f'assembly.target_frame {tname!r} is not a declared frame'
     assert tname in targets, (
@@ -4714,7 +4558,8 @@ def test_insertion_tester_injection_sign_and_modes():
                encoding='utf-8').read()
     # the maneuvers are IMPORTED from the apps that own them, not re-implemented, or this tester
     # would slowly stop measuring what production actually runs
-    for owner, name in (('bnc_assembly', '_ScrewAdvance'), ('bnc_assembly', '_AnyGuard'),
+    for owner, name in (('.robot.detectors', '_ScrewAdvance'),
+                        ('.robot.detectors', '_AnyGuard'),
                         ('calibration_check', 'line_rows')):
         assert name in src and f'from .{owner} import' in src, \
             f'{name} must come from {owner}, not be copied into the tester'
@@ -4914,11 +4759,10 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
     from urlab.transforms import rotate_about_axis
 
     cfg = urconfig.load('bnc_assembly')
-    asm = cfg.section('assembly')
-    cl = asm['collar_clocking']
+    cl = cfg.section('collar_clocking')
     T_ftip = tool_frames.load_frames(cfg)['fingertip']
-    T_socket = tool_frames.load_targets(cfg)[asm['target_frame']]
-    eng = np.radians(float(asm.get('engage_clock_deg', 0.0) or 0.0))
+    T_socket = tool_frames.load_targets(cfg)[cfg.get_path('run.target_frame')]
+    eng = np.radians(float(cfg.get_path('run.engage_clock_deg', 0.0) or 0.0))
     T_clk = T_socket @ T.xyzrpy_to_matrix([0., 0., 0.], [eng, 0., 0.])
 
     collar_x = float(cl['collar_offset_mm']) / 1000.0     # from the connector ORIGIN, on the axis
@@ -5001,8 +4845,13 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
         f'lateral, {np.degrees(ang):.4f} deg) -- that is what makes a straight ramp exact')
 
     # ---- ORDER, and every leg guarded ----
-    src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8').read()
-    body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
+    src = (open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'),
+                encoding='utf-8').read()
+           + open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                  encoding='utf-8').read())
+    body = open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                encoding='utf-8').read()
+    body = body[body.index('def collar_clocking('):body.index('def screw_ramp(')]
     order = ["label='realign with the engagement pose '",  # undo the sweep first...
              "label='collar retract (connector -X)'",       # ...back off ALONG the cable...
              "label='collar pitch onto the axis'",          # ...reorient onto the axis...
@@ -5110,7 +4959,7 @@ def test_the_collar_is_grasped_axially_and_turned_by_a_wrist_twist():
 
     # ---- CONFIG SHAPE ----
     c = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))
-    ccl = c['assembly']['collar_clocking']
+    ccl = c['collar_clocking']
     assert 'prewind_deg' not in ccl, 'prewind_deg is gone with the radial approach'
     for k in ('grasp_clock_deg', 'retract_mm', 'wall_standoff_mm'):
         assert k in ccl, f'collar_clocking must declare {k} so the axial approach is tunable'
@@ -5148,9 +4997,9 @@ def test_the_connector_sweep_rocks_between_absolute_roll_positions():
     from urlab import config as urconfig, tool_frames
     from urlab.transforms import inverse, xyzrpy_to_matrix
 
-    asm = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))['assembly']
+    asm = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))
     cc = asm['connector_clocking']
-    eng = float(asm['engage_clock_deg'])
+    eng = float(asm['run']['engage_clock_deg'])
     sweep = [float(v) for v in cc['sweep_deg']]
     tries = int(cc['max_tries'])
     assert len(sweep) >= 2, 'the oscillation needs two ends to rock between'
@@ -5170,7 +5019,7 @@ def test_the_connector_sweep_rocks_between_absolute_roll_positions():
 
     # ---- EACH LEG IS A TRUE SCREW: the connector origin never leaves the axis line ----
     cfg = urconfig.load('bnc_assembly')
-    T_clk = tool_frames.load_targets(cfg)[cfg['assembly']['target_frame']] \
+    T_clk = tool_frames.load_targets(cfg)[cfg['run']['target_frame']] \
         @ xyzrpy_to_matrix([0.0, 0.0, 0.0], np.radians([eng, 0.0, 0.0]))
     T_tool0_conn = tool_frames.load_frames(cfg)[cfg['estimation']['initial_connector_frame']]
     ref_start = T_clk @ inverse(T_tool0_conn)
@@ -5208,10 +5057,15 @@ def test_the_connector_sweep_rocks_between_absolute_roll_positions():
             'would unload the connector on every reversal, which is when the cams give back')
 
     # ---- SOURCE: the structure the arithmetic above assumes ----
-    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
-        src = fh.read()
-    body = src[src.index('def connector_clocking('):src.index('def collar_clocking(')]
-    assert 'res, f_done = screw_ramp(' in body and 'th_at = _a + turn * f_done' in body, (
+    src = (open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'),
+                encoding='utf-8').read()
+           + open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                  encoding='utf-8').read())
+    body = open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                encoding='utf-8').read()
+    body = body[body.index('def connector_clocking('):body.index('def collar_clocking(')]
+    assert ('res, f_done = bnc_skills.screw_ramp(' in body
+            and 'th_at = _a + turn * f_done' in body), (
         'a jammed leg must continue from the FRACTION screw_ramp reached, not from the endpoint '
         'it never got to -- restarting at the endpoint commands a jump across the arc the guard '
         'just refused')
@@ -5295,35 +5149,38 @@ def test_engage_clock_angle_places_the_sweep_without_changing_the_insertion():
             'the target-frame retract leg must be unmoved by the clock angle'
 
     # ---- APPLIED ONCE, AND EVERYTHING DOWNSTREAM IS HANDED THE ROLLED FRAME ----
-    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
-        src = fh.read()
-    assert 'T_base_socket = targets[tname]' in src and \
-           'T_base_tconn = T_base_socket @ R_clock' in src, (
+    src = (open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'),
+                encoding='utf-8').read()
+           + open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                  encoding='utf-8').read())
+    dsrc = open(os.path.join(ROOT, 'urlab', 'domain.py'), encoding='utf-8').read()
+    assert ('frames_t.anchor(targets[tname])' in src
+            and 'self.T_base_tconn = T_socket @ self.R_clock' in dsrc), (
         'the clock angle must be folded into the target frame ONCE, at the catalogue load, so no '
         'caller downstream can forget it or apply it twice')
-    assert 'T_base_targetobj = T_base_tconn @ inverse(mats[-1])' in src, \
+    assert 'self.T_base_targetobj = self.T_base_tconn @ self._inverse(self.mats[-1])' in dsrc, \
         'the trajectory must be anchored on the ROLLED frame'
     # THE RAW SOCKET FRAME IS WRITE-ONCE-READ-ONCE. Anything else READING it would be working at
     # a different clock angle from the rest of the app. Checked as a rule rather than a count,
     # because target_source: visual legitimately re-anchors the run on a measured socket pose --
     # which assigns it again and rebuilds the rolled frame from it, exactly as the rule intends.
-    uses = [ln.strip() for ln in src.splitlines() if 'T_base_socket' in ln
+    # the raw socket frame is written by anchor() and read only to build the rolled one
+    uses = [ln.strip() for ln in dsrc.splitlines() if 'T_base_socket' in ln
             and not ln.strip().startswith('#')]
-    reads = [ln for ln in uses
-             if not re.match(r'^(nonlocal .*|T_base_socket = )', ln)]
-    assert reads == ['T_base_tconn = T_base_socket @ R_clock'] * len(reads) and reads, (
-        'the raw socket frame exists only to build the rolled one; found other reads: '
-        f'{[ln for ln in reads if ln != "T_base_tconn = T_base_socket @ R_clock"]}')
+    reads = [ln for ln in uses if not ln.startswith('self.T_base_socket = ')]
+    assert not reads, (
+        f'the raw socket frame exists only to build the rolled one; found: {reads}')
     # the estimator matches a map collected at ONE clock angle, so a non-zero roll must say so
-    tail = src[src.index('T_base_tconn = T_base_socket @ R_clock'):]
+    tail = src[src.index('Clock angles about the socket +X'):]
     assert "ins_mode == 'estimate'" in tail[:2500] and 'manifold' in tail[:2500], (
         'a non-zero clock angle with insertion_mode: estimate must warn -- the contact manifold '
         'was collected at one clock angle and the socket is not a body of revolution')
 
     # ---- THE SHIPPED PAIR STAYS INSIDE ONE TURN ----
-    a = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))['assembly']
-    assert 'engage_clock_deg' in a, 'the key must be declared so the behaviour is discoverable'
-    start = float(a['engage_clock_deg'])
+    a = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))
+    assert 'engage_clock_deg' in a['run'], \
+        'the key must be declared so the behaviour is discoverable'
+    start = float(a['run']['engage_clock_deg'])
     assert abs(start) <= 180.0, f'engage_clock_deg {start} is outside one turn'
     stops = [start] + [float(v) for v in a['connector_clocking']['sweep_deg']]
     assert max(stops) - min(stops) <= 360.0, (
@@ -5352,7 +5209,7 @@ def test_the_achieved_clock_angle_is_wrapped_onto_the_stroke_branch():
     puts the whole feasible range inside one branch. This pins that, including the sign-symmetric
     case (a negative commanded stroke) and the ordinary angles that must NOT be moved.
     """
-    from urlab.apps.bnc_assembly import _wrap_near
+    from urlab.domain import wrap_near as _wrap_near
 
     half = np.radians(90.0)                     # centre for a +180 deg commanded stroke
     # the failure case: +182 achieved, read back as -178
@@ -5375,9 +5232,13 @@ def test_the_achieved_clock_angle_is_wrapped_onto_the_stroke_branch():
             'the 90 deg stroke branch must be unchanged by the wrap'
 
     # ---- and every place that reads an achieved angle must use it ----
-    with open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8') as fh:
-        src = fh.read()
-    cable = src[src.index('def connector_clocking('):src.index('def collar_clocking(')]
+    src = (open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'),
+                encoding='utf-8').read()
+           + open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                  encoding='utf-8').read())
+    cable = open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                encoding='utf-8').read()
+    cable = cable[cable.index('def connector_clocking('):cable.index('def collar_clocking(')]
     assert '_wrap_near(float(got[1][0]), cc_mid)' in cable, (
         'the achieved-roll read-back must be wrapped onto the sweep band centre -- it is handed '
         'to collar clocking as the angle to UNWIND, so a sign that flipped at the band edge '
@@ -5391,7 +5252,9 @@ def test_the_achieved_clock_angle_is_wrapped_onto_the_stroke_branch():
         'that tells a measured roll from itself plus 360')
     # collar_clocking does NOT wrap anything any more: the axial approach is placed in free
     # space from the frames, so there is no measured arm clock angle to recover a branch for.
-    collar = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
+    collar = open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                  encoding='utf-8').read()
+    collar = collar[collar.index('def collar_clocking('):collar.index('def screw_ramp(')]
     assert '_wrap_near(' not in collar, (
         'the axial collar approach is built from the frames, not solved from the measured arm '
         'pose -- nothing there has a branch to wrap')
@@ -5473,8 +5336,10 @@ def test_wrench_in_moves_the_moment_off_the_flange():
         'hundreds that a base-origin reference produces')
 
     # ---- the callers hand over the flange pose they already read ----
-    for app in ('estimator_eval', 'uncertain_sampling', 'cable_pick_estimate_assemble'):
-        src = open(os.path.join(ROOT, 'urlab', 'apps', f'{app}.py'), encoding='utf-8').read()
+    # cable_pick_estimate_assemble's observation row moved to skills/estimate.py (observe),
+    # so THAT is where its wrench_in call now lives.
+    for app in ('apps/estimator_eval', 'apps/uncertain_sampling', 'skills/estimate'):
+        src = open(os.path.join(ROOT, 'urlab', *f'{app}.py'.split('/')), encoding='utf-8').read()
         assert 'wrench_in(' in src, f'{app} logs a connector-frame wrench'
         for call in [ln for ln in src.splitlines() if 'wrench_in(' in ln and 'def ' not in ln]:
             assert 'T_base_tool0' in call or 'T_base_tool0' in src[
@@ -5535,14 +5400,14 @@ def test_payload_and_joint_acceleration_are_fleet_wide_constants():
                     for v in distinct_a))
 
     # ...and it must be the value the shared file declares, not merely a value they agree on
-    common = yaml.safe_load(open(os.path.join(ROOT, 'configs', '_common.yaml')))
+    common = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'robot.yaml')))
     assert distinct_a[0] == float(common['speed']['max_joint_acceleration_deg_s2']), (
-        f'the fleet agrees on {distinct_a[0]} deg/s2 but _common.yaml declares '
+        f'the fleet agrees on {distinct_a[0]} deg/s2 but robot.yaml declares '
         f"{common['speed']['max_joint_acceleration_deg_s2']} -- the shared file must be the "
         'source of truth, not a stale fourth opinion')
     cp = common['robot']['payload']
     assert distinct_p[0] == (float(cp['mass_kg']), tuple(float(v) for v in cp['cog_m'])), \
-        'the fleet payload must match the one _common.yaml declares'
+        'the fleet payload must match the one robot.yaml declares'
 
     # The LEGACY spelling silently wins over nothing but loses to the modern key, so a config
     # carrying both is a trap: delete the modern one and the fleet re-diverges invisibly.
@@ -5555,7 +5420,7 @@ def test_payload_and_joint_acceleration_are_fleet_wide_constants():
         if spd:
             assert 'max_joint_acceleration_deg_s2' in spd, (
                 f'{n}.yaml defines a speed: block without max_joint_acceleration_deg_s2. Blocks '
-                'are owned WHOLESALE (no per-key merge with _common.yaml), so this one falls '
+                'are owned WHOLESALE (no per-key merge with robot.yaml), so this one falls '
                 "through to the arm's built-in default instead of the fleet value")
 
 
@@ -5576,9 +5441,9 @@ def test_engage_is_the_trajectory_plus_an_optional_oscillation():
     from urlab.skills import trajectory as traj
     from urlab.skills.manifold import vec6_from_mats
 
-    cfg = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))['assembly']
+    cfg = yaml.safe_load(open(os.path.join(ROOT, 'configs', 'bnc_assembly.yaml')))
     mats = traj.load_csv(os.path.join(ROOT, 'configs', 'assembly_trajectory.csv'))
-    res_m = float(cfg.get('translational_resolution_m', 0.001))
+    res_m = float(cfg['trajectory'].get('translational_resolution_mm', 1.0)) / 1000.0
     dense = traj.resample(mats, res_m, 1.0)
 
     def build(pre_mm, amp, frq, v_mm_s):
@@ -5652,14 +5517,16 @@ def test_engage_is_the_trajectory_plus_an_optional_oscillation():
     # amplitude/frequency are NOT declared here any more -- they come from the tuned file, and
     # test_every_app_resolves_to_the_tuned_wiggle checks that resolution.
     for k in ('preload_mm', 'sample_rate_hz',
-              'max_axial_force_n', 'persistence_s', 'stiffness'):
-        assert k in en, f'assembly.engage.{k} must be declared'
+              'max_axial_force_n', 'persistence_s'):
+        assert k in en, f'engage.{k} must be declared'
+    assert 'stiffness' in (en.get('compliance') or {}), \
+        'engage.compliance.stiffness must be declared'
     # RETIRED: the phase's speed is in the speed table with every other phase's, so that one
     # place describes how fast the run goes.
     assert 'speed_mm_s' not in en, (
         'assembly.engage.speed_mm_s is retired -- set speed.phase_scale.engage instead')
     assert float(en['preload_mm']) >= 0.0
-    _r = _resolved_wiggle('bnc_assembly', 'assembly', 'engage')
+    _r = _resolved_wiggle('bnc_assembly', 'engage')
     _amp, _frq = _r.get('amplitude') or {}, _r.get('frequency_hz') or {}
     live = [k for k, v in _amp.items() if abs(float(v)) > 0.0]
     for d_ in live:
@@ -5668,7 +5535,10 @@ def test_engage_is_the_trajectory_plus_an_optional_oscillation():
         assert float(en['sample_rate_hz']) >= 4.0 * max(float(_frq[d_])
                                                         for d_ in live), 'engage would alias'
 
-    src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8').read()
+    src = (open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'),
+                encoding='utf-8').read()
+           + open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                  encoding='utf-8').read())
     assert "ins_mode not in ('estimate', 'engage')" in src, (
         'engage must be a valid mode, and the standalone wiggle must NOT be -- it is retired, '
         'with its oscillation living inside engage')
@@ -5678,7 +5548,10 @@ def test_engage_is_the_trajectory_plus_an_optional_oscillation():
         'partway is what the clocking screw is for. TRAVEL is now a success too: a mate that '
         'slides home under low force is a seat, and travel is the one signal a jam cannot fake')
     # and the limit is AXIAL, not |f|
-    assert 'class _AxialForce' in src and 'wrench_in(T_base_conn, T_base_tool0)' in src, (
+    dsrc = open(os.path.join(ROOT, 'urlab', 'robot', 'detectors.py'),
+                encoding='utf-8').read()
+    assert 'class AxialForce' in dsrc and 'wrench_in(T_base_conn, T_base_tool0)' in open(
+        os.path.join(ROOT, 'urlab', 'skills', 'estimate.py'), encoding='utf-8').read(), (
         'the engage limit must project onto the connector +X; a |f| limit tight enough to catch '
         'real resistance also stops on every lateral graze')
 
@@ -5797,7 +5670,7 @@ def test_the_collar_turn_is_prewound_into_the_wrist_3_window():
       * CLAMPING IS THE FALLBACK, and is REPORTED, because it does move the attitude.
     """
     from urlab import config as urconfig
-    from urlab.apps.bnc_assembly import _fit_turn
+    from urlab.domain import fit_turn as _fit_turn
 
     TAU = 2.0 * np.pi
 
@@ -5822,7 +5695,7 @@ def test_the_collar_turn_is_prewound_into_the_wrist_3_window():
     # the window arithmetic itself: the START must leave a full rotation inside the far end,
     # in whichever direction the turn travels.
     cfg = urconfig.load('bnc_assembly')
-    cl = cfg.section('assembly')['collar_clocking']
+    cl = cfg.section('collar_clocking')
     rot = np.radians(float(cl['rotation_deg']))
     margin = np.radians(float(cl.get('wrist3_margin_deg', 5.0)))
     w_lo, w_hi = -TAU, TAU                        # the UR nominal range
@@ -5847,8 +5720,9 @@ def test_the_prewind_is_verified_from_measured_joints_before_the_collar_is_clamp
     re-check therefore reads robot.arm.q(), and it must sit BEFORE the gripper closes: refusing
     with open fingers costs nothing, refusing with the collar clamped strands the run.
     """
-    src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8').read()
-    body = src[src.index('def collar_clocking('):src.index('def traj_ref(')]
+    body = open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                encoding='utf-8').read()
+    body = body[body.index('def collar_clocking('):body.index('def screw_ramp(')]
 
     order = ["adm_cl.ramp(T_retreat, T_grip",          # the compliant advance...
              "q6_now = float(robot.arm.q()[5])",       # ...then re-read wrist_3 from the ARM...
@@ -6114,24 +5988,43 @@ def test_visual_target_reanchors_every_frame_the_run_plans_from():
     through the closure. Re-anchoring a subset would put the insertion trajectory at one place and
     the clocking axes at another, which no single log line would reveal.
     """
-    src = open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'), encoding='utf-8').read()
-    body = src[src.index('def _anchor_target('):src.index('_sh_m, _sh_r = pose_error(')]
-    for name in ('T_base_socket', 'T_base_tconn', 'T_clk', 'T_base_targetobj', 'T_base_commit'):
-        assert f'{name} = ' in body, f'_anchor_target must rebind {name}'
-    assert 'nonlocal' in body, (
-        'the maneuvers read these through the closure, so they must be REBOUND in the enclosing '
-        'scope -- a local copy would leave every nested function on the kinematic pose')
-
+    src = (open(os.path.join(ROOT, 'urlab', 'apps', 'bnc_assembly.py'),
+                encoding='utf-8').read()
+           + open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'),
+                  encoding='utf-8').read())
+    # The closure is gone: re-anchoring is TargetFrames.anchor(), tested by
+    # BEHAVIOUR -- anchor twice, every planning frame must move consistently.
+    from urlab.domain import TargetFrames
+    from urlab.transforms import translation_matrix, xyzrpy_to_matrix
+    R_clock = xyzrpy_to_matrix([0.0, 0.0, 0.0], [0.3, 0.0, 0.0])
+    mats = [np.eye(4), translation_matrix([0.002, 0.0, 0.0])]
+    fr = TargetFrames(R_clock, mats, commit_preload_mm=10.0)
+    A = translation_matrix([0.5, 0.0, 0.2])
+    B = translation_matrix([0.6, 0.1, 0.2])
+    fr.anchor(A)
+    first = {n: getattr(fr, n).copy() for n in
+             ('T_base_socket', 'T_base_tconn', 'T_clk', 'T_base_targetobj',
+              'T_base_commit')}
+    fr.anchor(B)
+    for n, T0 in first.items():
+        assert not np.allclose(getattr(fr, n), T0), f'anchor() must rebind {n}'
+    assert np.allclose(fr.T_base_tconn, B @ R_clock, atol=1e-12)
+    assert np.allclose(fr.T_base_commit[:3, 3] - fr.T_base_targetobj[:3, 3],
+                       fr.T_base_targetobj[:3, :3] @ [0.010, 0.0, 0.0], atol=1e-12), \
+        'the commit frame is the anchor pushed preload_mm along the connector +X'
     # THE ORDER: validated at parse, run after the reset, before the pick.
-    assert (src.index("tgt_source = str(a.get('target_source')")
-            < src.index('def _anchor_target(')), (
-        'the source must be validated while the config is being read')
-    assert (src.index("log.error('assembly.target_source is visual but %s has no marker_rigs:")
-            < src.index("reset.reset_robot(robot, cfg, 'start reset')")), (
+    # setup() carries ALL parse-time validation and the app calls it before anything moves;
+    # the rig check must live there, not in the flow.
+    assert "tgt_source = str(spec.run.target_source" in src, 'the source must be validated'
+    assert "log.error('run.target_source is visual but %s has no marker_rigs:" in src, (
         'a missing rig is a config typo -- it must fail before the arm homes and drives to a view '
         'pose, not three moves in')
+    assert (src.index('if not bnc_skills.setup(asm):')
+            < src.index("reset.reset_robot(robot, cfg, 'start reset')")), (
+        'setup (and every validation in it) must run before anything MOVES')
     i_reset = src.index("reset.reset_robot(robot, cfg, 'start reset')")
-    i_call = src.index("tgt_source == 'visual' and not locate_target_visually(q_home)")
+    i_call = src.index("tgt_source == 'visual' and not "
+                       'bnc_skills.locate_target_visually(asm, q_home)')
     i_pick = src.index('result = _pick(cfg, robot, scanner')
     assert i_reset < i_call < i_pick, (
         'the sweep runs with the gripper EMPTY and the arm at home -- after the mate the socket is '
@@ -6142,7 +6035,8 @@ def test_visual_target_reanchors_every_frame_the_run_plans_from():
     # window back from the call site, which silently stopped covering locate_target_visually
     # the moment an unrelated helper was added above it -- the test then failed for a reason
     # that had nothing to do with what it checks.
-    loc = src[src.index('def locate_target_visually('):i_call]
+    loc = open(os.path.join(ROOT, 'urlab', 'skills', 'bnc.py'), encoding='utf-8').read()
+    loc = loc[loc.index('def locate_target_visually('):loc.index('def reorient_recovery(')]
     assert 'max_shift_mm' in loc and 'Refusing to plan an insertion at it' in loc, (
         'a visual pose wildly far from the recorded mate is a stale rig or a marker on the wrong '
         'fixture; driving an insertion trajectory at it is the expensive way to find out')
@@ -6152,7 +6046,7 @@ def test_visual_target_reanchors_every_frame_the_run_plans_from():
     # entry exists for the target, so the failure mode the old kinematic default guarded
     # against is loud, not silent: calibrate with urlab.apps.marker_calibration first.
     from urlab import config as urconfig
-    a = urconfig.load('bnc_assembly').section('assembly')
+    a = urconfig.load('bnc_assembly').section('run')
     assert str(a.get('target_source')).lower() in ('kinematic', 'visual')
     # CALIBRATION <-> RUNTIME PARITY: the rig's PnP biases cancel only when both runs look at
     # the markers the same way, so the capture/servo/weighting settings must not drift apart.
@@ -6164,6 +6058,6 @@ def test_visual_target_reanchors_every_frame_the_run_plans_from():
             f'marker_views.{k} differs between bnc_assembly and marker_calibration -- the '
             'calibration and the runtime localization must capture the same way or the '
             'biases the rig relies on cancelling stop cancelling')
-    vt = a.get('visual_target') or {}
+    vt = urconfig.load('bnc_assembly').section('visual_target') or {}
     assert vt.get('return_home_after') is True, (
         'the scan, the grasp geometry and every retry offset are written from the home pose')

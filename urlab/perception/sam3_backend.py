@@ -21,11 +21,39 @@ from .neck import compute_necks, compute_tip, masks_from_output, masks_scores_fr
 __all__ = ['Sam3Backend']
 
 
+def resolve_device(requested):
+    """`compute.device` -> the torch device string, resolved LOUDLY.
+
+    'auto'  -- cuda when available, else cpu. Right for configs shared between the GPU robot
+               host and CPU-only laptops.
+    'cpu'   -- force CPU even when a GPU exists (it is busy with other software, or you want
+               reproducible timings).
+    'cuda'  -- require the GPU: raise AT CONSTRUCTION if it is missing, instead of crashing
+               hundreds of layers deep in the first inference. Three separate deep crashes on a
+               CPU-only laptop are why this knob exists.
+    """
+    import torch
+    req = str(requested or 'auto').strip().lower()
+    if req == 'auto':
+        return 'cuda' if torch.cuda.is_available() else 'cpu'
+    if req == 'cpu':
+        return 'cpu'
+    if req == 'cuda':
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "compute.device is 'cuda' but torch reports no CUDA device (torch %s). Set "
+                "compute.device: auto|cpu in configs/robot.yaml, or install a CUDA torch build."
+                % torch.__version__)
+        return 'cuda'
+    raise ValueError(f"compute.device must be 'auto', 'cpu' or 'cuda', got {requested!r}")
+
+
 class Sam3Backend:
     """SAM3-backed cable-neck detector. Loads the model once; reuse across frames."""
 
     def __init__(self, cable_prompt="cable", connector_prompt="connector",
-                 threshold=0.5, connector_threshold=None, mislabel_overlap=0.6):
+                 threshold=0.5, connector_threshold=None, mislabel_overlap=0.6,
+                 device="auto"):
         import torch
         from sam3 import build_sam3_image_model
         from sam3.model.sam3_image_processor import Sam3Processor
@@ -51,12 +79,13 @@ class Sam3Backend:
         # materializes it. It is only eligible for fp16 (bf16 needs sm_80), which is why detect()
         # autocasts to float16 on CUDA. Weights stay fp32 -- autocast casts per op, so there is no
         # fp16/fp32 mismatch (unlike .half()'ing the model, which SAM3 does not support).
-        if torch.cuda.is_available():
+        # ONE resolution, up front, from config -- everything below keys off self.device.
+        self.device = resolve_device(device)
+        if self.device == "cuda":
             torch.backends.cuda.enable_flash_sdp(False)         # needs Ampere; unavailable here
             torch.backends.cuda.enable_mem_efficient_sdp(True)  # the one that saves the memory
             torch.backends.cuda.enable_math_sdp(True)           # keep only as a last-resort fallback
-        model = build_sam3_image_model()
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        model = build_sam3_image_model(device=self.device)
         # Do NOT .half() this model. SAM3 creates fp32 tensors internally all over its graph (decoder
         # queries, text embeddings, ...), and autocast doesn't cover those paths -- fp16 weights then
         # collide with them ("mat1 and mat2 must have the same dtype, but got Float and Half") in one
@@ -65,7 +94,7 @@ class Sam3Backend:
         # RESOLUTION MUST STAY 1008: the ViTDet backbone's RoPE `freqs_cis` buffer is baked for that
         # grid, so any other value trips the assert in vitdet.reshape_for_broadcast.
         resolution = int(os.environ.get("SAM3_RESOLUTION", "1008"))
-        self.processor = Sam3Processor(model, resolution=resolution,
+        self.processor = Sam3Processor(model, device=self.device, resolution=resolution,
                                        confidence_threshold=threshold)
 
     def detect(self, pil_rgb):
@@ -127,62 +156,6 @@ class Sam3Backend:
             conn_m, conn_s = masks_scores_from_output(
                 self.processor.set_text_prompt(state=state, prompt=self.connector_prompt))
         return cable_m, cable_s, conn_m, conn_s
-
-    def detect_adaptive(self, pil_rgb, floor=0.05, mislabel_overlap=None):
-        """ADAPTIVE-THRESHOLD neck detection: tune the thresholds per image, subject to a confidence
-        floor, until the cable and connector actually TOUCH (which is what defines the neck).
-
-        The problem with a fixed threshold. SAM3 puts the connector in the "cable" bucket (or the cable
-        in the "connector" bucket) depending on the frame. Whichever class comes up empty, compute_necks
-        emits nothing -- it needs BOTH, because a neck IS the cable/connector contact. One global
-        threshold cannot be right for every frame.
-
-        The fix. Do not commit to a threshold. Get every candidate mask WITH ITS SCORE, then search the
-        threshold PAIR, keeping the MOST CONFIDENT masks that still yield a valid neck. The acceptance
-        test is GEOMETRIC, not confidence-based -- which is the whole point: a mislabel only matters if
-        it destroys the cable/connector contact.
-
-        Why this is nearly free:
-          * The threshold is only a FILTER on per-mask scores (`keep = out_probs > threshold`) -- the
-            forward pass is identical. So sweeping it costs NO extra inference: one run at `floor`.
-          * Only the actual mask SCORES are distinguishable thresholds. Keeping the top-k of a class is
-            therefore the complete set of reachable subsets, so the search is exactly
-            len(cable) x len(connector) cheap geometry calls -- typically well under 25.
-
-        Preference order: the combination whose LOWEST admitted score is HIGHEST -- i.e. the highest
-        thresholds that still produce a neck. Never admits anything below `floor`.
-
-        Returns the compute_necks dict plus: cables_raw, connectors_raw, thr_cable, thr_conn, eff_conf
-        (the chosen effective confidence), combos_tried. thr_* are None if nothing worked.
-        """
-        W, H = pil_rgb.size
-        mo = self.mislabel_overlap if mislabel_overlap is None else mislabel_overlap
-        cable_m, cable_s, conn_m, conn_s = self._segment_both_scored(pil_rgb, floor)
-
-        # Every reachable (cable, connector) subset pair, ranked by effective confidence.
-        cands = []
-        for kc in range(1, len(cable_m) + 1):
-            for kk in range(1, len(conn_m) + 1):
-                eff = min(cable_s[kc - 1], conn_s[kk - 1])   # the weakest mask this pair admits
-                if eff < floor:
-                    continue
-                cands.append((eff, kc, kk))
-        cands.sort(key=lambda t: -t[0])                      # most confident first
-
-        for tried, (eff, kc, kk) in enumerate(cands, start=1):
-            res = compute_necks(cable_m[:kc], conn_m[:kk], H, W, mo)
-            if res["necks"]:                                 # <-- the geometric acceptance test
-                res.update(cables_raw=len(cable_m), connectors_raw=len(conn_m),
-                           thr_cable=cable_s[kc - 1], thr_conn=conn_s[kk - 1],
-                           eff_conf=eff, combos_tried=tried)
-                return res
-
-        # No admissible threshold pair yields a neck. Return the most permissive result so the debug
-        # overlay still shows what SAM3 actually saw (which is how you diagnose it).
-        res = compute_necks(cable_m, conn_m, H, W, mo)
-        res.update(cables_raw=len(cable_m), connectors_raw=len(conn_m),
-                   thr_cable=None, thr_conn=None, eff_conf=None, combos_tried=len(cands))
-        return res
 
     def detect_tip(self, pil_rgb, curve_px=40):
         """Classification-free CONNECTOR TIP detection: union both prompts, then use the SHAPE.

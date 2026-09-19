@@ -1,6 +1,6 @@
 """Perception layer: camera capture, ArUco, SAM3 cable/connector detection, multi-view fusion.
 
-Imports are LAZY so the pure-numpy parts (ConnectorEstimator, the fusion math) can be used --
+Imports are LAZY so the pure-numpy parts can be used --
 and tested -- without opencv or pyrealsense2 installed. `import urlab.perception` costs nothing;
 `urlab.perception.ArucoDetector` pulls in cv2 only when you actually reach for it.
 """
@@ -10,10 +10,7 @@ _LAZY = {
     'Frame': '.camera',
     'ArucoDetector': '.aruco',
     'MarkerTracker': '.aruco',
-    'ConnectorEstimator': '.connector',
     'ConnectorTracker': '.connector',
-    'CableReconstructor': '.cable_recon',
-    'Reconstruction': '.cable_recon',
     # Junction geometry, vendored from sam3-abhay so it lives with the app. compute_junction
     # and the renderers need cv2; the graph tracer is numpy/scipy only, hence the split.
     'compute_junction': '.junction',

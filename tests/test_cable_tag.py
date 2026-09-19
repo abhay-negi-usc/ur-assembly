@@ -225,10 +225,11 @@ def test_the_engage_speed_comes_from_phase_scale_not_a_private_key():
     import os
 
     from urlab import config as urconfig
-    src = open(os.path.join(os.path.dirname(urconfig.__file__), 'apps',
-                            'bnc_assembly.py'), encoding='utf-8').read()
+    src = open(os.path.join(os.path.dirname(urconfig.__file__), 'skills',
+                            'bnc.py'), encoding='utf-8').read()
     assert "v_mm_s = g_v * s_eng" in src, 'the engage rate must be the cap x its phase scale'
-    assert "s_eng = float(scales.get('engage', scales.get('assemble', 1.0)))" in src, \
+    assert "self.s_eng = float(self.scales.get('engage', self.scales.get('assemble', 1.0)))" in open(
+        os.path.join(os.path.dirname(urconfig.__file__), 'domain.py'), encoding='utf-8').read(), \
         'engage needs its own scale, falling back to assemble so old configs are unchanged'
     assert "float(en_speed) if en_speed is not None" not in src, 'the private override is gone'
     assert "is RETIRED" in src, 'a stale speed_mm_s must fail loudly, not be ignored'
@@ -243,7 +244,7 @@ def test_the_engage_speed_comes_from_phase_scale_not_a_private_key():
         'the resolved reference rate must be logged, so the speed is answerable from the log'
 
     cfg = urconfig.load('bnc_assembly')
-    assert cfg.get_path('assembly.engage.speed_mm_s') is None, 'the key must be gone from the yaml'
+    assert cfg.get_path('engage.speed_mm_s') is None, 'the key must be gone from the yaml'
     cap = float(cfg.get_path('speed.max_cartesian_translation_mm_s'))
     scales = cfg.get_path('speed.phase_scale') or {}
     assert 'engage' in scales, 'bnc_assembly must declare its own engage scale'
@@ -308,28 +309,32 @@ def test_celebrate_is_off_by_default_and_cannot_disturb_the_assembly():
 
     # 1. OFF by default -- it must not fire during a data-collection run.
     cfg = urconfig.load('bnc_assembly')
-    cb = cfg.get_path('assembly.celebrate') or {}
+    cb = cfg.get_path('celebrate') or {}
     assert cb.get('enabled') is False, 'celebrate must ship disabled'
     for k in ('rise_mm', 'nod_deg', 'spin_deg', 'repeats', 'gripper_flourish'):
         assert k in cb, f'assembly.celebrate.{k} must be declared'
 
     # 2. It runs AFTER the escape and BEFORE disassembly, so the connector is already released.
-    i_cel = src.index('celebrate(state, cycle, tug_res, ret_ok)')
-    i_dis = src.index('dis_ok, state = disassembly(')
+    i_cel = src.index('bnc_skills.celebrate(asm, state, cycle, tug_res, ret_ok)')
+    i_dis = src.index('dis_ok, state = bnc_skills.disassembly(')
     assert i_cel < i_dis, 'celebrate must run before disassembly'
+    # The behaviour itself now lives in urlab/skills/bnc.py -- pin its gates there.
+    import inspect
+
+    from urlab.skills import bnc as bnc_skills
+    body = inspect.getsource(bnc_skills.celebrate)
     # A tug that TERMINATED verified nothing -- an earlier gate tested `!= 'failed'` and let that
     # through. The bar is the same one the run uses for ok_cycle.
-    assert "tug_res not in (None, 'skipped', 'verified')" in src, \
+    assert "tug_res not in (None, 'skipped', 'verified')" in body, \
         'celebrate must refuse any tug outcome that is not verified/skipped/disabled'
-    assert 'if not ret_ok:' in src, 'celebrate must refuse when the escape did not complete'
+    assert 'if not ret_ok:' in body, 'celebrate must refuse when the escape did not complete'
 
     # 3. Only on the state the run was CONFIGURED to reach -- not a hardcoded 'locked', or a
     #    connector-clocking-only run could never celebrate.
-    assert "want = 'locked' if cl_on else ('seated' if cc_on else 'engaged')" in src
+    assert "want = 'locked' if asm.cl_on else ('seated' if asm.cc_on else 'engaged')" in body
 
     # 4. Joint moves are collision-checked and limit-checked. A flourish is never worth a forced
     #    move, and a moveJ can swing the tool through the bench between two clear endpoints.
-    body = src[src.index('def celebrate(state, cycle'):src.index('def disassembly(state,')]
     assert 'model.check_path(' in body, 'the nod/spin must be collision-checked'
     assert 'robot.arm.joints_ok(' in body, 'targets must be checked against the joint limits'
     assert 'wrist_1_joint' in body and 'wrist_3_joint' in body, 'wrist-only by design'
@@ -342,7 +347,7 @@ def test_celebrate_is_off_by_default_and_cannot_disturb_the_assembly():
     # 6. Cadence -- a 50-cycle collection must not stop to dance 50 times.
     assert cb.get('when') == 'last', 'the default cadence must be once, at the end of the run'
     assert 'every_n' in cb
-    assert 'due = (cycle >= n_cycles)' in body, "'last' means the final cycle of the run"
+    assert 'due = (cycle >= asm.n_cycles)' in body, "'last' means the final cycle of the run"
     assert 'due = (cycle % every_n == 0)' in body, "'every_n' means every Nth cycle"
     assert "treating it as 'last'" in body, 'an unknown cadence must warn, not silently do nothing'
 
@@ -359,7 +364,7 @@ def test_place_scatter_is_bounded_centred_and_reproducible():
 
     from urlab import config as urconfig
     cfg = urconfig.load('bnc_assembly')
-    sc = cfg.get_path('assembly.disassembly.place_scatter') or {}
+    sc = cfg.get_path('disassembly.place_scatter') or {}
     assert sc.get('enabled') is False, 'scatter must ship off'
     assert sc['x_mm'] == 50.0 and sc['y_mm'] == 50.0 and sc['yaw_deg'] == 30.0
     assert 'seed' in sc, 'a scattered run must be reproducible'
@@ -375,27 +380,27 @@ def test_place_scatter_is_bounded_centred_and_reproducible():
     assert abs(draws[:, 0].mean()) < 0.1 * rx, 'the scatter must be CENTRED on the configured place'
     assert abs(draws[:, 2].mean()) < 0.1 * rw
 
-    src = open(os.path.join(os.path.dirname(urconfig.__file__), 'apps',
-                            'bnc_assembly.py'), encoding='utf-8').read()
-    body = src[src.index('def place_scatter():'):src.index('def aligned_place_pose(')]
-    assert "if not bool(sc.get('enabled', False)):" in body and 'return 0.0, 0.0, 0.0' in body, \
+    ksrc = open(os.path.join(os.path.dirname(urconfig.__file__), 'skills',
+                             'bnc.py'), encoding='utf-8').read()
+    body = ksrc[ksrc.index('def place_scatter(asm):'):ksrc.index('def aligned_place_pose(')]
+    assert "if not sc.enabled:" in body and 'return 0.0, 0.0, 0.0' in body, \
         'disabled must yield exactly zero offset, not a tiny random one'
     assert 'rng.uniform(' in body, 'the draw must be uniform, as specified'
 
     # ADDED to the configured offsets, not replacing them.
-    place = src[src.index('def aligned_place_pose('):src.index('def reorient_recovery(')]
+    place = ksrc[ksrc.index('def aligned_place_pose('):ksrc.index('def celebrate(')]
     assert "float(off.get('x_mm', 0.0)) / 1000.0 + s_x" in place, 'scatter ADDS to the offset'
     assert '+ s_yaw' in place
 
     # Only the DISASSEMBLY place is scattered -- reorient recovery must stay deterministic, since
     # it exists to put a badly-presented cable somewhere the coaxial grasp is known to reach.
-    assert src.count('aligned_place_pose(dis_clear_m, scatter=') == 1
-    reorient = src[src.index('def reorient_recovery('):]
+    assert ksrc.count('aligned_place_pose(asm, dis_clear_m, scatter=') == 1
+    reorient = ksrc[ksrc.index('def reorient_recovery('):]
     assert 'scatter=' not in reorient[:reorient.index('def ', 10)], \
         'the reorient recovery place must not be scattered'
 
     # An unlucky draw must not kill an unattended run.
-    assert 'no reachable draw in 8 tries' in src, 'unreachable draws must fall back to the centre'
+    assert 'no reachable draw in 8 tries' in ksrc, 'unreachable draws must fall back to the centre'
 
 
 def test_an_engage_that_never_makes_contact_is_a_failure_not_a_completion():
@@ -430,13 +435,15 @@ def test_an_engage_that_never_makes_contact_is_a_failure_not_a_completion():
 
     # Budgeted, not looped.
     cfg = urconfig.load('bnc_assembly')
-    assert cfg.get_path('assembly.engage.max_misses') == 2
-    assert float(cfg.get_path('assembly.engage.max_axial_force_n')) > 0.0, \
+    assert cfg.get_path('engage.max_misses') == 2
+    assert float(cfg.get_path('engage.max_axial_force_n')) > 0.0, \
         'with no axial limit a miss cannot be detected at all'
     assert 'engage_misses < max_engage_misses' in src
 
     # The recovery puts the cable DOWN and returns to the pick pose.
-    body = src[src.index('def place_after_failed_engage('):src.index('def celebrate(')]
+    body = open(os.path.join(os.path.dirname(urconfig.__file__), 'skills',
+                             'bnc.py'), encoding='utf-8').read()
+    body = body[body.index('def place_after_failed_engage('):body.index('def locate_target_visually(')]
     assert 'aligned_place_pose(' in body and "gripper.open(" in body, 'it must place and release'
     assert "move_j(q_pick" in body, 'it must end at the pick pose, ready to start over'
     # THE RETRACT IS MANDATORY, VERIFIED, AND FIRST. The arm is about to travel sideways; a
@@ -455,7 +462,7 @@ def test_an_engage_that_never_makes_contact_is_a_failure_not_a_completion():
         'both a raised retract and an under-travelled one must ABORT: stopping with the part '
         'held is recoverable by hand, a snapped socket is not')
     assert 'backed_out_mm' in body, 'the clearance must be MEASURED, not assumed from the command'
-    cfg_fr = urconfig.load('bnc_assembly').get_path('assembly.engage.fail_retract')
+    cfg_fr = urconfig.load('bnc_assembly').get_path('engage.fail_retract')
     assert cfg_fr['distance_mm'] == 100.0 and cfg_fr['min_mm'] > 0.0
 
     # THE OPERATOR IS ASKED FIRST, and before ANY motion. A miss means the connector is somewhere
@@ -493,7 +500,7 @@ def test_a_seat_must_be_confirmed_by_sustained_radial_force():
                             'bnc_assembly.py'), encoding='utf-8').read()
 
     cfg = urconfig.load('bnc_assembly')
-    cf = cfg.get_path('assembly.engage.confirm') or {}
+    cf = cfg.get_path('engage.confirm') or {}
     assert cf['radial_force_n'] == 1.0
     assert cf['radial_persistence_s'] == 0.10
     assert cf['max_wiggle_mm'] == 1.0
@@ -501,14 +508,19 @@ def test_a_seat_must_be_confirmed_by_sustained_radial_force():
 
     # RADIAL means the connector's OWN Y-Z, not |f| -- a magnitude test would be satisfied by the
     # axial push itself and confirm nothing.
-    rc = src[src.index('class _RadialConfirm:'):src.index('class _AnyGuard:')]
+    dsrc = open(os.path.join(os.path.dirname(urconfig.__file__), 'robot',
+                             'detectors.py'),
+                encoding='utf-8').read()
+    rc = dsrc[dsrc.index('class RadialConfirm:'):dsrc.index('class AnyGuard:')]
     assert 'w[1:3]' in rc, 'radial force must be the Y-Z components in the CONNECTOR frame'
     assert 'wrench_in(T_base_conn, T_base_tool0)' in rc
     assert 'self.held_s' in rc and 'persistence_s' in rc, 'it must be a sustained condition'
 
     # The confirmation WIGGLES IN PLACE at the stopped depth -- advancing while testing would
     # confound depth with capture.
-    eng = src[src.index('def engage_insertion():'):src.index('def connector_clocking():')]
+    eng = open(os.path.join(os.path.dirname(urconfig.__file__), 'skills',
+                            'bnc.py'), encoding='utf-8').read()
+    eng = eng[eng.index('def engage_insertion('):eng.index('def disassembly(')]
     assert 'path_at(d_stop)' in eng, 'the confirmation must hold the stopped depth'
     assert 'en_wig.delta(t_end + tc, dur_s)' in eng, 'the wiggle phase must run on continuously'
     assert "status = 'unconfirmed'" in eng
@@ -525,11 +537,15 @@ def test_a_seat_must_be_confirmed_by_sustained_radial_force():
     # Travel is REPORTED, never decisive -- the verdict must read the radial result alone.
     assert "if confirm['radial_ok']:" in eng, 'the verdict must turn on radial force alone'
     assert 'travel_ok' not in eng.split('confirm = {')[1].split('}')[0] or True
-    assert 'REPORTED ONLY' in src, 'the travel number must be labelled as non-deciding'
+    _full = open(os.path.join(os.path.dirname(urconfig.__file__),
+                              'skills', 'bnc.py'), encoding='utf-8').read()
+    assert 'REPORTED ONLY' in _full, 'the travel number must be labelled as non-deciding'
 
     # The report names WHICH condition failed and by how much -- 'not confirmed' alone is
     # unreadable at 2am.
-    rep = src[src.index('def _engage_report('):src.index('def build_and_run(')]
+    rep = open(os.path.join(os.path.dirname(urconfig.__file__), 'skills',
+                            'bnc.py'), encoding='utf-8').read()
+    rep = rep[rep.index('def _engage_report('):rep.index('def traj_ref(')]
     assert 'radial force' in rep and 'wiggle travel' in rep
     assert 'want >= %.1f N for %.2f s' in rep, 'the radial limit must be shown with its value'
     assert 'REPORTED ONLY, not a criterion' in rep, 'travel must be labelled non-deciding'
@@ -549,17 +565,22 @@ def test_every_behaviour_boundary_pauses_and_yes_cannot_silence_it():
     from urlab import config as urconfig
     src = open(os.path.join(os.path.dirname(urconfig.__file__), 'apps',
                             'bnc_assembly.py'), encoding='utf-8').read()
+    # the behaviours that own gates live in skills/bnc.py now; the boundary names span both
+    src += open(os.path.join(os.path.dirname(urconfig.__file__), 'skills',
+                             'bnc.py'), encoding='utf-8').read()
 
     # The gate must NOT consult confirm_each_step (which --yes sets false).
-    assert "gates_on = bool(a.get('gate_between_behaviors', True)) and not no_prompts" in src
+    assert "gates_on = bool(spec.run.gate_between_behaviors) and not no_prompts" in src
     assert "cfg.get('confirm_each_step'" not in src, (
         'behaviour gates must not read confirm_each_step -- --yes would silence a prompt that '
         'was deliberately asked for')
 
     # ...but --no-prompts and dry runs still skip, so unattended and simulated runs never hang.
-    assert 'if robot.arm.dry_run or not gates_on:' in src
+    ksrc = open(os.path.join(os.path.dirname(urconfig.__file__), 'skills',
+                             'bnc.py'), encoding='utf-8').read()
+    assert 'if asm.robot.arm.dry_run or not asm.gates_on:' in ksrc
     cfg = urconfig.load('bnc_assembly')
-    assert cfg.get_path('assembly.gate_between_behaviors') is True
+    assert cfg.get_path('run.gate_between_behaviors') is True
 
     # Every behaviour boundary has one.
     for name in ('PICK THE CABLE', 'ENGAGE (from contact)', 'CONNECTOR CLOCKING (insert)',
@@ -569,7 +590,9 @@ def test_every_behaviour_boundary_pauses_and_yes_cannot_silence_it():
 
     # THE CONTACT/ENGAGE GATE stops the servo before asking and re-warms after -- a prompt can sit
     # for minutes, and holding a servo stream open across it is not something to do to the arm.
-    eng = src[src.index('def engage_insertion():'):src.index('def connector_clocking():')]
+    eng = open(os.path.join(os.path.dirname(urconfig.__file__), 'skills',
+                            'bnc.py'), encoding='utf-8').read()
+    eng = eng[eng.index('def engage_insertion('):eng.index('def disassembly(')]
     i_gate = eng.index("'ENGAGE (from contact)'")
     assert 'robot.arm.servo_stop()' in eng[:i_gate], 'settle before prompting'
     assert 'adm_en.warmup(last_ref)' in eng[i_gate:], 're-engage the servo where the arm actually is'

@@ -59,7 +59,7 @@ from ._runner import run_app
 # The maneuver pieces come from the apps that own them rather than being re-implemented here:
 # a second copy of the advance detector or the wiggle geometry would drift from the one the
 # production app actually runs, and then this tester would be measuring the wrong thing.
-from .bnc_assembly import _AnyGuard, _ScrewAdvance
+from ..robot.detectors import AnyGuard as _AnyGuard, ScrewAdvance as _ScrewAdvance
 from .cable_pick_assemble import _guarded
 from .calibration_check import line_rows
 from .estimator_eval import _corr_to_m

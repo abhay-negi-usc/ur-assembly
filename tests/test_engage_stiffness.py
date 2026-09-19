@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from urlab import config as C
-from urlab.apps.bnc_assembly import _compliance_override
+from urlab.domain import compliance_override as _compliance_override
 from urlab.robot.admittance import AdmittanceController
 
 SHARED = {'stiffness': [500.0] * 3 + [10.0] * 3, 'mass': [5.0] * 3 + [0.5] * 3,
@@ -68,8 +68,9 @@ def test_stiffness_sets_how_far_the_connector_gives(stiffness_n_m, expect_give_m
 
 def test_the_shipped_engage_block_declares_a_stiffness():
     """It must be an explicit 6-vector: inheriting silently is what made the give invisible."""
-    en = C.load('bnc_assembly').get_path('assembly.engage') or {}
-    assert 'stiffness' in en, 'assembly.engage must declare its own stiffness'
-    assert len(en['stiffness']) == 6, '[x, y, z, rx, ry, rz]'
-    give_mm = float(en['max_axial_force_n']) / float(en['stiffness'][0]) * 1000.0
+    en = C.load('bnc_assembly').get_path('engage') or {}
+    assert 'stiffness' in (en.get('compliance') or {}), \
+        'engage.compliance must declare its own stiffness'
+    assert len(en['compliance']['stiffness']) == 6, '[x, y, z, rx, ry, rz]'
+    give_mm = float(en['max_axial_force_n']) / float(en['compliance']['stiffness'][0]) * 1000.0
     assert give_mm > 0

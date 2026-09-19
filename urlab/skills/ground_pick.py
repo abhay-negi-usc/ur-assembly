@@ -16,7 +16,7 @@ by assuming the cable lies on a GROUND PLANE parallel to the robot XY plane at a
 
 At the selection prompt the user can enter 'n' to take a NEW image from a small camera translation
 (useful when the junction isn't labelled in the first view). It returns T_base_connector just like
-CableScanner.scan(), so the app grasps + retries unchanged. The selection is cached, so grasp
+the scan() the apps have always called, so grasp + retry flows are unchanged. The selection is cached, so grasp
 retries re-estimate the SAME cable (re-detected) without re-prompting.
 """
 
@@ -31,14 +31,19 @@ log = urlog.get('ground-scan')
 
 
 class GroundPlaneScanner:
-    """Same interface as CableScanner (scan()/reset()/.camera/.estimator) so the apps use it as a
+    """THE cable scanner (single image, ground-plane pose). Interface: scan()/reset()/.camera/.estimator so the apps use it as a
     drop-in when scan.mode is 'ground_plane'."""
 
     def __init__(self, robot, camera, detector, estimator, cfg, data_root='data'):
         self.robot = robot
         self.camera = camera
         self.detector = detector
-        self.estimator = estimator          # unused for the fit; kept so the app's .estimator.reset() works
+        # The multi-view ConnectorEstimator is gone; this stub keeps the one call apps make
+        # (`scanner.estimator.reset()`) working without a hasattr dance at every site.
+        class _NullEstimator:
+            def reset(self):
+                pass
+        self.estimator = estimator if estimator is not None else _NullEstimator()
         if not hasattr(detector, 'detect_all'):
             raise ValueError("scan.mode 'ground_plane' needs the junction detector's detect_all -- "
                              "set sam3.mode: junction.")

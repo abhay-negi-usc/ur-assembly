@@ -1,0 +1,61 @@
+INFO    app: Config: <REPO>\configs\bnc_assembly.yaml
+WARNING arm: DRY RUN: no robot connection; moves are logged, not executed.
+WARNING gripper: DRY RUN: gripper commands are logged, not sent.
+WARNING camera: DRY RUN: the camera returns a black frame.
+INFO    manifold: Contact manifold: 41478 points from ./data/test data/banana_manifold_20260807_clean.csv
+INFO    manifold: Metric block balance (RMS mm-equivalent): {'translation': 15.97, 'rotation': 1.98, 'force': 0.95, 'torque': 2.71} -- the wrench block carries 0.18x the pose block under representation 'rawcap' (s_force 1, s_torque 1). Far from 1 means one half of the 12-D point decides the match.
+INFO    manifold: Interpolated matching: k=8, tau=4.720 mm-eq (median manifold spacing 0.472)
+INFO    manifold: Support reference: median 8-th NN distance 0.850 mm-eq global, depth-conditional 0.488..1.131 across x -25.0..-1.2 mm -- a query row whose k-th neighbour sits much further than ITS DEPTH's reference is extrapolating.
+INFO    solution_check: Check calibration: ./configs/data/check_calibration.json (u_post:147, u_spread:147, u_res:147, u_depth:147, u_split:147, u_cfg:147)
+INFO    bnc-assembly: Estimator: commit argmin, dims ['z_mm', 'pitch_deg'], manifold ./data/test data/banana_manifold_20260807_clean.csv.
+WARNING sam3: DRY RUN: SAM3 is not loaded; the detector returns nothing.
+INFO    ground-scan: Cable selection: tag red (hue 0+-18 deg, sat>=0.35, val>=0.20), selected at >=300 matching pixels.
+INFO    guard: Force guard persistence: the limit must hold for 1.00 s to trip.
+INFO    guard: Force guard persistence: the limit must hold for 1.00 s to trip.
+INFO    bnc-assembly: Final insertion ON: stiffness [500.0, 500.0, 500.0, 10.0, 10.0, 10.0], guard 1 N.
+INFO    bnc-assembly:    PRELOAD 25.0 mm past the mate on the commit (probing passes do NOT press). The spring holds 12.5 N of it at 500 N/m; the contact peak is a transient several times larger.
+INFO    bnc-assembly: ENGAGE wiggle: z_mm +5.00@0.70Hz; peak 21.99 mm/s / 0.00 deg/s; orbit closes every 1.4 s (parameters from wiggle_sampling.yaml).
+INFO    bnc-assembly: Post-mate clocking: connector clocking ON, collar clocking ON (a run therefore ends LOCKED/ASSEMBLED at best).
+INFO    guard: Force guard persistence: the limit must hold for 0.10 s to trip.
+INFO    guard: Force guard persistence: the limit must hold for 1.00 s to trip.
+INFO    bnc-assembly: Connector clocking ON: stiffness [1500.0, 1500.0, 1500.0, 10.0, 10.0, 10.0], guard 30.0 N / 8.0 Nm.
+INFO    bnc-assembly:     axial give 20.0 mm at 30.0 N (= force / stiffness 1500 N/m) -- the commanded pose backs off by this much to hold that force.
+INFO    guard: Force guard persistence: the limit must hold for 1.00 s to trip.
+INFO    bnc-assembly: Collar clocking ON: stiffness [1500.0, 1500.0, 1500.0, 10.0, 10.0, 10.0], guard 30.0 N / 5.0 Nm.
+INFO    bnc-assembly:     axial give 20.0 mm at 30.0 N (= force / stiffness 1500 N/m) -- the commanded pose backs off by this much to hold that force.
+INFO    guard: Force guard persistence: the limit must hold for 0.25 s to trip.
+INFO    bnc-assembly: Engage insertion ON: stiffness [500.0, 500.0, 500.0, 10.0, 10.0, 10.0], guard 40.0 N / 8.0 Nm.
+INFO    bnc-assembly:     axial give 10.0 mm at 5.0 N (= force / stiffness 500 N/m) -- the commanded pose backs off by this much to hold that force.
+INFO    bnc-assembly: Target source: KINEMATIC -- the recorded targets: pose of 'bnc_connector_finger_holder'.
+INFO    bnc-assembly: Clock angles about the socket +X: engage at +0.0 deg, connector sweep visits [-120.0, 120.0] deg in turn (up to 3 legs) -- the run works the -120.0 .. +120.0 deg band about the declared roll of 'bnc_connector_finger_holder'.
+INFO    bnc-assembly: Collection: offset_sweep, 18 passes per attempt (pitch [-5.0, -3.0, -1.0, 1.0, 3.0, 5.0, -5.0, -3.0, -1.0, 1.0, 3.0, 5.0, -5.0, -3.0, -1.0, 1.0, 3.0, 5.0]).
+INFO    bnc-assembly: fingertip_in_connector xyz [23.0, 0.0, 0.0] mm rpy [0.0, -70.0, 0.0] deg (target fingertip wrt the detected connector: +x along the connector, +y across the cable, +z up) -> in-hand belief derived to match. The pick and the belief come from this ONE transform, so they cannot drift apart.
+INFO    bnc-assembly: Belief offset [5.0, 0.0, -10.0] mm / [0.0, 0.0, 0.0] deg (CONNECTOR frame: +x along the connector axis) applied to the in-hand pose ONLY -- the grasp command is unchanged.
+INFO    bnc-assembly: Experiment folder: data\experiments\bnc_assembly_<STAMP>
+INFO    arm: Speed scale [reset]: 1.80x the global limits
+WARNING arm: speed.phase_scale [reset] = 1.80 puts the joint cap at 3.77 rad/s (216 deg/s), past the 3.14 rad/s the controller accepts -- every move in this phase will be CLAMPED to the ceiling. Lower the scale, or raise the CARTESIAN caps instead (they are what actually pace a free-space move).
+INFO    gripper: --> gripper reset: open gripper (3 counts)
+INFO    reset: Returning home to [-90, -140, -130, -90, -90, 180] deg (position control, contact-guarded at 50 N).
+INFO    arm: [dry-run] home (dry-run) -> q=[-1.571 -2.443 -2.269 -1.571 -1.571  3.142]
+WARNING collision: TOOL MODEL: the spacer (8 mm) and gripper body (55 mm) leave 119 mm of FINGER to reach the calibrated fingertip at 182 mm. A stock 2F-85 finger is ~43 mm. Either these are custom fingertips, or fingertip_grasp is stale -- measure it, because that frame is what every grasp and the in-hand belief are written against.
+INFO    pick: Ground-collision model: arm: UR10e collision MESHES (UR's own description) | ground z -0.760 m | margin 0.0 mm (fingertips 15.0 mm INTERSECTION allowed) | self-collision 5.0 mm over 15 link pairs + 25 tool/arm pairs | tool: spacer 0-8 mm r38, gripper_body 8-63 mm r45, fingertip_a 63-182 mm r12, fingertip_b 63-182 mm r12, camera_bracket box [50, 110, 35] mm at [0, -55, 18]
+WARNING collision: COLLISION MODEL UNVERIFIED: dry run, so arm.fk is a stand-in. The ground check is running on our own DH chain with nothing to compare it against.
+INFO    gripper: Gripper warm-up: 0 -> 255 -> 150 -> 255 -> 150 -> 255 -> 0 counts.
+INFO    gripper: --> gripper gripper warmup -> 0 (0 counts)
+INFO    gripper: --> gripper gripper warmup -> 255 (255 counts)
+INFO    gripper: --> gripper gripper warmup -> 150 (150 counts)
+INFO    gripper: --> gripper gripper warmup -> 255 (255 counts)
+INFO    gripper: --> gripper gripper warmup -> 150 (150 counts)
+INFO    gripper: --> gripper gripper warmup -> 255 (255 counts)
+INFO    gripper: --> gripper gripper warmup -> 0 (0 counts)
+INFO    bnc-assembly: ==============================================================================
+INFO    bnc-assembly: CYCLE 1/10
+INFO    bnc-assembly: ==============================================================================
+INFO    arm: Speed scale [reconfigure]: 1.00x the global limits
+INFO    arm: [dry-run] pick pose -> q=[-1.309 -2.705 -1.745 -3.316 -1.571  3.403]
+INFO    arm: Speed scale [scan]: 1.00x the global limits
+INFO    gripper: --> gripper open (3 counts)
+
+[ground_plane] NO cable detected in this view -- see data\ground_scan_labeled.png
+Enter "n" for a NEW view, "z" to move 50 mm toward the cable, or "q":
+target #> pybullet build time: Aug 26 2026 17:05:27

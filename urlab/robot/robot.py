@@ -78,8 +78,10 @@ class Robot:
             self.register_gripper(Robotiq2F85(cfg))
 
         # Hand-eye: tool0 -> camera. Static, so it never expires -- this single edge replaces
-        # the old static_transform_publisher.
-        self.T_tool0_cam = from_cfg(cfg.section('hand_eye'))
+        # the old static_transform_publisher. The calibration lives in configs/frames.yaml (the
+        # `camera` frame entry); a config-level `hand_eye:` block, where present, overrides it.
+        from .. import tool_frames
+        self.T_tool0_cam = tool_frames.hand_eye(cfg)
         self.register_frame(self.camera_frame, self.T_tool0_cam)
 
         # Frames rigidly attached to tool0. `grasp` is the TCP a grasp pose is expressed

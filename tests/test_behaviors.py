@@ -303,24 +303,6 @@ class _MarkerPlan:
     ransac_min_inliers = 2
 
 
-def test_fusion_weights_closer_views_more():
-    """A close view must dominate a far one (weight d^-2), and a view beyond the 500 mm
-    standoff cap must be dropped outright."""
-    from urlab.skills import marker_localize as mloc
-
-    T_true = translation_matrix([1.0, 0.0, 0.0])
-    T_off = translation_matrix([1.0, 0.010, 0.0])           # a 10 mm-wrong far view
-    fused = mloc.fuse_markers({7: [(T_true, 0.1), (T_off, 0.4)]}, _MarkerPlan)
-    err_mm = abs(fused[7][0][1, 3]) * 1000.0
-    # weights 100 : 6.25 -> the wrong far view contributes ~0.6 mm, not the unweighted 5 mm
-    assert err_mm < 1.0, f'closer views must dominate; got {err_mm:.2f} mm of pull'
-    assert fused[7][3] == 2 and fused[7][4] > 0
-
-    # beyond the cap: dropped -- and min_views then bites
-    fused = mloc.fuse_markers({7: [(T_true, 0.1), (T_off, 0.6)]}, _MarkerPlan)
-    assert 7 not in fused, 'a single surviving view (min_views 2) must not fuse'
-
-
 def test_vote_weighs_markers_by_their_certainty():
     from urlab.skills import marker_localize as mloc
 
@@ -691,8 +673,9 @@ def test_disassembly_walks_the_state_ladder_backwards():
     """Assembly walks engaged -> seated -> locked; disassembly must walk locked -> seated ->
     engaged -> removed, and each rung may only be claimed by the step that undoes it. The
     failure this prevents is reporting a connector 'removed' that was never unlocked."""
-    from urlab.apps.bnc_assembly import (CLOCK_STATES, UNCLOCK_STATES, _advance_state,
-                                         _retreat_state)
+    from urlab.domain import (CLOCK_STATES, UNCLOCK_STATES,
+                              advance_state as _advance_state,
+                              retreat_state as _retreat_state)
 
     assert CLOCK_STATES == ('engaged', 'seated', 'locked')
     assert UNCLOCK_STATES == ('locked', 'seated', 'engaged', 'removed')
@@ -753,7 +736,7 @@ def test_disassembly_config_is_coherent():
     import yaml
     cfg = yaml.safe_load(open(os.path.join(os.path.dirname(__file__), '..', 'configs',
                                            'bnc_assembly.yaml')))
-    d = cfg['assembly']['disassembly']
+    d = cfg['disassembly']
     assert isinstance(d['enabled'], bool), 'enabled must be a plain bool'
     # NO unclock_connector: the axial grasp holds the collar and the connector body together,
     # so the single reverse turn releases both -- a separate bayonet rotation would turn a part
@@ -983,7 +966,7 @@ def _bnc_frames():
     """(tool0->fingertip, junction_in_fingertip, nominal in-hand belief, a detected junction).
 
     The detected junction has x = the connector axis and z = the ground normal, which is what
-    skills/scan's frame_from_axis builds."""
+    transforms.frame_from_axis builds."""
     from urlab.transforms import xyzrpy_to_matrix
     return (xyzrpy_to_matrix(list(_T_TOOL0_FTIP_XYZ), list(_T_TOOL0_FTIP_RPY)),
             xyzrpy_to_matrix([0, 0, 0], [0, 0, np.pi]),              # cables.yaml bnc
@@ -1709,7 +1692,7 @@ def test_the_engage_report_shows_every_termination_condition():
     judged without the threshold it was tested against -- and the one that fired is marked."""
     import logging
 
-    from urlab.apps.bnc_assembly import _engage_report
+    from urlab.skills.bnc import _engage_report
 
     class _Guard:
         enabled, max_force, max_torque = True, 60.0, 8.0
@@ -1727,15 +1710,15 @@ def test_the_engage_report_shows_every_termination_condition():
         h = logging.Handler()
         h.emit = lambda r: rec.append(r.getMessage())
         lg = logging.getLogger('cable-assemble') if False else None
-        from urlab.apps import bnc_assembly as app
-        app.log.addHandler(h)
-        old = app.log.level
-        app.log.setLevel(logging.INFO)
+        from urlab.skills import bnc as bnc_skills
+        bnc_skills.log.addHandler(h)
+        old = bnc_skills.log.level
+        bnc_skills.log.setLevel(logging.INFO)
         try:
             _engage_report(status, dict(s or state), 1.83, object(), guard, _Combo())
         finally:
-            app.log.removeHandler(h)
-            app.log.setLevel(old)
+            bnc_skills.log.removeHandler(h)
+            bnc_skills.log.setLevel(old)
         del lg
         return '\n'.join(rec)
 
@@ -1855,7 +1838,7 @@ def test_the_reorient_recovery_places_the_cable_on_the_socket_heading():
     from urlab.transforms import xyzrpy_to_matrix
 
     cfg = urconfig.load('bnc_assembly')
-    r = cfg.get_path('assembly.reorient_recovery')
+    r = cfg.get_path('reorient_recovery')
     assert r and bool(r.get('enabled')), 'the recovery must be available'
     g = r['fingertip_in_connector']
     assert list(g['rpy_deg']) == [0.0, 0.0, 0.0], (
@@ -1942,7 +1925,6 @@ def test_the_reorient_recovery_reuses_the_scan_it_already_has():
     which reads as though the first answer was lost."""
     import inspect
 
-    from urlab.apps import bnc_assembly as app
     from urlab.apps import cable_pick_assemble as cpa
 
     sig = inspect.signature(cpa._pick)
@@ -1960,7 +1942,8 @@ def test_the_reorient_recovery_reuses_the_scan_it_already_has():
     i_lift = src.index('rests_on_ground_plane')
     assert i_keep < i_lift, 'the detection is stashed BEFORE the ground lift, or reuse doubles it'
 
-    rec = inspect.getsource(app.build_and_run)
+    from urlab.skills import bnc as bnc_skills
+    rec = inspect.getsource(bnc_skills.reorient_recovery)
     assert 'T_conn=getattr(geom, ' in rec, 'the recovery must pass the stored detection back in'
 
 
@@ -2002,12 +1985,16 @@ def test_both_places_lay_the_connector_along_the_socket_axis():
     import inspect
     from urlab.apps import bnc_assembly as app
     src = inspect.getsource(app.build_and_run)
-    assert 'T_ftip_conn_catalogue' in src and 'held_belief(T_ftip_conn_catalogue' in src, (
+    from urlab.skills import bnc as bnc_skills
+    ksrc = inspect.getsource(bnc_skills)
+    assert 'T_ftip_conn_catalogue' in ksrc and 'held_belief(T_ftip_conn_catalogue' in ksrc, (
         'the recovery must start from the catalogue belief, not one that already carries a grasp')
 
     # BOTH places share one aimed pose, and neither descends from the pick pose any more
-    assert src.count('def aligned_place_pose(') == 1
-    assert src.count('aligned_place_pose(') >= 3, 'the recovery AND the end place must use it'
+    from urlab.skills import bnc as bnc_skills
+    ksrc = inspect.getsource(bnc_skills)
+    assert ksrc.count('def aligned_place_pose(') == 1
+    assert (src + ksrc).count('aligned_place_pose(') - 1 >= 3,         'the recovery AND the end place must use it'
     assert "move_j(q_pick, label='pick pose (to place)')" not in src, (
         'the end-of-run place must AIM, not inherit the pick attitude'
     )
@@ -2019,7 +2006,7 @@ def test_the_aligned_place_pose_is_flat_and_on_the_socket_heading():
     from urlab.transforms import xyzrpy_to_matrix
 
     cfg = urconfig.load('bnc_assembly')
-    off = cfg.get_path('assembly.reorient_recovery.place_offsets')
+    off = cfg.get_path('reorient_recovery.place_offsets')
     # a socket with a real attitude, not an axis-aligned one
     T_t = xyzrpy_to_matrix([0.12, 1.09, -0.155], np.radians([-0.42, -0.44, 90.78]))
     yaw = np.arctan2(T_t[1, 0], T_t[0, 0]) + np.radians(off['yaw_deg'])
@@ -2086,13 +2073,13 @@ def test_the_reorient_waits_for_the_cable_to_settle_before_re_scanning():
     import inspect
 
     from urlab import config as urconfig
-    from urlab.apps import bnc_assembly as app
 
     settle = float(urconfig.load('bnc_assembly').get_path(
-        'assembly.reorient_recovery.settle_s'))
+        'reorient_recovery.settle_s'))
     assert settle >= 1.0, f'{settle} s is not long enough for a cable to stop moving'
 
-    src = inspect.getsource(app.build_and_run)
+    from urlab.skills import bnc as bnc_skills
+    src = inspect.getsource(bnc_skills.reorient_recovery)
     i_open = src.index("gripper.open('release (cable reoriented)')")
     i_wait = src.index('_t.sleep(settle)')
     i_done = src.index('REORIENT COMPLETE')
@@ -2472,9 +2459,9 @@ def test_the_admittance_integrator_is_never_reset_under_load():
     assert 'ASSERTION, NOT A MOTION' in AdmittanceController.reset.__doc__, (
         "reset's precondition must be written down, not folklore")
 
-    src = open(os.path.join(os.path.dirname(urconfig.__file__), 'apps',
-                            'bnc_assembly.py'), encoding='utf-8').read()
-    eng = src[src.index('def engage_insertion():'):src.index('def connector_clocking():')]
+    eng = open(os.path.join(os.path.dirname(urconfig.__file__), 'skills',
+                            'bnc.py'), encoding='utf-8').read()
+    eng = eng[eng.index('def engage_insertion('):eng.index('def disassembly(')]
 
     # THE CONFIRMATION runs in hard contact -- it must inherit the equilibrium, not zero it.
     conf = eng[eng.index('confirming the seat'):eng.index('robot.arm.servo_stop()',

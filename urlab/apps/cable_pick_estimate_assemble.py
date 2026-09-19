@@ -39,8 +39,7 @@ from .. import tool_frames
 from ..robot import AdmittanceController, ForceGuard
 from ..skills import reset
 from ..skills import trajectory as traj
-from ..skills.manifold import (FORCE_COLS, ManifoldEstimator, POSE_COLS, TORQUE_COLS,
-                               vec6_from_mats)
+from ..skills.manifold import ManifoldEstimator, vec6_from_mats
 from ..skills.pick import (GraspCheck, GraspController, GraspGeometry, GraspImageRecorder,
                            GraspRecovery, belief_offset, fingertip_in_connector,
                            held_belief, offset_belief, retry_offset_x, verify_cable_held)
@@ -49,38 +48,13 @@ from ._cable import build_scanner, make_confirm
 from ._common import experiment_dir, prompts_off, seg_time
 from ._estimate_plots import plot_estimate as _plot_estimate
 from ._estimate_plots import plot_run as _plot_run
+from ..skills.estimate import (corr_to_m as _corr_to_m, observe as _observe,
+                               save_observations as _save_observations)
 from ._runner import run_app
 from .cable_pick_assemble import _guarded, _pick
 from .uncertain_sampling import _retract_ref
 
 log = urlog.get('cable-est-assemble')
-
-
-def _corr_to_m(T_corr_mm):
-    """The estimator's correction (translation in mm) -> a metre-based transform."""
-    T = np.array(T_corr_mm, dtype=float)
-    T[:3, 3] /= 1000.0
-    return T
-
-
-def _observe(robot, T_tool0_conn, T_base_tconn):
-    """One observation row: believed connector-wrt-target [mm, deg 6-vec] + raw wrench in the
-    believed connector frame [N, Nm]."""
-    T_base_tool0 = robot.tool0()
-    T_base_conn = T_base_tool0 @ T_tool0_conn
-    rel = inverse(T_base_tconn) @ T_base_conn
-    xyz, rpy = matrix_to_xyzrpy(rel)
-    # Flange pose handed over: wrench_in moves the moment's reference point off the flange,
-    # and re-reading the pose there would pair the wrench with a different cycle.
-    w = robot.arm.wrench_in(T_base_conn, T_base_tool0)
-    return list(xyz * 1000.0) + list(np.degrees(rpy)) + list(w)
-
-
-def _save_observations(path, rows):
-    with open(path, 'w', newline='') as fh:
-        w = _csv.writer(fh)
-        w.writerow(POSE_COLS + FORCE_COLS + TORQUE_COLS)
-        w.writerows(rows)
 
 
 def _parse_traj_noise(a):

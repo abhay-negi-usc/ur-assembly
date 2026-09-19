@@ -1,5 +1,16 @@
 # Refactor plan — behaviours, objects, trees
 
+> **STATUS (2026-08-28): EXECUTED, with one deliberate change — NO BEHAVIOUR TREES.**
+> The port is complete on branch `clean_refactor`: `apps/bnc_assembly.py` is the plain
+> algorithmic script, the behaviours live in `urlab/skills/bnc.py`, the domain (specs, the
+> BncAssembly bag, frames/pacing/state math) in `urlab/domain.py`, and the termination
+> detectors in `urlab/robot/detectors.py`. Composition is plain Python control flow — the
+> tree layer described below was rejected mid-port as harder to follow (2026-08-28 decision).
+> The as-built architecture is documented in `docs/bnc_assembly.md`; the step-by-step record
+> with the verification gates is `docs/bnc_port_log.md`. The one remaining step is the yaml
+> schema swap (see 'Still open' in bnc_assembly.md). The plan below is kept as the historical
+> design document.
+
 *Drafted 2026-08-24. Written to be read cold: if you are an assistant or a new engineer picking
 this up with no prior context, everything you need to start is in this file. A working plan, not a
 spec — where you disagree, change it and keep the reasoning visible.*

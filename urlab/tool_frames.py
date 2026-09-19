@@ -261,3 +261,48 @@ def check_drift(frames, cfg, tol_mm=0.5, tol_deg=0.2):
             log.warning('frames.yaml %r differs from config section %r by %.2f mm / %.2f deg -- '
                         'the Robot facade uses the SECTION; align them.', name, section, d_mm, d_deg)
     return drifted
+
+def hand_eye(cfg=None):
+    """tool0 -> camera, from the CONFIG's `hand_eye:` block when it declares one, else from the
+    frames catalogue's `camera` entry.
+
+    The block was the legacy home; the catalogue is where the measured frames live, so a config
+    that says nothing gets the calibration everything else uses. A config that DOES declare
+    `hand_eye:` owns it wholesale -- that is how the older cells with a different camera-mount
+    calibration keep their value. Missing from BOTH is an error, not an identity: from_cfg({})
+    would quietly put the camera at the flange and every detection would be ~80 mm off."""
+    if cfg is not None and cfg.get('hand_eye'):
+        return from_cfg(_pose_si(dict(cfg.get('hand_eye'))))
+    frames = load_frames(cfg)
+    if 'camera' not in frames:
+        raise ValueError(f"no hand_eye: block in the config and no 'camera' frame in "
+                         f"{frames_path(cfg)} -- one of the two must define tool0 -> camera")
+    return frames['camera']
+
+
+def aruco_defaults(cfg=None):
+    """The `aruco:`-shaped dict derived from the frames catalogue's marker_rigs.
+
+    The rigs already record the CALIBRATION -- dictionary and per-marker printed size -- so a
+    config does not have to repeat them (and drift, which is worse). Returns
+    {'dictionary': ..., 'marker_sizes_m': {id: size}, 'marker_size_m': <the common size>};
+    empty dict if the catalogue has no rigs."""
+    rigs = (_read(frames_path(cfg)).get('marker_rigs') or {})
+    dictionaries, sizes = set(), {}
+    for rig in rigs.values():
+        if rig.get('dictionary'):
+            dictionaries.add(str(rig['dictionary']))
+        for mid, m in (rig.get('markers') or {}).items():
+            if isinstance(m, dict) and m.get('size_mm') is not None:
+                sizes[int(mid)] = float(m['size_mm']) / 1000.0
+    if not dictionaries and not sizes:
+        return {}
+    if len(dictionaries) > 1:
+        raise ValueError(f'marker_rigs disagree on the dictionary: {sorted(dictionaries)} -- '
+                         f'set aruco.dictionary in the config to pick one')
+    out = {'marker_sizes_m': sizes}
+    if dictionaries:
+        out['dictionary'] = next(iter(dictionaries))
+    if sizes and len(set(sizes.values())) == 1:
+        out['marker_size_m'] = next(iter(sizes.values()))
+    return out

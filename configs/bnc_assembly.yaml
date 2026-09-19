@@ -11,20 +11,8 @@
 # and success is the OPERATOR's call at the check.  assembly.target_frame is the recorded mate
 # (frames.yaml targets:); the in-hand belief starts from the grasp geometry.
 
-robot:
-  ip: 192.168.125.2
-  dry_run: false
-  payload:
-    mass_kg: 1.3
-    cog_mm: [-26.0, 28.0, 30.0]
-base_frame: base_link
-tip_frame: tool0
-camera_frame: camera1_color_optical_frame
-
-hand_eye:
-  xyz_mm: [-9.0, -80.0, 31.0] # accounting for plate deformation
-  rpy_deg: [0.0, 0.0, 0.0]
-
+robot_config: robot.yaml            # the machine (see configs/robot.yaml)
+camera_config: camera.yaml          # the sensor  (see configs/camera.yaml)
 camera:
   serial_no: "218622272137"
   width: 1280
@@ -51,10 +39,6 @@ camera:
 # The rig itself (which markers, sizes, target pose in each) lives in configs/frames.yaml
 # under marker_rigs:, keyed by assembly.target_frame, produced by urlab.apps.marker_calibration.
 # This block is only the detector's dictionary + a fallback size for an undeclared id.
-aruco:
-  dictionary: DICT_4X4_50
-  marker_size_mm: 38.8
-
 # THE VIEW SWEEP, shared with urlab.apps.marker_calibration (urlab/skills/marker_localize.py).
 # Offsets are CAMERA-FRAME poses relative to the start pose; the markers must already be in
 # view.  Only camera TRANSLATION adds information (a single ArUco PnP trades in-plane rotation
@@ -105,7 +89,13 @@ marker_views:
     ring_views: 36
 
 sam3:
-  mode: junction
+  # ONE detection method (2026-08-27): junction geometry, graph centreline tracing, slope
+  # junction selection, prompts fixed to "cable"/"connector". The former knobs -- mode:
+  # (neck|junction|tip), trace: (graph|geodesic), junction_select: (slope|longest_run),
+  # cable_prompt:/connector_prompt:, and the neck-only adaptive:/confidence_floor: (adaptive
+  # re-ran segmentation over a per-prompt threshold grid until a neck appeared;
+  # confidence_floor was that search's lowest allowed threshold) -- are gone: one validated
+  # path instead of options nobody switched.
   # Centreline tracer for the junction geometry (urlab/perception/junction.py, vendored):
   #   graph    -- build the skeleton's graph and walk THROUGH a self-crossing, pairing branches on
   #               tangent continuity, flagging the fused samples so they cannot be mistaken for the
@@ -113,11 +103,6 @@ sam3:
   #   geodesic -- the ORIGINAL: shortest path between the shape's two farthest points. Shortcuts a
   #               loop (skipping a lobe, sometimes the one the connector is on) and reports the
   #               width spike at a crossing as a junction, with high contrast. Kept for A/B.
-  trace: graph
-  cable_prompt: cable
-  connector_prompt: connector
-  adaptive: true
-  confidence_floor: 0.2
   # HOW the junction is picked off the diameter profile.
   #   slope       -- (default) the cable-side flank of the thickest TRANSITION. A junction IS a
   #                  transition, so an intermediate feature -- a strain-relief boot, a moulded
@@ -126,26 +111,33 @@ sam3:
   #                  junction from a median 23% of the arc away from the connector to 2.8%.
   #   longest_run -- the ORIGINAL: find the longest constant-diameter run, take whichever end
   #                  borders a rise. Kept to reproduce a past run, and as a fallback.
-  junction_select: slope
   # How many times the cable diameter a feature must reach to count as a connector. This also
   # decides HOW MANY junctions a cable reports: every qualifying feature gets one, so a cable
   # with a plug at each end reports two. Lower it and cable bends start reading as connectors
   # (~1.6 on these cables); raise it and a low-profile plug is missed (a real USB-A read 1.82).
   connector_peak_min: 1.8
+  # THE THREE REMAINING KNOBS of the junction detector:
+  #
+  # min_contrast -- reject a junction whose connector/cable diameter ratio is below this. A
+  #   flat profile is not a real junction: on the bench-photo test set, floor seams and bare
+  #   cable scored ~1.0-1.1 while every real connector measured >= 1.8. 0 = filter OFF, which
+  #   passes those false positives downstream; ~1.3-1.5 is the measured safe band if enabled.
+  #   (Distinct from connector_peak_min, which gates CANDIDATE features inside the selector;
+  #   this one gates the final answer.)
+  #
+  # work_dim -- the junction geometry runs on a copy downscaled so max(H, W) == work_dim, and
+  #   maps results back to full resolution. Speed/precision trade: the tracer's cost grows with
+  #   the skeleton size, but the cable must stay enough pixels wide to measure -- at 1024 a
+  #   thin cable is only ~7 px across internally, so widths are quantised to ~15%. Raise it if
+  #   thin cables misjudge diameters; expect roughly linear slowdown.
+  #
+  # overlay_opacity -- how strongly the saved DEBUG overlay (mask tint, centreline, junction
+  #   dot/arrow) is blended over the raw camera frame in the labelled images. Cosmetic only:
+  #   0..1 (clipped), 1 = fully opaque drawing, lower = see more of the photo. No effect on
+  #   detection.
   min_contrast: 0.0
   work_dim: 1024
   overlay_opacity: 0.5
-
-connector_estimator:
-  min_views: 3
-  min_inlier_views: 3
-  min_parallax_deg: 3.0
-  inlier_dist_mm: 10.0
-  max_range_mm: 100.0
-  reject_dist_mm: 50.0
-  up_axis: [0.0, 0.0, 1.0]
-  workspace_min: [-10.0, -10.0, -10.0]
-  workspace_max: [10.0, 10.0, 10.0]
 
 # ---- Ground-plane manual-select scan (the default scan.mode) ----
 # ---- Coloured TAG on the target cable (selection only; never touches the grasp) -------------
@@ -180,10 +172,6 @@ ground_plane:
 
 connector_frame: connector
 
-cable_end:
-  enabled: true
-  switch_distance_mm: 250.0
-
 # (The grasp pose comes from <cable>.junction_in_fingertip in cables.yaml.)
 grasp_tcp_offset:
   xyz_mm: [0.0, 0.0, 0.0]
@@ -193,40 +181,9 @@ fingertip_grasp:
   rpy_deg: [179.9998479605, 0.0, -90.0002104591]
 
 scan:
-  mode: ground_plane
-  require_detection: true
-  min_good_views: 3
-  max_passes: 3
-  view_settle_s: 0.5
-  max_view_distance_mm: 250.0
-  approach:
-    enabled: true
-    step_mm: 250.0
-    min_distance_mm: 250.0
-    nominal_distance_mm: 230.0
-    scale_offsets: true
-    recenter: true
-    max_view_delta_mm: 100.0
-    max_view_delta_deg: 45.0
-  relative_bounds:
-    xyz_mm: [80.0, 80.0, 50.0]
-    rpy_deg: [20.05352282958, 20.05352282958, 5.72957795131]
-  offsets:
-    - {xyz: [ 0.000,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
-    - {xyz: [ 0.040,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
-    - {xyz: [ 0.028,  0.028, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
-    - {xyz: [ 0.000,  0.040, 0.00], rpy: [ 0.1722,  0.0000, 0.0]}
-    - {xyz: [-0.028,  0.028, 0.00], rpy: [ 0.1224,  0.1224, 0.0]}
-    - {xyz: [-0.040,  0.000, 0.00], rpy: [ 0.0000,  0.1722, 0.0]}
-    - {xyz: [-0.028, -0.028, 0.00], rpy: [-0.1224,  0.1224, 0.0]}
-    - {xyz: [ 0.000, -0.040, 0.00], rpy: [-0.1722,  0.0000, 0.0]}
-    - {xyz: [ 0.028, -0.028, 0.00], rpy: [-0.1224, -0.1224, 0.0]}
-  refine:
-    enabled: false
-    orbit_deg: [12.0, -12.0, 20.0, -20.0]
-    max_orbit_deg: 25.0
-    min_height_mm: 120.0
-
+  # ONE scan method (2026-08-28): the single-image ground-plane estimate (ground_plane: block).
+  # The multi-view orbit (CableScanner + ConnectorEstimator) and reconstruction mode were removed;
+  # `mode:` is gone with them.
 save_scan_images: true
 data_dir: data
 scan_images_subdir: bnc_assembly
@@ -701,7 +658,13 @@ pick_joints_deg: [-75, -155, -100, -190, -90, 195]
 # ===================================================================================================
 # ASSEMBLY -- the estimate-while-assemble loop
 # ===================================================================================================
-assembly:
+# ========================================================================================
+# THE BNC RUN -- one top-level block per behaviour, mirroring urlab/domain.py specs.
+# (2026-08-28 schema swap: these blocks were assembly.<key>; see
+#  docs/bnc_config_migration.md for the exact old -> new mapping.)
+# ========================================================================================
+
+run:
   # PAUSE BETWEEN BEHAVIOURS.  Every boundary -- pick, contact, engage, connector clocking,
   # the collar, the tug, the escape, disassembly -- stops and waits for Enter, so an operator can
   # look at what just happened before the next thing starts.
@@ -712,78 +675,6 @@ assembly:
   # how the failed-engage gate went missing.  Set this false, or run --no-prompts, for genuinely
   # unattended runs.  Dry runs never prompt, and EOF continues so a headless run cannot hang.
   gate_between_behaviors: true
-
-  # The KNOWN target (where the CONNECTOR must end up, base_link): names a configs/frames.yaml
-  # frame whose `targets:` entry is the recorded mate.  MEASURE: hand-guide to a good mate,
-  # read `base_link <- <frame>` off the monitor, paste it under targets: (mm/deg).
-  # RECORDED THROUGH THE HOLDER, DRIVEN WITH THE FINGERPADS -- deliberately DIFFERENT
-  # frames.  The mate is recorded with the cable clamped in the FINGER HOLDER (jog to a good
-  # mate, read `base_link <- bnc_connector_finger_holder` off the monitor), so targets[
-  # finger_holder] is a WORLD pose of the connector datum at the mate.  At run time the
-  # PICKED part sits in the fingerpads (estimation.initial_connector_frame), and the engage
-  # drives that believed connector onto this recorded world pose -- landing the physical
-  # connector exactly where the mate was recorded.  The two frames must describe the SAME
-  # connector datum (same orientation, differing only in grip depth along tool0 z); the
-  # smoke suite pins that.
-  # ===========================================================================================
-  # REORIENT RECOVERY -- what to do when the coaxial grasp cannot be reached at all.
-  #
-  # THE FAILURE IT ANSWERS.  The coaxial grasp comes at the connector from along its OWN axis,
-  # so whether the arm can get there depends on which way the cable happens to be lying.  A
-  # cable pointing the wrong way has NO collision-free path to that grasp, and retrying cannot
-  # produce one -- the geometry refused, not the attempt.
-  #
-  # THE ANSWER.  A SQUARE grasp (straight down) has no such dependence: the approach is vertical
-  # whatever the heading.  So pick the cable the easy way, set it back down pointing where the
-  # socket points, and re-scan -- the coaxial grasp then has a heading it can reach.  RUNS ONCE
-  # PER PICK: if it is still unreachable after the cable has been squared up, the heading was
-  # not the problem and repeating would only shuffle the part around the bench.
-  #
-  # NO SECOND SCAN AND NO SECOND PROMPT for the recovery pick itself -- nothing has moved
-  # between the refused coaxial attempt and the square retry, only the way the arm means to
-  # approach, so the detection and the cable the operator already identified both still hold.
-  # (The pick AFTER the place does re-scan: by then the cable really has moved.)
-  #
-  # THE PLACE POSE is written wrt the TARGET CONNECTOR, because aligning with the socket is the
-  # entire point.  yaw 0 puts the connector axis on the socket's own compass heading.  ROLL AND
-  # PITCH ARE NOT SETTINGS -- the part is going onto a flat bench, so its axis ends up
-  # horizontal and its z up regardless of the socket's attitude; only the heading carries over.
-  reorient_recovery:
-    enabled: true
-    # THE SQUARE GRASP: the WHOLE pose, not just the angles -- the bite point that suits a
-    # coaxial approach is not the one that suits a vertical one.  This same transform is what
-    # the in-hand belief for the PLACE is derived from, so the pick and the set-down cannot
-    # disagree about where the connector is being held.
-    fingertip_in_connector:
-      xyz_mm:  [20.0, 0.0, -8.0]
-      rpy_deg: [0.0, 0.0, 0.0]
-    # OFFSETS IN THE TARGET CONNECTOR FRAME.  x runs along the socket axis, so -400 sets the
-    # cable down 400 mm OUT IN FRONT of the socket -- clear of the fixture and its mounting
-    # plate, which a drop directly beneath the socket would land on.
-    place_offsets:
-      x_mm: -250.0
-      y_mm: -100.0
-      # z is IGNORED while snap_to_ground is on, and it should be: "on the ground plane" is the
-      # requirement, and the resting height is a property of the PART (ground + one barrel
-      # radius, ~9 mm here), not a number worth typing twice.  Set snap_to_ground false to
-      # honour z_mm literally.
-      z_mm: 0.0
-      yaw_deg: -45.0
-    snap_to_ground: true
-    # RELEASE HEIGHT above where the connector comes to rest -- the gripper opens here and the
-    # part drops the last few mm.  Small on purpose: enough that the pads are not pressing the
-    # cable into the bench when they let go, not so much that it bounces or rolls.
-    release_clearance_mm: 10.0
-    approach_mm: 120.0               # stand-off above the place, straight down onto it
-    # WAIT BEFORE RE-SCANNING.  A cable that has just been carried and set down is still under
-    # whatever tension the move put into it, and it keeps moving for a second or two after the
-    # fingers open -- the free length pulls the connector round as it relaxes.  Scanning into
-    # that returns a junction pose the part has already left, and the coaxial grasp is the one
-    # approach that cannot absorb a heading error.  So wait, THEN take the picture.
-    #
-    # (The end-of-cycle disassembly place needs no equivalent: the end reset, the home move and
-    # the next cycle's marker sweep already put tens of seconds between it and the next scan.)
-    settle_s: 5.0
   target_frame: bnc_connector_finger_holder
 
   # ---- WHERE THE TARGET POSE COMES FROM ------------------------------------------------------
@@ -796,24 +687,6 @@ assembly:
   # The sweep runs ONCE, after the start reset and BEFORE the pick (gripper empty, arm at
   # home, clear view -- after the mate the socket is behind a connector and a gripper).
   target_source: visual
-  visual_target:
-    # Joint degrees for the sweep's start pose.  null = sweep from HOME, which IS the
-    # marker view pose (reset.home_joints_deg) -- set this only to sweep from somewhere
-    # else, and then use the SAME value for marker_calibration's view_joints_deg.
-    view_joints_deg: null
-    # Per-marker SERVO REFINEMENT at run time (see marker_views.servo for the parameters,
-    # which are shared with marker_calibration and must stay identical to it).  false = the
-    # plain sweep only -- faster, but the localization then views the markers differently
-    # from how the calibration did, so the PnP bias cancellation is partly given up.
-    servo_refine: true
-    # Keep true: return to home after the sweep; the app then drives to pick_joints_deg,
-    # where the scan, grasp geometry and retry offsets are written.
-    return_home_after: true
-    # SANITY GATE on how far the visual answer may sit from the recorded mate.  The fixture
-    # is allowed to move -- that is the point -- but a metre-scale shift is a stale rig or a
-    # marker on the wrong fixture.  null on either disables it.
-    max_shift_mm: 25.0
-    max_shift_deg: 10.0
 
   # ENGAGE CLOCK ANGLE, deg about the socket frame's own +X -- the roll the connector is
   # MATED at (a BNC is free about that axis until the bayonet pins pick up).  The socket
@@ -825,17 +698,6 @@ assembly:
   # is non-zero).  0.0 = the declared roll.
   engage_clock_deg: 0.0
 
-  # The ideal insertion path: CONNECTOR w.r.t. the TARGET connector, last row = identity (the mate).
-  trajectory_csv: assembly_trajectory.csv
-  trajectory_angles_deg: false
-  translational_resolution_mm: 1.0
-  rotational_resolution_deg: 1.0
-
-  # Stand-off beyond the trajectory START (target-connector frame), approached once after the lift.
-  standoff:
-    axis: [-1.0, 0.0, 0.0]
-    distance_mm: 100.0
-
   # Between attempts: back out along the CONNECTOR's OWN -X from wherever the insert stopped.
   retract_distance_mm: 30.0
 
@@ -843,194 +705,6 @@ assembly:
   # attempt about to be RETRIED backs off first; one the operator calls successful holds the
   # seat -- which is what makes that pose the ENGAGED pose the clocking maneuvers use.)
   max_attempts: 1
-
-  # ===========================================================================================
-  # ENGAGE -- the trajectory-following insertion (insertion_mode: engage)
-  # ===========================================================================================
-  # Drives configs/assembly_trajectory.csv from its first row to the mate, extends it by
-  # preload_mm, and superimposes an optional oscillation.  With every amplitude at 0 this is a
-  # plain DIRECT insertion.  TWO CLOCKS on purpose: the PATH advances by DISTANCE
-  # (speed.phase_scale.engage x the translation cap)
-  # while the OSCILLATION advances by TIME, so the wiggle frequency does not depend on the
-  # insert speed.
-  engage:
-    # SPEED for this phase lives in speed.phase_scale.engage (0.05 x the 50 mm/s cap = 2.5
-    # mm/s).  Kept slow deliberately: contact force scales hard with approach speed, and whole
-    # oscillation cycles must fit INSIDE the insertion.
-
-    # PRELOAD, mm past the mate along the connector's own +X, so the reference finishes
-    # pressing rather than merely arriving.  0 = stop exactly on the mate.  (Distinct from
-    # final_insertion.preload_mm, which belongs to the estimate-mode commit.)
-    preload_mm: 15.0
-
-    # Reference rebuild rate.  Must be >= 4x the highest active frequency or the sampled sine
-    # aliases -- validated pre-motion.
-    sample_rate_hz: 25.0
-
-    # Axes, amplitudes, frequencies, phases, taper and the oscillation speed caps come from
-    # configs/wiggle_sampling.yaml at run time -- the one place they are tuned.  Add a
-    # `wiggle:` sub-block for a one-off override.
-    wiggle_from: wiggle_sampling.yaml
-
-    # ---- TERMINATION -------------------------------------------------------------------------
-    # AXIAL force limit: the component along the CONNECTOR'S +X (the insertion reaction).
-    # Reaching it ENDS THE ENGAGE, not the run -- meeting resistance partway is what the
-    # bayonet search is for.  Axial rather than |f| is what lets it be set low: a magnitude
-    # limit tight enough to catch real resistance also stops on every lateral graze.
-    # A MISSED ENGAGEMENT -- the full path ran, preload included, without the axial limit ever
-    # being reached -- means the connector never touched the socket.  That is a FAILURE, not a
-    # completion: clocking from there would turn a connector that is not in a socket.
-    #
-    # The run recovers by putting the cable DOWN, returning to the pick view, and starting the
-    # cycle over -- so the target is re-localized, the in-hand belief is reset to nominal, and
-    # the cable is re-detected and re-grasped.  Every input to the engagement is measured
-    # afresh, which is the point: a miss usually means the target pose or the belief was wrong,
-    # and pushing again from the same place with the same numbers cannot fix that.
-    # A retried cycle does NOT consume one of the `cycles` asked for.
-    #
-    # A BUDGET for the whole run, not a loop -- a cell that keeps missing has a real setup
-    # problem and retrying wears the part.  0 = never recover, fail on the first miss.
-    # NOTE a miss is only DETECTABLE while max_axial_force_n > 0: with no limit the axial
-    # condition can never fire, so every engage ends 'complete' and a miss looks like a seat.
-    max_misses: 2
-
-    # ---- CONFIRM THE SEAT ------------------------------------------------------------------
-    # The axial limit only says SOMETHING RESISTED.  Pushing a connector flat against the
-    # fixture body, the bench, or the rim of the wrong hole develops axial reaction exactly like
-    # a real insertion and stops the engage identically.  Two things separate a socket from a
-    # face, and both are measured by WIGGLING IN PLACE at the stopped depth:
-    #
-    #   RADIAL FORCE   a barrel inside a socket is laterally constrained, so rocking it pushes
-    #                  back ACROSS its own axis.  A connector on a flat face just slides.
-    # WIGGLE TRAVEL is measured and logged, but is NOT a criterion: the commanded amplitude is
-    # only an upper bound on what a free connector would do, the admittance spring already
-    # suppresses most of it, and the test rejected good seats.  The number is worth reading; it
-    # is not worth failing a run on.
-    #
-    # Failing the radial test is treated exactly like a MISS: the cable goes down, the arm
-    # returns to the pick view, and everything is measured again (see max_misses).  Continuing
-    # would clock a connector that is only leaning on something.
-    confirm:
-      enabled: true
-      radial_force_n: 1.0        # |force| across the connector axis, in its OWN Y-Z
-      radial_persistence_s: 0.10 # ...held continuously for this long
-      max_wiggle_mm: 1.0         # RETAINED for the log only -- no longer a pass/fail criterion
-      cycles: 1                  # how many full wiggle cycles to watch
-      fallback_s: 0.5            # confirmation window when no oscillation is configured
-    
-    # ---- STAGE 1: CONTACT -- find the socket before engaging into it -----------------------
-    # Slow and UN-OSCILLATED, at speed.phase_scale.contact.  Driving the whole insertion in one
-    # go means the wiggle and the full approach speed are already running when the parts first
-    # touch, so first contact is the least controlled moment of the phase.  Creeping in first
-    # lets the engagement start from a MEASURED contact pose instead of a guess.
-    contact:
-      enabled: true
-      force_n: 1.0             # light -- this is 'are we touching', not 'are we seated'
-      persistence_s: 0.10
-    
-    # ---- STAGE 2: ENGAGE -- align laterally AND insert, together ---------------------------
-    # From the contact pose the reference fades onto the trajectory over align_s while it
-    # advances, so alignment and insertion happen together and there is no step for the
-    # admittance spring to absorb while already in contact.  The INSERTION AXIS (x) is excluded
-    # from the alignment: x is depth, and depth is what the advance is for.
-    #
-    # SUCCESS IS POSITIVE EVIDENCE ONLY:
-    #   travel_mm   the part actually WENT somewhere -- the one thing a jam cannot fake, and
-    #               what recognises a mate that slides home under low force.
-    #   the axial force limit below, held for persistence_s.
-    # Anything else -- the path running out, the timeout, a jam -- is a MISS and takes the
-    # place-and-re-pick recovery (see max_misses).
-    # ---- THE FAILED-ENGAGE RETRACT ---------------------------------------------------------
-    # After a missed engagement the arm is about to TRAVEL SIDEWAYS to put the cable down.  If
-    # the connector is still in or against the socket when that happens it levers the socket off
-    # its fixture -- the recovery breaks the very thing the run exists to mate into.  So this
-    # retraction is MANDATORY: failing it ABORTS the recovery and leaves the arm where it is,
-    # because stopping with the part held is recoverable by hand and a snapped socket is not.
-    #
-    # ALONG THE TARGET CONNECTOR'S -X, not the believed connector's.  A missed engagement is
-    # evidence the BELIEF is wrong, and retracting along a wrong axis pulls at an angle -- which
-    # is how a recovery levers the socket instead of freeing the part.
-    #
-    # VERIFIED, not assumed: the retract drives a compliant REFERENCE, and a jammed connector can
-    # leave the reference free while the part has not moved.  min_mm is the MEASURED clearance
-    # the recovery refuses to travel without.
-    fail_retract:
-      distance_mm: 100.0
-      min_mm: 20.0
-    
-    travel_mm: 5.0
-    timeout_s: 15.0
-    align_s: 2.0             # how long the lateral correction takes to fade in
-    
-    max_axial_force_n: 5.0
-    persistence_s: 0.25          # the limit must hold this long -- rides out contact spikes
-
-    # ---- compliance overrides (else the top-level compliance:) ---
-    # STATIC FOR THE WHOLE ENGAGE (contact, insertion, confirm and settle all share it).
-    # Order is [x, y, z, rx, ry, rz]; translations N/m, rotations Nm/rad. x IS THE INSERTION
-    # AXIS -- these are connector-frame axes, not base.
-    #
-    # HOW MUCH THE PART GIVES: this is an admittance loop, so holding a force REQUIRES
-    # deflecting by force/stiffness, and the commanded pose backs off the contact by exactly
-    # that much. At the max_axial_force_n above:
-    #
-    #     500 N/m  ->  5 N / 500  = 10.0 mm of give     (more than travel_mm: 5.0)
-    #    2000 N/m  ->  5 N / 2000 =  2.5 mm
-    #    5000 N/m  ->  5 N / 5000 =  1.0 mm
-    #
-    # so an axial stiffness low against the force limit can give back more than the insertion
-    # is trying to travel. The run logs the resulting give on the `Engage insertion ON:` line.
-    # RAISE x ALONE to firm up the insertion while keeping the lateral/rotational compliance
-    # that lets a misaligned connector find the socket -- worth keeping soft when the
-    # connector-wrt-fingertip belief carries error, since stiffness turns that error into force.
-    # Damping tracks stiffness automatically (D = zeta * 2*sqrt(M*S)), so raising S stays
-    # critically damped at damping_ratio 1.0; no need to retune mass with it.
-    stiffness: [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
-    mass: null               # null = inherit the top-level compliance:
-    damping_ratio: null      # null = inherit
-    # ---- force guard overrides (else force_guard:) ---
-    # The general guard still runs alongside the axial one and means "hit something
-    # unexpected / jammed".  Keep it well above max_axial_force_n.
-    max_force_n: 40.0
-    max_torque_nm: 8.0
-
-  # ---- CELEBRATE: a flourish after a VERIFIED assembly, before disassembly -----------------
-  # Cosmetic and OFF BY DEFAULT -- nobody wants it firing 50 times in a data-collection run.
-  #
-  # It runs only when the run reached the end state it was CONFIGURED to reach (locked with
-  # collar clocking on, seated with only connector clocking, engaged with neither), and only
-  # after the escape has released the connector and backed the arm off -- so it cannot disturb
-  # what it is celebrating. A failure inside it is logged and ignored; it never fails a good
-  # assembly.
-  #
-  # WRIST-ONLY BY DESIGN. wrist_3 turns about tool0's own axis, so it moves the tool0 ORIGIN by
-  # exactly zero and cannot put the gripper into anything. wrist_1 does move the tool, so it is
-  # small, taken after the rise, and collision-checked like any other joint move.
-  celebrate:
-    enabled: false
-    # HOW OFTEN. A 50-cycle collection should not stop to dance 50 times, but finishing the set
-    # is worth marking -- so `last` is the default.
-    #   last     only after the FINAL cycle of the run completes successfully
-    #   every    after every successful cycle
-    #   every_n  after every `every_n`-th successful cycle
-    # `last` is safe against a mid-run failure for free: a failed cycle stops the loop, so the
-    # final cycle is never reached and nothing celebrates.
-    when: last
-    every_n: 5              # only read when `when: every_n`
-    # HOW OFTEN. A 50-cycle collection should not stop to dance 50 times, but finishing the set
-    # is worth marking -- so `last` is the default.
-    #   last     only after the FINAL cycle of the run completes successfully
-    #   every    after every successful cycle
-    #   every_n  after every `every_n`-th successful cycle
-    # `last` is safe against a mid-run failure for free: a failed cycle stops the loop, so the
-    # final cycle is never reached and nothing celebrates.
-    when: last
-    every_n: 5              # only read when `when: every_n`
-    rise_mm: 100.0          # up in base +Z first, so the rest happens in open air
-    nod_deg: 15.0           # wrist_1 rock, +/- this (the "bow")
-    spin_deg: 180.0         # wrist_3 rock, +/- this (the flourish; cannot translate the tool)
-    repeats: 2
-    gripper_flourish: true  # close/open between reps
 
   # ---- INSERTION MODE -----------------------------------------------------------------------
   # estimate  insert, observe, fit the contact manifold, correct the in-hand belief, repeat,
@@ -1055,385 +729,12 @@ assembly:
   # escape direction follows the mated part, never a base-frame axis).  The end reset then
   # takes the arm home.
   release_retract_distance_mm: 80.0
-  success_tolerance:
-    pos_mm: 1.0
-    rot_deg: 1.0
+  success_pos_mm: 1.0
+  success_rot_deg: 1.0
   # ACCUMULATE observations across a trial's attempts (the part is fixtured, so the rigid
   # belief-error assumption holds): each estimate uses ALL observations so far, prior attempts
   # re-projected into the current belief after every correction.  false = current attempt only.
   accumulate_observations: true
-
-  # ---- OBSERVATION COLLECTION MODE ----------------------------------------------------------
-  # attempts       one noised insertion per attempt.
-  # offset_sweep   each attempt commands every offset in sweep_offsets (belief held fixed),
-  #                pools all their observations, THEN estimates once -- trajectory diversity,
-  #                the measured strongest lever for estimate quality.
-  # peck           a force stop does not end the attempt: back off peck_retract_mm, advance
-  #                again, until the trajectory ends or peck_timeout_s runs out.
-  # Whatever the mode, the trial ends with ONE zero-noise insertion from the final belief
-  # (final_insertion).
-  collection:
-    mode: offset_sweep               # attempts | offset_sweep | peck
-    # offset_sweep: commanded offsets [x, y, z (m), roll, pitch, yaw (deg)] in the held
-    # part's own frame.  null = the default pitch sweep -4..+4 deg in 2 deg steps.
-    sweep_offsets:
-    - [0, 0, -0.003, 0, -5, 0]
-    - [0, 0, -0.003, 0, -3, 0]
-    - [0, 0, -0.003, 0, -1, 0]
-    - [0, 0, -0.003, 0, +1, 0]
-    - [0, 0, -0.003, 0, +3, 0]
-    - [0, 0, -0.003, 0, +5, 0]
-    - [0, 0, 0, 0, -5, 0]
-    - [0, 0, 0, 0, -3, 0]
-    - [0, 0, 0, 0, -1, 0]
-    - [0, 0, 0, 0, +1, 0]
-    - [0, 0, 0, 0, +3, 0]
-    - [0, 0, 0, 0, +5, 0]
-    - [0, 0, +0.003, 0, -5, 0]
-    - [0, 0, +0.003, 0, -3, 0]
-    - [0, 0, +0.003, 0, -1, 0]
-    - [0, 0, +0.003, 0, +1, 0]
-    - [0, 0, +0.003, 0, +3, 0]
-    - [0, 0, +0.003, 0, +5, 0]
-
-    peck_retract_mm: 10.0         # back-off after each force stop
-    peck_timeout_s: 60.0         # time budget for one peck attempt
-
-  # OPTIONAL trajectory noising: smoothed zero-mean Gaussian offsets applied to every waypoint
-  # in the connector's OWN frame, redrawn per attempt -- varied contact instead of the same
-  # nominal path every time.  Own random stream, so toggling it keeps runs pairable.
-  trajectory_noise:
-    enabled: false
-    # Per-dimension per-waypoint std [x, y, z (m), roll, pitch, yaw (deg)], applied after
-    # smoothing; a zero entry leaves that DOF unperturbed.
-    std: [0.000, 0.002, 0.002, 0.0, 2.0, 0.0]
-    smooth_window: 10            # moving-average window (waypoints) -- keeps the reference smooth
-    noise_decay_attempt: 0.1     # attempt k is scaled (1 - f)^(k-1)
-    noise_decay_traj: 0.2        # shed linearly along the path (converge onto nominal at seat)
-
-  # ---- FINAL INSERTION -- the COMMIT ---------------------------------------------------------
-  # After the estimation attempts, ONE more guarded assemble along the NOMINAL trajectory from
-  # the FINAL corrected belief: does the corrected belief actually seat?  No estimation, no
-  # belief update, no noise; logged as attempt='final_insertion'.  Probing and committing want
-  # different physics -- probing a light early-stopping touch, the commit a press home -- so
-  # every knob that may differ lives HERE; null (or absent) inherits the shared block.
-  final_insertion:
-    enabled: true
-    # --- compliance overrides (else compliance:) ---
-    stiffness: [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
-    mass: null
-    damping_ratio: null
-    settle_s: null               # logged settle at the stop; feeds no estimate here
-    hold_after_insertion_s: 1.0  # UN-GUARDED dwell -- for pressing an irreversible mate home
-    # --- force guard overrides (else force_guard:) ---
-    # A deliberately LIGHT commit guard: the commit ends at first sustained contact and the
-    # press is bought with preload_mm + hold_after_insertion_s, not by pushing through.
-    max_force_n: 1.0
-    max_torque_nm: 8.0
-    persistence_s: 1.0
-    # --- pacing, pause and noise for the commit ---
-    # EXPLICIT commit speed (null = speed.max_cartesian_* x phase_scale.assemble): at 30 mm/s
-    # the whole commit ramp is shorter than the guard's persistence_s, so the light 1 N guard
-    # above provably cannot end the press mid-ramp -- it can only trip in the settle.
-    speed_translation_mm_s: 30.0
-    speed_rotation_deg_s: null
-    # PAUSE at the seat once the insertion finishes -- servo RELEASED (inspection time),
-    # unlike hold_after_insertion_s which keeps pressing under admittance.  0 = off.
-    pause_s: 0.0
-    # PRELOAD: drive the commit's reference this far PAST the mate along the connector's +X;
-    # the spring turns the leftover travel into contact force.  Named here (NOT a trajectory
-    # row) so it survives anchoring and applies only to the COMMIT -- probing passes end on
-    # the mate, where the map is.  It buys the break-in spike; what it can HOLD is
-    # stiffness x preload.  0 = off.
-    preload_mm: 25.0
-    # NOISE on the commit trajectory, OFF deliberately: the jitter exists to gather varied
-    # contact while PROBING and has no place in the attempt meant to seat.
-    trajectory_noise:
-      enabled: false
-      std: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   # [x, y, z (m), roll, pitch, yaw (deg)]
-      smooth_window: 10
-
-  # ===========================================================================================
-  # POST-MATE CLOCKING -- runs only after the operator calls the assembly successful.
-  # ===========================================================================================
-  # STATE VOCABULARY, in order (see urlab/apps/bnc_assembly.py); each maneuver advances the
-  # state by one, so the app cannot report LOCKED for a connector that was never SEATED:
-  #   ENGAGED    the initial assembly mated the connector
-  #   SEATED     connector clocking succeeded: the bayonet cams pulled the connector home
-  #   LOCKED     collar clocking succeeded: the locking collar has been turned
-  #   ASSEMBLED  all of the above
-  #
-  # Both maneuvers are optional and independent, EXCEPT collar without connector clocking,
-  # which is REJECTED before the robot moves (the collar frame is placed against the
-  # connector pose the bayonet sweep establishes).
-  #
-  # CONNECTOR CLOCKING: the bayonet search -- rock between roll positions about the
-  # connector's +X while pushing along that axis at a virtual target past where the part can
-  # go, so compliance follows whatever path the cams allow.  Its first act is the BELIEF
-  # RESET: at the mate the connector's pose is known from the physical constraint (it is AT
-  # assembly.target_frame), which replaces the estimate and makes the screw axis the target's
-  # +X exactly.
-
-  connector_clocking:
-    enabled: true             # OPTIONAL -- false ends the run ENGAGED
-    # THE SWEEP: ABSOLUTE roll positions about the socket +X (deg, wrt the TARGET frame), one
-    # leg per try.  It ROCKS instead of turning further one way because a pin that missed its
-    # slot finds it by crossing back and forth under a steady axial load, not by turning
-    # harder.  Absolute so the reachable band -- a property of the FIXTURE -- cannot be
-    # dragged by engage_clock_deg.  A leg stopped by the force guard is NORMAL (that is how
-    # the far edge of the slot is found); only a sweep in which EVERY leg was guard-stopped is
-    # reported NOT SEATED.  The app pre-samples the band and WARNS on poses with no IK
-    # solution; more than two entries narrows in, one entry is a single stroke.
-    sweep_deg: [-120.0, +120.0]
-    # PUSH: how far past the engaged pose the virtual target aims, along the connector +X.
-    # Too small and the cams never engage; too large and the spring loads the mate harder
-    # than needed.
-    push_mm: 15.0
-    # SUCCESS: measured advance along the ENGAGED frame's +X, read from the MEASURED arm pose
-    # (under admittance the commanded reference is not where the arm is).  Checked every
-    # servo cycle; EARLY-OUT ONLY -- a sweep that runs its legs is assumed seated.
-    # Cumulative from the original engaged pose.
-    success_advance_mm: 5.0
-    # One try = one leg = one rotation to the next sweep_deg position.  The gripper stays
-    # CLOSED for the whole sweep.
-    max_tries: 3
-    # FALSE: hand the connector over STILL HELD -- the collar maneuver's seat push wants the
-    # pads already closed on it.
-    open_gripper_after: false
-    settle_s: 0.5                 # compliant settle at whatever pose the sweep reached
-    hold_after_s: 0.0             # extra un-guarded dwell on top of settle_s
-    # OFF here: the arm stands in a MATED, LOADED pose when clocking starts, so re-zeroing
-    # the F/T would define the mate load as zero.
-    tare_before: false
-    # null = speed.max_cartesian_* x speed.phase_scale.connector_clock.  Set numbers here
-    # only to break rotation and translation apart.
-    speed_rotation_deg_s: null
-    speed_translation_mm_s: null
-    # --- compliance overrides (else the top-level compliance:) ---
-    # Stiff along x (press the cams home), soft in rotation about x (let the bayonet steer).
-    stiffness: [1500.0, 1500.0, 1500.0, 10.0, 10.0, 10.0]
-    mass: null
-    damping_ratio: null
-    # --- force guard overrides (else the top-level force_guard:) ---
-    # Required in practice: force_guard: is tuned for a light probing insertion, and a
-    # deliberate press-and-twist exceeds it on the first cycle.  Set for "stop if genuinely
-    # jammed", not "stop on contact".  (force_guard_enabled, not `enabled` -- `enabled`
-    # above is this maneuver's own switch.)
-    force_guard_enabled: true
-    max_force_n: 30.0
-    max_torque_nm: 8.0
-    persistence_s: 1.0
-
-  # COLLAR CLOCKING: grasp the locking collar AXIALLY and TWIST THE WRIST.  Runs only if
-  # connector clocking succeeded.  The gripper comes onto the connector axis POINTING ALONG
-  # IT, so tool0 sits ON the axis with its Z collinear and the turn is a rotation about
-  # tool0's own Z: the flange does not move -- which is what makes this safe against a
-  # wall-mounted socket (the old radial grasp swept a 258 mm arc across the wall).  The cost:
-  # the approach lifts off, retreats, reorients in clear space, then advances back down the
-  # axis, THREADING THE CABLE between the open fingers -- guarded, but jog it once with the
-  # phase gate before trusting it.
-  collar_clocking:
-    # OPTIONAL -- false ends the run SEATED.  true with connector_clocking false is REJECTED
-    # before the robot moves.
-    enabled: true
-    # WHERE THE COLLAR RING SITS, mm along the connector +X, measured FROM THE CONNECTOR
-    # FRAME ORIGIN (the same origin targets: declares).  DERIVED from the bench measurement
-    # "ring stands 30 mm from the JUNCTION": junction sits at -45.7 mm on this axis, so
-    # collar = -45.7 + 30 = -15.7 mm.  If re-tuned on the bench, measure from the connector
-    # frame origin.
-    collar_offset_mm: -2.0
-    # COLLAR AXIS OFFSET, mm, in the SOCKET (target) frame's own axes: shifts the LINE the
-    # whole collar maneuver works about (centring, unwind, advance, turn, and the tug
-    # re-grip).  Y and Z move the line; X only slides the reference point along it.  Exists
-    # because nothing forces the declared connector origin onto the barrel centreline the
-    # collar turns about.  NOT rolled by engage_clock_deg (measured against the FIXTURE).
-    # Only set it if the centreline is MEASURED to differ from the declared frame.
-    axis_offset_mm: [0.0, 0.0, 0.0]
-    # RETRACT, mm along the TARGET connector -X, from wherever the seat push left the arm --
-    # a pure translation with the open fingers still around the cable (they slide ALONG it).
-    # The pitch onto the axis happens out here, the furthest from the wall the maneuver gets.
-    retract_mm: 150.0
-    # WALL STANDOFF, mm: the largest tool0 station along the connector +X any planned pose
-    # may take, in the TARGET frame (+X points INTO the wall, 0 = the mating face).  Every
-    # station is known before the arm moves, so the closest approach to the wall is checked
-    # up front.  -50.0 keeps the flange 50 mm clear.  null = no check.
-    wall_standoff_mm: -50.0
-    # CEILING, not the expected end: the turn should stop on the torque limit when the collar
-    # locks.  Reaching this without ever building the torque means the ring never locked.
-    # Needs this much wrist_3 headroom from wherever the grasp starts.
-    rotation_deg: 120.0
-    # PUSH while turning, mm along the connector +X, making the turn a SCREW: the axial press
-    # keeps the collar's lugs on their ramps instead of camming back.  0.0 = pure rotation.
-    push_mm: 10.0
-    # SEAT PUSH -- FIRST, before the lift-off: re-grip the connector at the junction and
-    # PRESS it deeper along +X until force_n is sustained for persistence_s (the guard trip
-    # IS the success).  The screw's compliance can leave the connector short, and the collar
-    # should be locked on a SEATED one.  max_travel_mm must cover force_n / stiffness plus
-    # real seating motion.  A failed grasp skips the push rather than failing the run.
-    seat_push:
-      enabled: true
-      force_n: 3.0
-      persistence_s: 0.10
-      max_travel_mm: 15.0
-    # GRASP CLOCK ANGLE, deg: the ABSOLUTE roll about the socket +X to take the collar at
-    # (same convention as connector_clocking.sweep_deg); the turn runs from here to
-    # here + rotation_deg.  null = lay tool0's -Y on the connector's -Z (where the sweep left
-    # it), solved in closed form -- the choice that halves the reorientation swing and keeps
-    # the analytic IK on a reachable branch.  If the angle does not solve, the app scans 24
-    # alternatives and takes the cheapest reachable one, warning that it did.  Pin a number
-    # here once it is stable.
-    grasp_clock_deg: -90.0
-    # WRIST-3 MARGIN, deg inside each end of the usable wrist_3 range the turn must stay.
-    # The grasp clock angle is exactly a wrist_3 offset, which lets the app PREWIND the wrist
-    # before threading down the axis.  The margin exists because the compliant turn can walk
-    # past a start placed hard against the limit; checked when the angle is chosen and again
-    # from the measured joints while the fingers are still open.
-    wrist3_margin_deg: 5.0
-    # OUT-OF-AXIS TILT GATE, deg: before the unwind, the part of the arm's orientation that
-    # NO rotation about the connector axis can explain.  Above this, refuse to orbit rather
-    # than swing blindly.  A CONSTANT value run to run is a frame declaration error; a
-    # VARIABLE one is tilt the connector screw left behind.  Not tighter, because the
-    # centring move that follows corrects a few degrees on the way in; the tilt is always
-    # logged.
-    max_offaxis_tilt_deg: 10.0
-    settle_s: 0.5
-    # TRUE here, unlike connector_clocking: the tare is taken at the collar station with the
-    # fingers still OPEN and clear of the ring -- the one genuinely unloaded moment -- so the
-    # torque limit measures torque ADDED by turning the collar.
-    tare_before: true
-    # null = the global caps x speed.phase_scale.collar_clock.
-    speed_rotation_deg_s: null
-    speed_translation_mm_s: null
-    # --- compliance overrides ---
-    # Softer than the screw: this turns a ring that is already captive, so it should yield
-    # rather than force a mis-estimated axis.
-    stiffness: [1500.0, 1500.0, 1500.0, 10.0, 10.0, 10.0]
-    mass: null
-    damping_ratio: null
-    # --- force guard overrides ---
-    # A collar that has reached its lock STOPS TURNING, so a trip here is the intended end
-    # state as often as a jam -- the app logs the achieved angle and does not call it a
-    # failure.
-    force_guard_enabled: true
-    max_force_n: 30.0
-    # The INTENDED TERMINATION, not a safety backstop: the locked collar stops turning and
-    # the torque builds.  Only meaningful against the open-finger tare above.
-    max_torque_nm: 5.0
-    persistence_s: 1.0
-    # TODO: grasp verification + failure recovery on the close -- a missed collar currently
-    # turns an empty gripper.
-
-  # ---- DISASSEMBLY (optional) ---------------------------------------------------------
-  # Take the connector back OUT and put the cable down -- the assembly run in reverse, which
-  # is what makes repeated trials possible without a human resetting the fixture.
-  #
-  # WHERE IT STARTS: straight after the tug, which leaves the fingers CLOSED on the collar
-  # with tool0 already ON the connector axis.  Every rotation below is then a wrist twist
-  # about the axis the arm is already on -- no re-approach, no re-grip, nothing to lose the
-  # part between steps.  (With this enabled the tug HOLDS its grip instead of releasing.)
-  #
-  # THE STATE LADDER RUN BACKWARDS: locked -> seated -> engaged -> removed, each rung claimed
-  # only by the step that undoes it.  A connector that never locked skips the collar unlock;
-  # one that never seated skips the bayonet.
-  #
-  # DIRECTIONS (the easy thing to get backwards): the collar unlocks by -rotation_deg, and the
-  # bayonet releases by turning back through the ACHIEVED sweep angle -- the measured one, not
-  # the commanded -- which returns the connector to the roll it was MATED at, where its pins
-  # line up with the slots.  Turning further would ride them onto the rim.
-  disassembly:
-    enabled: true
-    # ---- SCATTER THE PLACE, so each cycle re-picks from a genuinely different pose ----------
-    # Without this a multi-cycle run puts the cable back in the SAME spot every time, so the
-    # pick is only ever tested against one presentation and the detector only ever sees one.
-    # The draw is UNIFORM and ADDED to reorient_recovery.place_offsets, so it is centred on the
-    # place the run would otherwise have used -- turning it off restores that exactly.
-    #
-    # x/y are in the TARGET CONNECTOR's frame (like the offsets they perturb), so the spread
-    # means the same thing whichever way the socket faces. An unreachable draw is redrawn up to
-    # 8 times and then falls back to the centre, so an unlucky draw cannot kill a long run.
-    #
-    # `seed` makes a scattered run reproducible -- without it you cannot re-create the run when
-    # something goes wrong on cycle 34. Leave null for a different scatter each run.
-    place_scatter:
-      enabled: false
-      x_mm: 50.0            # +/- this, uniform
-      y_mm: 50.0            # +/- this, uniform
-      yaw_deg: 30.0         # +/- this, uniform
-      seed: null
-    # ---- SCATTER THE PLACE, so each cycle re-picks from a genuinely different pose ----------
-    # Without this a multi-cycle run puts the cable back in the SAME spot every time, so the
-    # pick is only ever tested against one presentation and the detector only ever sees one.
-    # The draw is UNIFORM and ADDED to reorient_recovery.place_offsets, so it is centred on the
-    # place the run would otherwise have used -- turning it off restores that exactly.
-    #
-    # x/y are in the TARGET CONNECTOR's frame (like the offsets they perturb), so the spread
-    # means the same thing whichever way the socket faces. An unreachable draw is redrawn up to
-    # 8 times and then falls back to the centre, so an unlucky draw cannot kill a long run.
-    #
-    # `seed` makes a scattered run reproducible -- without it you cannot re-create the run when
-    # something goes wrong on cycle 34. Leave null for a different scatter each run.
-    place_scatter:
-      enabled: false
-      x_mm: 50.0            # +/- this, uniform
-      y_mm: 50.0            # +/- this, uniform
-      yaw_deg: 30.0         # +/- this, uniform
-      seed: null
-    # CYCLES: repeat the whole pass -- localize, pick, assemble, clock, verify, take apart,
-    # place the cable back -- this many times.  Each cycle RE-LOCALIZES (the fixture may have
-    # moved; that is what the marker rig buys) and RE-PICKS from wherever the last cycle put
-    # the cable down, so it exercises the full pipeline rather than just the insertion.
-    #
-    # Needs disassembly AND place enabled: without them the connector stays mated and a second
-    # pass has nothing to pick.  The app clamps to 1 and says so rather than looping anyway.
-    # The in-hand belief is reset to nominal at the start of every cycle -- a fresh grasp has a
-    # fresh error, so last cycle's estimator correction must not carry over.
-    cycles: 10
-    # LOCKED -> SEATED.  The unlock drives the collar approach in reverse: turn rotation_deg
-    # BACK, or until the torque limit stops it -- symmetric with the lock, because the ring
-    # runs to a stop at BOTH ends of its travel, so torque building is the intended end in
-    # either direction.  It does NOT realign with the engagement angle first: the connector is
-    # already mated and the arm is already clear of it, and the collar station is absolute, so
-    # driving the open gripper back onto the connector would only be a pose to leave again.
-    unlock_collar: true
-    extract_mm: 60.0             # pull along the socket -X once the bayonet is free
-    # PLACE: back to the PICK pose, straight down, release ABOVE the ground, rise.  The same
-    # configuration the cable was picked from, so it goes back the way it was taken.
-    place:
-      enabled: true
-      # The FINGERTIP stops this far above ground_plane.z_mm -- the descent is guarded as well,
-      # so the pads stop short rather than pressing the cable into the table.
-      clearance_mm: 25.0
-      retreat_mm: 100.0          # rise this far after releasing, before going home
-
-  # THE SHARED ESCAPE, after either path: two guarded straight legs (the part is released by
-  # now, so there is no held connector to thread out along its own axis).
-  clocking_retract:
-    # Leg 1, in the GRIPPER's own (tool0) frame: -Z lifts the open fingers straight off the
-    # connector (tool0 +Z points from the flange toward the fingertips).
-    gripper_axis: [0.0, 0.0, -1.0]
-    gripper_distance_mm: 100.0
-    # Leg 2, in the TARGET CONNECTOR frame: -X backs away from the socket along the
-    # insertion axis.
-    target_axis: [-1.0, 0.0, 0.0]
-    target_distance_mm: 100.0
-
-  # ---- TUG VERIFICATION: does the lock actually hold? --------------------------------------
-  # After the escape, the gripper returns to the engaged pose, closes on the seated connector
-  # and PULLS along the connector -X.  A locked bayonet holds; an unlocked one backs out.  A
-  # SPRING pull: the reference is offset by pull_force_n / stiffness, so the force can never
-  # exceed the commanded value on a connector that holds, and drops as one comes out.
-  # VERIFIED -> release, retract, home (ASSEMBLED, TUG-VERIFIED).  FAILED -> the connector is
-  # extracted, carried home and released there.  A GLOBAL guard trip during any pull
-  # terminates where it stands rather than tearing at the fixture.
-  tug_verify:
-    enabled: true
-    # The spec only discriminates if the spring offset pull_force_n / stiffness EXCEEDS
-    # displacement_threshold_mm -- tune force/threshold/stiffness together.
-    stiffness: [500.0, 500.0, 500.0, 15.0, 15.0, 15.0]
-    pull_force_n: 3.0
-    pull_time_s: 3.0
-    displacement_threshold_mm: 3.0
-    extraction_distance_mm: 50.0
 
   # ---- MATCH DIAGNOSTICS: where did the estimate come from? --------------------------------
   # Per attempt, a 6-panel figure (attempt_YY_match.png) around the committed correction
@@ -1458,10 +759,709 @@ assembly:
     max_rows: 250                # observation rows drawn/matched (shape is unaffected)
     grid_points: 41              # candidate grid per estimated dim for panel F
 
-# ===================================================================================================
-# ESTIMATION -- the contact-manifold ICP.  KEEP IN SYNC with estimator_eval.yaml and
-# cable_pick_estimate_assemble_check -- the smoke tests pin the tuned values across the three.
-# ===================================================================================================
+# The recorded insertion path: where it lives, how it is resampled and approached.
+trajectory:
+
+  # The ideal insertion path: CONNECTOR w.r.t. the TARGET connector, last row = identity (the mate).
+  csv: assembly_trajectory.csv
+  angles_deg: false
+  translational_resolution_mm: 1.0
+  rotational_resolution_deg: 1.0
+
+  # Stand-off beyond the trajectory START (target-connector frame), approached once after the lift.
+  standoff:
+    axis: [-1.0, 0.0, 0.0]
+    distance_mm: 100.0
+
+visual_target:
+  # Joint degrees for the sweep's start pose.  null = sweep from HOME, which IS the
+  # marker view pose (reset.home_joints_deg) -- set this only to sweep from somewhere
+  # else, and then use the SAME value for marker_calibration's view_joints_deg.
+  view_joints_deg: null
+  # Per-marker SERVO REFINEMENT at run time (see marker_views.servo for the parameters,
+  # which are shared with marker_calibration and must stay identical to it).  false = the
+  # plain sweep only -- faster, but the localization then views the markers differently
+  # from how the calibration did, so the PnP bias cancellation is partly given up.
+  servo_refine: true
+  # Keep true: return to home after the sweep; the app then drives to pick_joints_deg,
+  # where the scan, grasp geometry and retry offsets are written.
+  return_home_after: true
+  # SANITY GATE on how far the visual answer may sit from the recorded mate.  The fixture
+  # is allowed to move -- that is the point -- but a metre-scale shift is a stale rig or a
+  # marker on the wrong fixture.  null on either disables it.
+  max_shift_mm: 25.0
+  max_shift_deg: 10.0
+
+
+# ===========================================================================================
+# ENGAGE -- the trajectory-following insertion (insertion_mode: engage)
+# ===========================================================================================
+# Drives configs/assembly_trajectory.csv from its first row to the mate, extends it by
+# preload_mm, and superimposes an optional oscillation.  With every amplitude at 0 this is a
+# plain DIRECT insertion.  TWO CLOCKS on purpose: the PATH advances by DISTANCE
+# (speed.phase_scale.engage x the translation cap)
+# while the OSCILLATION advances by TIME, so the wiggle frequency does not depend on the
+# insert speed.
+engage:
+  # SPEED for this phase lives in speed.phase_scale.engage (0.05 x the 50 mm/s cap = 2.5
+  # mm/s).  Kept slow deliberately: contact force scales hard with approach speed, and whole
+  # oscillation cycles must fit INSIDE the insertion.
+
+  # PRELOAD, mm past the mate along the connector's own +X, so the reference finishes
+  # pressing rather than merely arriving.  0 = stop exactly on the mate.  (Distinct from
+  # final_insertion.preload_mm, which belongs to the estimate-mode commit.)
+  preload_mm: 15.0
+
+  # Reference rebuild rate.  Must be >= 4x the highest active frequency or the sampled sine
+  # aliases -- validated pre-motion.
+  sample_rate_hz: 25.0
+
+  # Axes, amplitudes, frequencies, phases, taper and the oscillation speed caps come from
+  # configs/wiggle_sampling.yaml at run time -- the one place they are tuned.  Add a
+  # `wiggle:` sub-block for a one-off override.
+  wiggle_from: wiggle_sampling.yaml
+
+  # ---- TERMINATION -------------------------------------------------------------------------
+  # AXIAL force limit: the component along the CONNECTOR'S +X (the insertion reaction).
+  # Reaching it ENDS THE ENGAGE, not the run -- meeting resistance partway is what the
+  # bayonet search is for.  Axial rather than |f| is what lets it be set low: a magnitude
+  # limit tight enough to catch real resistance also stops on every lateral graze.
+  # A MISSED ENGAGEMENT -- the full path ran, preload included, without the axial limit ever
+  # being reached -- means the connector never touched the socket.  That is a FAILURE, not a
+  # completion: clocking from there would turn a connector that is not in a socket.
+  #
+  # The run recovers by putting the cable DOWN, returning to the pick view, and starting the
+  # cycle over -- so the target is re-localized, the in-hand belief is reset to nominal, and
+  # the cable is re-detected and re-grasped.  Every input to the engagement is measured
+  # afresh, which is the point: a miss usually means the target pose or the belief was wrong,
+  # and pushing again from the same place with the same numbers cannot fix that.
+  # A retried cycle does NOT consume one of the `cycles` asked for.
+  #
+  # A BUDGET for the whole run, not a loop -- a cell that keeps missing has a real setup
+  # problem and retrying wears the part.  0 = never recover, fail on the first miss.
+  # NOTE a miss is only DETECTABLE while max_axial_force_n > 0: with no limit the axial
+  # condition can never fire, so every engage ends 'complete' and a miss looks like a seat.
+  max_misses: 2
+
+  # ---- CONFIRM THE SEAT ------------------------------------------------------------------
+  # The axial limit only says SOMETHING RESISTED.  Pushing a connector flat against the
+  # fixture body, the bench, or the rim of the wrong hole develops axial reaction exactly like
+  # a real insertion and stops the engage identically.  Two things separate a socket from a
+  # face, and both are measured by WIGGLING IN PLACE at the stopped depth:
+  #
+  #   RADIAL FORCE   a barrel inside a socket is laterally constrained, so rocking it pushes
+  #                  back ACROSS its own axis.  A connector on a flat face just slides.
+  # WIGGLE TRAVEL is measured and logged, but is NOT a criterion: the commanded amplitude is
+  # only an upper bound on what a free connector would do, the admittance spring already
+  # suppresses most of it, and the test rejected good seats.  The number is worth reading; it
+  # is not worth failing a run on.
+  #
+  # Failing the radial test is treated exactly like a MISS: the cable goes down, the arm
+  # returns to the pick view, and everything is measured again (see max_misses).  Continuing
+  # would clock a connector that is only leaning on something.
+  confirm:
+    enabled: true
+    radial_force_n: 1.0        # |force| across the connector axis, in its OWN Y-Z
+    radial_persistence_s: 0.10 # ...held continuously for this long
+    max_wiggle_mm: 1.0         # RETAINED for the log only -- no longer a pass/fail criterion
+    cycles: 1                  # how many full wiggle cycles to watch
+    fallback_s: 0.5            # confirmation window when no oscillation is configured
+  
+  # ---- STAGE 1: CONTACT -- find the socket before engaging into it -----------------------
+  # Slow and UN-OSCILLATED, at speed.phase_scale.contact.  Driving the whole insertion in one
+  # go means the wiggle and the full approach speed are already running when the parts first
+  # touch, so first contact is the least controlled moment of the phase.  Creeping in first
+  # lets the engagement start from a MEASURED contact pose instead of a guess.
+  contact:
+    enabled: true
+    force_n: 1.0             # light -- this is 'are we touching', not 'are we seated'
+    persistence_s: 0.10
+  
+  # ---- STAGE 2: ENGAGE -- align laterally AND insert, together ---------------------------
+  # From the contact pose the reference fades onto the trajectory over align_s while it
+  # advances, so alignment and insertion happen together and there is no step for the
+  # admittance spring to absorb while already in contact.  The INSERTION AXIS (x) is excluded
+  # from the alignment: x is depth, and depth is what the advance is for.
+  #
+  # SUCCESS IS POSITIVE EVIDENCE ONLY:
+  #   travel_mm   the part actually WENT somewhere -- the one thing a jam cannot fake, and
+  #               what recognises a mate that slides home under low force.
+  #   the axial force limit below, held for persistence_s.
+  # Anything else -- the path running out, the timeout, a jam -- is a MISS and takes the
+  # place-and-re-pick recovery (see max_misses).
+  # ---- THE FAILED-ENGAGE RETRACT ---------------------------------------------------------
+  # After a missed engagement the arm is about to TRAVEL SIDEWAYS to put the cable down.  If
+  # the connector is still in or against the socket when that happens it levers the socket off
+  # its fixture -- the recovery breaks the very thing the run exists to mate into.  So this
+  # retraction is MANDATORY: failing it ABORTS the recovery and leaves the arm where it is,
+  # because stopping with the part held is recoverable by hand and a snapped socket is not.
+  #
+  # ALONG THE TARGET CONNECTOR'S -X, not the believed connector's.  A missed engagement is
+  # evidence the BELIEF is wrong, and retracting along a wrong axis pulls at an angle -- which
+  # is how a recovery levers the socket instead of freeing the part.
+  #
+  # VERIFIED, not assumed: the retract drives a compliant REFERENCE, and a jammed connector can
+  # leave the reference free while the part has not moved.  min_mm is the MEASURED clearance
+  # the recovery refuses to travel without.
+  fail_retract:
+    distance_mm: 100.0
+    min_mm: 20.0
+  
+  travel_mm: 5.0
+  timeout_s: 15.0
+  align_s: 2.0             # how long the lateral correction takes to fade in
+  
+  max_axial_force_n: 5.0
+  persistence_s: 0.25          # the limit must hold this long -- rides out contact spikes
+  # Compliance OVERRIDE for this behaviour (null entries inherit the
+  # top-level compliance: block).
+  compliance:
+
+    # ---- compliance overrides (else the top-level compliance:) ---
+    # STATIC FOR THE WHOLE ENGAGE (contact, insertion, confirm and settle all share it).
+    # Order is [x, y, z, rx, ry, rz]; translations N/m, rotations Nm/rad. x IS THE INSERTION
+    # AXIS -- these are connector-frame axes, not base.
+    #
+    # HOW MUCH THE PART GIVES: this is an admittance loop, so holding a force REQUIRES
+    # deflecting by force/stiffness, and the commanded pose backs off the contact by exactly
+    # that much. At the max_axial_force_n above:
+    #
+    #     500 N/m  ->  5 N / 500  = 10.0 mm of give     (more than travel_mm: 5.0)
+    #    2000 N/m  ->  5 N / 2000 =  2.5 mm
+    #    5000 N/m  ->  5 N / 5000 =  1.0 mm
+    #
+    # so an axial stiffness low against the force limit can give back more than the insertion
+    # is trying to travel. The run logs the resulting give on the `Engage insertion ON:` line.
+    # RAISE x ALONE to firm up the insertion while keeping the lateral/rotational compliance
+    # that lets a misaligned connector find the socket -- worth keeping soft when the
+    # connector-wrt-fingertip belief carries error, since stiffness turns that error into force.
+    # Damping tracks stiffness automatically (D = zeta * 2*sqrt(M*S)), so raising S stays
+    # critically damped at damping_ratio 1.0; no need to retune mass with it.
+    stiffness: [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
+    mass: null               # null = inherit the top-level compliance:
+    damping_ratio: null      # null = inherit
+  # Force-guard OVERRIDE for this behaviour (unset keys inherit the
+  # top-level force_guard: block).
+  force_guard:
+    # ---- force guard overrides (else force_guard:) ---
+    # The general guard still runs alongside the axial one and means "hit something
+    # unexpected / jammed".  Keep it well above max_axial_force_n.
+    max_force_n: 40.0
+    max_torque_nm: 8.0
+
+
+# ---- FINAL INSERTION -- the COMMIT ---------------------------------------------------------
+# After the estimation attempts, ONE more guarded assemble along the NOMINAL trajectory from
+# the FINAL corrected belief: does the corrected belief actually seat?  No estimation, no
+# belief update, no noise; logged as attempt='final_insertion'.  Probing and committing want
+# different physics -- probing a light early-stopping touch, the commit a press home -- so
+# every knob that may differ lives HERE; null (or absent) inherits the shared block.
+final_insertion:
+  enabled: true
+  settle_s: null               # logged settle at the stop; feeds no estimate here
+  hold_after_insertion_s: 1.0  # UN-GUARDED dwell -- for pressing an irreversible mate home
+  # --- pacing, pause and noise for the commit ---
+  # EXPLICIT commit speed (null = speed.max_cartesian_* x phase_scale.assemble): at 30 mm/s
+  # the whole commit ramp is shorter than the guard's persistence_s, so the light 1 N guard
+  # above provably cannot end the press mid-ramp -- it can only trip in the settle.
+  speed_translation_mm_s: 30.0
+  speed_rotation_deg_s: null
+  # PAUSE at the seat once the insertion finishes -- servo RELEASED (inspection time),
+  # unlike hold_after_insertion_s which keeps pressing under admittance.  0 = off.
+  pause_s: 0.0
+  # PRELOAD: drive the commit's reference this far PAST the mate along the connector's +X;
+  # the spring turns the leftover travel into contact force.  Named here (NOT a trajectory
+  # row) so it survives anchoring and applies only to the COMMIT -- probing passes end on
+  # the mate, where the map is.  It buys the break-in spike; what it can HOLD is
+  # stiffness x preload.  0 = off.
+  preload_mm: 25.0
+  # NOISE on the commit trajectory, OFF deliberately: the jitter exists to gather varied
+  # contact while PROBING and has no place in the attempt meant to seat.
+  trajectory_noise:
+    enabled: false
+    std: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]   # [x, y, z (m), roll, pitch, yaw (deg)]
+    smooth_window: 10
+  # Compliance OVERRIDE for this behaviour (null entries inherit the
+  # top-level compliance: block).
+  compliance:
+    # --- compliance overrides (else compliance:) ---
+    stiffness: [500.0, 500.0, 500.0, 10.0, 10.0, 10.0]
+    mass: null
+    damping_ratio: null
+  # Force-guard OVERRIDE for this behaviour (unset keys inherit the
+  # top-level force_guard: block).
+  force_guard:
+    # --- force guard overrides (else force_guard:) ---
+    # A deliberately LIGHT commit guard: the commit ends at first sustained contact and the
+    # press is bought with preload_mm + hold_after_insertion_s, not by pushing through.
+    max_force_n: 1.0
+    max_torque_nm: 8.0
+    persistence_s: 1.0
+
+
+# ---- OBSERVATION COLLECTION MODE ----------------------------------------------------------
+# attempts       one noised insertion per attempt.
+# offset_sweep   each attempt commands every offset in sweep_offsets (belief held fixed),
+#                pools all their observations, THEN estimates once -- trajectory diversity,
+#                the measured strongest lever for estimate quality.
+# peck           a force stop does not end the attempt: back off peck_retract_mm, advance
+#                again, until the trajectory ends or peck_timeout_s runs out.
+# Whatever the mode, the trial ends with ONE zero-noise insertion from the final belief
+# (final_insertion).
+collection:
+  mode: offset_sweep               # attempts | offset_sweep | peck
+  # offset_sweep: commanded offsets [x, y, z (m), roll, pitch, yaw (deg)] in the held
+  # part's own frame.  null = the default pitch sweep -4..+4 deg in 2 deg steps.
+  sweep_offsets:
+  - [0, 0, -0.003, 0, -5, 0]
+  - [0, 0, -0.003, 0, -3, 0]
+  - [0, 0, -0.003, 0, -1, 0]
+  - [0, 0, -0.003, 0, +1, 0]
+  - [0, 0, -0.003, 0, +3, 0]
+  - [0, 0, -0.003, 0, +5, 0]
+  - [0, 0, 0, 0, -5, 0]
+  - [0, 0, 0, 0, -3, 0]
+  - [0, 0, 0, 0, -1, 0]
+  - [0, 0, 0, 0, +1, 0]
+  - [0, 0, 0, 0, +3, 0]
+  - [0, 0, 0, 0, +5, 0]
+  - [0, 0, +0.003, 0, -5, 0]
+  - [0, 0, +0.003, 0, -3, 0]
+  - [0, 0, +0.003, 0, -1, 0]
+  - [0, 0, +0.003, 0, +1, 0]
+  - [0, 0, +0.003, 0, +3, 0]
+  - [0, 0, +0.003, 0, +5, 0]
+
+  peck_retract_mm: 10.0         # back-off after each force stop
+  peck_timeout_s: 60.0         # time budget for one peck attempt
+
+
+# OPTIONAL trajectory noising: smoothed zero-mean Gaussian offsets applied to every waypoint
+# in the connector's OWN frame, redrawn per attempt -- varied contact instead of the same
+# nominal path every time.  Own random stream, so toggling it keeps runs pairable.
+trajectory_noise:
+  enabled: false
+  # Per-dimension per-waypoint std [x, y, z (m), roll, pitch, yaw (deg)], applied after
+  # smoothing; a zero entry leaves that DOF unperturbed.
+  std: [0.000, 0.002, 0.002, 0.0, 2.0, 0.0]
+  smooth_window: 10            # moving-average window (waypoints) -- keeps the reference smooth
+  noise_decay_attempt: 0.1     # attempt k is scaled (1 - f)^(k-1)
+  noise_decay_traj: 0.2        # shed linearly along the path (converge onto nominal at seat)
+
+
+# ===========================================================================================
+# POST-MATE CLOCKING -- runs only after the operator calls the assembly successful.
+# ===========================================================================================
+# STATE VOCABULARY, in order (see urlab/apps/bnc_assembly.py); each maneuver advances the
+# state by one, so the app cannot report LOCKED for a connector that was never SEATED:
+#   ENGAGED    the initial assembly mated the connector
+#   SEATED     connector clocking succeeded: the bayonet cams pulled the connector home
+#   LOCKED     collar clocking succeeded: the locking collar has been turned
+#   ASSEMBLED  all of the above
+#
+# Both maneuvers are optional and independent, EXCEPT collar without connector clocking,
+# which is REJECTED before the robot moves (the collar frame is placed against the
+# connector pose the bayonet sweep establishes).
+#
+# CONNECTOR CLOCKING: the bayonet search -- rock between roll positions about the
+# connector's +X while pushing along that axis at a virtual target past where the part can
+# go, so compliance follows whatever path the cams allow.  Its first act is the BELIEF
+# RESET: at the mate the connector's pose is known from the physical constraint (it is AT
+# assembly.target_frame), which replaces the estimate and makes the screw axis the target's
+# +X exactly.
+
+connector_clocking:
+  enabled: true             # OPTIONAL -- false ends the run ENGAGED
+  # THE SWEEP: ABSOLUTE roll positions about the socket +X (deg, wrt the TARGET frame), one
+  # leg per try.  It ROCKS instead of turning further one way because a pin that missed its
+  # slot finds it by crossing back and forth under a steady axial load, not by turning
+  # harder.  Absolute so the reachable band -- a property of the FIXTURE -- cannot be
+  # dragged by engage_clock_deg.  A leg stopped by the force guard is NORMAL (that is how
+  # the far edge of the slot is found); only a sweep in which EVERY leg was guard-stopped is
+  # reported NOT SEATED.  The app pre-samples the band and WARNS on poses with no IK
+  # solution; more than two entries narrows in, one entry is a single stroke.
+  sweep_deg: [-120.0, +120.0]
+  # PUSH: how far past the engaged pose the virtual target aims, along the connector +X.
+  # Too small and the cams never engage; too large and the spring loads the mate harder
+  # than needed.
+  push_mm: 15.0
+  # SUCCESS: measured advance along the ENGAGED frame's +X, read from the MEASURED arm pose
+  # (under admittance the commanded reference is not where the arm is).  Checked every
+  # servo cycle; EARLY-OUT ONLY -- a sweep that runs its legs is assumed seated.
+  # Cumulative from the original engaged pose.
+  success_advance_mm: 5.0
+  # One try = one leg = one rotation to the next sweep_deg position.  The gripper stays
+  # CLOSED for the whole sweep.
+  max_tries: 3
+  # FALSE: hand the connector over STILL HELD -- the collar maneuver's seat push wants the
+  # pads already closed on it.
+  open_gripper_after: false
+  settle_s: 0.5                 # compliant settle at whatever pose the sweep reached
+  hold_after_s: 0.0             # extra un-guarded dwell on top of settle_s
+  # OFF here: the arm stands in a MATED, LOADED pose when clocking starts, so re-zeroing
+  # the F/T would define the mate load as zero.
+  tare_before: false
+  # null = speed.max_cartesian_* x speed.phase_scale.connector_clock.  Set numbers here
+  # only to break rotation and translation apart.
+  speed_rotation_deg_s: null
+  speed_translation_mm_s: null
+  # Compliance OVERRIDE for this behaviour (null entries inherit the
+  # top-level compliance: block).
+  compliance:
+    # --- compliance overrides (else the top-level compliance:) ---
+    # Stiff along x (press the cams home), soft in rotation about x (let the bayonet steer).
+    stiffness: [1500.0, 1500.0, 1500.0, 10.0, 10.0, 10.0]
+    mass: null
+    damping_ratio: null
+  # Force-guard OVERRIDE for this behaviour (unset keys inherit the
+  # top-level force_guard: block).
+  force_guard:
+    # --- force guard overrides (else the top-level force_guard:) ---
+    # Required in practice: force_guard: is tuned for a light probing insertion, and a
+    # deliberate press-and-twist exceeds it on the first cycle.  Set for "stop if genuinely
+    # jammed", not "stop on contact".  (force_guard_enabled, not `enabled` -- `enabled`
+    # above is this maneuver's own switch.)
+    force_guard_enabled: true
+    max_force_n: 30.0
+    max_torque_nm: 8.0
+    persistence_s: 1.0
+
+
+# COLLAR CLOCKING: grasp the locking collar AXIALLY and TWIST THE WRIST.  Runs only if
+# connector clocking succeeded.  The gripper comes onto the connector axis POINTING ALONG
+# IT, so tool0 sits ON the axis with its Z collinear and the turn is a rotation about
+# tool0's own Z: the flange does not move -- which is what makes this safe against a
+# wall-mounted socket (the old radial grasp swept a 258 mm arc across the wall).  The cost:
+# the approach lifts off, retreats, reorients in clear space, then advances back down the
+# axis, THREADING THE CABLE between the open fingers -- guarded, but jog it once with the
+# phase gate before trusting it.
+collar_clocking:
+  # OPTIONAL -- false ends the run SEATED.  true with connector_clocking false is REJECTED
+  # before the robot moves.
+  enabled: true
+  # WHERE THE COLLAR RING SITS, mm along the connector +X, measured FROM THE CONNECTOR
+  # FRAME ORIGIN (the same origin targets: declares).  DERIVED from the bench measurement
+  # "ring stands 30 mm from the JUNCTION": junction sits at -45.7 mm on this axis, so
+  # collar = -45.7 + 30 = -15.7 mm.  If re-tuned on the bench, measure from the connector
+  # frame origin.
+  collar_offset_mm: -2.0
+  # COLLAR AXIS OFFSET, mm, in the SOCKET (target) frame's own axes: shifts the LINE the
+  # whole collar maneuver works about (centring, unwind, advance, turn, and the tug
+  # re-grip).  Y and Z move the line; X only slides the reference point along it.  Exists
+  # because nothing forces the declared connector origin onto the barrel centreline the
+  # collar turns about.  NOT rolled by engage_clock_deg (measured against the FIXTURE).
+  # Only set it if the centreline is MEASURED to differ from the declared frame.
+  axis_offset_mm: [0.0, 0.0, 0.0]
+  # RETRACT, mm along the TARGET connector -X, from wherever the seat push left the arm --
+  # a pure translation with the open fingers still around the cable (they slide ALONG it).
+  # The pitch onto the axis happens out here, the furthest from the wall the maneuver gets.
+  retract_mm: 150.0
+  # WALL STANDOFF, mm: the largest tool0 station along the connector +X any planned pose
+  # may take, in the TARGET frame (+X points INTO the wall, 0 = the mating face).  Every
+  # station is known before the arm moves, so the closest approach to the wall is checked
+  # up front.  -50.0 keeps the flange 50 mm clear.  null = no check.
+  wall_standoff_mm: -50.0
+  # CEILING, not the expected end: the turn should stop on the torque limit when the collar
+  # locks.  Reaching this without ever building the torque means the ring never locked.
+  # Needs this much wrist_3 headroom from wherever the grasp starts.
+  rotation_deg: 120.0
+  # PUSH while turning, mm along the connector +X, making the turn a SCREW: the axial press
+  # keeps the collar's lugs on their ramps instead of camming back.  0.0 = pure rotation.
+  push_mm: 10.0
+  # SEAT PUSH -- FIRST, before the lift-off: re-grip the connector at the junction and
+  # PRESS it deeper along +X until force_n is sustained for persistence_s (the guard trip
+  # IS the success).  The screw's compliance can leave the connector short, and the collar
+  # should be locked on a SEATED one.  max_travel_mm must cover force_n / stiffness plus
+  # real seating motion.  A failed grasp skips the push rather than failing the run.
+  seat_push:
+    enabled: true
+    force_n: 3.0
+    persistence_s: 0.10
+    max_travel_mm: 15.0
+  # GRASP CLOCK ANGLE, deg: the ABSOLUTE roll about the socket +X to take the collar at
+  # (same convention as connector_clocking.sweep_deg); the turn runs from here to
+  # here + rotation_deg.  null = lay tool0's -Y on the connector's -Z (where the sweep left
+  # it), solved in closed form -- the choice that halves the reorientation swing and keeps
+  # the analytic IK on a reachable branch.  If the angle does not solve, the app scans 24
+  # alternatives and takes the cheapest reachable one, warning that it did.  Pin a number
+  # here once it is stable.
+  grasp_clock_deg: -90.0
+  # WRIST-3 MARGIN, deg inside each end of the usable wrist_3 range the turn must stay.
+  # The grasp clock angle is exactly a wrist_3 offset, which lets the app PREWIND the wrist
+  # before threading down the axis.  The margin exists because the compliant turn can walk
+  # past a start placed hard against the limit; checked when the angle is chosen and again
+  # from the measured joints while the fingers are still open.
+  wrist3_margin_deg: 5.0
+  # OUT-OF-AXIS TILT GATE, deg: before the unwind, the part of the arm's orientation that
+  # NO rotation about the connector axis can explain.  Above this, refuse to orbit rather
+  # than swing blindly.  A CONSTANT value run to run is a frame declaration error; a
+  # VARIABLE one is tilt the connector screw left behind.  Not tighter, because the
+  # centring move that follows corrects a few degrees on the way in; the tilt is always
+  # logged.
+  max_offaxis_tilt_deg: 10.0
+  settle_s: 0.5
+  # TRUE here, unlike connector_clocking: the tare is taken at the collar station with the
+  # fingers still OPEN and clear of the ring -- the one genuinely unloaded moment -- so the
+  # torque limit measures torque ADDED by turning the collar.
+  tare_before: true
+  # null = the global caps x speed.phase_scale.collar_clock.
+  speed_rotation_deg_s: null
+  speed_translation_mm_s: null
+  # Compliance OVERRIDE for this behaviour (null entries inherit the
+  # top-level compliance: block).
+  compliance:
+    # --- compliance overrides ---
+    # Softer than the screw: this turns a ring that is already captive, so it should yield
+    # rather than force a mis-estimated axis.
+    stiffness: [1500.0, 1500.0, 1500.0, 10.0, 10.0, 10.0]
+    mass: null
+    damping_ratio: null
+  # Force-guard OVERRIDE for this behaviour (unset keys inherit the
+  # top-level force_guard: block).
+  force_guard:
+    # --- force guard overrides ---
+    # A collar that has reached its lock STOPS TURNING, so a trip here is the intended end
+    # state as often as a jam -- the app logs the achieved angle and does not call it a
+    # failure.
+    force_guard_enabled: true
+    max_force_n: 30.0
+    # The INTENDED TERMINATION, not a safety backstop: the locked collar stops turning and
+    # the torque builds.  Only meaningful against the open-finger tare above.
+    max_torque_nm: 5.0
+    persistence_s: 1.0
+
+
+# THE SHARED ESCAPE, after either path: two guarded straight legs (the part is released by
+# now, so there is no held connector to thread out along its own axis).
+clocking_retract:
+  # Leg 1, in the GRIPPER's own (tool0) frame: -Z lifts the open fingers straight off the
+  # connector (tool0 +Z points from the flange toward the fingertips).
+  gripper_axis: [0.0, 0.0, -1.0]
+  gripper_distance_mm: 100.0
+  # Leg 2, in the TARGET CONNECTOR frame: -X backs away from the socket along the
+  # insertion axis.
+  target_axis: [-1.0, 0.0, 0.0]
+  target_distance_mm: 100.0
+
+
+# ---- TUG VERIFICATION: does the lock actually hold? --------------------------------------
+# After the escape, the gripper returns to the engaged pose, closes on the seated connector
+# and PULLS along the connector -X.  A locked bayonet holds; an unlocked one backs out.  A
+# SPRING pull: the reference is offset by pull_force_n / stiffness, so the force can never
+# exceed the commanded value on a connector that holds, and drops as one comes out.
+# VERIFIED -> release, retract, home (ASSEMBLED, TUG-VERIFIED).  FAILED -> the connector is
+# extracted, carried home and released there.  A GLOBAL guard trip during any pull
+# terminates where it stands rather than tearing at the fixture.
+tug_verify:
+  enabled: true
+  pull_force_n: 3.0
+  pull_time_s: 3.0
+  displacement_threshold_mm: 3.0
+  extraction_distance_mm: 50.0
+  # Compliance OVERRIDE for this behaviour (null entries inherit the
+  # top-level compliance: block).
+  compliance:
+    # The spec only discriminates if the spring offset pull_force_n / stiffness EXCEEDS
+    # displacement_threshold_mm -- tune force/threshold/stiffness together.
+    stiffness: [500.0, 500.0, 500.0, 15.0, 15.0, 15.0]
+
+  # TODO: grasp verification + failure recovery on the close -- a missed collar currently
+  # turns an empty gripper.
+
+# ---- DISASSEMBLY (optional) ---------------------------------------------------------
+# Take the connector back OUT and put the cable down -- the assembly run in reverse, which
+# is what makes repeated trials possible without a human resetting the fixture.
+#
+# WHERE IT STARTS: straight after the tug, which leaves the fingers CLOSED on the collar
+# with tool0 already ON the connector axis.  Every rotation below is then a wrist twist
+# about the axis the arm is already on -- no re-approach, no re-grip, nothing to lose the
+# part between steps.  (With this enabled the tug HOLDS its grip instead of releasing.)
+#
+# THE STATE LADDER RUN BACKWARDS: locked -> seated -> engaged -> removed, each rung claimed
+# only by the step that undoes it.  A connector that never locked skips the collar unlock;
+# one that never seated skips the bayonet.
+#
+# DIRECTIONS (the easy thing to get backwards): the collar unlocks by -rotation_deg, and the
+# bayonet releases by turning back through the ACHIEVED sweep angle -- the measured one, not
+# the commanded -- which returns the connector to the roll it was MATED at, where its pins
+# line up with the slots.  Turning further would ride them onto the rim.
+disassembly:
+  enabled: true
+  # ---- SCATTER THE PLACE, so each cycle re-picks from a genuinely different pose ----------
+  # Without this a multi-cycle run puts the cable back in the SAME spot every time, so the
+  # pick is only ever tested against one presentation and the detector only ever sees one.
+  # The draw is UNIFORM and ADDED to reorient_recovery.place_offsets, so it is centred on the
+  # place the run would otherwise have used -- turning it off restores that exactly.
+  #
+  # x/y are in the TARGET CONNECTOR's frame (like the offsets they perturb), so the spread
+  # means the same thing whichever way the socket faces. An unreachable draw is redrawn up to
+  # 8 times and then falls back to the centre, so an unlucky draw cannot kill a long run.
+  #
+  # `seed` makes a scattered run reproducible -- without it you cannot re-create the run when
+  # something goes wrong on cycle 34. Leave null for a different scatter each run.
+  place_scatter:
+    enabled: false
+    x_mm: 50.0            # +/- this, uniform
+    y_mm: 50.0            # +/- this, uniform
+    yaw_deg: 30.0         # +/- this, uniform
+    seed: null
+  # ---- SCATTER THE PLACE, so each cycle re-picks from a genuinely different pose ----------
+  # Without this a multi-cycle run puts the cable back in the SAME spot every time, so the
+  # pick is only ever tested against one presentation and the detector only ever sees one.
+  # The draw is UNIFORM and ADDED to reorient_recovery.place_offsets, so it is centred on the
+  # place the run would otherwise have used -- turning it off restores that exactly.
+  #
+  # x/y are in the TARGET CONNECTOR's frame (like the offsets they perturb), so the spread
+  # means the same thing whichever way the socket faces. An unreachable draw is redrawn up to
+  # 8 times and then falls back to the centre, so an unlucky draw cannot kill a long run.
+  #
+  # `seed` makes a scattered run reproducible -- without it you cannot re-create the run when
+  # something goes wrong on cycle 34. Leave null for a different scatter each run.
+  place_scatter:
+    enabled: false
+    x_mm: 50.0            # +/- this, uniform
+    y_mm: 50.0            # +/- this, uniform
+    yaw_deg: 30.0         # +/- this, uniform
+    seed: null
+  # CYCLES: repeat the whole pass -- localize, pick, assemble, clock, verify, take apart,
+  # place the cable back -- this many times.  Each cycle RE-LOCALIZES (the fixture may have
+  # moved; that is what the marker rig buys) and RE-PICKS from wherever the last cycle put
+  # the cable down, so it exercises the full pipeline rather than just the insertion.
+  #
+  # Needs disassembly AND place enabled: without them the connector stays mated and a second
+  # pass has nothing to pick.  The app clamps to 1 and says so rather than looping anyway.
+  # The in-hand belief is reset to nominal at the start of every cycle -- a fresh grasp has a
+  # fresh error, so last cycle's estimator correction must not carry over.
+  cycles: 10
+  # LOCKED -> SEATED.  The unlock drives the collar approach in reverse: turn rotation_deg
+  # BACK, or until the torque limit stops it -- symmetric with the lock, because the ring
+  # runs to a stop at BOTH ends of its travel, so torque building is the intended end in
+  # either direction.  It does NOT realign with the engagement angle first: the connector is
+  # already mated and the arm is already clear of it, and the collar station is absolute, so
+  # driving the open gripper back onto the connector would only be a pose to leave again.
+  unlock_collar: true
+  extract_mm: 60.0             # pull along the socket -X once the bayonet is free
+  # PLACE: back to the PICK pose, straight down, release ABOVE the ground, rise.  The same
+  # configuration the cable was picked from, so it goes back the way it was taken.
+  place:
+    enabled: true
+    # The FINGERTIP stops this far above ground_plane.z_mm -- the descent is guarded as well,
+    # so the pads stop short rather than pressing the cable into the table.
+    clearance_mm: 25.0
+    retreat_mm: 100.0          # rise this far after releasing, before going home
+
+
+# The KNOWN target (where the CONNECTOR must end up, base_link): names a configs/frames.yaml
+# frame whose `targets:` entry is the recorded mate.  MEASURE: hand-guide to a good mate,
+# read `base_link <- <frame>` off the monitor, paste it under targets: (mm/deg).
+# RECORDED THROUGH THE HOLDER, DRIVEN WITH THE FINGERPADS -- deliberately DIFFERENT
+# frames.  The mate is recorded with the cable clamped in the FINGER HOLDER (jog to a good
+# mate, read `base_link <- bnc_connector_finger_holder` off the monitor), so targets[
+# finger_holder] is a WORLD pose of the connector datum at the mate.  At run time the
+# PICKED part sits in the fingerpads (estimation.initial_connector_frame), and the engage
+# drives that believed connector onto this recorded world pose -- landing the physical
+# connector exactly where the mate was recorded.  The two frames must describe the SAME
+# connector datum (same orientation, differing only in grip depth along tool0 z); the
+# smoke suite pins that.
+# ===========================================================================================
+# REORIENT RECOVERY -- what to do when the coaxial grasp cannot be reached at all.
+#
+# THE FAILURE IT ANSWERS.  The coaxial grasp comes at the connector from along its OWN axis,
+# so whether the arm can get there depends on which way the cable happens to be lying.  A
+# cable pointing the wrong way has NO collision-free path to that grasp, and retrying cannot
+# produce one -- the geometry refused, not the attempt.
+#
+# THE ANSWER.  A SQUARE grasp (straight down) has no such dependence: the approach is vertical
+# whatever the heading.  So pick the cable the easy way, set it back down pointing where the
+# socket points, and re-scan -- the coaxial grasp then has a heading it can reach.  RUNS ONCE
+# PER PICK: if it is still unreachable after the cable has been squared up, the heading was
+# not the problem and repeating would only shuffle the part around the bench.
+#
+# NO SECOND SCAN AND NO SECOND PROMPT for the recovery pick itself -- nothing has moved
+# between the refused coaxial attempt and the square retry, only the way the arm means to
+# approach, so the detection and the cable the operator already identified both still hold.
+# (The pick AFTER the place does re-scan: by then the cable really has moved.)
+#
+# THE PLACE POSE is written wrt the TARGET CONNECTOR, because aligning with the socket is the
+# entire point.  yaw 0 puts the connector axis on the socket's own compass heading.  ROLL AND
+# PITCH ARE NOT SETTINGS -- the part is going onto a flat bench, so its axis ends up
+# horizontal and its z up regardless of the socket's attitude; only the heading carries over.
+reorient_recovery:
+  enabled: true
+  # THE SQUARE GRASP: the WHOLE pose, not just the angles -- the bite point that suits a
+  # coaxial approach is not the one that suits a vertical one.  This same transform is what
+  # the in-hand belief for the PLACE is derived from, so the pick and the set-down cannot
+  # disagree about where the connector is being held.
+  fingertip_in_connector:
+    xyz_mm:  [20.0, 0.0, -8.0]
+    rpy_deg: [0.0, 0.0, 0.0]
+  # OFFSETS IN THE TARGET CONNECTOR FRAME.  x runs along the socket axis, so -400 sets the
+  # cable down 400 mm OUT IN FRONT of the socket -- clear of the fixture and its mounting
+  # plate, which a drop directly beneath the socket would land on.
+  place_offsets:
+    x_mm: -250.0
+    y_mm: -100.0
+    # z is IGNORED while snap_to_ground is on, and it should be: "on the ground plane" is the
+    # requirement, and the resting height is a property of the PART (ground + one barrel
+    # radius, ~9 mm here), not a number worth typing twice.  Set snap_to_ground false to
+    # honour z_mm literally.
+    z_mm: 0.0
+    yaw_deg: -45.0
+  snap_to_ground: true
+  # RELEASE HEIGHT above where the connector comes to rest -- the gripper opens here and the
+  # part drops the last few mm.  Small on purpose: enough that the pads are not pressing the
+  # cable into the bench when they let go, not so much that it bounces or rolls.
+  release_clearance_mm: 10.0
+  approach_mm: 120.0               # stand-off above the place, straight down onto it
+  # WAIT BEFORE RE-SCANNING.  A cable that has just been carried and set down is still under
+  # whatever tension the move put into it, and it keeps moving for a second or two after the
+  # fingers open -- the free length pulls the connector round as it relaxes.  Scanning into
+  # that returns a junction pose the part has already left, and the coaxial grasp is the one
+  # approach that cannot absorb a heading error.  So wait, THEN take the picture.
+  #
+  # (The end-of-cycle disassembly place needs no equivalent: the end reset, the home move and
+  # the next cycle's marker sweep already put tens of seconds between it and the next scan.)
+  settle_s: 5.0
+
+
+# ---- CELEBRATE: a flourish after a VERIFIED assembly, before disassembly -----------------
+# Cosmetic and OFF BY DEFAULT -- nobody wants it firing 50 times in a data-collection run.
+#
+# It runs only when the run reached the end state it was CONFIGURED to reach (locked with
+# collar clocking on, seated with only connector clocking, engaged with neither), and only
+# after the escape has released the connector and backed the arm off -- so it cannot disturb
+# what it is celebrating. A failure inside it is logged and ignored; it never fails a good
+# assembly.
+#
+# WRIST-ONLY BY DESIGN. wrist_3 turns about tool0's own axis, so it moves the tool0 ORIGIN by
+# exactly zero and cannot put the gripper into anything. wrist_1 does move the tool, so it is
+# small, taken after the rise, and collision-checked like any other joint move.
+celebrate:
+  enabled: false
+  # HOW OFTEN. A 50-cycle collection should not stop to dance 50 times, but finishing the set
+  # is worth marking -- so `last` is the default.
+  #   last     only after the FINAL cycle of the run completes successfully
+  #   every    after every successful cycle
+  #   every_n  after every `every_n`-th successful cycle
+  # `last` is safe against a mid-run failure for free: a failed cycle stops the loop, so the
+  # final cycle is never reached and nothing celebrates.
+  when: last
+  every_n: 5              # only read when `when: every_n`
+  # HOW OFTEN. A 50-cycle collection should not stop to dance 50 times, but finishing the set
+  # is worth marking -- so `last` is the default.
+  #   last     only after the FINAL cycle of the run completes successfully
+  #   every    after every successful cycle
+  #   every_n  after every `every_n`-th successful cycle
+  # `last` is safe against a mid-run failure for free: a failed cycle stops the loop, so the
+  # final cycle is never reached and nothing celebrates.
+  when: last
+  every_n: 5              # only read when `when: every_n`
+  rise_mm: 100.0          # up in base +Z first, so the rest happens in open air
+  nod_deg: 15.0           # wrist_1 rock, +/- this (the "bow")
+  spin_deg: 180.0         # wrist_3 rock, +/- this (the flourish; cannot translate the tool)
+  repeats: 2
+  gripper_flourish: true  # close/open between reps
+
 estimation:
   # WHICH NUMBER GETS COMMITTED.
   #   aggregator  the multi-start solver's vote (see `aggregator:` below) -- production.
@@ -1485,7 +1485,7 @@ estimation:
     # Value = inverse(fingertip_grasp) @ frames[bnc_connector_in_fingerpads].
     xyz_mm: [-45.7, 0.0, 7.5]           # m
     rpy_deg: [0.0, 0.0, 180.0]       # rad (exactly 180 deg yaw)
-  manifold_csv: ./configs/data/bnc_manifold_v6.csv
+  manifold_csv: ./data/test data/banana_manifold_20260807_clean.csv
   # WRENCH REPRESENTATION: unit | rawcap | raw.
   #   unit    direction only -- magnitude discarded.
   #   rawcap  direction x magnitude, saturated (rawcap_* below).

@@ -14,19 +14,16 @@ like torch: `import sam3`, resolving its own tokenizer and checkpoint. So there 
 than pointing a config at a directory. Detection code used to live in that checkout, where the test
 suite could not reach it and a fix only got to the robot by pulling a second repo.
 
-FOUR names, THREE methods -- selected by `sam3.mode`:
+ONE method. The junction detector: SAM3 segments with the fixed prompts "cable" and
+"connector", the masks are unioned, the graph tracer follows the strand through its own
+crossings, and the slope selector puts the junction on the cable-side flank of the thickest
+diameter transition. The neck and tip methods, the geodesic-tracer option and the
+longest-run selector were REMOVED as configuration (2026-08-27): every shipped config used
+junction/graph/slope, and alternatives-as-config meant every option had to be revalidated
+after every change. The geometry functions still accept the old strategies as ARGUMENTS
+(compute_junction(trace=...), find_junction_index(select=...)) so tests can compare against
+them; they are just not reachable from YAML.
 
-  neck     -- cable/connector junction, from cable_neck_core.NeckDetector. Iterates over CONNECTOR
-              masks, so a mislabelled connector starves it. Has an adaptive-threshold mode.
-  junction -- the SAME junction, but the DIAMETER-PROFILING method (perception.junction): it unions
-              the cable+connector masks, traces the assembly, and puts the junction where the
-              constant-diameter cable run ends -- classification-free, one junction per frame, NO
-              adaptive mode. "neck" and "junction" are the same physical point by two different
-              methods; the name in the log tells you which is live. `sam3.trace` picks its
-              centreline tracer: 'graph' (default) or 'geodesic' (the original).
-  tip      -- the cable's free END (cable_neck_core.detect_tip). Also classification-free.
-
-All emit the SAME (u, v, yaw) tuple, so the ConnectorEstimator fuses any of them unchanged.
 
 Only ONE SAM3 model is ever loaded: each detector builds exactly one segmentation backend (the
 junction method reuses NeckDetector for segmentation), so the 6 GB card is not doubled.
@@ -50,12 +47,6 @@ def _count(x):
         return int(x) if isinstance(x, (int, float)) else 0
 
 
-def _num(x, default=-1.0):
-    """A float for logging. detect_adaptive returns thr_cable/thr_conn/eff_conf as None when it
-    finds no valid neck combo, and %.2f can't format None -- coalesce to a sentinel."""
-    return float(x) if isinstance(x, (int, float)) else default
-
-
 class _Base:
     """Common config + lifecycle. Subclasses build their own detector in _build() -- the base does
     NOT create one, so the junction method (which wraps its own NeckDetector) never loads SAM3
@@ -63,18 +54,28 @@ class _Base:
 
     def __init__(self, cfg):
         s = cfg.section('sam3')
-        self.cable_prompt = s.get('cable_prompt', 'cable')
-        self.connector_prompt = s.get('connector_prompt', 'connector')
+        # The prompts are FIXED. They are part of the method, not tuning: the junction geometry
+        # assumes the union of exactly these two semantic classes, and every mask-band constant
+        # downstream was measured against them.
+        self.cable_prompt = 'cable'
+        self.connector_prompt = 'connector'
         self.threshold = float(s.get('threshold', 0.5))
         self.connector_threshold = s.get('connector_threshold', None)
         self.mislabel_overlap = float(s.get('mislabel_overlap', 0.6))
-        self.adaptive = bool(s.get('adaptive', True))
-        self.confidence_floor = float(s.get('confidence_floor', 0.2))
+        # `sam3.adaptive` and `sam3.confidence_floor` are GONE. They belonged to the retired
+        # NECK method: adaptive re-ran segmentation over a grid of per-prompt confidence
+        # thresholds until a cable/connector pair produced a valid neck, and confidence_floor
+        # was the lowest threshold that search was allowed to try. The junction method never
+        # had an adaptive mode (it unions the masks and needs no classification), so the keys
+        # were read and ignored -- now they are neither.
         # Opacity of the drawn overlay (lines/arrows/dots/mask tint) over the raw image, 0..1.
         # 1.0 = the detector's overlay unchanged; lower fades every drawn marker toward the raw
         # frame so the cable underneath stays visible. Applied in _blend, after the detector renders.
         self.overlay_opacity = float(np.clip(s.get('overlay_opacity', 1.0), 0.0, 1.0))
         self.dry_run = bool(cfg.get_path('robot.dry_run', False))
+        # Where the model runs: 'auto' | 'cpu' | 'cuda'. A MACHINE fact, so it lives in
+        # configs/robot.yaml (compute:) with the robot IP.
+        self.compute_device = str(cfg.get_path('compute.device', 'auto'))
         self.last_debug = None
         self.core = None
         self.detector = None
@@ -101,7 +102,8 @@ class _Base:
         det = Sam3Backend(
             cable_prompt=self.cable_prompt, connector_prompt=self.connector_prompt,
             threshold=self.threshold, connector_threshold=self.connector_threshold,
-            mislabel_overlap=self.mislabel_overlap)
+            mislabel_overlap=self.mislabel_overlap, device=self.compute_device)
+        log.info('  SAM3 device: %s (compute.device: %s).', det.device, self.compute_device)
         return neck, det
 
     def _pil(self, frame):
@@ -127,54 +129,6 @@ class _Base:
         return cv2.cvtColor(frame.rgb, cv2.COLOR_RGB2BGR)
 
 
-class NeckDetector(_Base):
-    """Cable/connector junction ("neck") detection -- cable_neck_core.NeckDetector."""
-
-    def _build(self):
-        return self._neck_backend()
-
-    def detect(self, frame):
-        """[(u, v, yaw_rad), ...]. yaw is in the PIXEL frame (u right, v DOWN), so the neck's
-        direction is (cos yaw, sin yaw) in image coordinates -- what the estimator expects."""
-        if self.dry_run:
-            return []
-
-        pil = self._pil(frame)
-        if self.adaptive:
-            # The confidence threshold is only a post-hoc FILTER on per-mask scores -- the forward
-            # pass is identical at every threshold. So one inference at the floor yields every
-            # candidate with its score, and sweeping thresholds afterwards is FREE.
-            res = self.detector.detect_adaptive(
-                pil, floor=self.confidence_floor, mislabel_overlap=self.mislabel_overlap)
-            log.info('  adaptive: thr_cable=%.2f thr_conn=%.2f eff=%.2f (%d combos), '
-                     'cables=%d connectors=%d necks=%d',
-                     _num(res.get('thr_cable')), _num(res.get('thr_conn')),
-                     _num(res.get('eff_conf')), _count(res.get('combos_tried')),
-                     _count(res.get('cables_raw')), _count(res.get('connectors_raw')),
-                     _count(res.get('necks')))
-        else:
-            res = self.detector.detect(pil)
-            log.info('  cables=%d connectors=%d necks=%d dropped=%d',
-                     _count(res.get('cables_raw')), _count(res.get('connectors_raw')),
-                     _count(res.get('necks')), _count(res.get('n_dropped')))
-
-        self.last_debug = self._overlay(frame, res)
-        out = []
-        for neck in res.get('necks', []):
-            u, v = neck['neck']
-            dx, dy = neck['direction']
-            out.append((float(u), float(v), float(np.arctan2(dy, dx))))
-        return out
-
-    def _overlay(self, frame, res):
-        import cv2
-        bgr = cv2.cvtColor(frame.rgb, cv2.COLOR_RGB2BGR)
-        vis = self.core.render_overlay(
-            bgr.copy(), res.get('cleaned_cables', []), res.get('conn_masks', []),
-            res.get('necks', []))
-        return self._blend(bgr, vis)
-
-
 class JunctionDetector(_Base):
     """Cable/connector JUNCTION detection by DIAMETER PROFILING -- geometry from perception.junction.
 
@@ -192,9 +146,8 @@ class JunctionDetector(_Base):
         # Read before super().__init__ -- _build (called from it) needs work_dim.
         self.min_contrast = float(cfg.get_path('sam3.min_contrast', 0.0))
         self.work_dim = int(cfg.get_path('sam3.work_dim', 1024))
-        self.trace = str(cfg.get_path('sam3.trace', 'graph'))
-        if self.trace not in ('graph', 'geodesic'):
-            raise ValueError(f"sam3.trace must be 'graph' or 'geodesic', got {self.trace!r}")
+        # graph tracing and slope selection are THE method, not options (module docstring).
+        self.trace = 'graph'
         # HOW the junction is picked off the diameter profile. 'slope' finds the cable-side flank
         # of the thickest transition; 'longest_run' is the original (find the longest constant
         # stretch, take whichever end borders a rise). See perception/junction.py for why the
@@ -202,21 +155,16 @@ class JunctionDetector(_Base):
         # must reach to count as a connector at all -- it also decides how many junctions a cable
         # reports, since every qualifying feature gets one.
         from . import junction as _j
-        self.select = str(cfg.get_path('sam3.junction_select', _j.JUNCTION_SELECT))
-        if self.select not in ('slope', 'longest_run'):
-            raise ValueError("sam3.junction_select must be 'slope' or 'longest_run', "
-                             f'got {self.select!r}')
+        self.select = 'slope'
         self.peak_min = float(cfg.get_path('sam3.connector_peak_min', _j.CONNECTOR_PEAK_MIN))
         super().__init__(cfg)
-        if not self.dry_run and self.adaptive:
-            log.info('  (junction method has no adaptive-threshold mode; sam3.adaptive ignored.)')
 
     def _build(self):
         """SAM3 for segmentation only; the junction geometry is ours."""
         from . import junction
         _core, det = self._neck_backend()      # NeckDetector: the torch model + its GPU setup
-        log.info('  junction geometry: urlab.perception.junction, trace=%s, select=%s '
-                 '(connector >= %.2f x cable).', self.trace, self.select, self.peak_min)
+        log.info('  junction geometry: urlab.perception.junction, graph trace + slope '
+                 'selection (connector >= %.2f x cable).', self.peak_min)
         return junction, det
 
     def _detect_raw(self, frame):
@@ -571,46 +519,8 @@ class JunctionDetector(_Base):
         return self._blend(bgr, vis)
 
 
-class TipDetector(_Base):
-    """Cable TIP detection -- classification-free, so it survives SAM3 mislabelling."""
-
-    def __init__(self, cfg):
-        super().__init__(cfg)
-        self.curve_px = int(cfg.get_path('sam3.curve_px', 40))
-
-    def _build(self):
-        return self._neck_backend()
-
-    def detect(self, frame):
-        """[(u, v, yaw_rad)] -- at most one, since a cable has one connector end."""
-        if self.dry_run:
-            return []
-
-        res = self.detector.detect_tip(self._pil(frame), curve_px=self.curve_px)
-        self.last_debug = self._overlay(frame, res)
-
-        tip = res.get('tip')
-        if tip is None:
-            log.info('  no tip found.')
-            return []
-        dx, dy = res['direction']
-        log.info('  tip at (%.0f, %.0f), end chosen by %s.', tip[0], tip[1],
-                 'connector-mask' if res.get('used_connector') else 'thicker-end fallback')
-        return [(float(tip[0]), float(tip[1]), float(np.arctan2(dy, dx)))]
-
-    def _overlay(self, frame, res):
-        import cv2
-        bgr = cv2.cvtColor(frame.rgb, cv2.COLOR_RGB2BGR)
-        vis = self.core.render_tip_overlay(bgr.copy(), res)
-        return self._blend(bgr, vis)
-
-
-_MODES = {'neck': NeckDetector, 'junction': JunctionDetector, 'tip': TipDetector}
-
-
 def make_detector(cfg):
-    """The detector for `sam3.mode` ('neck' | 'junction' | 'tip')."""
-    mode = cfg.get_path('sam3.mode', 'junction')
-    if mode not in _MODES:
-        raise ValueError(f"sam3.mode must be one of {sorted(_MODES)}, got {mode!r}")
-    return _MODES[mode](cfg)
+    """The cable/connector junction detector. There is exactly one method now -- see the module
+    docstring for what was removed and why. `sam3.mode`, if a config still carries it, is
+    ignored rather than an error, so an old config keeps loading."""
+    return JunctionDetector(cfg)

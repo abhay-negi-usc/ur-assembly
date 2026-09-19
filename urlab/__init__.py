@@ -10,7 +10,7 @@ Layout:
     frames.py             FrameGraph -- the tf2 replacement, with explicit staleness
     config.py, log.py     config loading + logging/step-runner
     robot/                URArm (RTDE), Robotiq2F85 (Modbus), Robot facade, ForceGuard
-    perception/           RealSenseCamera, ArUco, SAM3 adapter, ConnectorEstimator
+    perception/           RealSenseCamera, ArUco, SAM3 adapter, junction geometry
     skills/               reusable behaviours: scan, servo, insert, pick, touch
     apps/                 thin demo scripts, one per old *_demo package
 """

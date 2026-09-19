@@ -34,7 +34,12 @@ class ArucoDetector:
     were not declared."""
 
     def __init__(self, cfg, sizes_m=None):
-        a = cfg.section('aruco')
+        # The frames catalogue's marker_rigs carry the CALIBRATION (dictionary + per-marker
+        # printed size), so they are the base layer; a config-level `aruco:` block overrides
+        # per key. A config using markers no rig describes still just declares its own block.
+        from .. import tool_frames
+        a = dict(tool_frames.aruco_defaults(cfg))
+        a.update(cfg.section('aruco'))
         self.marker_size = float(a.get('marker_size_m', 0.0203))
         self.sizes = {int(k): float(v) for k, v in (a.get('marker_sizes_m') or {}).items()}
         self.sizes.update({int(k): float(v) for k, v in (sizes_m or {}).items()})

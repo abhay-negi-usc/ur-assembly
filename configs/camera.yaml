@@ -1,0 +1,21 @@
+# THE CAMERA DEFINITION -- the sensor, referenced explicitly by every config that images:
+#
+#     camera_config: camera.yaml
+#
+# Same fill rules as robot_config (see robot.yaml). The camera MOUNT calibration (hand_eye,
+# tool0 -> camera) is NOT here: it lives in configs/frames.yaml as the `camera` frame entry,
+# with the rest of the measured frames.
+
+camera:
+  serial_no: "218622272137"
+  width: 1280
+  height: 720
+  fps: 15                          # D405 max at 1280x720 is 15 fps
+
+# ---- Global speed caps (the modern four-key schema; see docs/cable_pick_estimate_assemble.md).
+# All four are enforced simultaneously -- whichever binds. A config with its own speed: block
+# overrides ALL of this (whole-block ownership). ----
+
+camera_frame: camera1_color_optical_frame
+
+# ---- Camera (RealSense D405) ----

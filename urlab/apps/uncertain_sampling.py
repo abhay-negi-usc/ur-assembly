@@ -31,6 +31,7 @@ import time
 
 import numpy as np
 
+from ..skills.insert import axial_ref as _axial_ref, retract_ref as _retract_ref
 from .. import config as urconfig
 from .. import log as urlog
 from .. import tool_frames
@@ -310,27 +311,6 @@ def build_and_run(cfg, robot, camera, args):
         robot.arm.move_j(q_home, label='home')
         log.info('Sampling complete: %s', out_path)
     return ok
-
-
-def _axial_ref(T_ref, T_tool0_held, distance_m):
-    """The tool0 reference that slides the HELD PART along ITS OWN X by `distance_m` (SIGNED:
-    + drives into the socket, - backs out of it).
-
-    ASSUMES LINEAR (PEG-IN-HOLE) ASSEMBLY: the mate is a single-axis insertion along the connector's
-    +X, so both the preload and the escape are translations along that one axis. Expressed in the
-    CONNECTOR's frame (right-multiply), so it follows the part's ACTUAL, perturbed orientation --
-    a tilted connector presses and backs out along its own axis, not the target's."""
-    step = translation_matrix([float(distance_m), 0.0, 0.0])
-    return T_ref @ T_tool0_held @ step @ inverse(T_tool0_held)
-
-
-def _retract_ref(T_ref, T_tool0_held, distance_m):
-    """The tool0 reference that backs the HELD PART straight out along ITS OWN -X by `distance_m`.
-
-    `distance_m` is used as a MAGNITUDE here: a negative value would otherwise drive INTO the
-    socket, which is never what a retract wants (_axial_ref is the signed version, and is what
-    the preload press uses)."""
-    return _axial_ref(T_ref, T_tool0_held, -abs(float(distance_m)))
 
 
 def _pose_fields_mm(T):

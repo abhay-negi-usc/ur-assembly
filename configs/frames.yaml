@@ -23,6 +23,8 @@
 # connector_holder_target) is RETIRED.
 # ============================================================================
 
+robot_config: robot.yaml            # the machine (see configs/robot.yaml)
+camera_config: camera.yaml          # the sensor  (see configs/camera.yaml)
 frames:
   # The gripper fingertip at the grasp (tool0 -> fingertip). Mirrors fingertip_grasp.
   fingertip:

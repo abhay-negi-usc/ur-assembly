@@ -8,28 +8,16 @@
 # ASSUMPTION: LINEAR (PEG-IN-HOLE) ASSEMBLY -- single-axis insertion along the connector's +X;
 # the retract between attempts is the reverse translation along that same axis.
 
-robot:
-  ip: 192.168.125.2
-  dry_run: false
-  payload:
-    mass_kg: 1.3
-    cog_mm: [-26.0, 28.0, 30.0]
-base_frame: base_link
-tip_frame: tool0
-camera_frame: camera1_color_optical_frame
-
-hand_eye:
-  xyz_mm: [-9.0, -80.0, 31.0] # accounting for plate deformation
-  rpy_deg: [0.0, 0.0, 0.0]
-
-camera:
-  serial_no: "218622272137"
-  width: 1280
-  height: 720
-  fps: 15                          # D405 max at 1280x720 is 15 fps
-
+robot_config: robot.yaml            # the machine (see configs/robot.yaml)
+camera_config: camera.yaml          # the sensor  (see configs/camera.yaml)
 sam3:
-  mode: junction
+  # ONE detection method (2026-08-27): junction geometry, graph centreline tracing, slope
+  # junction selection, prompts fixed to "cable"/"connector". The former knobs -- mode:
+  # (neck|junction|tip), trace: (graph|geodesic), junction_select: (slope|longest_run),
+  # cable_prompt:/connector_prompt:, and the neck-only adaptive:/confidence_floor: (adaptive
+  # re-ran segmentation over a per-prompt threshold grid until a neck appeared;
+  # confidence_floor was that search's lowest allowed threshold) -- are gone: one validated
+  # path instead of options nobody switched.
   # Centreline tracer for the junction geometry (urlab/perception/junction.py, vendored):
   #   graph    -- build the skeleton's graph and walk THROUGH a self-crossing, pairing branches on
   #               tangent continuity, flagging the fused samples so they cannot be mistaken for the
@@ -37,11 +25,6 @@ sam3:
   #   geodesic -- the ORIGINAL: shortest path between the shape's two farthest points. Shortcuts a
   #               loop (skipping a lobe, sometimes the one the connector is on) and reports the
   #               width spike at a crossing as a junction, with high contrast. Kept for A/B.
-  trace: graph
-  cable_prompt: cable
-  connector_prompt: connector
-  adaptive: true
-  confidence_floor: 0.2
   # HOW the junction is picked off the diameter profile.
   #   slope       -- (default) the cable-side flank of the thickest TRANSITION. A junction IS a
   #                  transition, so an intermediate feature -- a strain-relief boot, a moulded
@@ -50,26 +33,33 @@ sam3:
   #                  junction from a median 23% of the arc away from the connector to 2.8%.
   #   longest_run -- the ORIGINAL: find the longest constant-diameter run, take whichever end
   #                  borders a rise. Kept to reproduce a past run, and as a fallback.
-  junction_select: slope
   # How many times the cable diameter a feature must reach to count as a connector. This also
   # decides HOW MANY junctions a cable reports: every qualifying feature gets one, so a cable
   # with a plug at each end reports two. Lower it and cable bends start reading as connectors
   # (~1.6 on these cables); raise it and a low-profile plug is missed (a real USB-A read 1.82).
   connector_peak_min: 1.8
+  # THE THREE REMAINING KNOBS of the junction detector:
+  #
+  # min_contrast -- reject a junction whose connector/cable diameter ratio is below this. A
+  #   flat profile is not a real junction: on the bench-photo test set, floor seams and bare
+  #   cable scored ~1.0-1.1 while every real connector measured >= 1.8. 0 = filter OFF, which
+  #   passes those false positives downstream; ~1.3-1.5 is the measured safe band if enabled.
+  #   (Distinct from connector_peak_min, which gates CANDIDATE features inside the selector;
+  #   this one gates the final answer.)
+  #
+  # work_dim -- the junction geometry runs on a copy downscaled so max(H, W) == work_dim, and
+  #   maps results back to full resolution. Speed/precision trade: the tracer's cost grows with
+  #   the skeleton size, but the cable must stay enough pixels wide to measure -- at 1024 a
+  #   thin cable is only ~7 px across internally, so widths are quantised to ~15%. Raise it if
+  #   thin cables misjudge diameters; expect roughly linear slowdown.
+  #
+  # overlay_opacity -- how strongly the saved DEBUG overlay (mask tint, centreline, junction
+  #   dot/arrow) is blended over the raw camera frame in the labelled images. Cosmetic only:
+  #   0..1 (clipped), 1 = fully opaque drawing, lower = see more of the photo. No effect on
+  #   detection.
   min_contrast: 0.0
   work_dim: 1024
   overlay_opacity: 0.5
-
-connector_estimator:
-  min_views: 3
-  min_inlier_views: 3
-  min_parallax_deg: 3.0
-  inlier_dist_mm: 10.0
-  max_range_mm: 100.0
-  reject_dist_mm: 50.0
-  up_axis: [0.0, 0.0, 1.0]
-  workspace_min: [-10.0, -10.0, -10.0]
-  workspace_max: [10.0, 10.0, 10.0]
 
 # ---- Ground-plane manual-select scan (the default scan.mode) ----
 # ---- Coloured TAG on the target cable (selection only; never touches the grasp) -------------
@@ -104,10 +94,6 @@ ground_plane:
 
 connector_frame: connector
 
-cable_end:
-  enabled: true
-  switch_distance_mm: 250.0
-
 # (The grasp pose comes from <cable>.junction_in_fingertip in cables.yaml -- the junction pose wrt
 # the fingertip at the grasp; the old connector_grasp block is obsolete.)
 grasp_tcp_offset:
@@ -118,40 +104,9 @@ fingertip_grasp:
   rpy_deg: [179.9998479605, 0.0, -90.0002104591]
 
 scan:
-  mode: ground_plane
-  require_detection: true
-  min_good_views: 3
-  max_passes: 3
-  view_settle_s: 0.5
-  max_view_distance_mm: 250.0
-  approach:
-    enabled: true
-    step_mm: 250.0
-    min_distance_mm: 250.0
-    nominal_distance_mm: 230.0
-    scale_offsets: true
-    recenter: true
-    max_view_delta_mm: 100.0
-    max_view_delta_deg: 45.0
-  relative_bounds:
-    xyz_mm: [80.0, 80.0, 50.0]
-    rpy_deg: [20.05352282958, 20.05352282958, 5.72957795131]
-  offsets:
-    - {xyz: [ 0.000,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
-    - {xyz: [ 0.040,  0.000, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
-    - {xyz: [ 0.028,  0.028, 0.00], rpy: [ 0.0000,  0.0000, 0.0]}
-    - {xyz: [ 0.000,  0.040, 0.00], rpy: [ 0.1722,  0.0000, 0.0]}
-    - {xyz: [-0.028,  0.028, 0.00], rpy: [ 0.1224,  0.1224, 0.0]}
-    - {xyz: [-0.040,  0.000, 0.00], rpy: [ 0.0000,  0.1722, 0.0]}
-    - {xyz: [-0.028, -0.028, 0.00], rpy: [-0.1224,  0.1224, 0.0]}
-    - {xyz: [ 0.000, -0.040, 0.00], rpy: [-0.1722,  0.0000, 0.0]}
-    - {xyz: [ 0.028, -0.028, 0.00], rpy: [-0.1224, -0.1224, 0.0]}
-  refine:
-    enabled: true
-    orbit_deg: [12.0, -12.0, 20.0, -20.0]
-    max_orbit_deg: 25.0
-    min_height_mm: 120.0
-
+  # ONE scan method (2026-08-28): the single-image ground-plane estimate (ground_plane: block).
+  # The multi-view orbit (CableScanner + ConnectorEstimator) and reconstruction mode were removed;
+  # `mode:` is gone with them.
 save_scan_images: true
 data_dir: data
 scan_images_subdir: cable_pick_estimate_assemble

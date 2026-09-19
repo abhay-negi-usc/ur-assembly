@@ -49,7 +49,8 @@ urlab-cable-pick-assemble = "urlab.apps.cable_pick_assemble:main"
 urlab-insertion-tester = "urlab.apps.insertion_tester:main"
 
 [tool.setuptools]
-packages = ["urlab", "urlab.robot", "urlab.perception", "urlab.skills", "urlab.apps"]
+packages = ["urlab", "urlab.robot", "urlab.perception", "urlab.skills", "urlab.apps",
+            "urlab.behaviors"]
 
 [tool.setuptools.package-data]
 urlab = ["../configs/*.yaml", "../configs/*.csv"]

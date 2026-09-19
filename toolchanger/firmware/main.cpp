@@ -32,9 +32,18 @@ const int noLockAngle = 15; // servo angle for unlocked toolchanger (no tool mou
 *   or send 'r' by hand with a tool mounted and again with nothing mounted. Put the midpoint
 *   of the two readings in thresh, and set toolReadsHigh to match which reading is larger.
 */
-const int thresh = 100;          //  reading that separates "tool" from "no tool"
-const bool toolReadsHigh = true; //  true:  a mounted tool reads ABOVE thresh
-                                 //  false: a mounted tool reads BELOW thresh (inverted probe)
+/*  MEASURED on this cell: with the changer EMPTY the pin sits railed at 1022..1023, stable
+*   to within a count. The rail is therefore the NO-TOOL reading -- which is what the original
+*   sketch's "the value will be 4095" comment meant, 4095 being the rail on the 12 bit board it
+*   was ported from. A tool in front of the probe pulls the reading DOWN, so toolReadsHigh is
+*   false here; it was true, which is why the board reported a tool while gripping nothing.
+*
+*   thresh is still PROVISIONAL: 1023 is the only state measured so far. Mount a tool and run
+*   `./toolchanger.py calibrate` to replace it with the real midpoint.
+*/
+const int thresh = 900;           //  below this = tool present, above = empty (see above)
+const bool toolReadsHigh = false; //  true:  a mounted tool reads ABOVE thresh
+                                  //  false: a mounted tool reads BELOW thresh (this probe)
 
 /*  How long to let the sensor come around after a move before calling it an emergency stop.
 *   The tool needs a moment to seat once the servo has swung, and a single unlucky sample

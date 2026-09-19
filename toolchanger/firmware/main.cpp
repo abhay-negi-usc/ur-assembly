@@ -17,8 +17,8 @@ void checkTime();
 Servo myServo; //   initialize servo lib
 
 //  =====    variables  =====
-const int lockAngle = 50;   // servo angle for locked toolchanger   (tool mounted)
-const int noLockAngle = 15; // servo angle for unlocked toolchanger (no tool mounted)
+const int lockAngle = 15;   // servo angle for locked toolchanger   (tool mounted)
+const int noLockAngle = 50; // servo angle for unlocked toolchanger (no tool mounted)
 
 /*  proximity sensor calibration
 *   The Uno's ADC is 10 bit, so analogRead() returns 0..1023. An earlier version of this

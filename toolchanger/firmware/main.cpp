@@ -110,20 +110,38 @@ void changeStatus(uint8_t newStatus)
 {
     if (newStatus != status)
     {
+        //  printed in one go, before the servo blocks -- splitting it around changeServo()
+        //  left half a line on the wire for 500 ms and the host read it as two lines
         Serial.print("changed status from ");
         Serial.print(status);
+        Serial.print(" to ");
+        Serial.println(newStatus);
 
         status = newStatus;
 
         changeServo(status > 0); //  switches the servo to the new position
-
-        Serial.print(" to ");
-        Serial.println(status);
     }
 
-    //  confirms the change to the robot: true when the sensor comes to agree with the
-    //  requested status within settleMax, false (emergency stop) when it never does
-    sendRoboSig(waitForTool(status > 0));
+    /*  Locking and releasing are not mirror images of each other.
+    *
+    *   Locking: the bearings must have something to grip. If the sensor sees nothing we
+    *   have clamped thin air, and that IS an emergency.
+    *
+    *   Releasing: the bearings retract, but the tool goes on sitting in the changer until
+    *   something physically pulls it away. The sensor still seeing it is the NORMAL case,
+    *   so demanding an empty reading here turned every good release into an emergency stop.
+    *   Report what the sensor sees, and confirm the release.
+    */
+    if (status > 0)
+    {
+        sendRoboSig(waitForTool(true));
+    }
+    else
+    {
+        Serial.print("released, tool ");
+        Serial.println(checkTool() ? "still in the changer" : "gone");
+        sendRoboSig(true);
+    }
 }
 
 void toggleMotorPower()
@@ -161,7 +179,14 @@ void readRoboSig()
         {
             //  a query reports what the sensor says right now, with no retry -- unlike a
             //  commanded change, nothing is expected to be settling
-            sendRoboSig(checkTool() == (status > 0));
+            bool present = checkTool();
+
+            Serial.print("tool ");
+            Serial.println(present ? "present" : "absent");
+
+            //  only a changer CLAIMING to hold a tool that is not there is an emergency;
+            //  a released changer with the tool still resting in it is perfectly normal
+            sendRoboSig(status == 0 || present);
         }
         else if (c == 'r') //raw sensor value ('r' == raw), for calibration
         {

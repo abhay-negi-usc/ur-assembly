@@ -27,16 +27,17 @@ driver waits `--settle` seconds (default 2) for the bootloader, then sends a sin
 
 | command | byte | what the board does | what you get back |
 |---|---|---|---|
-| `hold` | `1` | `changeStatus(1)` -> servo to **50 deg** (locked), then checks the sensor | `1 confirmed!` or `emergency stop` |
-| `release` | `0` | `changeStatus(0)` -> servo to **15 deg** (unlocked), then checks the sensor | `0 confirmed!` or `emergency stop` |
-| `status` | `s` | reads the sensor **once**, changes nothing, no retry | `<n> confirmed!` or `emergency stop` |
+| `hold` | `1` | `changeStatus(1)` -> servo to **50 deg** (locked). Alarms if there is nothing to grip | `1 confirmed!` or `emergency stop` |
+| `release` | `0` | `changeStatus(0)` -> servo to **15 deg**, bearings retract. Always confirms | `0 confirmed!`, after `released, tool ...` |
+| `status` | `s` | reads the sensor **once**, changes nothing, no retry | `tool present`/`absent`, then a confirm or an alarm |
 | `probe` | `r` | reads the sensor and prints the raw number. **Moves nothing** | `raw 812 thresh 100 tool yes status 1` |
 | `calibrate` | `r`, twice | prompts you to mount and remove a tool, then recommends `thresh`. **Moves nothing** | the two readings and the values to paste into `main.cpp` |
 | `motor` | `m` | toggles relay K1 (`analogWrite` 201 ~ 4 V) | `Motor On` / `Motor Off` |
 | `monitor` | -- | sends nothing, just prints what the board says | whatever arrives |
 | *(no argument)* | -- | interactive prompt | `toolchanger> ` |
 
-`hold`, `release` and `status` return **False** (CLI exit code 2) on `emergency stop`.
+`hold` and `status` return **False** (CLI exit code 2) on `emergency stop`. `release` confirms
+whenever the servo was commanded -- see below for why it is not symmetric with `hold`.
 
 A round trip takes most of a second: `loop()` delays 200 ms, `changeServo()` blocks 500 ms, and
 every sensor read averages 10 analog samples 10 ms apart.
@@ -50,12 +51,24 @@ with ToolChanger('/dev/ttyACM0') as tc:
     tc.hold()     # True = confirmed, False = emergency stop
 ```
 
+## Hold and release are not mirror images
+
+The proximity sensor answers one question: **is a tool present?** That is not the same question
+as "are the bearings clamped", and treating it as if it were is what made `release` fail.
+
+* **Holding** onto nothing is a real fault. If the bearings close and the sensor sees no tool,
+  the changer has clamped thin air -- that alarms.
+* **Releasing** retracts the bearings, but the tool goes on sitting in the changer until
+  something physically pulls it away. The sensor still seeing it is the **normal** outcome, so
+  a release confirms and reports `released, tool still in the changer`. An earlier version
+  demanded an empty reading here and turned every good release into an emergency stop.
+* The genuinely dangerous case -- the changer believes it is holding a tool that has since
+  fallen out -- is still caught, by the `checkTime()` watchdog every 10 s and by `status`.
+
 ## "the sensor disagrees with the commanded state"
 
-That message means the board did what you asked and then the proximity sensor contradicted it:
-told to hold but it reads nothing gripped, or told to release but something is still detected.
-The servo moves either way -- the emergency stop is about the *sensor*, not the servo. Two
-different causes, and the raw value tells them apart:
+You will now see this only when **holding**: the bearings closed and the sensor saw nothing to
+grip. Two different causes, and the raw value tells them apart:
 
 ```
 emergency stop raw=112 thresh=100     <- raw sits ON the threshold: MISCALIBRATED
@@ -108,12 +121,12 @@ PORT=/dev/ttyACM1 ./build_flash.sh upload
 
 Builds against the toolchain the Arduino IDE installs under `~/.arduino15` (avr-gcc 7.3, Servo,
 avrdude) -- no PlatformIO, no IDE. Target is an Uno / ATmega328P at 16 MHz, 9600 baud. Current
-build: 5116 bytes flash (15.6%), 399 bytes RAM.
+build: 5232 bytes flash (16.0%), 449 bytes RAM.
 
 **Check which build is on the board**: run `./toolchanger.py monitor` and press the reset button.
-The current firmware prints `toolchanger ready`. If you do not see it, the board is still running
-an older sketch -- and the old one never replied to `release` at all, which looks exactly like
-the command "not working".
+The current firmware prints `toolchanger ready`. Two other quick tells that you are on an older
+sketch: `probe` times out (nothing implements `'r'`), and an emergency stop comes back as a bare
+`emergency stop` with no `raw=N thresh=M` after it.
 
 IntelliSense for the sketch comes from `.vscode/c_cpp_properties.json` at the repo root; the
 absolute paths in it point at `~/.arduino15` and need editing on another machine.

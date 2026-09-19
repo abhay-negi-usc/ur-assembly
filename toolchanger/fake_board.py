@@ -28,12 +28,11 @@ def board(fd, tool_present):
     def raw():
         return RAW_TOOL if tool_present[0] else RAW_EMPTY
 
+    def emergency():
+        os.write(fd, f"emergency stop raw={raw()} thresh={THRESH}\r\n".encode())
+
     def confirm():
-        #  the board confirms only when the sensor agrees with the commanded status
-        if tool_present[0] == (status > 0):
-            os.write(fd, f"{status} confirmed!\r\n".encode())
-        else:
-            os.write(fd, f"emergency stop raw={raw()} thresh={THRESH}\r\n".encode())
+        os.write(fd, f"{status} confirmed!\r\n".encode())
 
     while True:
         try:
@@ -43,8 +42,11 @@ def board(fd, tool_present):
         if not c:
             return
         ch = c.decode('ascii', errors='replace')
+
         if ch == 's':
-            confirm()
+            os.write(fd, b"tool present\r\n" if tool_present[0] else b"tool absent\r\n")
+            #  only claiming to hold a tool that is not there is an emergency
+            confirm() if (status == 0 or tool_present[0]) else emergency()
         elif ch == 'r':
             tool = 'yes' if tool_present[0] else 'no'
             os.write(fd, f"raw {raw()} thresh {THRESH} tool {tool} status {status}\r\n".encode())
@@ -56,7 +58,14 @@ def board(fd, tool_present):
             if new != status:
                 os.write(fd, f"changed status from {status} to {new}\r\n".encode())
                 status = new
-            confirm()
+            if status > 0:
+                #  locking onto nothing is a genuine emergency
+                confirm() if tool_present[0] else emergency()
+            else:
+                #  releasing always succeeds; the tool sitting there afterwards is normal
+                here = 'still in the changer' if tool_present[0] else 'gone'
+                os.write(fd, f"released, tool {here}\r\n".encode())
+                confirm()
         #  anything else (line endings, noise) is ignored, as on the board
 
 
@@ -72,14 +81,18 @@ def main():
         assert tc.probe() == RAW_TOOL, 'probe should report the mounted reading'
         assert tc.motor() is True, 'first toggle turns the motor on'
         assert tc.motor() is False
-        #  releasing while the sensor still sees the tool must trip the emergency stop
-        assert tc.release() is False
 
-        tool_present[0] = False  # the tool is physically gone
+        #  THE regression this guards: the tool is still sitting in the changer after a
+        #  release, which is normal and must NOT come back as an emergency stop
+        assert tc.release() is True, 'release with the tool still present must confirm'
+        assert tc.status() is True, 'released + tool present is a normal state'
+
+        tool_present[0] = False  # the tool is physically pulled away
         assert tc.release() is True
         assert tc.probe() == RAW_EMPTY
-        #  holding with nothing in the gripper must trip it the other way
-        assert tc.hold() is False
+        #  clamping onto nothing is a real failure and must still alarm
+        assert tc.hold() is False, 'hold with nothing to grip must be an emergency stop'
+        assert tc.status() is False, 'claiming to hold a tool that is gone must alarm'
     finally:
         tc.close()
 

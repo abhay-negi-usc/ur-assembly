@@ -58,6 +58,7 @@ QUERY = 's'
 RAW = 'r'
 MOTOR = 'm'
 
+BANNER = 'toolchanger ready'   #  printed by setup(), i.e. once per board reset
 CONFIRM_SUFFIX = 'confirmed!'
 EMERGENCY = 'emergency stop'   #  the board appends " raw=N thresh=M"; match on the prefix
 
@@ -85,17 +86,64 @@ def find_port():
 class ToolChanger:
     """Blocking control of the toolchanger. `hold()` locks, `release()` unlocks."""
 
-    def __init__(self, port=None, baud=9600, timeout=5.0, settle=2.0, verbose=False):
+    def __init__(self, port=None, baud=9600, timeout=5.0, settle=3.0, verbose=False,
+                 latch=False):
         self.port = port or find_port()
         self.baud = baud
         self.timeout = timeout
         self.verbose = verbose
         # read timeout is per-readline; the overall budget is enforced in _exchange()
         self.ser = serial.Serial(self.port, baud, timeout=0.3)
-        # Opening the port toggles DTR, which resets the board. Anything we send during
-        # the bootloader window is lost, so wait it out and drop the boot noise.
-        time.sleep(settle)
+        if latch:
+            self._clear_hupcl()
+        # Opening the port toggles DTR, which resets the board. Anything we send during the
+        # bootloader window is lost, so wait the reset out before sending.
+        self._sync(settle)
+
+    def _sync(self, settle):
+        """Wait for the board's boot banner, then drop anything still buffered.
+
+        Sleeping a fixed time and flushing early is not enough: a line that lands AFTER the
+        flush but BEFORE the next command -- the tail of the previous session, or the banner
+        from a slow boot -- is read as the reply to that command, and every answer after it is
+        off by one. Waiting for the banner puts us at a known point in the stream.
+
+        Seeing the banner also means the board has just run setup(), so motorActive is false
+        and the relay is off, whatever state the previous session left behind."""
+        #  setup() has to get through the bootloader, a 100 ms sensor average and a
+        #  500 ms servo move before it can print, so the floor here is generous
+        deadline = time.time() + max(settle, 2.5)
+        while time.time() < deadline:
+            raw = self.ser.readline()
+            if raw and BANNER in raw.decode('ascii', errors='replace'):
+                self.booted = True
+                break
+        else:
+            # An older sketch predates the banner, so this is a warning and not an error.
+            self.booted = False
+            if self.verbose:
+                print(f"  (no {BANNER!r} within {settle}s -- older firmware?)", file=sys.stderr)
         self.ser.reset_input_buffer()
+
+    def _clear_hupcl(self):
+        """Stop the kernel dropping DTR when the port closes.
+
+        Closing the port normally hangs up DTR, which resets the Arduino -- setup() then runs
+        digitalWrite(relayK1, LOW) and the motor switches off the instant this process exits.
+        Clearing HUPCL leaves the board running, so a latched relay stays latched.
+
+        Note this gives up a dead-man switch: with the reset in place, a crashed or killed
+        script always leaves the motor off. Latched, the motor keeps running until something
+        turns it off or the board loses power."""
+        try:
+            import termios
+            fd = self.ser.fileno()
+            attrs = termios.tcgetattr(fd)
+            attrs[2] &= ~termios.HUPCL      # index 2 is cflag
+            termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        except Exception as exc:  # not a tty, no termios, permissions -- never fatal
+            print(f"  warning: could not keep the board alive across close ({exc}). It will "
+                  f"reset on exit and the motor will switch off.", file=sys.stderr)
 
     # ---------------------------------------------------------------- raw io
     def _send(self, byte):
@@ -288,12 +336,18 @@ def main():
     ap.add_argument('--port', help='serial device (default: autodetect)')
     ap.add_argument('--baud', type=int, default=9600, help='must match Serial.begin() (default 9600)')
     ap.add_argument('--timeout', type=float, default=5.0, help='seconds to wait for a reply')
-    ap.add_argument('--settle', type=float, default=2.0, help='seconds to wait for the board to boot')
+    ap.add_argument('--settle', type=float, default=3.0,
+                    help='seconds to wait for the board to boot (it prints a banner when ready)')
     ap.add_argument('-v', '--verbose', action='store_true', help='show the raw bytes and lines')
+    ap.add_argument('--latch', action='store_true',
+                    help='leave the board running when this exits, so the motor STAYS on. '
+                         'Without it, closing the port resets the board and switches the '
+                         'motor off -- which doubles as a dead-man switch.')
     args = ap.parse_args()
 
     try:
-        tc = ToolChanger(args.port, args.baud, args.timeout, args.settle, args.verbose)
+        tc = ToolChanger(args.port, args.baud, args.timeout, args.settle, args.verbose,
+                         args.latch)
     except serial.SerialException as exc:
         sys.exit(f"Cannot open the port: {exc}\n"
                  f"Check `ls /dev/ttyACM* /dev/ttyUSB*`, that you are in the dialout group, "

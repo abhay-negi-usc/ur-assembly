@@ -335,13 +335,14 @@ void setup()
         servoPin, 1000,
         2000); // map the pwm signal according to the datasheet of the servo
 
+    //  Announced BEFORE the slow work below, not after. The host uses this line to know the
+    //  board has just reset, and checkTool() (100 ms) plus changeServo() (500 ms) on top of
+    //  the bootloader pushed it far enough out that the host gave up waiting for it.
+    Serial.println("toolchanger ready");
+
     // start of program
     status = checkTool() ? 1 : 0; //  checks if a tool is mounted and saves this information to 'status'
     changeServo(status > 0);      //  turns the servo to the specified angle according to the state of the tool
-
-    //  says which build is on the board -- if you do not see this on reset, the flash did
-    //  not take and you are still running the old sketch
-    Serial.println("toolchanger ready");
 
     lastCheck = millis(); //  start the periodic check timer
 }

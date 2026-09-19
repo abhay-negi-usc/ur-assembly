@@ -25,6 +25,9 @@ def board(fd, tool_present):
     status = 0
     motor = False
 
+    #  setup() announces itself once, which is what the driver syncs on
+    os.write(fd, b"toolchanger ready\r\n")
+
     def raw():
         return RAW_TOOL if tool_present[0] else RAW_EMPTY
 

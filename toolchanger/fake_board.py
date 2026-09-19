@@ -8,9 +8,12 @@ exercise the driver without moving anything. It speaks exactly the lines main.cp
 """
 
 import os
+import pathlib
 import pty
+import re
 import sys
 import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from toolchanger import ToolChanger  # noqa: E402
@@ -25,7 +28,10 @@ def board(fd, tool_present):
     status = 0
     motor = False
 
-    #  setup() announces itself once, which is what the driver syncs on
+    #  setup() announces itself once, which is what the driver syncs on. Delayed a beat
+    #  because the driver opens the pty after this thread starts, and a banner written
+    #  before it is listening is a banner it never sees.
+    time.sleep(0.2)
     os.write(fd, b"toolchanger ready\r\n")
 
     def raw():
@@ -72,7 +78,47 @@ def board(fd, tool_present):
         #  anything else (line endings, noise) is ignored, as on the board
 
 
+def check_docs_match_firmware():
+    """Fail if the servo angles quoted in the driver or the README have drifted from main.cpp.
+
+    main.cpp is the only place the angles actually take effect; everywhere else is prose that
+    silently goes stale when they are retuned. They were swapped once with the docs left
+    behind, which is exactly the sort of thing nobody notices until the tool drops."""
+    here = pathlib.Path(__file__).parent
+    firmware = (here / 'firmware' / 'main.cpp').read_text()
+
+    lock = int(re.search(r'const int lockAngle\s*=\s*(\d+)', firmware).group(1))
+    nolock = int(re.search(r'const int noLockAngle\s*=\s*(\d+)', firmware).group(1))
+
+    driver = (here / 'toolchanger.py').read_text()
+    readme = (here / 'README.md').read_text()
+
+    quoted = [
+        # (what it should be, pattern, where)
+        (nolock, r'0 = unlocked \(servo (\d+) deg\)', 'toolchanger.py'),
+        (lock, r'>0 = locked \(servo (\d+) deg\)', 'toolchanger.py'),
+        (lock, r'lockAngle, (\d+) deg', 'toolchanger.py'),
+        (nolock, r'noLockAngle, (\d+) deg', 'toolchanger.py'),
+        (lock, r'servo to \*\*(\d+) deg\*\* \(locked\)', 'README.md'),
+        (nolock, r'0 unlocks \(servo (\d+) deg\)', 'README.md'),
+        (lock, r'>0 locks \((\d+) deg\)', 'README.md'),
+    ]
+
+    for expected, pattern, where in quoted:
+        text = driver if where == 'toolchanger.py' else readme
+        found = re.search(pattern, text)
+        assert found, f"{where}: nothing matched {pattern!r} -- the wording moved, fix this check"
+        actual = int(found.group(1))
+        assert actual == expected, (
+            f"{where} says {actual} deg where main.cpp says {expected} "
+            f"(lockAngle={lock}, noLockAngle={nolock})")
+
+    print(f"angles agree everywhere: locked {lock} deg, unlocked {nolock} deg")
+
+
 def main():
+    check_docs_match_firmware()
+
     master, slave = pty.openpty()
     tool_present = [True]  # what the proximity sensor "sees"; flip it mid-test
     threading.Thread(target=board, args=(master, tool_present), daemon=True).start()

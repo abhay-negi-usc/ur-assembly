@@ -14,7 +14,9 @@ Options: --port /dev/ttyACM0   --baud 9600   --timeout 5   --verbose
 
 The wire protocol is exactly what main.cpp implements -- one ASCII byte per command:
 
-    '0'..'9'  changeStatus(n).  0 = unlocked (servo 15 deg), >0 = locked (servo 50 deg).
+    '0'..'9'  changeStatus(n).  0 = unlocked (servo 50 deg), >0 = locked (servo 15 deg).
+              The angles live in main.cpp as noLockAngle/lockAngle -- if you retune them
+              there, these comments are the thing that goes stale.
               Board may print "changed status from X to Y", then the confirmation line.
     's'       report status without changing it, with no retry.
     'r'       print the raw averaged sensor reading, for calibrating thresh. Reads only.
@@ -112,7 +114,8 @@ class ToolChanger:
         and the relay is off, whatever state the previous session left behind."""
         #  setup() has to get through the bootloader, a 100 ms sensor average and a
         #  500 ms servo move before it can print, so the floor here is generous
-        deadline = time.time() + max(settle, 2.5)
+        waited = max(settle, 2.5)
+        deadline = time.time() + waited
         while time.time() < deadline:
             raw = self.ser.readline()
             if raw and BANNER in raw.decode('ascii', errors='replace'):
@@ -122,7 +125,7 @@ class ToolChanger:
             # An older sketch predates the banner, so this is a warning and not an error.
             self.booted = False
             if self.verbose:
-                print(f"  (no {BANNER!r} within {settle}s -- older firmware?)", file=sys.stderr)
+                print(f"  (no {BANNER!r} within {waited}s -- older firmware?)", file=sys.stderr)
         self.ser.reset_input_buffer()
 
     def _clear_hupcl(self):
@@ -194,11 +197,11 @@ class ToolChanger:
         return True
 
     def hold(self):
-        """Lock the bearings onto the tool (servo -> 50 deg)."""
+        """Lock the bearings onto the tool (servo -> lockAngle, 15 deg)."""
         return self._status_cmd(LOCKED, 'hold')
 
     def release(self):
-        """Unlock and let the tool go (servo -> 15 deg)."""
+        """Unlock and let the tool go (servo -> noLockAngle, 50 deg)."""
         return self._status_cmd(UNLOCKED, 'release')
 
     def status(self):

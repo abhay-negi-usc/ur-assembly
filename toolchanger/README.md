@@ -27,8 +27,8 @@ driver waits `--settle` seconds (default 2) for the bootloader, then sends a sin
 
 | command | byte | what the board does | what you get back |
 |---|---|---|---|
-| `hold` | `1` | `changeStatus(1)` -> servo to **50 deg** (locked). Alarms if there is nothing to grip | `1 confirmed!` or `emergency stop` |
-| `release` | `0` | `changeStatus(0)` -> servo to **15 deg**, bearings retract. Always confirms | `0 confirmed!`, after `released, tool ...` |
+| `hold` | `1` | `changeStatus(1)` -> servo to **15 deg** (locked). Alarms if there is nothing to grip | `1 confirmed!` or `emergency stop` |
+| `release` | `0` | `changeStatus(0)` -> servo to **50 deg**, bearings retract. Always confirms | `0 confirmed!`, after `released, tool ...` |
 | `status` | `s` | reads the sensor **once**, changes nothing, no retry | `tool present`/`absent`, then a confirm or an alarm |
 | `probe` | `r` | reads the sensor and prints the raw number. **Moves nothing** | `raw 812 thresh 100 tool yes status 1` |
 | `calibrate` | `r`, twice | prompts you to mount and remove a tool, then recommends `thresh`. **Moves nothing** | the two readings and the values to paste into `main.cpp` |
@@ -101,7 +101,7 @@ One ASCII byte per command; anything else (line endings, noise) is ignored by th
 
 | byte     | effect                                                          |
 |----------|-----------------------------------------------------------------|
-| `0`..`9` | `changeStatus(n)` -- 0 unlocks (servo 15 deg), >0 locks (50 deg) |
+| `0`..`9` | `changeStatus(n)` -- 0 unlocks (servo 50 deg), >0 locks (15 deg) |
 | `s`      | report status without changing it, no retry                     |
 | `r`      | print the raw averaged sensor reading                           |
 | `m`      | toggle the motor relay K1                                       |

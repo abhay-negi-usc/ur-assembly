@@ -5,6 +5,8 @@
     ./toolchanger.py release     # unlock, let the tool go                (sends '0')
     ./toolchanger.py status      # ask whether a tool is actually there   (sends 's')
     ./toolchanger.py motor       # toggle the motor relay K1 on/off       (sends 'm')
+    ./toolchanger.py probe       # print the raw proximity reading        (sends 'r')
+    ./toolchanger.py calibrate   # measure thresh -- READ ONLY, servo never moves
     ./toolchanger.py monitor     # just watch whatever the board prints
     ./toolchanger.py             # interactive prompt (hold/release/status/motor/quit)
 
@@ -14,14 +16,18 @@ The wire protocol is exactly what main.cpp implements -- one ASCII byte per comm
 
     '0'..'9'  changeStatus(n).  0 = unlocked (servo 15 deg), >0 = locked (servo 50 deg).
               Board may print "changed status from X to Y", then the confirmation line.
-    's'       report status without changing it.
+    's'       report status without changing it, with no retry.
+    'r'       print the raw averaged sensor reading, for calibrating thresh. Reads only.
     'm'       toggleMotorPower() -> "Motor On" / "Motor Off".
 
 and the board answers with one of:
 
     "<n> confirmed!"   the proximity sensor AGREES with the commanded status -- success.
-    "emergency stop"   the sensor DISAGREES. Asked to hold but nothing is gripped, or
-                       asked to release but something is still detected.
+    "emergency stop raw=N thresh=M"
+                       the sensor DISAGREES. Asked to hold but nothing is gripped, or asked
+                       to release but something is still detected. raw is the reading that
+                       caused it: when raw sits near thresh the threshold is mistuned rather
+                       than the tool being absent -- run `calibrate` and edit main.cpp.
 
 Timing notes that matter: opening the port pulls DTR and RESETS the Arduino, so we wait
 for it to boot before sending (--settle). loop() has a 200 ms delay and reads ONE byte
@@ -49,10 +55,11 @@ except ImportError:
 LOCKED = '1'
 UNLOCKED = '0'
 QUERY = 's'
+RAW = 'r'
 MOTOR = 'm'
 
 CONFIRM_SUFFIX = 'confirmed!'
-EMERGENCY = 'emergency stop'
+EMERGENCY = 'emergency stop'   #  the board appends " raw=N thresh=M"; match on the prefix
 
 
 class ToolChangerError(RuntimeError):
@@ -125,13 +132,16 @@ class ToolChanger:
     # ---------------------------------------------------------------- commands
     def _status_cmd(self, byte, label):
         def terminal(line):
-            return line.endswith(CONFIRM_SUFFIX) or line == EMERGENCY
+            return line.endswith(CONFIRM_SUFFIX) or line.startswith(EMERGENCY)
 
         final, lines = self._exchange(byte, terminal)
         for note in lines[:-1]:
             print(f"   {note}")
-        if final == EMERGENCY:
+        if final.startswith(EMERGENCY):
             print(f"{label}: EMERGENCY STOP -- the sensor disagrees with the commanded state.")
+            print(f"   board said: {final}")
+            print("   If raw is close to thresh, the threshold is mistuned, not the tool "
+                  "missing -- run `./toolchanger.py calibrate`.")
             return False
         print(f"{label}: {final}")
         return True
@@ -154,6 +164,52 @@ class ToolChanger:
         print(f"motor: {final}")
         return final == 'Motor On'
 
+    def probe(self):
+        """Print the raw averaged sensor reading. Reads only -- the servo does not move."""
+        final, _ = self._exchange(RAW, lambda ln: ln.startswith('raw '))
+        print(f"probe: {final}")
+        return self._parse_raw(final)
+
+    @staticmethod
+    def _parse_raw(line):
+        """Pull N out of "raw N thresh M tool yes status 1"."""
+        try:
+            return int(line.split()[1])
+        except (IndexError, ValueError):
+            raise ToolChangerError(
+                f"Could not read a raw value out of {line!r}. An older sketch that does not "
+                f"implement 'r' is probably still flashed -- reflash with "
+                f"firmware/build_flash.sh upload.")
+
+    def calibrate(self):
+        """Measure the sensor with and without a tool and recommend thresh/toolReadsHigh.
+
+        Nothing here commands a status change, so the servo stays where it is."""
+        print("Calibration reads the sensor only -- the servo will not move.\n")
+        input("  1. MOUNT a tool, then press Enter...")
+        mounted = self.probe()
+        input("  2. REMOVE the tool, then press Enter...")
+        empty = self.probe()
+
+        spread = abs(mounted - empty)
+        print(f"\n  mounted: {mounted}    empty: {empty}    spread: {spread}")
+
+        #  the Uno's ADC is 0..1023; a sensor that barely moves between the two states cannot
+        #  drive any threshold reliably, so say so rather than recommending a coin flip
+        if spread < 50:
+            print("\n  The two readings are too close to tell apart. The threshold is not the "
+                  "problem:\n  check the sensor's wiring, its supply, and its distance to the "
+                  "tool. A working\n  probe should swing by hundreds of counts.")
+            return False
+
+        thresh = (mounted + empty) // 2
+        reads_high = mounted > empty
+        print(f"\n  Put these in firmware/main.cpp and reflash:\n"
+              f"      const int thresh = {thresh};\n"
+              f"      const bool toolReadsHigh = {'true' if reads_high else 'false'};\n"
+              f"\n  cd firmware && ./build_flash.sh upload")
+        return True
+
     def monitor(self):
         """Print whatever the board sends until Ctrl-C."""
         print(f"Monitoring {self.port} at {self.baud} baud. Ctrl-C to stop.")
@@ -175,11 +231,14 @@ class ToolChanger:
 
 
 def repl(tc):
-    print(f"Connected to {tc.port}. Commands: hold, release, status, motor, quit")
+    print(f"Connected to {tc.port}. "
+          f"Commands: hold, release, status, motor, probe, calibrate, quit")
     actions = {'hold': tc.hold, 'h': tc.hold,
                'release': tc.release, 'r': tc.release,
                'status': tc.status, 's': tc.status,
-               'motor': tc.motor, 'm': tc.motor}
+               'motor': tc.motor, 'm': tc.motor,
+               'probe': tc.probe, 'p': tc.probe,
+               'calibrate': tc.calibrate}
     while True:
         try:
             word = input('toolchanger> ').strip().lower()
@@ -191,7 +250,8 @@ def repl(tc):
         if not word:
             continue
         if word not in actions:
-            print(f"  unknown: {word!r} -- try hold, release, status, motor, quit")
+            print(f"  unknown: {word!r} -- try hold, release, status, motor, probe, "
+                  f"calibrate, quit")
             continue
         try:
             actions[word]()
@@ -204,7 +264,8 @@ def main():
         description='Drive the Arduino toolchanger over serial.',
         epilog="hold = clamp the ball bearings onto the tool, release = let it go.")
     ap.add_argument('command', nargs='?',
-                    choices=['hold', 'release', 'status', 'motor', 'monitor'],
+                    choices=['hold', 'release', 'status', 'motor', 'probe', 'calibrate',
+                             'monitor'],
                     help='omit for an interactive prompt')
     ap.add_argument('--port', help='serial device (default: autodetect)')
     ap.add_argument('--baud', type=int, default=9600, help='must match Serial.begin() (default 9600)')

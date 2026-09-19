@@ -15,16 +15,25 @@ import threading
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from toolchanger import ToolChanger  # noqa: E402
 
+THRESH = 100          # must match main.cpp
+RAW_TOOL = 800        # what the sensor reads with a tool in front of it
+RAW_EMPTY = 20        # ... and with nothing there
+
 
 def board(fd, tool_present):
-    """Mimic main.cpp: one ASCII byte in, one confirmation line out."""
+    """Mimic main.cpp: one ASCII byte in, one line out."""
     status = 0
     motor = False
 
+    def raw():
+        return RAW_TOOL if tool_present[0] else RAW_EMPTY
+
     def confirm():
         #  the board confirms only when the sensor agrees with the commanded status
-        agrees = tool_present[0] == (status > 0)
-        os.write(fd, (f"{status} confirmed!\r\n" if agrees else "emergency stop\r\n").encode())
+        if tool_present[0] == (status > 0):
+            os.write(fd, f"{status} confirmed!\r\n".encode())
+        else:
+            os.write(fd, f"emergency stop raw={raw()} thresh={THRESH}\r\n".encode())
 
     while True:
         try:
@@ -36,6 +45,9 @@ def board(fd, tool_present):
         ch = c.decode('ascii', errors='replace')
         if ch == 's':
             confirm()
+        elif ch == 'r':
+            tool = 'yes' if tool_present[0] else 'no'
+            os.write(fd, f"raw {raw()} thresh {THRESH} tool {tool} status {status}\r\n".encode())
         elif ch == 'm':
             motor = not motor
             os.write(fd, b"Motor On\r\n" if motor else b"Motor Off\r\n")
@@ -57,6 +69,7 @@ def main():
     try:
         assert tc.hold() is True, 'hold with a tool present should confirm'
         assert tc.status() is True
+        assert tc.probe() == RAW_TOOL, 'probe should report the mounted reading'
         assert tc.motor() is True, 'first toggle turns the motor on'
         assert tc.motor() is False
         #  releasing while the sensor still sees the tool must trip the emergency stop
@@ -64,6 +77,7 @@ def main():
 
         tool_present[0] = False  # the tool is physically gone
         assert tc.release() is True
+        assert tc.probe() == RAW_EMPTY
         #  holding with nothing in the gripper must trip it the other way
         assert tc.hold() is False
     finally:

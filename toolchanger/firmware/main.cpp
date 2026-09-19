@@ -7,7 +7,10 @@ void changeStatus(uint8_t newStatus);
 void toggleMotorPower();
 void readRoboSig();
 int sensor();
+bool toolFrom(int value);
 bool checkTool();
+bool waitForTool(bool want);
+void reportSensor();
 void checkTime();
 
 
@@ -17,10 +20,32 @@ Servo myServo; //   initialize servo lib
 const int lockAngle = 50;   // servo angle for locked toolchanger   (tool mounted)
 const int noLockAngle = 15; // servo angle for unlocked toolchanger (no tool mounted)
 
-const int thresh = 100;              //  threshhold for the proximity sensor
+/*  proximity sensor calibration
+*   The Uno's ADC is 10 bit, so analogRead() returns 0..1023. An earlier version of this
+*   sketch said the no-tool reading would be 4095 -- that is a 12 bit value from a different
+*   board, so the threshold below was never tuned for THIS hardware, and the comment
+*   disagreed with the code about which side means "tool". That is what makes the sensor
+*   "disagree with the commanded state".
+*
+*   To calibrate, with no risk of the servo moving:
+*       ./toolchanger.py calibrate
+*   or send 'r' by hand with a tool mounted and again with nothing mounted. Put the midpoint
+*   of the two readings in thresh, and set toolReadsHigh to match which reading is larger.
+*/
+const int thresh = 100;          //  reading that separates "tool" from "no tool"
+const bool toolReadsHigh = true; //  true:  a mounted tool reads ABOVE thresh
+                                 //  false: a mounted tool reads BELOW thresh (inverted probe)
+
+/*  How long to let the sensor come around after a move before calling it an emergency stop.
+*   The tool needs a moment to seat once the servo has swung, and a single unlucky sample
+*   used to be reported as a failure -- which is why the disagreement looked intermittent.
+*/
+const unsigned long settleMax = 1500;
+
 const unsigned long timeMax = 10000; //  timer for periodic check of tool status
 unsigned long lastCheck = 0;         //  time of the last periodic check
 int status = 0;           //  saves the status of the toolchanger (0 = no tool mounted)
+int lastRaw = 0;          //  most recent averaged reading, reported on an emergency stop
 bool motorActive = false;
 
 //  =====    pin declaration    =====
@@ -59,7 +84,12 @@ void sendRoboSig(bool signal)
         //digitalWrite(relayK2, HIGH);
         //delay(200);
         //digitalWrite(relayK2, LOW);
-        Serial.println("emergency stop");
+        //  report the reading behind it, so the host can tell a miscalibrated threshold
+        //  apart from a tool that genuinely is not there
+        Serial.print("emergency stop raw=");
+        Serial.print(lastRaw);
+        Serial.print(" thresh=");
+        Serial.println(thresh);
     }
 }
 
@@ -91,9 +121,9 @@ void changeStatus(uint8_t newStatus)
         Serial.println(status);
     }
 
-    //  confirms the change to the robot: true when the sensor agrees with the
-    //  requested status, false (emergency stop) when it does not
-    sendRoboSig(checkTool() == (status > 0));
+    //  confirms the change to the robot: true when the sensor comes to agree with the
+    //  requested status within settleMax, false (emergency stop) when it never does
+    sendRoboSig(waitForTool(status > 0));
 }
 
 void toggleMotorPower()
@@ -129,7 +159,13 @@ void readRoboSig()
         }
         else if (c == 's') //check status ('s' == status)
         {
-            sendRoboSig(checkTool() == (status > 0));   //  confirms change to robot
+            //  a query reports what the sensor says right now, with no retry -- unlike a
+            //  commanded change, nothing is expected to be settling
+            sendRoboSig(checkTool() == (status > 0));
+        }
+        else if (c == 'r') //raw sensor value ('r' == raw), for calibration
+        {
+            reportSensor();
         }
         else if (c == 'm') //toggle motor ('m' == motor)
         {
@@ -160,26 +196,59 @@ int sensor()
         delay(10);
     }
 
-    temp /= checks;    //    average the value of the sensor over the number of checks performed
-    return (int)temp;  //    returns the value
+    temp /= checks;       //    average the value of the sensor over the number of checks performed
+    lastRaw = (int)temp;  //    kept for the emergency stop message
+    return lastRaw;       //    returns the value
+}
+
+//  which side of the threshold counts as "tool present" depends on the probe wiring
+bool toolFrom(int value)
+{
+    return toolReadsHigh ? (value >= thresh) : (value < thresh);
 }
 
 //  checks if a tool is mounted to the tool changer
 bool checkTool()
 {
-    // a reading below the threshold means nothing is in front of the sensor
-    if (sensor() < thresh)
-    {
-        digitalWrite(signalLED, HIGH);
-        return false;
-    }
+    bool present = toolFrom(sensor());
 
-    // any other value will cause the toolchanger to lock
-    else
+    //  the LED lights when nothing is mounted
+    digitalWrite(signalLED, present ? LOW : HIGH);
+    return present;
+}
+
+/*  waits for the sensor to agree with `want`, up to settleMax
+*   Each checkTool() averages 10 readings 10 ms apart, so this retries about every 100 ms.
+*   Returns true as soon as the sensor agrees, false if it never does.
+*/
+bool waitForTool(bool want)
+{
+    unsigned long start = millis();
+
+    do
     {
-        digitalWrite(signalLED, LOW);
-        return true;
-    }
+        if (checkTool() == want)
+        {
+            return true;
+        }
+    } while (millis() - start < settleMax);
+
+    return false;
+}
+
+//  prints the raw averaged reading, for calibrating thresh and toolReadsHigh
+void reportSensor()
+{
+    int value = sensor();
+
+    Serial.print("raw ");
+    Serial.print(value);
+    Serial.print(" thresh ");
+    Serial.print(thresh);
+    Serial.print(" tool ");
+    Serial.print(toolFrom(value) ? "yes" : "no");
+    Serial.print(" status ");
+    Serial.println(status);
 }
 
 /*  timer function
@@ -192,10 +261,12 @@ void checkTime()
     //  after timer runs out
     if (millis() - lastCheck >= timeMax)
     {
-        //  checks if the tool is mounted like expected
+        //  checks if the tool is mounted like expected (also refreshes the LED)
         bool check = checkTool();
 
-        if (!check && status > 0)
+        //  only alarm when the tool is still missing after a retry, so a single noisy
+        //  sample does not fire a spurious halt while idling
+        if (!check && status > 0 && !waitForTool(true))
         {
             sendRoboSig(false); //  sends a emergency halt to the robot
         }
@@ -233,6 +304,10 @@ void setup()
     // start of program
     status = checkTool() ? 1 : 0; //  checks if a tool is mounted and saves this information to 'status'
     changeServo(status > 0);      //  turns the servo to the specified angle according to the state of the tool
+
+    //  says which build is on the board -- if you do not see this on reset, the flash did
+    //  not take and you are still running the old sketch
+    Serial.println("toolchanger ready");
 
     lastCheck = millis(); //  start the periodic check timer
 }

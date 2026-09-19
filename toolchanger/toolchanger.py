@@ -6,6 +6,7 @@
     ./toolchanger.py status      # ask whether a tool is actually there   (sends 's')
     ./toolchanger.py motor       # toggle the motor relay K1 on/off       (sends 'm')
     ./toolchanger.py probe       # print the raw proximity reading        (sends 'r')
+    ./toolchanger.py bypass      # work the servo WITHOUT the sensor      (sends 'b')
     ./toolchanger.py calibrate   # measure thresh -- READ ONLY, servo never moves
     ./toolchanger.py monitor     # just watch whatever the board prints
     ./toolchanger.py             # interactive prompt (hold/release/status/motor/quit)
@@ -20,6 +21,9 @@ The wire protocol is exactly what main.cpp implements -- one ASCII byte per comm
               Board may print "changed status from X to Y", then the confirmation line.
     's'       report status without changing it, with no retry.
     'r'       print the raw averaged sensor reading, for calibrating thresh. Reads only.
+    'b'       toggle the sensor bypass. Bypassed, hold and release move the servo and confirm
+              without consulting the sensor, and the watchdog stops alarming. Cleared by any
+              reset, so it never outlives the connection that set it.
     'm'       toggleMotorPower() -> "Motor On" / "Motor Off".
 
 and the board answers with one of:
@@ -58,6 +62,7 @@ LOCKED = '1'
 UNLOCKED = '0'
 QUERY = 's'
 RAW = 'r'
+BYPASS = 'b'
 MOTOR = 'm'
 
 BANNER = 'toolchanger ready'   #  printed by setup(), i.e. once per board reset
@@ -233,6 +238,22 @@ class ToolChanger:
         return (f"raw {raw} is a clear {abs(raw - thresh)} from thresh {thresh}, so the sensor "
                 f"is confident: there is genuinely no tool to grip.")
 
+    def bypass(self):
+        """Toggle the board's sensor bypass. Returns True if the bypass ended up ON.
+
+        For working the mechanism while the probe is untrustworthy. A disconnected or shorted
+        sensor reads a hard rail and then agrees with every command, confirming grips that are
+        not happening -- bypassing at least stops the board claiming to have checked.
+
+        The board clears this on reset, and opening the port resets the board, so it only lasts
+        as long as this connection."""
+        final, _ = self._exchange(BYPASS, lambda ln: ln.startswith('sensor bypass'))
+        on = 'ON' in final
+        print(f"bypass: {final}")
+        if on:
+            print("   grip is NOT verified while this is on. It clears when you disconnect.")
+        return on
+
     def probe(self):
         """Print the raw averaged sensor reading. Reads only -- the servo does not move."""
         final, _ = self._exchange(RAW, lambda ln: ln.startswith('raw '))
@@ -301,13 +322,14 @@ class ToolChanger:
 
 def repl(tc):
     print(f"Connected to {tc.port}. "
-          f"Commands: hold, release, status, motor, probe, calibrate, quit")
+          f"Commands: hold, release, status, motor, probe, calibrate, bypass, quit")
     actions = {'hold': tc.hold, 'h': tc.hold,
                'release': tc.release, 'r': tc.release,
                'status': tc.status, 's': tc.status,
                'motor': tc.motor, 'm': tc.motor,
                'probe': tc.probe, 'p': tc.probe,
-               'calibrate': tc.calibrate}
+               'calibrate': tc.calibrate,
+               'bypass': tc.bypass, 'b': tc.bypass}
     while True:
         try:
             word = input('toolchanger> ').strip().lower()
@@ -320,7 +342,7 @@ def repl(tc):
             continue
         if word not in actions:
             print(f"  unknown: {word!r} -- try hold, release, status, motor, probe, "
-                  f"calibrate, quit")
+                  f"calibrate, bypass, quit")
             continue
         try:
             actions[word]()
@@ -334,7 +356,7 @@ def main():
         epilog="hold = clamp the ball bearings onto the tool, release = let it go.")
     ap.add_argument('command', nargs='?',
                     choices=['hold', 'release', 'status', 'motor', 'probe', 'calibrate',
-                             'monitor'],
+                             'bypass', 'monitor'],
                     help='omit for an interactive prompt')
     ap.add_argument('--port', help='serial device (default: autodetect)')
     ap.add_argument('--baud', type=int, default=9600, help='must match Serial.begin() (default 9600)')

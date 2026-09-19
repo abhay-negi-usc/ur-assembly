@@ -27,6 +27,7 @@ def board(fd, tool_present):
     """Mimic main.cpp: one ASCII byte in, one line out."""
     status = 0
     motor = False
+    bypassed = False
 
     #  setup() announces itself once, which is what the driver syncs on. Delayed a beat
     #  because the driver opens the pty after this thread starts, and a banner written
@@ -58,7 +59,13 @@ def board(fd, tool_present):
             confirm() if (status == 0 or tool_present[0]) else emergency()
         elif ch == 'r':
             tool = 'yes' if tool_present[0] else 'no'
-            os.write(fd, f"raw {raw()} thresh {THRESH} tool {tool} status {status}\r\n".encode())
+            byp = 'on' if bypassed else 'off'
+            os.write(fd, f"raw {raw()} thresh {THRESH} tool {tool} status {status} "
+                         f"bypass {byp}\r\n".encode())
+        elif ch == 'b':
+            bypassed = not bypassed
+            os.write(fd, b"sensor bypass ON -- grip is NOT verified\r\n" if bypassed
+                         else b"sensor bypass off\r\n")
         elif ch == 'm':
             motor = not motor
             os.write(fd, b"Motor On\r\n" if motor else b"Motor Off\r\n")
@@ -67,7 +74,11 @@ def board(fd, tool_present):
             if new != status:
                 os.write(fd, f"changed status from {status} to {new}\r\n".encode())
                 status = new
-            if status > 0:
+            if bypassed:
+                #  no sensor opinion is sought when bypassed
+                os.write(fd, b"(sensor bypassed)\r\n")
+                confirm()
+            elif status > 0:
                 #  locking onto nothing is a genuine emergency
                 confirm() if tool_present[0] else emergency()
             else:
@@ -142,6 +153,14 @@ def main():
         #  clamping onto nothing is a real failure and must still alarm
         assert tc.hold() is False, 'hold with nothing to grip must be an emergency stop'
         assert tc.status() is False, 'claiming to hold a tool that is gone must alarm'
+
+        #  ... unless the sensor is bypassed, which is the point of the bypass: work the
+        #  servo while the probe is untrustworthy, without the board pretending it checked
+        assert tc.bypass() is True, 'first toggle turns the bypass on'
+        assert tc.hold() is True, 'bypassed, hold confirms without consulting the sensor'
+        assert tc.release() is True
+        assert tc.bypass() is False, 'second toggle turns it back off'
+        assert tc.hold() is False, 'un-bypassed, the alarm comes back'
     finally:
         tc.close()
 

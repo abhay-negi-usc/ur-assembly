@@ -32,6 +32,7 @@ driver waits `--settle` seconds (default 2) for the bootloader, then sends a sin
 | `status` | `s` | reads the sensor **once**, changes nothing, no retry | `tool present`/`absent`, then a confirm or an alarm |
 | `probe` | `r` | reads the sensor and prints the raw number. **Moves nothing** | `raw 812 thresh 100 tool yes status 1` |
 | `calibrate` | `r`, twice | prompts you to mount and remove a tool, then recommends `thresh`. **Moves nothing** | the two readings and the values to paste into `main.cpp` |
+| `bypass` | `b` | stops the board consulting the sensor at all. **Moves nothing** | `sensor bypass ON` / `off` |
 | `motor` | `m` | toggles relay K1 (`analogWrite` 201 ~ 4 V) | `Motor On` / `Motor Off` |
 | `monitor` | -- | sends nothing, just prints what the board says | whatever arrives |
 | *(no argument)* | -- | interactive prompt | `toolchanger> ` |
@@ -50,6 +51,28 @@ from toolchanger import ToolChanger
 with ToolChanger('/dev/ttyACM0') as tc:
     tc.hold()     # True = confirmed, False = emergency stop
 ```
+
+## Working the servo with a broken sensor
+
+A probe that is unplugged, unpowered or shorted does not read as "no tool" -- it reads a hard
+rail, 0 or 1023, and then *agrees with everything*. That is worse than no sensor at all,
+because the board goes on confirming grips that are not happening. When the readings look like
+that (`probe` returning a dead-stable 0 or 1023 no matter what is in the changer), bypass it:
+
+```bash
+./toolchanger.py            # the bypass only lasts as long as the connection
+toolchanger> bypass         # "sensor bypass ON -- grip is NOT verified"
+toolchanger> hold           # servo moves, confirms, says "(sensor bypassed)"
+toolchanger> release
+```
+
+Bypassed, `hold` and `release` move the servo and confirm without asking the sensor, and the
+10 s watchdog stops alarming. **Grip is not verified** -- every confirmation means only "the
+servo was commanded".
+
+It lives in RAM and any reset clears it, and opening the serial port resets the board, so a
+bypass can never outlive the connection that set it. You cannot leave the machine bypassed by
+accident.
 
 ## Hold and release are not mirror images
 
@@ -104,6 +127,7 @@ One ASCII byte per command; anything else (line endings, noise) is ignored by th
 | `0`..`9` | `changeStatus(n)` -- 0 unlocks (servo 50 deg), >0 locks (15 deg) |
 | `s`      | report status without changing it, no retry                     |
 | `r`      | print the raw averaged sensor reading                           |
+| `b`      | toggle the sensor bypass (cleared by any reset)                 |
 | `m`      | toggle the motor relay K1                                       |
 
 Replies: `<n> confirmed!`, `emergency stop raw=N thresh=M`, `raw N thresh M tool yes status n`,
@@ -121,7 +145,7 @@ PORT=/dev/ttyACM1 ./build_flash.sh upload
 
 Builds against the toolchain the Arduino IDE installs under `~/.arduino15` (avr-gcc 7.3, Servo,
 avrdude) -- no PlatformIO, no IDE. Target is an Uno / ATmega328P at 16 MHz, 9600 baud. Current
-build: 5232 bytes flash (16.0%), 449 bytes RAM.
+build: 5380 bytes flash (16.4%), 514 bytes RAM.
 
 **Check which build is on the board**: run `./toolchanger.py monitor` and press the reset button.
 The current firmware prints `toolchanger ready`. Two other quick tells that you are on an older

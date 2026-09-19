@@ -11,6 +11,7 @@ bool toolFrom(int value);
 bool checkTool();
 bool waitForTool(bool want);
 void reportSensor();
+void toggleBypass();
 void checkTime();
 
 
@@ -56,6 +57,19 @@ unsigned long lastCheck = 0;         //  time of the last periodic check
 int status = 0;           //  saves the status of the toolchanger (0 = no tool mounted)
 int lastRaw = 0;          //  most recent averaged reading, reported on an emergency stop
 bool motorActive = false;
+
+/*  Sensor bypass: when true, hold and release move the servo and confirm without asking the
+*   proximity sensor, and the periodic watchdog stops alarming.
+*
+*   This exists for working on the mechanism while the sensor is untrustworthy -- a probe that
+*   is unplugged or shorted reads a hard 0 or a hard 1023 and then "agrees" with everything,
+*   which is worse than useless because it confirms grips that are not happening.
+*
+*   It gives up the emergency stop, so it is deliberately NOT persistent: it lives in RAM and
+*   every reset -- including every time the host opens the serial port -- clears it back to
+*   false. You cannot leave the machine bypassed by accident.
+*/
+bool sensorBypass = false;
 
 //  =====    pin declaration    =====
 const int signalLED = LED_BUILTIN; // uses the LED on the arduino to visualize status
@@ -141,7 +155,13 @@ void changeStatus(uint8_t newStatus)
     *   so demanding an empty reading here turned every good release into an emergency stop.
     *   Report what the sensor sees, and confirm the release.
     */
-    if (status > 0)
+    if (sensorBypass)
+    {
+        //  no sensor opinion is sought; the servo was commanded and that is all we claim
+        Serial.println("(sensor bypassed)");
+        sendRoboSig(true);
+    }
+    else if (status > 0)
     {
         sendRoboSig(waitForTool(true));
     }
@@ -200,6 +220,10 @@ void readRoboSig()
         else if (c == 'r') //raw sensor value ('r' == raw), for calibration
         {
             reportSensor();
+        }
+        else if (c == 'b') //toggle sensor bypass ('b' == bypass)
+        {
+            toggleBypass();
         }
         else if (c == 'm') //toggle motor ('m' == motor)
         {
@@ -270,6 +294,15 @@ bool waitForTool(bool want)
     return false;
 }
 
+//  turns the sensor check off or back on; cleared by any reset
+void toggleBypass()
+{
+    sensorBypass = !sensorBypass;
+
+    Serial.print("sensor bypass ");
+    Serial.println(sensorBypass ? "ON -- grip is NOT verified" : "off");
+}
+
 //  prints the raw averaged reading, for calibrating thresh and toolReadsHigh
 void reportSensor()
 {
@@ -282,7 +315,9 @@ void reportSensor()
     Serial.print(" tool ");
     Serial.print(toolFrom(value) ? "yes" : "no");
     Serial.print(" status ");
-    Serial.println(status);
+    Serial.print(status);
+    Serial.print(" bypass ");
+    Serial.println(sensorBypass ? "on" : "off");
 }
 
 /*  timer function
@@ -300,7 +335,7 @@ void checkTime()
 
         //  only alarm when the tool is still missing after a retry, so a single noisy
         //  sample does not fire a spurious halt while idling
-        if (!check && status > 0 && !waitForTool(true))
+        if (!sensorBypass && !check && status > 0 && !waitForTool(true))
         {
             sendRoboSig(false); //  sends a emergency halt to the robot
         }

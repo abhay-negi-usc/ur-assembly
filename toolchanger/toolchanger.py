@@ -140,8 +140,7 @@ class ToolChanger:
         if final.startswith(EMERGENCY):
             print(f"{label}: EMERGENCY STOP -- the sensor disagrees with the commanded state.")
             print(f"   board said: {final}")
-            print("   If raw is close to thresh, the threshold is mistuned, not the tool "
-                  "missing -- run `./toolchanger.py calibrate`.")
+            print(f"   {self._explain_emergency(final)}")
             return False
         print(f"{label}: {final}")
         return True
@@ -163,6 +162,25 @@ class ToolChanger:
         final, _ = self._exchange(MOTOR, lambda ln: ln.startswith('Motor'))
         print(f"motor: {final}")
         return final == 'Motor On'
+
+    #  a reading this far from the threshold is a clear verdict; anything nearer and the
+    #  threshold itself is the thing in doubt, not the tool
+    DECISIVE_MARGIN = 100
+
+    @classmethod
+    def _explain_emergency(cls, line):
+        """Say whether an emergency stop means "no tool" or "threshold mistuned"."""
+        try:
+            fields = dict(part.split('=', 1) for part in line.split() if '=' in part)
+            raw, thresh = int(fields['raw']), int(fields['thresh'])
+        except (ValueError, KeyError):
+            return ('Could not parse the reading. Run `./toolchanger.py probe` to see it.')
+
+        if abs(raw - thresh) < cls.DECISIVE_MARGIN:
+            return (f"raw {raw} is within {cls.DECISIVE_MARGIN} of thresh {thresh}, so the "
+                    f"THRESHOLD is in doubt, not the tool. Run `./toolchanger.py calibrate`.")
+        return (f"raw {raw} is a clear {abs(raw - thresh)} from thresh {thresh}, so the sensor "
+                f"is confident: there is genuinely no tool to grip.")
 
     def probe(self):
         """Print the raw averaged sensor reading. Reads only -- the servo does not move."""

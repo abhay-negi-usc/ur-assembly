@@ -11,10 +11,6 @@
 
 robot_config: robot.yaml            # the machine (see configs/robot.yaml)
 camera_config: camera.yaml          # the sensor  (see configs/camera.yaml)
-hand_eye:                        # tool0 -> camera (eye-in-hand); replaces ur_tf_demo
-  xyz_mm: [0.0, -80.0, 31.0]
-  rpy_deg: [0.0, 0.0, 0.0]
-
 # ---- SAM3 detector (in-process) ----
 sam3:
   # ONE detection method (2026-08-27): junction geometry, graph centreline tracing, slope

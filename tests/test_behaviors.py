@@ -1801,10 +1801,18 @@ def test_the_camera_is_checked_against_the_arm_and_ground_but_not_the_tool():
     # the declared extents are the ones asked for, and the optics land inside them
     _n, centre, half = next(b for b in m.tool.boxes if b[0] == 'camera_bracket')
     lo, hi = (centre - half) * 1000.0, (centre + half) * 1000.0
-    assert np.allclose(lo, [-25.0, -110.0, 0.0]) and np.allclose(hi, [25.0, 0.0, 35.0]), (
+    assert np.allclose(lo, [-25.0, -150.0, 0.0]) and np.allclose(hi, [25.0, 0.0, 35.0]), (
         f'camera extents {lo.tolist()}..{hi.tolist()} mm are not the measured ones')
-    assert np.all(np.abs(np.array([-0.009, -0.080, 0.031]) - centre) <= half), (
-        'hand_eye puts the camera outside its own bracket -- one of the two is wrong')
+
+    # THE LIVE CROSS-CHECK. This used to compare a HARDCODED [-9, -80, 31] against the box,
+    # so when the calibration moved the assertion went on passing against a number nothing
+    # used any more -- exactly the drift it exists to catch. Read the real one instead.
+    from urlab import config as C
+    from urlab import tool_frames
+    optics = tool_frames.hand_eye(C.load('bnc_assembly'))[:3, 3]
+    assert np.all(np.abs(optics - centre) <= half), (
+        f'the hand-eye calibration puts the optics at {(optics * 1000).round(1).tolist()} mm, '
+        f'outside its own bracket {lo.tolist()}..{hi.tolist()} mm -- one of the two is wrong')
 
     pairs = set(m.self_clearances(np.radians([-85, -145, -105, -205, -85, 180])))
     cam = {p for p in pairs if 'camera_bracket' in p}

@@ -263,8 +263,9 @@ These are physical-calibration items the code cannot settle for you:
   (software admittance, same law as the assembly insert); validate the params on hardware.
 - `touch.contact_z_offset_mm` — tune on the real connector.
 - `assembly.target` — measure by jogging to a good mate and reading the chosen frame off the robot.
-- **hand-eye `rpy`** — the configs carry `[0, 0, 0]` (identity), matching the `dev` branch exactly.
-  The `dev` plan noted identity puts a detected marker ~0.6 m too low and proposed
-  `[-1.5708, 0, -1.5708]` (an optical-frame rotation), but that change was never committed and is
-  unverified. Left at identity here for faithful parity; resolve it as a hand-eye calibration on
-  hardware and set `hand_eye.rpy` in the configs (or `--set hand_eye.rpy='[-1.5708,0,-1.5708]'`).
+- **hand-eye `rpy`** — `configs/frames.yaml`'s `camera` entry carries `[0, 0, 0]` (identity),
+  matching the `dev` branch exactly. The `dev` plan noted identity puts a detected marker ~0.6 m
+  too low and proposed `[-1.5708, 0, -1.5708]` (an optical-frame rotation), but that change was
+  never committed and is unverified. Left at identity for faithful parity; resolve it as a
+  hand-eye calibration on hardware and set `frames.camera.rpy_deg` there. There is ONE copy of
+  this calibration — no config carries a `hand_eye:` block any more, and none can override it.

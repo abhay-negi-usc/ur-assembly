@@ -19,8 +19,9 @@ configs/frames.yaml (urlab/tool_frames.py) -- ALL of its entries are shown, so a
 there (one yaml entry: parent + xyz_mm/rpy_deg, the units this screen prints) makes it appear
 change; held connectors are declared there directly wrt tool0. 'tool0' itself (the flange /
 all-zeros pendant TCP; getActualTCPPose is this pose) is always first. If frames.yaml is
-missing, the legacy per-config sections (fingertip_grasp, hand_eye, grasp_tcp_offset) are used
-as before; when both exist and disagree, a drift warning prints at startup.
+missing, the legacy per-config sections (fingertip_grasp, grasp_tcp_offset) are used as before,
+minus the camera -- the hand-eye calibration lives ONLY in frames.yaml, so without that file
+there is no camera frame to show. When both exist and disagree, a drift warning prints at startup.
 Poses print as xyz (mm) + rpy (deg, EXTRINSIC XYZ). This is the tool to MEASURE the config values
 the README's hardware checklist leaves open (assembly.target, a grasp pose, etc.): jog to the spot,
 read the frame off here, paste it in.
@@ -48,16 +49,21 @@ def _frames(cfg):
     """{name: T_tool0_frame} for every tool0-attached frame -- ALL entries of the shared
     configs/frames.yaml (urlab/tool_frames.py: add a frame there, it shows up here; held
     connectors are declared there directly wrt tool0). Falls back to the legacy per-config
-    sections if the frames yaml is missing."""
+    sections if the frames yaml is missing.
+
+    NO CAMERA IN THE FALLBACK: the hand-eye calibration has no per-config section any more, so
+    without frames.yaml there is nothing to fall back TO. Showing an identity camera would be
+    worse than showing none -- it reads as 'the optics are at the flange' rather than 'the
+    catalogue is missing'."""
     try:
         frames = tool_frames.load_frames(cfg)
         tool_frames.check_drift(frames, cfg)           # warn if the legacy sections disagree
     except FileNotFoundError as exc:
-        log.warning('%s -- falling back to the per-config frame sections.', exc)
+        log.warning('%s -- falling back to the per-config frame sections, without the camera '
+                    '(its calibration lives only in the frames yaml).', exc)
         frames = {
             'tool0': np.eye(4),
             'fingertip': from_cfg(cfg.section('fingertip_grasp')),
-            'camera': from_cfg(cfg.section('hand_eye')),
             'grasp': from_cfg(cfg.section('grasp_tcp_offset')),
         }
     return frames

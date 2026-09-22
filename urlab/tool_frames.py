@@ -1,7 +1,7 @@
 """Tool0-attached frames from ONE shared yaml -- configs/frames.yaml.
 
-Every demo config declares its own frame sections (fingertip_grasp, hand_eye, ...), and every
-script that wanted to display a frame had to list it by name. frames.yaml is the single source
+Every demo config used to declare its own frame sections (fingertip_grasp, hand_eye, ...), and
+every script that wanted to display a frame had to list it by name. frames.yaml is the single source
 instead: a flat `frames:` mapping of name -> {parent, pose}, pose in the repo-standard xyz/rpy
 (m / rad, extrinsic XYZ) or monitor units xyz_mm/rpy_deg (the unit lives in the KEY -- see
 config._pose_si). `parent` chains frames (default tool0); the loader flattens every chain to
@@ -50,8 +50,9 @@ MARKER_SIZE_KEYS = {'size_mm', 'size_m'}
 MARKER_META_KEYS = {'views', 'residual_mm', 'residual_deg', 'measured', 'note'}
 
 # frames.yaml name -> the legacy per-config section that still feeds the Robot facade.
-LEGACY_SECTIONS = {'fingertip': 'fingertip_grasp', 'camera': 'hand_eye',
-                   'grasp': 'grasp_tcp_offset'}
+# NOTE 'camera' is deliberately absent: the hand-eye calibration has no per-config section any
+# more (see hand_eye()), so there is no second value for check_drift to disagree with.
+LEGACY_SECTIONS = {'fingertip': 'fingertip_grasp', 'grasp': 'grasp_tcp_offset'}
 
 
 def frames_path(cfg=None):
@@ -263,20 +264,20 @@ def check_drift(frames, cfg, tol_mm=0.5, tol_deg=0.2):
     return drifted
 
 def hand_eye(cfg=None):
-    """tool0 -> camera, from the CONFIG's `hand_eye:` block when it declares one, else from the
-    frames catalogue's `camera` entry.
+    """tool0 -> camera, from the frames catalogue's `camera` entry. THE ONLY SOURCE.
 
-    The block was the legacy home; the catalogue is where the measured frames live, so a config
-    that says nothing gets the calibration everything else uses. A config that DOES declare
-    `hand_eye:` owns it wholesale -- that is how the older cells with a different camera-mount
-    calibration keep their value. Missing from BOTH is an error, not an identity: from_cfg({})
-    would quietly put the camera at the flange and every detection would be ~80 mm off."""
-    if cfg is not None and cfg.get('hand_eye'):
-        return from_cfg(_pose_si(dict(cfg.get('hand_eye'))))
+    Configs used to be able to declare their own `hand_eye:` block, and several did, so the one
+    number that every detection depends on was spelled four different ways across configs/ and
+    silently differed by 9 mm between them. There is no override now: the calibration is measured
+    geometry, it belongs with the other measured geometry, and a per-config copy is a way for the
+    cell to be wrong without anyone noticing.
+
+    A MISSING `camera` entry is an error, not an identity: from_cfg({}) would quietly put the
+    camera at the flange and every detection would be off by the length of the bracket."""
     frames = load_frames(cfg)
     if 'camera' not in frames:
-        raise ValueError(f"no hand_eye: block in the config and no 'camera' frame in "
-                         f"{frames_path(cfg)} -- one of the two must define tool0 -> camera")
+        raise ValueError(f"no 'camera' frame in {frames_path(cfg)} -- it is the hand-eye "
+                         'calibration (tool0 -> camera) and nothing else defines it')
     return frames['camera']
 
 

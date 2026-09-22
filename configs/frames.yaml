@@ -13,9 +13,14 @@
 # ADDING A FRAME IS ONE ENTRY HERE -- no code. Generic consumers (urlab.apps.monitor) list
 # whatever this file contains.
 #
-# NOTE the Robot facade still reads the per-demo-config sections (fingertip_grasp, hand_eye,
+# THE HAND-EYE CALIBRATION (tool0 -> camera) IS THE `camera` ENTRY BELOW, and this file is its
+# ONLY home -- there is no `hand_eye:` block in any config any more, and no override path. It is
+# read by tool_frames.hand_eye(), which the Robot facade calls; a missing `camera` entry is a
+# startup ERROR, never a silent identity.
+#
+# NOTE the Robot facade still reads two per-demo-config sections (fingertip_grasp,
 # grasp_tcp_offset); the seeds below mirror cable_pick_estimate_assemble.yaml, and the loader's
-# check_drift() WARNS when this file and a loaded config disagree, so the duplication cannot rot
+# check_drift() WARNS when this file and a loaded config disagree, so that duplication cannot rot
 # silently. Treat THIS file as the place to edit first.
 #
 # HELD CONNECTORS are declared here directly wrt tool0 (e.g. banana_connector_finger_holder) --
@@ -31,9 +36,12 @@ frames:
     xyz_mm:  [0.0, 0.0, 182.0]
     rpy_deg: [180.0, 0.0, -90.0]
 
-  # The RealSense color optical frame (tool0 -> camera). Mirrors hand_eye.
+  # The RealSense color optical frame (tool0 -> camera) -- THE hand-eye calibration, defined
+  # here and nowhere else.
+  # UPDATED 2026-09-22: was [-9.0, -80.0, 31.0] ("accounting for plate deformation"); the four
+  # three configs that carried their own [0.0, -80.0, 31.0] block were folded onto this value.
   camera:
-    xyz_mm:  [-9.0, -80.0, 31.0]
+    xyz_mm:  [0.0, -120.0, 25.0]
     rpy_deg: [0.0, 0.0, 0.0]
 
   # The grasp TCP (tool0 -> grasp). Mirrors grasp_tcp_offset.

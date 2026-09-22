@@ -1,10 +1,6 @@
 # Fiducial pick-and-place (ArUco). Detect a marker, visually approach, grasp, place.
 robot_config: robot.yaml            # the machine (see configs/robot.yaml)
 camera_config: camera.yaml          # the sensor  (see configs/camera.yaml)
-hand_eye:
-  xyz_mm: [0.0, -80.0, 31.0]
-  rpy_deg: [0.0, 0.0, 0.0]
-
 aruco:
   dictionary: DICT_4X4_50
   marker_size_mm: 20.3

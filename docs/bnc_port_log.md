@@ -52,6 +52,13 @@ both wholesale — the four older-calibration configs (cable_pick_place, cable_t
 pick_place, visual_servo: hand_eye x = 0 vs the current −9 mm) keep their own values on
 purpose. Tests: `tests/test_machine_config.py`.
 
+> **SUPERSEDED 2026-09-22** for hand-eye only. The per-config override was the mechanism by
+> which one calibration was spelled two ways (x = 0 vs −9 mm) across the fleet, which is a way
+> for a cell to be wrong silently. `hand_eye:` blocks are now GONE from every config and
+> `tool_frames.hand_eye()` has no override path: `configs/frames.yaml`'s `camera` entry is the
+> only source, and it reads `[0, −120, 25] mm`. The `aruco` override described above is
+> unchanged.
+
 Also restored after an afternoon working-tree rollback reverted uncommitted session work:
 robot.ip 192.168.10.106, gripper port COM3, the compute.device knob
 (`sam3_backend.resolve_device`), and the local manifold path.

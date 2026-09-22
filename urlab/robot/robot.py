@@ -78,8 +78,8 @@ class Robot:
             self.register_gripper(Robotiq2F85(cfg))
 
         # Hand-eye: tool0 -> camera. Static, so it never expires -- this single edge replaces
-        # the old static_transform_publisher. The calibration lives in configs/frames.yaml (the
-        # `camera` frame entry); a config-level `hand_eye:` block, where present, overrides it.
+        # the old static_transform_publisher. The calibration is configs/frames.yaml's `camera`
+        # entry and nothing else; configs cannot override it (see tool_frames.hand_eye).
         from .. import tool_frames
         self.T_tool0_cam = tool_frames.hand_eye(cfg)
         self.register_frame(self.camera_frame, self.T_tool0_cam)

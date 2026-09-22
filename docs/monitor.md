@@ -19,9 +19,10 @@ uploads no control script and needs no Remote Control, unlike the demos (which *
 2. Run the monitor.
 3. Push the arm around — the poses update live.
 
-The frames are built from the **same config sections the demos use** (`hand_eye` → camera,
-`fingertip_grasp` → fingertip, `grasp_tcp_offset` → grasp), so what you read here is exactly what a
-demo would command. That makes this the tool to **measure the config values the hardware checklist
+The frames are built from the **same sources the demos use** — the camera from
+`configs/frames.yaml`'s `camera` entry (the one hand-eye calibration), fingertip and grasp from
+`fingertip_grasp` / `grasp_tcp_offset` — so what you read here is exactly what a demo would
+command. That makes this the tool to **measure the config values the hardware checklist
 leaves open** (`assembly.target`, a grasp pose, `touch.contact_z_offset_mm`): freedrive to the spot,
 read the frame off here, paste it into the config.
 

@@ -1,0 +1,46 @@
+# COUPLER ACTUATE -- lock the toolchanger, wait, unlock. See urlab/apps/coupler_actuate.py.
+#
+#   python -m urlab.apps.coupler_actuate
+#
+# The bench check to run BEFORE a pick: it exercises the same `toolchanger:` block, the same
+# urlab.robot.coupler.Coupler and the same interlock that apps/coupler_pick_place uses, so a
+# config or wiring fault shows up here instead of halfway through a demo.
+#
+# NO ROBOT IS CONNECTED by this app. The robot_config/camera_config lines below only satisfy the
+# repo-wide rule that every demo config names its machine; nothing here reads the arm or camera,
+# and the controller can be off.
+
+robot_config: robot.yaml            # the machine (see configs/robot.yaml)
+camera_config: camera.yaml          # the sensor  (see configs/camera.yaml)
+
+# How many lock/unlock cycles, each gated by the operator on both sides. 1 is the check; a
+# handful is the shakedown after re-tuning the servo angles or the sensor threshold in
+# firmware/main.cpp, where what you want to see is the SAME verdict every time.
+cycles: 1
+
+# true = refuse to run without the Arduino driver. A coupler test that "passes" because a human
+# pressed Enter has tested the human, so the manual fallback that Coupler offers elsewhere is
+# switched off here by default. Set false to deliberately walk the manual path.
+require_driver: true
+
+# ---- The locking mechanism ----
+# Same block, same meanings, as configs/coupler_pick_place.yaml -- keep them in step, because
+# the whole value of this app is that it tests what the pick will use.
+toolchanger:
+  enabled: true
+  port: null                      # null = autodetect
+  baud: 9600
+  # Relay K1 POWERS THE ACTUATION, and the board comes up with it OFF after every connect
+  # (setup() drives it LOW, and opening the port resets the board). Without it the servo swings
+  # and nothing happens. The wire command is a TOGGLE, so the driver here drives it to a state
+  # rather than pulsing it. false leaves the relay alone, for a mechanism wired without it.
+  motor: true
+  # Opening the port pulls DTR and RESETS the Arduino. setup() must clear the bootloader,
+  # average the sensor and swing the servo before it prints its banner; the driver floors this
+  # at 2.5 s. If a run reports no banner, this is the first thing to raise.
+  settle_s: 3.0
+  # One hold/release round trip is the better part of a second on the board (a 200 ms loop, a
+  # 500 ms servo move, a 10-sample sensor average).
+  timeout_s: 5.0
+
+debug: false

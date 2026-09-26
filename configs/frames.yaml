@@ -41,12 +41,29 @@ frames:
   # UPDATED 2026-09-22: was [-9.0, -80.0, 31.0] ("accounting for plate deformation"); the four
   # three configs that carried their own [0.0, -80.0, 31.0] block were folded onto this value.
   camera:
-    xyz_mm:  [0.0, -120.0, 25.0]
+    xyz_mm:  [-35.0, -123.0, 25.0]
     rpy_deg: [0.0, 0.0, 0.0]
 
   # The grasp TCP (tool0 -> grasp). Mirrors grasp_tcp_offset.
   grasp:
     xyz_mm:  [0.0, 0.0, 0.0]
+    rpy_deg: [0.0, 0.0, 0.0]
+
+  # The toolchanger coupler's ENGAGEMENT END (tool0 -> coupler_mate): the tool-side half of the
+  # mate, and what urlab.apps.object_calibration drives into an object's mating feature.
+  #
+  # +z IS THE MATING AXIS, which is the tool axis -- the coupler picks straight down it, so the
+  # frame is a pure 55 mm translation with no rotation.
+  #
+  # THE ORIGIN IS AT THE ENGAGEMENT END, not the flange, and that is the point: an angular error
+  # has its smallest translational consequence AT the frame's origin, so putting the origin where
+  # the parts actually touch keeps a tilt from turning into a lever arm. See the note on
+  # bnc_connector_finger_holder above for what that costs when it is got wrong.
+  #
+  # ROLL ABOUT +z IS NOT CONSTRAINED by the mechanism. Nothing here can record that; it is a
+  # property of the coupler, and configs/objects.yaml is where its consequences are handled.
+  coupler_mate:
+    xyz_mm:  [0.0, 0.0, 144.0]
     rpy_deg: [0.0, 0.0, 0.0]
 
   # The banana connector fixtured between the closed fingers (tool0 -> connector).

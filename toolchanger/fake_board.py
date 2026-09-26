@@ -25,7 +25,13 @@ RAW_EMPTY = 20        # ... and with nothing there
 
 def board(fd, tool_present):
     """Mimic main.cpp: one ASCII byte in, one line out."""
-    status = 0
+    #  setup() ends with `status = checkTool() ? 1 : 0; changeServo(status > 0);` -- a board that
+    #  boots with anything in front of the probe comes up believing it is ALREADY LOCKED. That
+    #  matters because changeStatus() only swings the servo when the status CHANGES, so a hold()
+    #  in that state confirms without moving. Starting at 0 regardless made this simulation
+    #  unable to reproduce the one failure mode that has actually bitten: a pick that reported a
+    #  grip it never made.
+    status = 1 if tool_present[0] else 0
     motor = False
     bypassed = False
 

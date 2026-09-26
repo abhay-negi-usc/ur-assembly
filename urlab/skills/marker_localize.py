@@ -74,7 +74,16 @@ class ServoPlan:
     def __init__(self, block):
         b = dict(block or {})
         self.enabled = bool(b.get('enabled', False))
-        self.distance_m = float(b.get('distance_m', 0.15))
+        # ACCEPTS EITHER SPELLING. Every config writes `distance_mm` (it is a standoff, and the
+        # configs are in mm), and that only reached here because config._normalise_units adds an
+        # SI sibling at load time -- so a ViewPlan built from a plain dict, as a test or a caller
+        # assembling a block by hand does, silently got the 0.15 m default instead of the 0.1 m
+        # it asked for. A servo standoff that is quietly 50 mm further out than requested is
+        # exactly the kind of wrong that looks like nothing.
+        if 'distance_m' in b:
+            self.distance_m = float(b['distance_m'])
+        else:
+            self.distance_m = float(b.get('distance_mm', 150.0)) / 1000.0
         self.max_iterations = max(1, int(b.get('max_iterations', 4)))
         self.pos_tol_mm = float(b.get('pos_tol_mm', 0.5))
         self.ang_tol_deg = float(b.get('ang_tol_deg', 0.5))
@@ -131,6 +140,21 @@ class ViewPlan:
             raise ValueError(
                 f'marker_views.servo.distance_m ({self.servo.distance_m:.3f} m) is beyond the '
                 f'max_camera_distance_mm standoff cap ({self.max_camera_distance_m:.3f} m)')
+        # A CAP CLOSE TO THE SERVO STANDOFF makes the servo LOAD-BEARING rather than a
+        # refinement. fuse_markers drops every view captured beyond the cap, so when the two are
+        # near each other the sweep's own views -- flown far enough back to see all the markers
+        # at once -- are discarded, and a marker that fails to servo is left with nothing to fuse
+        # and vanishes. That is a legitimate way to run (it is the sharpest data), but it is not
+        # what "refinement" sounds like, so it is said out loud.
+        if (self.servo.enabled and self.max_camera_distance_m is not None
+                and self.max_camera_distance_m < 2.0 * self.servo.distance_m):
+            log.warning(
+                'marker_views: the %.0f mm standoff cap is close to the %.0f mm servo range, so '
+                'most SWEEP views will be dropped and the close servo views will be doing the '
+                'work. Fine if that is intended -- but a marker that will not servo then has no '
+                'views left at all. Raise max_camera_distance_mm to keep the sweep as a '
+                'fallback.',
+                self.max_camera_distance_m * 1000.0, self.servo.distance_m * 1000.0)
         offsets = b.get('offsets')
         if offsets is None:
             # A default that actually adds information: a ring of camera TRANSLATIONS around the
@@ -293,17 +317,46 @@ def _log_corner_view(corner_log, corners, frame, robot):
                        'T_base_cam': T_cam if T_cam is not None else robot.camera()})
 
 
+def _reach_vantage(robot, T_cam, T_overview, label, via_overview_ok):
+    """Move the camera to a servo vantage, retrying through the overview if the direct hop
+    fails.
+
+    THE DIRECT HOP IS THE NORMAL PATH. A vantage is an ABSOLUTE pose computed from the sweep's
+    estimate of the marker, not something steered toward from a place the marker can be seen --
+    so there is nothing to go back to the overview FOR, and doing it anyway costs a full extra
+    traverse per marker.
+
+    THE OVERVIEW SURVIVES AS A RECOVERY WAYPOINT. The one thing the detour genuinely bought is
+    reachability: a straight Cartesian path from one close vantage to the next can cross a wrist
+    limit or an IK branch that the path through the overview does not. So it is tried when the
+    direct move fails, rather than before every move on the chance that it might."""
+    if robot.arm.move_frame_to(T_cam, robot.T_tool0_cam, label):
+        return True
+    if not via_overview_ok:
+        return False
+    log.info('  %s did not finish -- retrying via the overview pose.', label)
+    if not robot.arm.move_frame_to(T_overview, robot.T_tool0_cam, 'overview (recovery)'):
+        return False
+    return robot.arm.move_frame_to(T_cam, robot.T_tool0_cam, f'{label} via the overview')
+
+
 def servo_refine(robot, camera, detector, plan, seen, T_overview=None, on_view=None,
                  corner_log=None):
     """Per-marker VISUAL SERVOING refinement (ViewPlan.servo). One marker at a time:
 
-        overview -> servo onto the marker's normal at distance_m (re-detect + re-centre
-        until two successive detections agree) -> capture the vantage + an aimed parallax
-        ring -> next marker
+        servo onto the marker's normal at distance_m (re-detect + re-centre until two
+        successive detections agree) -> capture the vantage + an aimed parallax ring ->
+        STRAIGHT ON to the next marker
 
-    The OVERVIEW hop between markers matters: servoing to one marker takes the others out of
-    frame by design, and returning to the pose the sweep ran from is what brings the whole
-    rig back into view before the next marker's servo starts.
+    NO OVERVIEW HOP BETWEEN MARKERS. Each vantage is an absolute pose computed from the sweep's
+    estimate of that marker, so the camera does not need the marker in frame before it sets off
+    -- it needs it in frame once it ARRIVES, which is what the vantage was computed to achieve.
+    Returning to the sweep pose between markers therefore bought nothing but a full extra
+    traverse per marker, which on a three-marker object is three of them.
+
+    The overview is still taken, and still used: when a direct hop between two vantages fails to
+    finish -- a wrist limit or an IK branch across the short path -- it is retried through the
+    overview, which is a known-good waypoint. See _reach_vantage.
 
     Returns {marker_id: [(T_base_marker, distance_m), ...]} -- ADDITIONAL views for every
     marker that refined (merge with merge_refined: they POOL with the sweep views, and the
@@ -315,25 +368,26 @@ def servo_refine(robot, camera, detector, plan, seen, T_overview=None, on_view=N
     if T_overview is None:
         T_overview = robot.camera()
     refined = {}
-    for mid, obs in sorted(seen.items()):
-        # OVERVIEW FIRST: the previous marker's servo took this one out of frame.
-        if not robot.arm.move_frame_to(T_overview, robot.T_tool0_cam,
-                                       f'overview (before marker {mid})'):
-            log.warning('  could not return to the overview pose -- refinement stops here; '
-                        'the remaining markers keep their sweep views.')
-            break
+    for order, (mid, obs) in enumerate(sorted(seen.items())):
         T_est = average_pose([T for T, _d in obs])[0]
         # The roll about the view axis is chosen ONCE per marker -- the nearest quarter turn
         # to the camera's current attitude -- and held for the whole servo + ring, so the
-        # views stay mutually consistent and the wrist never unwinds mid-marker.
+        # views stay mutually consistent and the wrist never unwinds mid-marker. Coming
+        # straight from the previous vantage rather than from the overview, "current" is now
+        # the pose next door, so the choice also minimises the wrist travel between markers.
         roll = _quarter_roll(T_est, sv.distance_m, robot.camera())
 
         # ---- servo: centre + square + fix the distance until the detection stops moving ----
         detected = False
         for it in range(1, sv.max_iterations + 1):
             T_cam = camera_on_marker(T_est, sv.distance_m, [np.pi, 0.0, roll])
-            if not robot.arm.move_frame_to(T_cam, robot.T_tool0_cam,
-                                           f'servo marker {mid} ({it}/{sv.max_iterations})'):
+            # Only the FIRST move of each marker is a long hop worth a recovery detour, and
+            # only when there is a previous vantage to have come from. The later iterations
+            # are small corrections already at the vantage, where a trip via the overview
+            # would be absurd.
+            if not _reach_vantage(robot, T_cam, T_overview,
+                                  f'servo marker {mid} ({it}/{sv.max_iterations})',
+                                  via_overview_ok=(it == 1 and order > 0)):
                 log.warning('  marker %d: servo move did not finish -- keeping the sweep '
                             'views.', mid)
                 detected = False

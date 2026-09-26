@@ -318,10 +318,10 @@ def test_vote_weighs_markers_by_their_certainty():
         f'the light marker must barely move the vote; got {pull_mm:.2f} mm (unweighted = 5)')
 
 
-def test_servo_refine_centres_each_marker_and_returns_to_the_overview():
-    """The servo loop: overview -> per-marker vantage at the canonical distance -> ring ->
-    overview. The fake detector reports a fixed truth, so one servo step centres it and the
-    refinement views land on the truth at ~distance_m."""
+def test_servo_refine_centres_each_marker_and_parks_at_the_overview():
+    """The servo loop: per-marker vantage at the canonical distance -> ring -> STRAIGHT ON to
+    the next marker -> park at the overview. The fake detector reports a fixed truth, so one
+    servo step centres it and the refinement views land on the truth at ~distance_m."""
     from urlab.skills import marker_localize as mloc
     from urlab.transforms import xyzrpy_to_matrix
 
@@ -379,11 +379,19 @@ def test_servo_refine_centres_each_marker_and_returns_to_the_overview():
         for T_v, d in views:
             assert np.allclose(T_v, truth[mid])
             assert 0.10 <= d <= 0.20, f'refinement views must sit near distance_m, got {d}'
-    # the overview reset: before EACH marker and once at the end
+    # ONE overview move, the final park. It used to return there before EVERY marker, which
+    # cost a full extra traverse each: a vantage is an absolute pose computed from the sweep
+    # estimate, so the camera does not need the marker in frame before it sets off.
     overview_hops = [l for l in robot.arm.labels if l.startswith('overview')]
-    assert len(overview_hops) == 3, robot.arm.labels
-    order = [l for l in robot.arm.labels if 'marker 6' in l or 'before marker' in l]
-    assert order[0].startswith('overview (before marker 5)'.split(' 5')[0]), robot.arm.labels
+    assert overview_hops == ['overview (refinement done)'], robot.arm.labels
+    # ... and the arm is left there, so whatever runs next sees the whole object again.
+    assert robot.arm.labels[-1].startswith('overview'), robot.arm.labels[-1]
+    # The markers are done one after the other with nothing between them: the last move for
+    # marker 5 is immediately followed by the first for marker 6.
+    labels = [l for l in robot.arm.labels if not l.startswith('overview')]
+    first_six = next(i for i, l in enumerate(labels) if 'marker 6' in l)
+    assert 'marker 5' in labels[first_six - 1], labels
+    assert all('marker 5' in l for l in labels[:first_six]), labels
 
 
 def test_servo_vantage_roll_snaps_to_the_nearest_quarter_turn():
@@ -1798,11 +1806,17 @@ def test_the_camera_is_checked_against_the_arm_and_ground_but_not_the_tool():
     names = m.tool.body_names()
     assert 'camera_bracket' in names, 'the camera must be part of the tool model'
 
-    # the declared extents are the ones asked for, and the optics land inside them
+    # The model's box is the CONFIG's box -- read both, do not spell either out. This is the
+    # mm -> m plumbing and the min/max -> centre/half conversion, which is worth checking and
+    # which a pinned literal would stop checking the moment the bracket is re-measured.
+    from urlab import config as C
+    declared = next(b for b in C.load('bnc_assembly').get_path('pickup.collision.tool.boxes')
+                    if b['name'] == 'camera_bracket')
     _n, centre, half = next(b for b in m.tool.boxes if b[0] == 'camera_bracket')
     lo, hi = (centre - half) * 1000.0, (centre + half) * 1000.0
-    assert np.allclose(lo, [-25.0, -150.0, 0.0]) and np.allclose(hi, [25.0, 0.0, 35.0]), (
-        f'camera extents {lo.tolist()}..{hi.tolist()} mm are not the measured ones')
+    assert np.allclose(lo, declared['min_mm']) and np.allclose(hi, declared['max_mm']), (
+        f'the model has the camera at {lo.tolist()}..{hi.tolist()} mm, but the config declares '
+        f"{declared['min_mm']}..{declared['max_mm']}")
 
     # THE LIVE CROSS-CHECK. This used to compare a HARDCODED [-9, -80, 31] against the box,
     # so when the calibration moved the assertion went on passing against a number nothing

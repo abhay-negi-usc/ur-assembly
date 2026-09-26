@@ -22,11 +22,19 @@ from urlab.perception.sam3_backend import resolve_device
 CONFIG_DIR = os.path.join(os.path.dirname(__file__), '..', 'configs')
 
 
+# The machine files themselves, plus the CATALOGUES -- frames.yaml, cables.yaml, objects.yaml.
+# A catalogue is measured data read straight off disk by its own loader (tool_frames._read,
+# apply_cable_profile); it never goes through config.load, so it has no machine to declare and a
+# `robot_config:` line in one is inert. objects.yaml is MACHINE-WRITTEN besides, so it could not
+# carry one even if it wanted to.
+NOT_DEMO_CONFIGS = {'robot.yaml', 'camera.yaml', 'frames.yaml', 'cables.yaml', 'objects.yaml'}
+
+
 def test_every_config_declares_its_machine():
     """Explicit reference, not directory magic: each demo config names robot.yaml/camera.yaml."""
     for path in sorted(glob.glob(os.path.join(CONFIG_DIR, '*.yaml'))):
         base = os.path.basename(path)
-        if base in ('robot.yaml', 'camera.yaml'):
+        if base in NOT_DEMO_CONFIGS:
             continue
         cfg = C.load(path)
         assert cfg.get('robot_config'), f'{base} does not declare robot_config'
@@ -54,24 +62,29 @@ def test_a_dangling_machine_reference_is_loud():
 
 def test_hand_eye_comes_from_the_frames_catalogue_for_every_config():
     """ONE calibration, no per-config blocks and no override path -- every config that images
-    resolves the SAME tool0 -> camera, because they all read frames.yaml's `camera` entry."""
-    seen = {}
+    resolves the SAME tool0 -> camera, because they all read frames.yaml's `camera` entry.
+
+    NOTHING IS PINNED TO A LITERAL HERE, deliberately. The hand-eye is a MEASUREMENT and moves
+    whenever the camera is recalibrated or remounted; a test that spelled the number out would
+    fail on every recalibration and would teach whoever is holding the calipers to edit the
+    expectation until it passes. What has to hold is AGREEMENT -- that the catalogue is the only
+    source and everything reads it -- and that is what is asserted. (A hardcoded [-9, -80, 31]
+    in tests/test_behaviors.py went on passing for exactly this reason long after nothing used
+    that value.)"""
+    catalogue = tool_frames.load_frames(C.load('bnc_assembly'))['camera']
     for name in ('bnc_assembly', 'pick_place', 'visual_servo', 'cable_pick_place',
                  'cable_pick_assemble', 'marker_calibration'):
-        seen[name] = tool_frames.hand_eye(C.load(name))
-        assert np.allclose(seen[name][:3, 3] * 1000.0, [0.0, -120.0, 25.0], atol=1e-6), name
-    ref = seen['bnc_assembly']
-    for name, T in seen.items():
-        assert np.allclose(T, ref, atol=1e-12), f'{name} resolved a different hand-eye'
+        assert np.allclose(tool_frames.hand_eye(C.load(name)), catalogue, atol=1e-12), (
+            f'{name} resolved a hand-eye that is not the catalogue entry')
 
 
 def test_a_config_cannot_override_the_hand_eye():
     """The override was how the 9 mm split between cells happened. A stray `hand_eye:` block is
     now INERT -- the catalogue wins -- so a leftover copy cannot quietly re-open the split."""
     cfg = C.load('pick_place')
+    catalogue = tool_frames.load_frames(cfg)['camera']
     cfg['hand_eye'] = {'xyz_mm': [99.0, 99.0, 99.0], 'rpy_deg': [0.0, 0.0, 0.0]}
-    T = tool_frames.hand_eye(cfg)
-    assert np.allclose(T[:3, 3] * 1000.0, [0.0, -120.0, 25.0], atol=1e-6)
+    assert np.allclose(tool_frames.hand_eye(cfg), catalogue, atol=1e-12)
 
 
 def test_no_config_still_declares_a_hand_eye_block():

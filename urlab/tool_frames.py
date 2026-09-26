@@ -1,9 +1,9 @@
 """Tool0-attached frames from ONE shared yaml -- configs/frames.yaml.
 
 Every demo config used to declare its own frame sections (fingertip_grasp, hand_eye, ...), and
-every script that wanted to display a frame had to list it by name. frames.yaml is the single source
-instead: a flat `frames:` mapping of name -> {parent, pose}, pose in the repo-standard xyz/rpy
-(m / rad, extrinsic XYZ) or monitor units xyz_mm/rpy_deg (the unit lives in the KEY -- see
+every script that wanted to display a frame had to list it by name. frames.yaml is the single
+source instead: a flat `frames:` mapping of name -> {parent, pose}, pose in the repo-standard
+xyz/rpy (m / rad, extrinsic XYZ) or monitor units xyz_mm/rpy_deg (the unit lives in the KEY -- see
 config._pose_si). `parent` chains frames (default tool0); the loader flattens every chain to
 tool0 and fails LOUDLY on unknown parents, cycles, mixed-unit pose blocks, unknown pose keys
 (a typo like 'xyz_m' would otherwise silently place the frame at its parent), and entries with
@@ -48,6 +48,14 @@ POSE_KEYS = {'xyz', 'rpy', 'xyz_mm', 'rpy_deg'}
 # translation linearly with the side length it is told); the rest is for the operator.
 MARKER_SIZE_KEYS = {'size_mm', 'size_m'}
 MARKER_META_KEYS = {'views', 'residual_mm', 'residual_deg', 'measured', 'note'}
+
+# The coupler's engagement datum, and the objects catalogue keyed off it.
+COUPLER_FRAME = 'coupler_mate'
+OBJECTS_FILE = 'objects.yaml'
+# objects: entries carry a pose PLUS provenance PLUS the held mass. Same split as the marker
+# rigs: the loader validates what it uses and carries the rest through untouched.
+OBJECT_META_KEYS = {'mates', 'views', 'approaches', 'residual_mm', 'residual_deg',
+                    'residual_axis_deg', 'measured', 'note'}
 
 # frames.yaml name -> the legacy per-config section that still feeds the Robot facade.
 # NOTE 'camera' is deliberately absent: the hand-eye calibration has no per-config section any
@@ -241,6 +249,125 @@ def resolve_held_and_target(frames, targets, held_name, target_name=None, path=N
                f' (it defaults to held_frame, so either add a targets: entry for {held_name!r} '
                f'or set target_frame to a name that has one)') + '.')
     return frames[held_name], targets[tgt], tgt
+
+
+def objects_path(cfg=None):
+    """The objects catalogue for this run: a config's `objects_file` (resolved beside that
+    config) when set, else the shared configs/objects.yaml."""
+    if cfg is not None and cfg.get('objects_file'):
+        return resolve(cfg, cfg['objects_file'])
+    return os.path.join(CONFIG_DIR, OBJECTS_FILE)
+
+
+def coupler_mate(cfg=None):
+    """tool0 -> the toolchanger coupler's engagement end, from the frames catalogue.
+
+    +z is the mating axis. This is the TOOL-side half of a mate; the object-side half lives in
+    objects.yaml, per object, relative to that object's marker. A missing entry is an error and
+    not an identity, for the same reason hand_eye() refuses one: from_cfg({}) would silently put
+    the mating point AT the flange, 55 mm behind where the parts actually touch, and every pick
+    would drive that far too deep."""
+    frames = load_frames(cfg)
+    if COUPLER_FRAME not in frames:
+        raise ValueError(f"no {COUPLER_FRAME!r} frame in {frames_path(cfg)} -- it is the "
+                         'coupler\'s engagement end (tool0 -> mating point) and nothing else '
+                         'defines it')
+    return frames[COUPLER_FRAME]
+
+
+def load_objects(cfg=None, path=None):
+    """{name: object} from the objects catalogue -- what the coupler can pick, and how to find
+    each one by sight.
+
+    An object carries ONE OR MORE markers, and each one holds the pose of the object's MATING
+    FEATURE in that marker's own frame (marker <- grasp). That direction is the useful one: at
+    run time the camera measures T_base_marker, and T_base_marker @ T_marker_grasp is where to
+    drive the coupler -- one multiply per marker, no inverse. Storing grasp <- marker would
+    invert per pick and would read as if the marker were being located, which is backwards; the
+    object is the unknown.
+
+    EVERY MARKER ENCODES THE SAME GRASP FRAME, expressed in its own coordinates. That is what
+    lets several of them vote at run time and be averaged, and what lets a pick survive one of
+    them being occluded. A marker that has been knocked or re-stuck disagrees with the others
+    and is outvoted there rather than quietly dragging the answer.
+
+    Shape (see configs/objects.yaml, which urlab.apps.object_calibration writes):
+
+        objects:
+          banana_jig:
+            markers:
+              31:
+                size_mm: 38.80       # REQUIRED -- see ArucoDetector on why
+                xyz_mm:  [...]       # the MATING FEATURE, expressed in marker 31's frame
+                rpy_deg: [...]
+              32:
+                size_mm: 38.80
+                xyz_mm:  [...]
+                rpy_deg: [...]
+            held_mass_kg: 0.4        # optional; the payload to set once it is on the coupler
+
+    Returns {name: {'markers': {id: {'size_m', 'T_marker_grasp', 'meta'}},
+                    'held_mass_kg': float|None, 'meta': {...}}}.
+
+    Fails LOUDLY on a missing or non-positive marker size, a non-integer id, a missing pose, an
+    object with no markers at all and unknown keys -- the same rule as the rest of this file,
+    because a typo here puts the coupler somewhere plausible and wrong rather than nowhere."""
+    p = path or objects_path(cfg)
+    doc = _read(p)
+    objects = {}
+    for name, entry in (doc.get('objects') or {}).items():
+        e = dict(entry or {})
+        where = f'{p}: object {name!r}'
+        raw_markers = e.pop('markers', None)
+        if not raw_markers:
+            raise ValueError(f'{where} declares no markers: -- an object is found by sight, so '
+                             'it needs at least one')
+        markers = {}
+        for raw_id, m_entry in raw_markers.items():
+            try:
+                mid = int(raw_id)
+            except (TypeError, ValueError):
+                raise ValueError(f'{where} has non-integer marker id {raw_id!r}') from None
+            m = dict(m_entry or {})
+            m_where = f'{where} marker {mid}'
+            sizes = MARKER_SIZE_KEYS & set(m)
+            if not sizes:
+                raise ValueError(f'{m_where} has no size_mm -- solvePnP scales the marker\'s '
+                                 'distance linearly with the side length, so an undeclared '
+                                 'size is a silent depth error, not a missing default')
+            if len(sizes) > 1:
+                raise ValueError(f'{m_where} sets both size_mm and size_m; use one unit')
+            size_m = float(m.pop('size_m')) if 'size_m' in m else float(m.pop('size_mm')) / 1000.0
+            if not size_m > 0.0:
+                raise ValueError(f'{m_where} has a non-positive size')
+            meta = {k: m.pop(k) for k in list(m) if k in OBJECT_META_KEYS}
+            markers[mid] = {'size_m': size_m, 'T_marker_grasp': _pose(m, m_where), 'meta': meta}
+
+        mass = e.pop('held_mass_kg', None)
+        if mass is not None:
+            mass = float(mass)
+            if not mass >= 0.0:
+                raise ValueError(f'{where} has a negative held_mass_kg')
+
+        # ASSEMBLIES: recorded base_link poses of the object's mating frame at an assembled
+        # position -- i.e. where `coupler_mate` has to end up for the part to be seated in its
+        # fixture. KINEMATIC, so exactly as good as the cell staying put: unbolt the fixture and
+        # they are wrong, with nothing to notice it. That is the trade a taught pose makes, and
+        # the alternative (a marker rig on the fixture) is what frames.yaml's marker_rigs are
+        # for. One object may have several, keyed by name.
+        assemblies = {}
+        for a_name, a_entry in dict(e.pop('assemblies', None) or {}).items():
+            a = dict(a_entry or {})
+            a_where = f'{where} assembly {a_name!r}'
+            a_meta = {k: a.pop(k) for k in list(a) if k in OBJECT_META_KEYS}
+            assemblies[str(a_name)] = {'T_base_assembly': _pose(a, a_where), 'meta': a_meta}
+
+        meta = {k: e.pop(k) for k in list(e) if k in OBJECT_META_KEYS}
+        if e:
+            raise ValueError(f'{where} has unknown key(s) {sorted(e)}')
+        objects[name] = {'markers': markers, 'held_mass_kg': mass, 'assemblies': assemblies,
+                         'meta': meta}
+    return objects
 
 
 def check_drift(frames, cfg, tol_mm=0.5, tol_deg=0.2):

@@ -1,0 +1,128 @@
+# OBJECT CALIBRATION -- measure where an object's mating feature sits in its marker's frame,
+# and write the result into configs/objects.yaml. See urlab/apps/object_calibration.py.
+#
+#   python -m urlab.apps.object_calibration --set object_name=banana_jig --set marker.id=31
+#
+# ONE OBJECT PER RUN. The catalogue is merged, not overwritten, so calibrating a second object
+# leaves the first alone.
+
+robot_config: robot.yaml            # the machine (see configs/robot.yaml)
+camera_config: camera.yaml          # the sensor  (see configs/camera.yaml)
+
+# ---- What is being calibrated ----
+# object_name is the key written into objects.yaml. There is no default: a run that guessed
+# would silently overwrite somebody else's object.
+object_name: ORU_v8
+
+# THE OBJECT'S MARKERS, as `id: printed size in mm`. One is fine; several is better, and is
+# what makes a pick survive one of them being occluded -- at run time each marker votes for the
+# grasp frame and the votes are averaged, so a marker that has been knocked is outvoted rather
+# than quietly dragging the answer.
+#
+# The size is the printed BLACK SQUARE, edge to edge, and is NEVER defaulted: solvePnP scales the
+# marker's distance LINEARLY with the side length it is told, so a marker solved at the wrong
+# size lands at the wrong depth with a perfect reprojection behind it and nothing in the image to
+# catch it. The white quiet zone is not part of the marker.
+markers:
+  0: 40.25
+  1: 40.25
+  2: 40.25
+
+
+# The mass the coupler ends up carrying, written straight through into objects.yaml. Leave null
+# until it is weighed -- robot.payload is sized for the EMPTY tool, so until this is set and
+# applied on a pick, getActualTCPForce() reports the object's own weight as external force.
+held_mass_kg: 3.3
+
+aruco:
+  dictionary: DICT_4X4_50
+
+# ---- How many times to mate ----
+# EACH MATE IS A FULL CYCLE: scan the marker, hand-guide the coupler in, lock, read, release,
+# retreat. Three is the minimum that says anything -- with one, the residuals are zero by
+# construction; with two, a disagreement cannot be attributed.
+#
+# THREE IS ALSO A NOISY ESTIMATE. The residuals are unbiased but they are RMS over a handful of
+# samples, so at three mates the printed number can land a factor of two either side of the true
+# spread. Read it as an order of magnitude; raise this to 8-10 when the number itself has to
+# carry weight (accepting a new object, or chasing a pick that sometimes misses).
+mates: 1
+retreat_mm: 60.0                  # back out along the coupler's own -z after each mate
+mate_settle_s: 0.5                # let the lock finish pulling the object in before reading FK
+
+# ---- Where to look from ----
+# null = hand-guide the camera until the marker is in view on the FIRST mate; the pose is then
+# remembered and returned to for every later mate, so the spread reports the object and not the
+# operator. Set joints here to pin it and make the run repeatable.
+view_joints_deg: null
+
+marker_views:
+  settle_s: 0.4
+  frames_per_view: 3
+  min_views: 3
+  max_camera_distance_mm: 250.0
+  multiview_refine: true
+  save_images: true
+  # ---- THE CLOSE LOOK ----
+  # After the sweep, visit each marker in turn and servo the camera onto its face at
+  # `distance_mm`, then pool those views with the sweep's.
+  #
+  # WHY IT EARNS ITS TIME. solvePnP's angular error falls roughly with the marker's apparent
+  # size, and the sweep has to fly far enough back to keep EVERY marker in one frame -- on an
+  # object with markers spread across it, a long way back. Servoing puts the camera the same
+  # short distance SQUARE ONTO each marker, so every one is measured under the geometry it is
+  # best estimated from instead of wherever in the frame it happened to land. It also fixes the
+  # weakest case for a top-down pick: a marker viewed head-on from far away is exactly where
+  # planar-pose tilt ambiguity is worst.
+  #
+  # THE COST IS TIME: an overview hop plus a servo plus a parallax ring, PER MARKER. A
+  # three-marker object is three of those. Set enabled: false for a fast cycle once the cell is
+  # trusted and the markers are big in frame from the sweep alone.
+  #
+  # The close views POOL with the sweep's rather than replacing them -- the closeness weighting
+  # makes them dominate anyway, and replacing outright could drop a marker whose servo produced
+  # few views below min_views.
+  servo:
+    enabled: true
+    distance_mm: 180.0            # camera-to-marker standoff for the close look
+    max_iterations: 4             # re-detect and re-centre until two readings agree
+    pos_tol_mm: 0.5               # ... to within this
+    ang_tol_deg: 0.5
+    ring_mm: 25.0                 # a small parallax ring around the vantage, aimed at the marker
+    ring_views: 4                 # 0 = the centred vantage only
+
+# ---- Gates ----
+# THE HONEST LIMIT IS THE COUPLER'S CAPTURE RANGE: how far off the mating axis, and how far
+# tilted, the mechanism can still seat from. That is a property of the mechanism, so it is left
+# null here rather than guessed -- a made-up number would fail runs that are fine, or pass runs
+# that will not seat. Fill both in once the capture range is measured and these become real
+# pass/fail gates instead of printed diagnostics.
+max_residual_mm: null
+max_residual_axis_deg: null
+
+# ---- What the stored pose IS ----
+# THE MATE, EXACTLY AS MEASURED. The pose the coupler was seated in is written down uncorrected:
+# no axis substituted from the marker, no angle reconstructed. Commanding it back at a pick
+# reproduces the seating that was proven to work.
+#
+# The coupler does not constrain yaw about its own +z, so the wrist angle each mate was seated at
+# is part of that mate. With mates: 1 that is simply the pose you chose. With several at
+# DIFFERENT yaws the mean is an orientation none of them had, and the run says so by printing
+# residual_deg (all rotation) beside residual_axis_deg (the mating axis alone). Seat repeat mates
+# at a consistent wrist angle.
+
+# ---- The locking mechanism ----
+# The Arduino driver is optional. Without it the operator locks and releases by hand and the run
+# still produces a calibration -- what is lost is the board's confirmation that the tool is
+# actually seated, which the app says out loud rather than quietly skipping.
+toolchanger:
+  enabled: true
+  port: null                      # null = autodetect
+  baud: 9600
+
+write_catalogue: true             # false = print the entry and leave objects.yaml alone
+
+move_timeout_s: 60.0
+settle_s: 0.3
+confirm_each_step: false
+debug: false

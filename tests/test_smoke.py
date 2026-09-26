@@ -2357,8 +2357,11 @@ def test_common_yaml_is_the_shared_base_layer():
     from urlab import tool_frames
 
     # Repo wiring: a demo config without a camera: block inherits the shared device...
+    # Compared against camera.yaml rather than a spelled-out serial: the serial identifies a
+    # PHYSICAL camera and changes whenever one is swapped, and what this test is about is the
+    # INHERITANCE, not which D405 is plugged in today.
     cfg = C.load('estimator_eval')
-    assert cfg.get_path('camera.serial_no') == '218622272137'
+    assert cfg.get_path('camera.serial_no') == C.load('camera').get_path('camera.serial_no')
     # ...and the pick app's mate comes from the frames catalogue (target_frame -> targets:).
     pick = C.load('cable_pick_estimate_assemble')
     assert pick.get_path('assembly.target_frame') in tool_frames.load_targets(pick)

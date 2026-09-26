@@ -155,7 +155,7 @@ class URArm:
             self.rtde_c = RTDEControlInterface(self.ip)
             self.rtde_r = RTDEReceiveInterface(self.ip)
             log.info('Connected.')
-            self._set_payload(r.get('payload', {}) or {})
+            self.set_payload(r.get('payload', {}) or {})
             self._report_tcp_offset()
 
         if frames is not None:
@@ -499,9 +499,14 @@ class URArm:
                 'confirm which end the moment comes from before trusting the torque columns.',
                 np.round(off[:3] * 1000.0, 2).tolist())
 
-    def _set_payload(self, payload):
+    def set_payload(self, payload):
         """Tell the controller the tool's mass + CoG so getActualTCPForce() subtracts the tool's
-        own weight and reports true EXTERNAL force. Without this, the wrench reads the tool weight
+        own weight and reports true EXTERNAL force.
+
+        PUBLIC because the payload CHANGES MID-RUN: picking an object up and putting it down
+        changes what the arm carries, and if the controller is not told, every wrench read after
+        the pick carries the object's weight as external force -- which the force guard and the
+        admittance law then both act on. See apps/coupler_pick_place.py. Without this, the wrench reads the tool weight
         (~tens of N) as contact -- and a tare only cancels it at the tare pose and only while idle,
         so a force guard trips spuriously the moment the arm is under active control. Configure
         robot.payload.mass_kg + cog_m for correct readings everywhere (guard, admittance, touch)."""

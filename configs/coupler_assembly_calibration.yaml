@@ -1,0 +1,76 @@
+# ASSEMBLY CALIBRATION -- teach where a held object sits when it is assembled.
+# See urlab/apps/coupler_assembly_calibration.py.
+#
+#   python -m urlab.apps.coupler_assembly_calibration --set object_name=ORU_v7 \
+#                                                     --set assembly_name=rack_slot_1
+#
+# Writes one `assemblies:` entry into configs/objects.yaml, under the object. The catalogue is
+# MERGED, so this object's other assemblies and every other object are left alone.
+#
+# KINEMATIC, AND ONLY THAT. The pose is read off forward kinematics with the object hand-guided
+# into its fixture, so it is exactly as good as the cell staying put. Unbolt the fixture, nudge
+# the bench, re-zero the robot, and every assembly taught here is wrong with nothing to notice
+# it. The alternative -- a marker rig on the fixture, found by sight every run -- is what
+# frames.yaml's marker_rigs are for. Taught poses are quicker, need no line of sight, and are
+# right until something moves.
+#
+# NO CAMERA IS OPENED. Nothing is detected: the object is in hand and the fixture is wherever it
+# is. This runs with the camera unplugged.
+
+robot_config: robot.yaml            # the machine (see configs/robot.yaml)
+camera_config: camera.yaml          # the sensor  (unused here; the rule is every config names it)
+
+# WHICH OBJECT, and WHAT TO CALL THIS ASSEMBLY. Neither has a default: the object must already be
+# in the catalogue (its held_mass_kg is what makes freedrive behave), and the assembly name is
+# the key this run writes -- one that guessed would overwrite a different station.
+object_name: null
+assembly_name: null
+
+# ---- How many times to seat it ----
+# EACH APPROACH IS: freedrive, the operator seats the part in its fixture, Enter, read forward
+# kinematics, retreat. Three is the minimum that says anything -- with one, the residuals are
+# zero by construction and the number has no error bar at all.
+#
+# THE SPREAD IS THE REAL OUTPUT. It is how repeatably a human can seat this part, which is the
+# floor on how well the robot can be expected to. A part that seats to 0.2 mm by hand can be
+# assembled; one that wanders 3 mm needs a better fixture, not a better calibration.
+approaches: 3
+
+# Back the object out between approaches so the next one starts clear. Straight back out along
+# the assembly axis by default -- any other direction levers the part against the fixture it is
+# still inside. Same shape as coupler_pick_place's motion legs.
+retreat:
+  distance_mm: 100.0
+  axis: [0.0, 0.0, -1.0]
+  frame: coupler
+
+# ---- Gates ----
+# Warnings, not limits, until there is a real number to put here. The honest threshold is what
+# the assembly can actually absorb -- the fixture's own lead-in and the coupler's capture range
+# -- which is a property of the hardware, not of this run. null disables.
+max_residual_mm: null
+max_residual_deg: null
+
+# The object's centre of mass, in tool0 mm. null puts it at the coupler's engagement point. This
+# matters MORE here than in a pick: freedrive is gravity compensation, and a wrong CoG makes the
+# arm sag or fight while the operator is trying to seat a part by hand -- so the pose finally
+# recorded is the one they settled for rather than the one they meant.
+held_cog_mm: null
+
+# ---- The locking mechanism ----
+# Same block as coupler_pick_place. The object has to be ON the coupler before anything is
+# taught, and the board's sensor is what confirms it rather than assuming.
+toolchanger:
+  enabled: true
+  port: null                      # null = autodetect
+  baud: 9600
+  motor: true
+  settle_s: 3.0
+  timeout_s: 5.0
+
+write_catalogue: true             # false = report the entry and leave objects.yaml alone
+
+move_timeout_s: 60.0
+settle_s: 0.3
+confirm_each_step: false
+debug: false

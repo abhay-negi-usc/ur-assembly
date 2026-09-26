@@ -484,26 +484,29 @@ pickup:
       # they are checked against the ground AND against the arm.  NO fingertip allowance: the
       # pads are meant to reach the work surface, a bracket never is.
       boxes:
-        # The camera bracket.  x: symmetric about the tool0 yz plane, 50 mm wide.
+        # The camera bracket.  x: symmetric about the tool0 yz plane, 105 mm wide.
         #                      y: 150 mm along tool0 -Y, starting at the tool0 origin.
         #                      z: 35 mm along tool0 +Z, base on the tool0 xy plane.
         # Sanity check on the numbers: the hand-eye calibration (configs/frames.yaml, `camera`)
-        # puts the optics at [0, -120, 25] mm, which lands inside these extents -- so the
-        # bracket is where the optics say it is.  tests/test_behaviors.py reads BOTH numbers and
-        # asserts it, so a recalibration that walks the camera out of its own bracket fails.
+        # puts the optics at [-35, -120, 25] mm, which lands inside these extents -- so the
+        # bracket is where the optics say it is.  tests/test_behaviors.py reads BOTH numbers off
+        # the config and asserts it, so a recalibration that walks the camera out of its own
+        # bracket fails there rather than on the arm.
         #
-        # PLACEHOLDER EXTENT 2026-09-22, NOT MEASURED.  y was -110, sized around the old
-        # [-9, -80, 31] calibration.  The new calibration put the optics 10 mm OUTSIDE that, so
-        # y was extended to -150 to keep the same 30 mm gap between the optics and the outer
-        # face that the old pair had.  This is arithmetic, not a measurement: the physical
-        # bracket has never been ruled since the camera moved, and everything outboard of the
-        # optical centre (the camera body, the connector, the cable loom) is a guess.  MEASURE
-        # IT -- rule on the flange, read where the bracket starts and stops on each axis.  Too
-        # SMALL is the dangerous direction: the self-collision check would wave through a pose
-        # that buries the bracket in the forearm.
+        # X IS SPECIFIED, 2026-09-22: 105 mm wide, still centred on the tool0 yz plane.  It was
+        # 50 mm, sized when the optics sat near x = 0; the camera then moved to x = -35, which
+        # put it 10 mm outside its own bracket and failed the cross-check above.
+        #
+        # Y AND Z ARE STILL PLACEHOLDERS AND HAVE NEVER BEEN RULED.  y was extended from -110 to
+        # -150 arithmetically, to keep the 30 mm gap between the optics and the outer face that
+        # the pre-move pair happened to have.  That is not a measurement, and everything outboard
+        # of the optical centre -- the camera body, the connector, the cable loom -- is a guess.
+        # MEASURE THEM: rule on the flange and read where the bracket starts and stops on each
+        # axis.  Too SMALL is the dangerous direction, because the self-collision check would
+        # then wave through a pose that buries the bracket in the forearm.
         - name: camera_bracket
-          min_mm: [-25.0, -150.0,  0.0]
-          max_mm: [ 25.0,    0.0, 35.0]
+          min_mm: [-52.5, -150.0,  0.0]
+          max_mm: [ 52.5,    0.0, 35.0]
   compliance:
     enabled: true
     tare_before: true

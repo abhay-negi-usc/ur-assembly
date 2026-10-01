@@ -17,6 +17,22 @@ except ImportError:
 from .base import ToolChangerError
 
 BANNER = 'toolchanger ready'   #  printed by setup(), i.e. once per board reset
+IDENTIFY = '?'                 #  asks the board to print its identity line again
+
+
+def parse_identity(line):
+    """(modules, proto) from "... modules=coupler,screwdrive proto=2"; None for what is absent.
+
+    Firmware from before the modules were selectable prints a bare "toolchanger ready", which
+    gives (None, None): the board cannot say what it has."""
+    fields = dict(part.split('=', 1) for part in (line or '').split() if '=' in part)
+    modules = fields.get('modules')
+    modules = [m for m in modules.split(',') if m] if modules is not None else None
+    try:
+        proto = int(fields['proto'])
+    except (KeyError, ValueError):
+        proto = None
+    return modules, proto
 
 
 #  =====   which board   =====
@@ -189,7 +205,7 @@ def find_port(match=None):
 class Board:
     """One open connection to a toolchanger board. Blocking; one command at a time."""
 
-    def __init__(self, port=None, baud=9600, timeout=5.0, settle=3.0, verbose=False,
+    def __init__(self, port=None, baud=115200, timeout=5.0, settle=3.0, verbose=False,
                  latch=False, name=None):
         # `name` prefixes everything this connection prints. With one board it is noise; with
         # several open at once a transcript without it cannot say which mechanism moved.
@@ -229,13 +245,30 @@ class Board:
             raw = self.ser.readline()
             if raw and BANNER in raw.decode('ascii', errors='replace'):
                 self.booted = True
+                self.banner = raw.decode('ascii', errors='replace').strip()
                 break
         else:
             # An older sketch predates the banner, so this is a warning and not an error.
             self.booted = False
+            self.banner = None
             if self.verbose:
                 print(f"  (no {BANNER!r} within {waited}s -- older firmware?)", file=sys.stderr)
         self.ser.reset_input_buffer()
+
+    def identify(self):
+        """(modules, proto) the firmware was built with, or (None, None) if it cannot say.
+
+        Read from the boot banner when it carried them; otherwise asked for with '?', which
+        old firmware ignores -- hence the short timeout rather than the full one."""
+        modules, proto = parse_identity(self.banner)
+        if modules is not None:
+            return modules, proto
+        self.send(IDENTIFY)
+        try:
+            line, _ = self.collect(IDENTIFY, lambda ln: 'modules=' in ln, min(self.timeout, 1.0))
+        except ToolChangerError:
+            return None, None
+        return parse_identity(line)
 
     def _clear_hupcl(self):
         """Stop the kernel dropping DTR when the port closes.
@@ -296,7 +329,7 @@ class Board:
                 return line, lines
         raise ToolChangerError(
             f"No reply to {byte!r} within {timeout:g}s on {self.port}. "
-            f"Check the baud rate matches Serial.begin(9600) in firmware/main.cpp, that the "
+            f"Check the baud rate matches Serial.begin() in firmware/main.cpp, that the "
             f"sketch is actually flashed, and that no serial monitor is holding the port."
             + (f" Got partial output: {lines}" if lines else ""))
 

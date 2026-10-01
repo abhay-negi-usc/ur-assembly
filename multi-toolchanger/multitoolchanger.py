@@ -7,11 +7,13 @@
     ./multitoolchanger.py ramp 0 60 3 --port dc_motor # any command, once, then exit
     ./multitoolchanger.py sequence screwdrive_attach --port dc_motor
 
-WHAT EXISTS DEPENDS ON THE CONFIG. config/multitoolchanger.yaml lists the modules this
-toolchanger has; each is a file in mtc/modules/ with its device protocol and its commands, and
-an optional config/<module>.yaml with its settings and sequences. Commands of modules that are
-not listed do not exist -- not in help, not in completion, not on the command line. Point at a
-different deployment with --config or $MULTITOOLCHANGER_CONFIG.
+WHAT EXISTS DEPENDS ON THE BOARD. The firmware is built with only some modules
+(firmware/build_flash.sh) and announces which when the port opens; the script loads exactly
+those -- each a file in mtc/modules/ with its device protocol and commands, plus an optional
+config/<module>.yaml with its settings and sequences. Commands of modules that are not loaded do
+not exist -- not in help, not in completion. With --no-detect the `modules:` list in
+config/multitoolchanger.yaml is used instead. Point at a different deployment's config with
+--config or $MULTITOOLCHANGER_CONFIG.
 
 At the prompt: Tab completes, up/down walk the history, and q stops a timed command or a
 sequence -- anything moving stops and the prompt carries on as normal.
@@ -36,7 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mtc.base import MAX_RUN_S, Interrupted, ToolChangerError  # noqa: E402
 from mtc.board import COUPLERS, serial  # noqa: E402
-from mtc.config import CONFIG_YAML, load_config  # noqa: E402
+from mtc.config import CONFIG_YAML, available_modules, load_config  # noqa: E402
 from mtc.modules.general import QuitPrompt  # noqa: E402
 from mtc.session import Session, ToolChanger, complete_line, lookup, parse_args  # noqa: E402
 
@@ -86,9 +88,10 @@ def repl(session):
     """The interactive prompt. Runs commands through the same Session as the CLI."""
     _enable_readline(session.cfg)
     board = session.tc.board
-    print(f"Connected to {board.name or board.port} with "
-          f"{', '.join(m for m in session.cfg.modules if m != 'general') or 'no modules'}. "
-          f"`help` lists commands; Tab completes; `quit` or Ctrl-D leaves.")
+    print(f"Connected to {board.name or board.port} -- "
+          f"{', '.join(m for m in session.cfg.modules if m != 'general') or 'no modules'} "
+          f"({'detected on the board' if session.tc.source == 'detected' else 'from the config'})."
+          f" `help` lists commands; Tab completes; `quit` or Ctrl-D leaves.")
     while True:
         try:
             line = input(f'{board.name or "multitoolchanger"}> ').strip()
@@ -124,11 +127,14 @@ def main():
                          'enough of one to be unambiguous), or a device path. With one board '
                          'plugged in this can be omitted; with several it cannot, because they '
                          'are identical over the wire. `list` shows what is connected.')
+    ap.add_argument('--no-detect', action='store_true',
+                    help="load the config's `modules:` list instead of the modules the board's "
+                         'firmware reports (it warns if they differ)')
     ap.add_argument('--config', metavar='PATH',
                     help=f'the main config (default {os.path.relpath(CONFIG_YAML)}, or '
                          f'$MULTITOOLCHANGER_CONFIG); module configs sit beside it')
-    ap.add_argument('--baud', type=int, default=9600,
-                    help='must match Serial.begin() (default 9600)')
+    ap.add_argument('--baud', type=int, default=115200,
+                    help='must match Serial.begin() in firmware/main.cpp (default 115200)')
     ap.add_argument('--timeout', type=float, default=5.0, help='seconds to wait for a reply')
     ap.add_argument('--settle', type=float, default=3.0,
                     help='seconds to wait for the board to boot (it prints a banner when '
@@ -141,24 +147,37 @@ def main():
                          'Ctrl-C.')
     args = ap.parse_args()
 
+    detect = not args.no_detect
     try:
         cfg = load_config(args.config)
         session = Session(cfg)
         # Checked before the port is opened: opening it resets the board and moves the servo,
-        # so a typo should cost nothing.
+        # so a typo should cost nothing. With detect on, the board decides the modules, so the
+        # check is against every module this script knows; the real check follows connecting.
         tokens = [args.command.lower()] + args.values if args.command else None
-        cmd = lookup(tokens[0], cfg) if tokens else None
-        if cmd:
-            values = parse_args(cmd, tokens[1:], cfg)
+        cmd = None
+        if tokens:
+            known = (load_config(args.config, modules=[m for m in available_modules()
+                                                       if m != 'general'])
+                     if detect else cfg)
+            cmd = lookup(tokens[0], known)
+            values = parse_args(cmd, tokens[1:], known)
             if not cmd.board:
-                sys.exit(0 if session.execute(tokens) else 2)
+                # With detect on, the board decides the modules, so `help` without a board
+                # describes every module this script has.
+                ok = (Session(known) if detect else session).execute(tokens)
+                if detect and cmd.name == 'help' and not values:
+                    print('(Without a board: every module this script knows. Connected, the '
+                          'board decides.)')
+                sys.exit(0 if ok else 2)
     except QuitPrompt:
         sys.exit(0)
     except ToolChangerError as exc:
         sys.exit(str(exc))
 
     try:
-        session.tc = ToolChanger(args.port, cfg, baud=args.baud, timeout=args.timeout,
+        session.tc = ToolChanger(args.port, None if detect else cfg, detect=detect,
+                                 config_path=args.config, baud=args.baud, timeout=args.timeout,
                                  settle=args.settle, verbose=args.verbose, latch=args.latch,
                                  name=args.port if args.port in COUPLERS else None)
     except serial.SerialException as exc:
@@ -167,13 +186,26 @@ def main():
                  f"and that the Arduino IDE serial monitor is closed.")
     except ToolChangerError as exc:
         sys.exit(str(exc))
+    session.cfg = cfg = session.tc.config
+    if session.tc.source == 'detected':
+        print(f"detected modules: {', '.join(m for m in cfg.modules if m != 'general') or 'none'}")
+    if cmd is not None and cmd.name not in cfg.commands:
+        session.tc.close()
+        sys.exit(f"{cmd.name} is a {cmd.module} command, and this board's firmware has no "
+                 f"{cmd.module} (it has: {', '.join(session.tc.detected) or 'nothing'})")
+    if cmd is not None:
+        try:
+            values = parse_args(cmd, tokens[1:], cfg)   # again: settings may differ by board
+        except ToolChangerError as exc:
+            session.tc.close()
+            sys.exit(str(exc))
 
     try:
         if cmd is None:
             repl(session)
             sys.exit(0)
         ok = session.execute(tokens)
-        if ok and cmd.runs_on and cmd.runs_on(values) and not args.latch:
+        if ok and cmd.runs_on and cmd.runs_on(values, cfg) and not args.latch:
             # closing the port resets the board and stops it, so without --latch whatever the
             # command left running lasts exactly as long as this process: hold it open
             print('   running until q or Ctrl-C (or use --latch to leave it running)')

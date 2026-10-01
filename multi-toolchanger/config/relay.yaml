@@ -1,0 +1,7 @@
+# ============================================================================
+# RELAY -- relay K1 (mtc/modules/relay.py)
+# ============================================================================
+
+# Pins on the Uno, checked by build_flash.sh.
+pins:
+  k1: 3         # relay K1, driven at ~4 V with analogWrite -- must be a PWM pin (D3 D5 D6 D9 D10 D11)

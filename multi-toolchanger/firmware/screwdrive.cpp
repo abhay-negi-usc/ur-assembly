@@ -2,6 +2,14 @@
 
 #include "screwdrive.h"
 
+//  Pins come from config/screwdrive.yaml via build_flash.sh (mtc/pins.py checks them).
+#ifndef PIN_SCREWDRIVE_PWM
+#error "PIN_SCREWDRIVE_PWM is not defined -- build with build_flash.sh, which takes the pins from config/screwdrive.yaml"
+#endif
+#ifndef PIN_SCREWDRIVE_DIR
+#error "PIN_SCREWDRIVE_DIR is not defined -- build with build_flash.sh, which takes the pins from config/screwdrive.yaml"
+#endif
+
 /*  The screwdrive: a 12 V DC motor turning the coupling lead screw.
 *
 *   Cytron MD10C R3, sign-magnitude mode: PWM sets the speed, DIR the direction.
@@ -9,13 +17,13 @@
 *   Wiring -- three wires, the 12 V motor supply goes straight to the MD10C's power terminals
 *   and the MD10C makes its own logic supply from it:
 *
-*       MD10C PWM  <-  D6    (Timer0, ~980 Hz; the MD10C takes up to 20 kHz)
-*       MD10C DIR  <-  D7
-*       MD10C GND  --  GND   common reference, required
+*       MD10C PWM  <-  pins.pwm  (default D6: Timer0, ~980 Hz; the MD10C takes up to 20 kHz)
+*       MD10C DIR  <-  pins.dir  (default D7)
+*       MD10C GND  --  GND       common reference, required
 *
-*   Pin choice: the Servo library owns Timer1, which kills PWM on 9 and 10; 3 is the relay and
-*   5 the servo. Timer0's frequency cannot be raised without breaking millis()/delay(), so the
-*   motor runs at ~980 Hz and may whine a little -- that is harmless.
+*   The pins are set in config/screwdrive.yaml. Timer0's frequency cannot be raised without
+*   breaking millis()/delay(), so on D5/D6 the motor runs at ~980 Hz and may whine a little --
+*   that is harmless.
 *
 *   PWM LOW is BRAKE on the MD10C (both outputs pulled to ground), not coast. That is why there
 *   is no back-EMF speed sensing here: the motor terminals never float, so there is no window
@@ -26,8 +34,8 @@ namespace screwdrive
 {
 namespace
 {
-const int pwmPin = 6;
-const int dirPin = 7;
+const int pwmPin = PIN_SCREWDRIVE_PWM;
+const int dirPin = PIN_SCREWDRIVE_DIR;
 
 //  Reversing while running cuts the drive for this long before flipping DIR, so the motor is
 //  never plugged straight from full forward into full reverse. (PWM LOW brakes on the MD10C.)

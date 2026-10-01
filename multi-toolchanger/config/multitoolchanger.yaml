@@ -1,9 +1,13 @@
 # ============================================================================
 # MULTI-TOOLCHANGER -- which modules this toolchanger has.
 #
-# Each module listed here loads mtc/modules/<name>.py (its commands) and, if present,
-# config/<name>.yaml next to this file (its settings and its own sequences). A module left out
-# does not exist for the script: its commands are not in `help`, Tab completion or the CLI.
+# This list is what firmware/build_flash.sh compiles into the board (unless given --modules).
+# The board then announces what it was built with, and the script loads exactly that; this
+# list is only used directly with --no-detect, or for firmware too old to announce itself.
+#
+# Each module loads mtc/modules/<name>.py (its commands) and, if present, config/<name>.yaml
+# next to this file (its settings and its own sequences). A module that is not loaded does not
+# exist for the script: its commands are not in `help`, Tab completion or the CLI.
 # `general` (help, sequence, wait, list, monitor, quit) is always loaded and is not listed.
 #
 # For a different toolchanger, copy this directory and point the script at it:

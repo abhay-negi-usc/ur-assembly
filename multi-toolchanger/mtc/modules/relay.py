@@ -21,6 +21,7 @@ class Relay:
 
 
 MODULE = Module('relay', 'relay K1 (firmware/relay.cpp)', device=Relay)
+MODULE.pin('k1', 3, needs='pwm')          # driven at ~4 V with analogWrite
 
 
 @MODULE.command()

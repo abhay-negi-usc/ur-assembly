@@ -1,0 +1,14 @@
+{
+  "turn_counts": -40000,
+  "note": "turn_counts carried over from t74-motor/t74_calibration.json (saved 2026-10-01 00:22:13). Run t74_identify with the heaviest load to add the motor model.",
+  "model_k": -208.9310018281415,
+  "model_tau": 0.42403401896162407,
+  "friction": 43.12576582582607,
+  "identify_pwm": [
+    60,
+    120
+  ],
+  "identify_seconds": 1.0,
+  "identify_rms_counts": 16.7,
+  "saved": "2026-10-01 00:54:45"
+}

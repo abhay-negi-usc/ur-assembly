@@ -5,6 +5,7 @@ is not a smaller configuration, it is a broken one. It lives in its own file any
 EVERY command is defined the same way, in a module file, with no special case in the core.
 """
 
+from ..base import ToolChangerError
 from ..board import describe_ports
 from ..registry import Module, Param
 from ..session import render_help, run_sequence
@@ -16,13 +17,26 @@ class QuitPrompt(Exception):
     """Raised by `quit` to leave the interactive prompt."""
 
 
-@MODULE.command(Param('TOPIC', 'topic', optional=True), board=False, in_sequence=False)
-def cmd_help(s, topic=None):
-    """List every command by module, or describe one command or module.
+def _parse_help_sub(text, cfg, name):
+    if text != 'sequence':
+        raise ToolChangerError(f'`help MODULE {text}`: the only thing after a module is '
+                               f'`sequence`')
+    return text
 
-    `help` lists everything this configuration loaded, and the sequences grouped by the file
-    they come from. `help ramp` shows one command in full; `help screwdrive` one module."""
-    print(render_help(s.cfg, topic))
+
+MODULE.kind('help_sub', _parse_help_sub, lambda cfg: '`sequence`: that module\'s sequences',
+            lambda cfg: ['sequence'])
+
+
+@MODULE.command(Param('TOPIC', 'topic', optional=True),
+                Param('sequence', 'help_sub', optional=True), board=False, in_sequence=False)
+def cmd_help(s, topic=None, sub=None):
+    """List the general commands and the modules, or describe one module, command or sequences.
+
+    `help` lists the general commands and the modules loaded. `help MODULE` lists a module's
+    commands; `help COMMAND` shows one in full. `help sequence` lists every sequence, grouped
+    by the file it comes from; `help MODULE sequence` just that module's."""
+    print(render_help(s.cfg, topic, sub))
 
 
 @MODULE.command(board=False, in_sequence=False)

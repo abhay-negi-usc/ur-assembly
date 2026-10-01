@@ -7,6 +7,10 @@ Opening the real port pulls DTR, resets the Arduino and swings the servo, so thi
 exercise the driver without moving anything. It speaks exactly the lines firmware/ prints.
 """
 
+import contextlib
+import io
+import json
+import math
 import os
 import pathlib
 import pty
@@ -20,7 +24,9 @@ HERE = pathlib.Path(__file__).parent
 sys.path.insert(0, str(HERE))
 from mtc import Interrupted, Session, ToolChanger, ToolChangerError, load_config  # noqa: E402
 from mtc.base import MAX_RUN_S  # noqa: E402
+from mtc.config import PROTOCOL  # noqa: E402
 from mtc.modules.screwdrive import duty_for_rpm  # noqa: E402
+from mtc.modules.t74 import fit_steps, pid_gains  # noqa: E402
 from mtc.session import complete_line, render_help  # noqa: E402
 
 FIRMWARE = HERE / 'firmware'
@@ -32,6 +38,7 @@ RAW_TOOL = 400        # what the sensor reads with a tool in front of it (below 
 RAW_EMPTY = 1023      # ... and with nothing there (railed, as measured on the cell)
 
 BOARD = {'dc': 0}     # what the simulated screwdrive is doing, for the tests to inspect
+ALL = ['coupler', 'relay', 'screwdrive']
 
 
 def read_args(fd, count):
@@ -57,8 +64,176 @@ def read_args(fd, count):
     return nums if ok and len(nums) == count else None
 
 
-def board(fd, tool_present):
-    """Mimic firmware/: one ASCII byte in (plus numbers after the screwdrive's), lines out."""
+class FakeT74:
+    """The T74 firmware's protocol over a motor whose true model is known, so the host's
+    identification fit can be checked against the truth. Moves are not PID-simulated here
+    (firmware/test/ does that, on the real control law): the position just follows the profile
+    to the goal, so the host's side of every exchange can be exercised."""
+
+    K, TAU, FRICTION = -120.0, 0.06, 35.0     # the "true" motor: counts/s per PWM, s, PWM
+    INDEX_EVERY = 2000                        # counts per encoder turn: 4 x 500 PPR
+
+    def __init__(self, say):
+        self.say = say
+        self.raw = 0.0                # encoder count
+        self.zero = 0
+        self.gains = None             # last J: kp, ki, kd, K, tau, friction
+        self.limits = None            # last L: vmax, amax, band, maxerr, homespeed
+        self.goal = 0.0
+        self.motion = None            # (t0, start, goal, seconds) of a move in progress
+        self.open = None              # (t0, start, pwm) of an open-loop run
+        self.mode = 'off'
+        self.goal_kept = False        # released on a goal by hold-off: R counts from it
+        self.gen = 0
+        self.fault_next_move = False
+        self.commands = []            # every command letter seen, for the tests
+
+    def _where(self):
+        now = time.time()
+        if self.motion:
+            t0, start, goal, dur = self.motion
+            f = min(1.0, (now - t0) / dur)
+            return start + (goal - start) * f
+        if self.open:
+            t0, start, pwm = self.open
+            speed = self.K * (abs(pwm) - self.FRICTION) * (1 if pwm > 0 else -1)
+            return start + speed * (now - t0)
+        return self.raw
+
+    def _freeze(self):
+        self.raw = self._where()
+        self.motion = self.open = None
+        self.gen += 1
+
+    def _move(self, goal):
+        if not self.gains or not self.limits:
+            self.say('t74 rejected: no gains yet -- the host sends them; run t74_identify first')
+            return
+        self._freeze()
+        start, vmax, amax = self.raw, self.limits[0], self.limits[1]
+        dur = (abs(goal - start) / vmax + vmax / amax) * 0.2 + 0.05   # faster than life
+        self.motion = (time.time(), start, goal, dur)
+        self.mode, self.goal = 'hold', goal
+        self.say(f't74 move from {round(start) - self.zero} to {round(goal) - self.zero}')
+        gen, fault = self.gen, self.fault_next_move
+        self.fault_next_move = False
+
+        def finish():
+            if self.gen != gen:
+                return
+            if fault:
+                self._freeze()
+                self.mode = 'off'
+                self.say('t74 FAULT following error too large -- jammed, overloaded, or the '
+                         'gains have the wrong sign (re-run t74_identify)')
+                return
+            self.raw, self.motion = goal, None
+            self.goal_kept = self.limits[5] == 0
+            self.say(f't74 done pos {round(goal) - self.zero} goal {round(goal) - self.zero}')
+            if self.limits[5] == 0:
+                self.mode = 'off'                  # released once settled, goal kept
+        threading.Timer(dur, finish).start()
+
+    def identify(self, pwm1, pwm2, ms):
+        """The samples the real board would stream: two steps of the true model, quantized."""
+        self.say(f't74 id start {round(self.raw)}')
+        T, x, v, t = ms / 1000.0, self.raw, 0.0, 0.0
+        dt = 0.0005
+        for step, pwm in enumerate((pwm1, pwm2)):
+            target = self.K * (pwm - self.FRICTION)
+            for _ in range(int(T / dt)):
+                v += dt * (target - v) / self.TAU
+                x += v * dt
+                t += dt
+                tick = round(t / dt)
+                if tick % 8 == 0:                       # every 4 ms
+                    self.say(f't74 id {round(t * 1000)} {int(x // 1)}')
+        self.raw = x
+        self.say('t74 id done')
+
+    def handle(self, ch, fd):
+        self.commands.append(ch)
+        if ch in 'JLRAOI':
+            text = b''
+            while True:
+                b = os.read(fd, 1)
+                if not b or b in b'\r\n':
+                    break
+                text += b
+            try:
+                nums = [float(v) for v in text.decode().split(',')]
+            except ValueError:
+                nums = []
+        if ch == 'J':
+            self.gains = nums
+            self.say('t74 gains ok')
+        elif ch == 'L':
+            self.limits = nums
+            self.say('t74 limits ok')
+        elif ch == 'R':
+            base = self.goal if self.mode == 'hold' or self.goal_kept else self._where()
+            self._move(round(base + nums[0]))
+        elif ch == 'A':
+            base = self.goal if self.mode == 'hold' or self.goal_kept else self._where()
+            d = self.zero + nums[0] - base
+            if len(nums) > 1 and nums[1] > 0:       # as the firmware: the nearest equivalent
+                d = math.fmod(d, nums[1])
+                d = d - nums[1] if d > nums[1] / 2 else d + nums[1] if d <= -nums[1] / 2 else d
+            self._move(round(base + d))
+        elif ch == 'H':
+            if not self.gains or not self.limits:
+                self.say('t74 rejected: no gains yet')
+                return
+            self._freeze()
+            self.say('t74 homing')
+            direction = 1 if self.limits[4] > 0 else -1
+            at = (math.floor(self.raw / self.INDEX_EVERY) + (1 if direction > 0 else 0)) \
+                * self.INDEX_EVERY
+            gen = self.gen
+
+            def found():
+                if self.gen == gen:
+                    self.zero, self.raw, self.goal, self.mode = at, at, at, 'hold'
+                    self.say(f't74 homed at raw {at}')
+                    self.say('t74 done pos 0 goal 0')
+            threading.Timer(0.1, found).start()
+        elif ch == 'Z':
+            self._freeze()
+            self.zero = round(self.raw)
+            self.say('t74 zero')
+        elif ch == 'S':
+            self._freeze()
+            if self.mode == 'hold':
+                self.goal = self.raw
+            else:
+                self.mode = 'off'
+            self.say(f't74 halt pos {round(self.raw) - self.zero}')
+        elif ch == 'X':
+            self._freeze()
+            self.goal_kept = False
+            self.mode = 'off'
+            self.say(f't74 off pos {round(self.raw) - self.zero}')
+        elif ch == 'O':
+            self._freeze()
+            self.open, self.mode = (time.time(), self.raw, int(nums[0])), 'open'
+            self.say(f't74 open {int(nums[0])} pos {round(self.raw) - self.zero}')
+        elif ch == 'I':
+            self._freeze()
+            self.identify(int(nums[0]), int(nums[1]), int(nums[2]))
+        elif ch == 'E':
+            pos = round(self._where())
+            self.say(f't74 pos {pos - self.zero} goal {round(self.goal) - self.zero} err 0 u 0 '
+                     f'mode {self.mode} homed 0 index 0 missed 0 raw {pos} '
+                     f'hold {int(self.limits[5]) if self.limits else 1}')
+
+
+T74S = []   # the FakeT74 of each simulated t74 board, for the tests to inspect
+
+
+def board(fd, tool_present, modules=ALL, proto=PROTOCOL):
+    """Mimic firmware/ built with `modules`: one ASCII byte in (plus numbers after the
+    screwdrive's), lines out. Bytes for a module that is not built in are ignored, as on the
+    board. modules=None mimics firmware from before protocol 2, which cannot say what it has."""
     status = 1 if tool_present[0] else 0     # setup(): status = checkTool() ? 1 : 0
     relay = False
     bypassed = False
@@ -67,7 +242,11 @@ def board(fd, tool_present):
     #  delayed a beat: the driver opens the pty after this thread starts, and a banner written
     #  before it is listening is a banner it never sees
     time.sleep(0.2)
-    os.write(fd, b"toolchanger ready\r\n")
+    identity = f"modules={','.join(modules)} proto={proto}" if modules is not None else None
+    os.write(fd, f"toolchanger ready {identity or ''}".strip().encode() + b"\r\n")
+    has = set(modules if modules is not None else ALL)
+    t74 = FakeT74(lambda text: os.write(fd, text.encode() + b"\r\n"))
+    T74S.append(t74)
 
     def say(text):
         os.write(fd, text.encode() + b"\r\n")
@@ -94,7 +273,19 @@ def board(fd, tool_present):
             return
         ch = c.decode('ascii', errors='replace')
 
-        if ch == 's':
+        if ch == '?':
+            if identity:                       # old firmware ignores it
+                say(identity)
+        elif (ch in 'srb' or ch.isdigit()) and 'coupler' not in has:
+            pass
+        elif ch == 'm' and 'relay' not in has:
+            pass
+        elif ch in 'dtpa' and 'screwdrive' not in has:
+            pass
+        elif ch in 'JLRAHZSXOIE':
+            if 't74' in has:
+                t74.handle(ch, fd)
+        elif ch == 's':
             say("tool present" if tool_present[0] else "tool absent")
             signal(status == 0 or tool_present[0])
         elif ch == 'r':
@@ -260,7 +451,7 @@ def check_config_loading(tmp):
     assert 'hold' not in small.commands and 'motor' not in small.commands
     assert small.settings['screwdrive'].max_rpm == 500, 'no screwdrive.yaml: the default'
     text = render_help(small)
-    assert 'coupler --' not in text and '  hold ' not in text and 'screwdrive --' in text
+    assert '  coupler ' not in text and '  hold ' not in text and '  screwdrive ' in text
     assert complete_line('h', small) == ['help ']
 
     #  fatal: these would otherwise run with the wrong modules or the wrong numbers
@@ -324,16 +515,32 @@ def check_session(tc, cfg, tool_present):
     expect_error(s.execute, ['wait', '5'], contains='interrupted')
     FakeWatcher.after = None
 
-    #  help: every loaded command, grouped under its module, and sequences by source file
+    #  help: the general commands and the modules; each module's commands; the sequences
+    def listed(usage, text):
+        return any(ln.startswith(f'  {usage} ') or ln == f'  {usage}' for ln in text.splitlines())
+
     text = render_help(cfg)
-    for name in cfg.modules:
-        assert f'{name} -- ' in text, name
     for name, cmd in cfg.commands.items():
-        assert cmd.usage in text and cmd.summary, name
-    assert 'sequences from' in text and 'screwdrive.yaml' in text and 'CANNOT RUN' in text
+        assert listed(cmd.usage, text) == (cmd.module == 'general'), name
+    for name in cfg.modules:
+        assert name == 'general' or f'  {name} ' in text, name
+    assert '3 commands' not in text and '6 commands, 5 sequences' in text, text
+    assert 'sequences from' not in text
+    for name in cfg.modules:
+        part = render_help(cfg, name)
+        for cmd in cfg.commands.values():
+            assert listed(cmd.usage, part) == (cmd.module == name), (name, cmd.name)
+        assert 'sequences from' not in part
+    assert 'help coupler sequence' in render_help(cfg, 'coupler')
+    every = render_help(cfg, 'sequence')
+    assert all(n in every for n in cfg.sequences) and 'CANNOT RUN' in every
+    assert 'multitoolchanger.yaml' in every, 'main-file sequences are listed too'
+    mine = render_help(cfg, 'coupler', 'sequence')
+    assert 'coupler_cycle' in mine and 'screwdrive_good' not in mine
+    assert 'no sequences' in render_help(cfg, 'relay', 'sequence')
+    expect_error(render_help, cfg, 'hold', 'sequence', contains='needs a module name')
+    expect_error(s.execute, ['help', 'coupler', 'seqs'], contains='only thing after a module')
     assert '-400..400' in render_help(cfg, 'rpm')
-    assert 'hold' in render_help(cfg, 'coupler') and 'drive' not in render_help(cfg, 'coupler')
-    assert 'coupler_cycle' in render_help(cfg, 'coupler')
 
     #  completion: commands first, then whatever the argument's kind offers
     c = complete_line
@@ -341,20 +548,262 @@ def check_session(tc, cfg, tool_present):
     assert c('seq', cfg) == ['sequence ']
     assert c('sequence coup', cfg) == ['coupler_cycle ']
     assert c('help s', cfg) == ['screwdrive ', 'sequence ', 'status ', 'stop ']
+    assert c('help coupler s', cfg) == ['sequence ']
     assert c('rpm ', cfg) == [] and c('ramp 0 ', cfg) == [] and c('nope ', cfg) == []
     print('session checks passed')
 
 
+def fake_port(tool_present=None, **board_kwargs):
+    """A fresh simulated board on its own pty; returns the device path to open."""
+    master, slave = pty.openpty()
+    threading.Thread(target=board, args=(master, tool_present or [True]), kwargs=board_kwargs,
+                     daemon=True).start()
+    return os.ttyname(slave)
+
+
+def open_quietly(*args, **kwargs):
+    """ToolChanger(...), returning it and whatever it warned about on stderr."""
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        tc = ToolChanger(*args, settle=0.1, timeout=3, **kwargs)
+    return tc, err.getvalue()
+
+
+def check_detection(cfg):
+    """The board says which modules it was built with, and that is what loads."""
+    main_cpp = (FIRMWARE / 'main.cpp').read_text()
+    assert int(re.search(r'const int PROTOCOL = (\d+);', main_cpp).group(1)) == PROTOCOL, \
+        'PROTOCOL in mtc/config.py disagrees with firmware/main.cpp'
+
+    #  a screwdrive-only board: no coupler commands, no coupler sequences
+    tc, warned = open_quietly(fake_port(modules=['screwdrive']), config_path=cfg.path)
+    try:
+        assert tc.source == 'detected' and not warned, warned
+        assert list(tc.config.modules) == ['general', 'screwdrive']
+        assert 'hold' not in tc.config.commands and not hasattr(tc.devices, 'coupler')
+        assert 'coupler_cycle' not in tc.config.sequences
+        assert 'hold' in ' '.join(tc.config.sequences['grab_and_spin'].errors), \
+            'a main sequence using an absent module cannot run'
+        assert complete_line('ho', tc.config) == []
+        assert 'coupler --' not in render_help(tc.config)
+        assert Session(tc.config, tc).execute(['sequence', 'screwdrive_good']) is True
+    finally:
+        tc.close()
+
+    #  --no-detect: the config's list, with a warning naming the difference
+    tc, warned = open_quietly(fake_port(modules=['screwdrive', 'relay']), cfg, detect=False)
+    try:
+        assert tc.source == 'config' and 'coupler' in tc.config.modules
+        assert 'loads coupler but' in warned and 'time out' in warned, warned
+    finally:
+        tc.close()
+    tc, warned = open_quietly(fake_port(modules=['screwdrive']),
+                              load_config(cfg.path, modules=['screwdrive', 'relay']),
+                              detect=False)
+    tc.close()
+    assert 'loads relay but' in warned, warned
+    tc, warned = open_quietly(fake_port(), load_config(cfg.path, modules=['screwdrive']),
+                              detect=False)
+    tc.close()
+    assert 'also has coupler, relay' in warned, warned
+
+    #  firmware too old to say: the config list, with a warning, detect or not
+    tc, warned = open_quietly(fake_port(modules=None), config_path=cfg.path)
+    tc.close()
+    assert tc.source == 'config' and tc.detected is None and 'Reflash' in warned, warned
+    assert list(tc.config.modules) == ['general'] + ALL
+
+    #  a module the board has but this script does not know: skipped, said so
+    tc, warned = open_quietly(fake_port(modules=['screwdrive', 'warpdrive']), config_path=cfg.path)
+    tc.close()
+    assert list(tc.config.modules) == ['general', 'screwdrive'] and 'warpdrive' in warned
+
+    #  another protocol: refused outright, and the port is closed again
+    port = fake_port(proto=PROTOCOL - 1)
+    expect_error(lambda: open_quietly(port, config_path=cfg.path),
+                 contains=f'protocol {PROTOCOL - 1}')
+    print('detection checks passed')
+
+
+def check_control_law():
+    """Build and run the firmware's control law against the simulated motor (firmware/test/)."""
+    import shutil
+    import subprocess
+    if not shutil.which('g++'):
+        print('control law simulation SKIPPED: no g++')
+        return
+    test = FIRMWARE / 'test' / 't74_control_test.cpp'
+    with tempfile.TemporaryDirectory() as tmp:
+        exe = os.path.join(tmp, 't74_test')
+        subprocess.run(['g++', '-O2', '-std=c++11', '-Wall', '-Wextra', '-Werror', '-o', exe,
+                        str(test)], check=True)
+        run = subprocess.run([exe], capture_output=True, text=True)
+    assert run.returncode == 0, 'the control law simulation failed:\n' + run.stdout
+    print('control law simulation passed (firmware/test/t74_control_test.cpp)')
+
+
+def check_pins(tmp):
+    """build_flash.sh's pin check (mtc/pins.py), without compiling anything."""
+    from mtc.pins import check, defines, parse_pin
+
+    def plan(files, modules):
+        d = os.path.join(tmp, f'pins{len(os.listdir(tmp))}')
+        cfg = load_config(write_config(dict({'multitoolchanger.yaml': 'modules: []'}, **files), d),
+                          modules=modules)
+        return check(cfg, modules), defines(cfg, modules)
+
+    #  the defaults are the wiring the firmware always had
+    problems, flags = plan({}, ['coupler', 'relay', 'screwdrive'])
+    assert not problems, problems
+    assert flags == ['-DPIN_COUPLER_SERVO=5', '-DPIN_COUPLER_SENSOR=17', '-DPIN_COUPLER_LED=13',
+                     '-DPIN_RELAY_K1=3', '-DPIN_SCREWDRIVE_PWM=6', '-DPIN_SCREWDRIVE_DIR=7'], flags
+    problems, flags = plan({}, ['t74'])
+    assert not problems and '-DPIN_T74_ENC_X=4' in flags
+
+    #  clashes, timers, capabilities -- each named
+    problems = '\n'.join(plan({}, ['t74', 'coupler'])[0])
+    assert 'coupler needs timer1, which t74 already has' in problems
+    assert 'D5 is wanted by t74.rpwm and coupler.servo' in problems
+    problems = plan({'screwdrive.yaml': 'pins: {pwm: 11, dir: 12}',
+                     't74.yaml': 'pins: {enc_x: A0}'}, ['t74', 'screwdrive'])[0]
+    assert not problems, 'repinned, the t74 and the screwdrive share a board'
+    problems = '\n'.join(plan({'screwdrive.yaml': 'pins: {pwm: 9, dir: 12}'},
+                              ['t74', 'screwdrive'])[0])
+    assert 'runs on timer1 -- and t74 has taken timer1 over' in problems
+    problems = '\n'.join(plan({'screwdrive.yaml': 'pins: {pwm: 7, dir: 0}'}, ['screwdrive'])[0])
+    assert 'D7 has none' in problems and 'D0 is the serial link' in problems
+    problems = '\n'.join(plan({'t74.yaml': 'pins: {enc_a: 4, enc_x: 2}'}, ['t74'])[0])
+    assert 'needs a hardware interrupt, and D4 has none' in problems
+    problems = '\n'.join(plan({'coupler.yaml': 'pins: {sensor: 8}'}, ['coupler'])[0])
+    assert 'needs an analog input, and D8 is not one' in problems
+    #  two pin-change pins on one port would need the same interrupt vector twice
+    assert not plan({'t74.yaml': 'pins: {enc_x: A0}'}, ['t74'])[0]
+
+    #  the config itself: unknown roles and pins the board does not have are fatal
+    expect_error(plan, {'relay.yaml': 'pins: {k2: 4}'}, ['relay'], contains='unknown pin(s) k2')
+    expect_error(plan, {'relay.yaml': 'pins: {k1: A7}'}, ['relay'], contains='not an Uno pin')
+    assert [parse_pin(v, '') for v in (6, '6', 'D6', 'a3', 'A0')] == [6, 6, 6, 17, 14]
+    print('pin checks passed')
+
+
+def check_t74(tmp):
+    """The t74 module against a fake board whose motor model is known."""
+    #  the gains really do put all three poles at -w: compare the characteristic polynomial
+    K, tau, w = -120.0, 0.06, 15.0
+    kp, ki, kd, note = pid_gains(K, tau, w)
+    got = [tau, 1 + K * kd, K * kp, K * ki]
+    want = [tau, 3 * tau * w, 3 * tau * w ** 2, tau * w ** 3]
+    assert all(abs(a - b) < 1e-9 * max(1, abs(b)) for a, b in zip(got, want)) and not note
+    assert 'clamped' in pid_gains(K, tau, 1.0)[3], 'w below 1/(3 tau) is called out'
+
+    d = os.path.join(tmp, 't74cfg')
+    write_config({'multitoolchanger.yaml': 'modules: [t74]\n',
+                  't74.yaml': 'settings: {max_speed_dps: 360, max_accel_dps2: 3600}\n'
+                              'sequences:\n  t74_square: [t74_move 90, wait 0.1, t74_move -90]\n'},
+                 d)
+    with open(os.path.join(d, 't74_calibration.json'), 'w') as fh:
+        fh.write('{"turn_counts": -40000}\n')
+
+    tc, warned = open_quietly(fake_port(modules=['t74']), config_path=os.path.join(d,
+                              'multitoolchanger.yaml'))
+    fake = T74S[-1]
+    try:
+        assert tc.source == 'detected' and list(tc.config.modules) == ['general', 't74'], warned
+        dev = tc.t74
+        assert fake.limits and fake.limits[4] < 0, 'limits sent; homes forward = counts down'
+        assert fake.gains is None, 'no model yet, so no gains sent'
+        expect_error(dev.move, 90, contains='t74_identify')
+
+        #  identification recovers the true model, and the gains it sends match pid_gains()
+        K, tau, friction = dev.identify(60, 120, 1.0)
+        assert abs(K / FakeT74.K - 1) < 0.03, K
+        assert abs(tau / FakeT74.TAU - 1) < 0.10, tau
+        assert abs(friction - FakeT74.FRICTION) < 2.0, friction
+        sent = fake.gains
+        kp, ki, kd, _ = pid_gains(K, tau, dev.bandwidth)
+        want = (kp, ki, kd, K, tau)
+        assert all(abs(a - b) < 1e-4 * max(1, abs(b)) for a, b in zip(sent, want)), (sent, want)
+        saved = json.load(open(os.path.join(d, 't74_calibration.json')))
+        assert saved['turn_counts'] == -40000 and abs(saved['model_k'] - K) < 1e-9
+
+        #  moves report in degrees, relative moves add to the target, goto is from zero
+        dev.zero()                              # identify turned it ~113 deg
+        assert abs(dev.move(90) - 90) < 0.01
+        assert abs(dev.move(-30) - 60) < 0.01
+        assert abs(dev.goto(-45) + 45) < 0.01
+        #  goto takes the shortest way round: through the zero, never more than half a turn
+        assert abs(dev.goto(300) + 60) < 0.01          # -45 -> -60, not +345 forward
+        assert abs(dev.goto(10) - 10) < 0.01           # -60 -> 10: forward 70 through zero
+        assert abs(dev.goto(200) + 160) < 0.01         # 190 forward vs 170 back: back
+        assert abs(dev.goto(-170) + 170) < 0.01        # 10 deg on: the same place, -170
+        assert abs(dev.goto(540) + 180) < 0.01         # whole turns ignored: 10 back to -180
+        dev.zero()
+        assert abs(dev.move(10) - 10) < 0.01
+        dev.home()
+        f = dev.report()
+        assert f['mode'] == 'hold' and f['pos'] == '0'
+
+        #  hold after move: on by default; off, the board releases once settled, and a
+        #  relative move still counts from the last target
+        assert dev.hold is True and fake.limits[5] == 1
+        assert dev.set_hold() is False and fake.limits[5] == 0, 'no argument toggles'
+        before = dev.report()['pos']
+        assert abs(dev.move(5) - (int(before) * 360 / -40000 + 5)) < 0.01
+        assert fake.mode == 'off', 'released after the move'
+        assert abs(dev.move(5) - (int(before) * 360 / -40000 + 10)) < 0.01, 'from the last goal'
+        assert dev.set_hold(True) is True and fake.limits[5] == 1
+        Session(tc.config, tc).execute(['t74_hold', 'off'])
+        assert dev.hold is False
+        Session(tc.config, tc).execute(['t74_hold', 'on'])
+        assert dev.hold is True
+        expect_error(Session(tc.config, tc).execute, ['t74_hold', 'maybe'], contains='on or off')
+        assert complete_line('t74_hold o', tc.config) == ['off ', 'on ']
+
+        #  a fault mid-move stops it and is an error, not a success
+        fake.fault_next_move = True
+        expect_error(dev.move, 45, contains='FAULT following error')
+
+        #  a reconnect re-sends limits AND the gains: the board forgot them in the reset
+        s = Session(tc.config, tc, watcher=FakeWatcher)
+        assert s.execute(['sequence', 't74_square']) is True
+
+        #  q halts -- HOLDS where it is -- rather than releasing an unbalanced load
+        FakeWatcher.after = 0.05
+        del fake.commands[:]
+        expect_error(s.execute, ['t74_move', '3000'], contains='t74 stopped')
+        assert 'S' in fake.commands and 'X' not in fake.commands, fake.commands
+        FakeWatcher.after = None
+        dev.stop()
+        assert fake.mode == 'off'
+    finally:
+        tc.close()
+
+    tc, _ = open_quietly(fake_port(modules=['t74']),
+                         config_path=os.path.join(d, 'multitoolchanger.yaml'))
+    tc.close()
+    assert T74S[-1].gains is not None, 'gains re-sent on connect from the saved model'
+    print('t74 checks passed')
+
+
 def main():
     check_docs_match_firmware()
+    check_control_law()
     with tempfile.TemporaryDirectory() as tmp:
         cfg = check_config_loading(tmp)
+        check_detection(cfg)
+        check_pins(tmp)
+        check_t74(tmp)
+        check_board(cfg)
 
-    master, slave = pty.openpty()
+    print('\nALL DRIVER ASSERTIONS PASSED')
+
+
+def check_board(cfg):
+
     tool_present = [True]  # what the proximity sensor "sees"; flip it mid-test
-    threading.Thread(target=board, args=(master, tool_present), daemon=True).start()
-
-    tc = ToolChanger(os.ttyname(slave), cfg, settle=0.1, timeout=3, verbose=True)
+    tc = ToolChanger(fake_port(tool_present), cfg, settle=0.1, timeout=3, verbose=True)
+    assert tc.source == 'detected' and tc.detected == ALL
+    cfg = tc.config
     sd, cp = tc.screwdrive, tc.coupler
     try:
         #  the board booted with a tool present, so it is already locked
@@ -420,8 +869,6 @@ def main():
         check_session(tc, cfg, tool_present)
     finally:
         tc.close()
-
-    print('\nALL DRIVER ASSERTIONS PASSED')
 
 
 if __name__ == '__main__':

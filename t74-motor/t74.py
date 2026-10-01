@@ -6,11 +6,12 @@ the encoder count. Without one, moves are timed estimates.
 
     ./t74.py                  interactive session: c, m, s, angles, e, h, g, q   (recommended)
     ./t74.py calibrate        time one full tile turn and count its encoder counts; saves both
+    ./t74.py calibrate --turns 5   same over 5 tile turns, for a more exact gear ratio
     ./t74.py move 60          turn +60 deg (-30 turns back)
     ./t74.py home             run forward to the encoder index pulse and call it 0 deg
-    ./t74.py goto 90          home, then go to 90 deg from the index (needs the encoder)
+    ./t74.py goto 90          home, then go to 90 deg from the index (encoder on the tile shaft only)
     ./t74.py watch            print the encoder 5x a second; turn the shaft by hand to test wiring
-    ./t74.py counts 20480     set the counts per tile turn by hand (4 x PPR if 1:1 on the tile)
+    ./t74.py counts 40640     set the counts per tile turn by hand (4 x PPR x gear ratio)
     ./t74.py speed 80         set the run speed (PWM 1..255); clears the turn time, so recalibrate
     ./t74.py status           show the saved calibration and speed, and what the board reports
     ./t74.py list             show the serial ports that look like an Arduino
@@ -30,7 +31,7 @@ Wire protocol (firmware/main.cpp), 115200 baud, one command per line:
     M         the mark has come back round: stop and store the motor-on time and counts
     S         stop now, motor disabled
     T<ms>     load a saved turn time, e.g. T4200
-    K<counts> load saved encoder counts per tile turn, signed, e.g. K20480
+    K<counts> load saved encoder counts per tile turn, signed, e.g. K40640
     P<pwm>    set the run speed 1..255, e.g. P80 (a new speed clears the turn time)
     H         home: run forward to the encoder index pulse, that is 0 deg
     G<deg>    go to an absolute angle from home, e.g. G90
@@ -205,6 +206,7 @@ class T74:
         self.cal_file = cal_file
         self.echo = echo
         self.lines = queue.Queue()
+        self.home_notes = []
         self.port = find_port(port)
         try:
             self.ser = serial.Serial(self.port, baud, timeout=0.1)
@@ -353,7 +355,13 @@ class T74:
         self.drain()
         self.send('H')
         self.wait_for(lambda l: l.startswith('Homing'), 2.0)
-        return self.wait_for(lambda l: l.startswith((HOMED, STOPPED)), ENC_TIMEOUT)
+        line = self.wait_for(lambda l: l.startswith((HOMED, STOPPED)), ENC_TIMEOUT)
+        self.home_notes = []
+        try:
+            self.home_notes.append(self.wait_for(lambda l: l.startswith('Note:'), 0.3))
+        except T74Error:
+            pass
+        return line
 
     def encoder(self):
         """The board's one-line encoder report."""
@@ -375,13 +383,14 @@ class T74:
 
 
 #  =====   commands   =====
-def cmd_calibrate(board):
+def cmd_calibrate(board, turns=1):
     print('\nCALIBRATION: the motor turns forward at the run speed until you tell it to stop.')
     input('  1. Put a mark on the tile and line it up with a fixed reference. Press Enter to start. ')
     board.drain()
     board.send('C')
     board.wait_for(lambda l: l.startswith('Calibration running'), 2.0)
-    input('  2. Press Enter the moment the mark comes back to the reference (one full turn). ')
+    what = 'one full turn' if turns == 1 else f'the {turns}th time ({turns} full turns)'
+    input(f'  2. Press Enter the moment the mark comes back to the reference {what}. ')
     board.send('M')
     line = board.wait_for(lambda l: CAL_RE.search(l), 2.0)
     try:
@@ -393,11 +402,19 @@ def cmd_calibrate(board):
     m = CAL_RE.search(line)
     ms = int(m.group(1))
     counts = int(m.group(3)) if m.group(3) is not None else 0
+    if turns > 1:
+        #  The board timed and counted all the turns as if they were one: divide and reload.
+        ms, counts = round(ms / turns), round(counts / turns)
+        if counts:
+            board.set_counts(counts)
+        board.send(f'T{ms}')
+        board.wait_for(lambda l: TURN_SET_RE.search(l), 2.0)
+        save_turn_ms(board.cal_file, ms, None, counts or None)
     print(f'\n  One full turn = {ms} ms of motor-on time.')
     if counts:
-        print(f'  Encoder: {counts} counts per turn, so moves are closed loop. If the encoder is on '
-              f'the tile shaft 1:1, the exact value is 4 x PPR (20480 at the factory 5120 PPR): '
-              f'set it with `./t74.py counts {"-" if counts < 0 else ""}20480`.')
+        print(f'  Encoder: {counts} counts per tile turn, so moves are closed loop. If you know the '
+              f'gear ratio exactly, the exact value is 4 x PPR x ratio: set it with '
+              f'`./t74.py counts N`.')
     else:
         print('  No encoder counts: moves will be timed estimates.')
     print('  Try `./t74.py move 90` and check the mark.')
@@ -416,7 +433,7 @@ def cmd_status(board, ms):
 
 def cmd_watch(board):
     print('  Turn the shaft by hand. The count should change smoothly, "missed edges" should stay 0,'
-          '\n  and "index pulses" should go up by one per shaft turn. Ctrl-C to stop.')
+          '\n  and "index pulses" should go up by one per encoder shaft turn. Ctrl-C to stop.')
     board.echo = False
     last = None
     while True:
@@ -435,7 +452,7 @@ INTERACTIVE_HELP = """
   e        encoder count and angle
   h        home to the encoder index pulse (that is 0 deg); also `home`
   g <deg>  go to an absolute angle from home, e.g. g 90
-  k <n>    set encoder counts per tile turn, e.g. k 20480
+  k <n>    set encoder counts per tile turn, e.g. k 40640
   s        STOP now
   ?        board status
   help     this list
@@ -464,7 +481,7 @@ def cmd_interactive(board):
             board.send(low.upper())
             continue
         if low[0] in 'pkg':
-            parse, example = {'p': (int, 'p 80'), 'k': (int, 'k 20480'), 'g': (float, 'g 90')}[low[0]]
+            parse, example = {'p': (int, 'p 80'), 'k': (int, 'k 40640'), 'g': (float, 'g 90')}[low[0]]
             try:
                 value = parse(low[1:])
             except ValueError:
@@ -495,6 +512,8 @@ def main(argv=None):
                          '`speed`, counts per turn for `counts`')
     ap.add_argument('--port', help='serial port, e.g. /dev/ttyACM0 (auto if only one board)')
     ap.add_argument('--baud', type=int, default=115200)
+    ap.add_argument('--turns', type=int, default=1, choices=range(1, 11), metavar='1..10',
+                    help='calibrate over this many tile turns (more turns, more exact; 60 s max)')
     ap.add_argument('--cal-file', default=DEFAULT_CAL_FILE,
                     help=f'where the turn time is saved (default {DEFAULT_CAL_FILE})')
     args = ap.parse_args(argv)
@@ -517,7 +536,7 @@ def main(argv=None):
     if args.command == 'counts':
         if args.value is None or args.value != int(args.value) or not 100 <= abs(args.value) <= 1e7:
             ap.error('counts needs a whole number of counts per tile turn, e.g. '
-                     '`./t74.py counts 20480` (negative if forward counts down)')
+                     '`./t74.py counts 40640` (negative if forward counts down)')
     if args.command == 'speed':
         if args.value is None or args.value != int(args.value) or not 1 <= args.value <= 255:
             ap.error('speed needs a whole PWM from 1 to 255, e.g. `./t74.py speed 80`')
@@ -526,7 +545,7 @@ def main(argv=None):
         with T74(args.port, args.baud, args.cal_file) as board:
             ms = board.connect()
             if args.command == 'calibrate':
-                cmd_calibrate(board)
+                cmd_calibrate(board, args.turns)
             elif args.command == 'move':
                 board.move(args.value)
             elif args.command == 'home':
@@ -534,6 +553,10 @@ def main(argv=None):
             elif args.command == 'goto':
                 #  Opening the port reset the board and its home, so find the index again first.
                 board.home()
+                if 'motor side' in ''.join(board.home_notes):
+                    raise T74Error('goto needs a unique tile zero, but the encoder index is on the '
+                                   'motor side of the gearbox. Use `move`, or `g` in the '
+                                   'interactive session (relative to where that session homed).')
                 board.goto(args.value)
             elif args.command == 'watch':
                 cmd_watch(board)

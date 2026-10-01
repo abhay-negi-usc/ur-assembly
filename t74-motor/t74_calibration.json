@@ -1,5 +1,6 @@
 {
-  "run_pwm": 60,
-  "saved": "2026-09-30 10:35:59",
-  "full_turn_ms": 8107
+  "run_pwm": 100,
+  "saved": "2026-10-01 00:22:13",
+  "full_turn_ms": 3334,
+  "turn_counts": -40000
 }

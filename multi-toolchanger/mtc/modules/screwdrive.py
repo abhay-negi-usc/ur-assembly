@@ -145,6 +145,9 @@ class Screwdrive:
 MODULE = Module('screwdrive', 'coupling lead screw: 12 V DC motor on a Cytron MD10C R3 '
                               '(firmware/screwdrive.cpp)', device=Screwdrive)
 
+MODULE.pin('pwm', 6, needs='pwm')         # MD10C PWM
+MODULE.pin('dir', 7)                      # MD10C DIR
+
 #  no-load rpm at full duty (12 V, 100% PWM); the open-loop `rpm` command scales from it
 MODULE.setting('max_rpm', 500, check=positive_number)
 
@@ -162,7 +165,7 @@ MODULE.kind('rpm',
                         f'config/screwdrive.yaml); negative reverses')
 
 
-@MODULE.command(Param('PCT', 'percent'), runs_on=lambda args: args[0] != 0)
+@MODULE.command(Param('PCT', 'percent'), runs_on=lambda args, cfg: args[0] != 0)
 def cmd_drive(s, pct):
     """Run the screwdrive at PCT percent until told otherwise.
 
@@ -187,7 +190,7 @@ def cmd_run(s, pct, seconds):
 
 
 @MODULE.command(Param('START', 'percent'), Param('END', 'percent'), Param('SECONDS', 'seconds'),
-                timed=True, runs_on=lambda args: args[1] != 0)
+                timed=True, runs_on=lambda args, cfg: args[1] != 0)
 def cmd_ramp(s, start, end, seconds):
     """Ramp the screwdrive from START to END percent over SECONDS, then hold END.
 

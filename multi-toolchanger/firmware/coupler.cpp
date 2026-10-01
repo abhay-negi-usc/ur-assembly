@@ -3,6 +3,17 @@
 
 #include "coupler.h"
 
+//  Pins come from config/coupler.yaml via build_flash.sh (mtc/pins.py checks them).
+#ifndef PIN_COUPLER_SERVO
+#error "PIN_COUPLER_SERVO is not defined -- build with build_flash.sh, which takes the pins from config/coupler.yaml"
+#endif
+#ifndef PIN_COUPLER_SENSOR
+#error "PIN_COUPLER_SENSOR is not defined -- build with build_flash.sh, which takes the pins from config/coupler.yaml"
+#endif
+#ifndef PIN_COUPLER_LED
+#error "PIN_COUPLER_LED is not defined -- build with build_flash.sh, which takes the pins from config/coupler.yaml"
+#endif
+
 namespace coupler
 {
 namespace
@@ -63,9 +74,9 @@ int lastRaw = 0;          //  most recent averaged reading, reported on an emerg
 bool sensorBypass = false;
 
 //  =====    pin declaration    =====
-const int signalLED = LED_BUILTIN; // uses the LED on the arduino to visualize status
-const int sensorPin = A3;          // proximity sensor pin
-const int servoPin = 5;            // servo pwm pin
+const int signalLED = PIN_COUPLER_LED;    // lit while no tool is mounted
+const int sensorPin = PIN_COUPLER_SENSOR; // proximity sensor (an analog input)
+const int servoPin = PIN_COUPLER_SERVO;   // servo signal
 
 //  =====   functions   =====
 

@@ -1,0 +1,100 @@
+# ============================================================================
+# T74 -- the tile motor, PID position control on an encoder (mtc/modules/t74.py)
+#
+# The T74 is on its own Uno: flash it with  cd firmware && ./build_flash.sh upload --modules t74
+# With the default pins it clashes with the other modules (build_flash.sh says how); moving pins
+# below can let some share a board. Connecting to the board loads this module by autodetect.
+#
+# Measured values -- counts per tile turn, and the identified motor model -- are written by
+# t74_calibrate and t74_identify to t74_calibration.json beside this file. These are the
+# settings you choose.
+# ============================================================================
+
+# Pins on the Uno, checked by build_flash.sh against the board and any module built with this one.
+# The t74 takes Timer1 over for its 500 Hz control loop (so not with the coupler's servo), and
+# counts every encoder edge, so A and B need the Uno's only two hardware interrupts.
+pins:
+  rpwm: 5       # IBT-2 RPWM, forward -- a PWM pin not on Timer1: D3 D5 D6 D11
+  lpwm: 6       # IBT-2 LPWM, reverse -- same
+  r_en: 7       # IBT-2 R_EN -- any pin
+  l_en: 8       # IBT-2 L_EN -- any pin
+  enc_a: 2      # encoder A -- D2 or D3
+  enc_b: 3      # encoder B -- the other one
+  enc_x: 4      # encoder index -- any pin
+
+settings:
+  # Closed-loop bandwidth, rad/s: all three poles of the PID loop are placed at -bandwidth, which
+  # is critically damped at the load t74_identify was run with (identify with the HEAVIEST load).
+  # Higher is faster and stiffer against an unbalanced load; lower is gentler. Errors die away to
+  # 1% in about 6.6 / bandwidth seconds.
+  bandwidth: 15
+
+  # The motion profile every move follows, in TILE degrees. At PWM 100 the tile turns about
+  # 108 deg/s, so keep max_speed_dps well under what the motor can do at full PWM
+  # (t74_identify warns if it is not).
+  max_speed_dps: 60
+  max_accel_dps2: 240
+
+  # "In position": a move is done once it is this close, and the integral stops there so the
+  # gearbox's friction cannot make it hunt. One encoder count is about 0.009 deg of tile.
+  hold_band_deg: 0.05
+
+  # After a move, goto or home: true = keep holding the target under PID until t74_stop (an
+  # unbalanced load cannot back-drive the tile); false = the board releases the motor as soon
+  # as the move has settled (less heat, but the load can drift). t74_hold toggles it for a
+  # session.
+  hold_after_move: true
+
+  # Following error that means something is wrong (jammed, overloaded, encoder fault): the
+  # board cuts the motor and reports a FAULT.
+  max_error_deg: 10
+
+  home_speed_dps: 20      # t74_home searches for the index this fast
+  calibrate_pwm: 100      # t74_calibrate runs open loop at this PWM
+
+  # t74_identify defaults: two PWM steps of this many seconds each. Both must turn the motor
+  # (above the friction, ~45 PWM); the tile turns about half a turn forward.
+  identify_pwm1: 60
+  identify_pwm2: 120
+  identify_seconds: 1.0
+
+  encoder_ppr: 500        # must match the AMT10E DIP switches (500 PPR = 0 1 0 1)
+
+# ----------------------------------------------------------------------------
+# SEQUENCES -- names start with t74_, steps use t74 commands plus `wait`.
+# ----------------------------------------------------------------------------
+sequences:
+  # The tile has 6 leaves, 60 deg apart. Leaf 0 is the zero (t74_zero, t74_home or power-on),
+  # leaf N is N * 60 deg forward of it.
+  t74_advance:
+    description: Advance the tile forward 1 leaf (60 deg).
+    steps:
+      - t74_move 60
+  t74_advance_back:
+    description: Advance the tile backward 1 leaf (60 deg).
+    steps:
+      - t74_move -60
+  t74_leaf_0:
+    description: Turn the tile to leaf 0 (0 deg from the zero).
+    steps:
+      - t74_goto 0
+  t74_leaf_1:
+    description: Turn the tile to leaf 1 (60 deg from the zero).
+    steps:
+      - t74_goto 60
+  t74_leaf_2:
+    description: Turn the tile to leaf 2 (120 deg from the zero).
+    steps:
+      - t74_goto 120
+  t74_leaf_3:
+    description: Turn the tile to leaf 3 (180 deg from the zero).
+    steps:
+      - t74_goto 180
+  t74_leaf_4:
+    description: Turn the tile to leaf 4 (240 deg from the zero).
+    steps:
+      - t74_goto 240
+  t74_leaf_5:
+    description: Turn the tile to leaf 5 (300 deg from the zero).
+    steps:
+      - t74_goto 300

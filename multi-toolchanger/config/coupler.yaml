@@ -4,6 +4,14 @@
 # No settings yet: the servo angles and sensor threshold live in firmware/coupler.cpp.
 # ============================================================================
 
+# Pins on the Uno, checked by build_flash.sh. The coupler's Servo library takes Timer1 over, so
+# it cannot share a board with another module that needs Timer1 (the t74), and PWM on D9/D10 is
+# unavailable alongside it.
+pins:
+  servo: 5      # servo signal -- any pin
+  sensor: A3    # proximity sensor -- an analog input, A0..A5
+  led: 13       # lit while no tool is mounted -- any pin (13 is the Uno's on-board LED)
+
 # Names must start with coupler_, and steps may only use coupler commands plus `wait`.
 sequences:
   coupler_tool_cycle:

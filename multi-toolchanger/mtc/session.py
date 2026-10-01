@@ -13,24 +13,76 @@ import time
 
 from .base import Interrupted, ToolChangerError
 from .board import Board
-from .config import MAIN, load_config
+from .config import MAIN, PROTOCOL, available_modules, load_config
+
+
+def _warn(message):
+    print(f'  warning: {message}', file=sys.stderr)
 
 
 class ToolChanger:
-    """A board connection plus a device object for every module the config loads.
+    """A board connection plus a device object for every module loaded.
 
         from mtc import ToolChanger
         with ToolChanger('dc_motor') as tc:
             tc.screwdrive.run(40, 2.5)
             tc.coupler.hold()
 
-    Board options (baud, timeout, settle, verbose, latch, name) pass straight to Board."""
+    WHICH MODULES: by default (detect=True) the ones the board's firmware says it was built
+    with; their settings and sequences still come from the config directory. detect=False uses
+    the config's `modules:` list, and warns if the board disagrees. Firmware too old to say
+    falls back to the config list either way.
 
-    def __init__(self, port=None, config=None, **board_options):
-        self.config = config or load_config()
+    `config` is a loaded Config, or None to load `config_path` (default: the usual one). Board
+    options (baud, timeout, settle, verbose, latch, name) pass straight to Board."""
+
+    def __init__(self, port=None, config=None, detect=True, config_path=None, **board_options):
         self.board = Board(port, **board_options)
-        self.devices = {name: module.device(self.board, self.config.settings[name])
-                        for name, module in self.config.modules.items() if module.device}
+        try:
+            self.detected, proto = self.board.identify()   # the board's modules, or None
+            if proto is not None and proto != PROTOCOL:
+                raise ToolChangerError(
+                    f'the board speaks protocol {proto} and this script speaks {PROTOCOL} -- '
+                    f'reflash it: cd firmware && ./build_flash.sh upload')
+            path = config_path or (config.path if config else None)
+            if detect and self.detected is not None:
+                known = set(available_modules())
+                unknown = [m for m in self.detected if m not in known]
+                if unknown:
+                    _warn(f'the board has {", ".join(unknown)}, which this script has no module '
+                          f'for (mtc/modules/) -- skipped')
+                config = load_config(path, modules=[m for m in self.detected if m in known])
+                self.source = 'detected'
+            else:
+                if detect and not self.board.booted:
+                    _warn(f'no boot banner at {self.board.baud} baud -- the board may run firmware '
+                          f'from before the switch to 115200 (protocol 3). Using the config list. '
+                          f'Reflash: cd firmware && ./build_flash.sh upload')
+                elif detect:
+                    _warn('the board does not say which modules it has (firmware from before '
+                          'protocol 2?) -- using the config list. Reflash to fix.')
+                config = config or load_config(path)
+                self.source = 'config'
+                if self.detected is not None:
+                    self._compare(config)
+            self.config = config
+            self.devices = {name: module.device(self.board, config.settings[name])
+                            for name, module in config.modules.items() if module.device}
+        except BaseException:
+            self.board.close()
+            raise
+
+    def _compare(self, config):
+        """Warn when the config's modules and the board's firmware disagree (--no-detect)."""
+        wanted = [m for m in config.modules if m != 'general']
+        missing = [m for m in wanted if m not in self.detected]
+        extra = [m for m in self.detected if m not in wanted]
+        if missing:
+            _warn(f'the config loads {", ".join(missing)} but the board\'s firmware does not have '
+                  f'{"it" if len(missing) == 1 else "them"} -- those commands will time out. '
+                  f'Reflash (cd firmware && ./build_flash.sh upload) or drop --no-detect.')
+        if extra:
+            _warn(f'the board also has {", ".join(extra)}, which the config does not load.')
 
     def __getattr__(self, name):
         devices = self.__dict__.get('devices', {})
@@ -258,52 +310,107 @@ def run_sequence(s, name):
 
 
 #  =====   help   =====
-def render_help(cfg, topic=None):
-    """The text `help` prints: everything, one module, or one command."""
-    if topic in cfg.commands:
-        cmd = cfg.commands[topic]
-        out = [f'{cmd.usage}    ({cmd.module})', f'  {cmd.summary}']
-        if cmd.details:
-            out += [''] + [f'  {ln}' for ln in cmd.details.splitlines()]
-        if cmd.params:
-            out += ['', '  arguments:']
-            out += [f'    {str(p):<10} {cfg.kinds[p.kind].describe(cfg)}' for p in cmd.params]
-        notes = []
-        if cmd.timed:
-            notes.append('press q to stop it')
-        if not cmd.in_sequence:
-            notes.append('not allowed in sequences')
-        if not cmd.board:
-            notes.append('works without a board')
-        if notes:
-            out += ['', '  ' + '; '.join(notes) + '.']
-        return '\n'.join(out)
+def _listing(rows):
+    """Two aligned columns."""
+    width = max((len(a) for a, _ in rows), default=0) + 3
+    return [f'  {a:<{width}}{b}' for a, b in rows]
 
-    modules = [topic] if topic in cfg.modules else list(cfg.modules)
-    width = max(len(name) for name in [c.usage for c in cfg.commands.values()]
-                + list(cfg.sequences)) + 3
+
+def _plural(n, word):
+    return f'{n} {word}{"" if n == 1 else "s"}'
+
+
+def _sequences_help(cfg, modules=None):
+    """The sequences, grouped by the file they come from; only `modules`' if given."""
+    sources = modules if modules is not None else list(cfg.modules) + [MAIN]
     out = []
-    for name in modules:
-        out.append(f'{name} -- {cfg.modules[name].description}')
-        out += [f'  {c.usage:<{width}}{c.summary}'
-                for c in cfg.commands.values() if c.module == name]
+    for source in sources:
+        seqs = [q for q in cfg.sequences.values() if q.source == source]
+        if not seqs:
+            continue
+        out.append(f'sequences from {os.path.relpath(seqs[0].path)}')
+        out += _listing([(q.name, (f'[CANNOT RUN: {_plural(len(q.errors), "problem")} -- '
+                                   f'`sequence {q.name}` says what] ' if q.errors else '')
+                          + q.description) for q in seqs])
         out.append('')
-    if topic is None or topic in cfg.modules:
-        for source in modules + ([MAIN] if topic is None else []):
-            seqs = [q for q in cfg.sequences.values() if q.source == source]
-            if not seqs:
-                continue
-            out.append(f'sequences from {os.path.relpath(seqs[0].path)} -- '
-                       f'run with `sequence NAME`')
-            for q in seqs:
-                state = (f'[CANNOT RUN: {len(q.errors)} problem(s) -- `sequence {q.name}` '
-                         f'says what] ' if q.errors else '')
-                out.append(f'  {q.name:<{width}}{state}{q.description}')
-            out.append('')
-    if topic is None:
-        out.append('`help COMMAND` or `help MODULE` for details. Tab completes; q stops a '
-                   'timed command or a sequence.')
-    return '\n'.join(out).rstrip()
+    if not out:
+        which = f'{" or ".join(modules)} has' if modules else 'this configuration has'
+        return f'{which} no sequences.'
+    out.append('Run one with `sequence NAME`; every step is checked first, and q stops it.')
+    return '\n'.join(out)
+
+
+def _command_help(cfg, cmd):
+    out = [f'{cmd.usage}    ({cmd.module})', f'  {cmd.summary}']
+    if cmd.details:
+        out += [''] + [f'  {ln}' for ln in cmd.details.splitlines()]
+    if cmd.params:
+        out += ['', '  arguments:']
+        out += [f'    {str(p):<10} {cfg.kinds[p.kind].describe(cfg)}' for p in cmd.params]
+    notes = []
+    if cmd.timed:
+        notes.append('press q to stop it')
+    if not cmd.in_sequence:
+        notes.append('not allowed in sequences')
+    if not cmd.board:
+        notes.append('works without a board')
+    if notes:
+        out += ['', '  ' + '; '.join(notes) + '.']
+    return '\n'.join(out)
+
+
+def _module_help(cfg, name):
+    cmds = [c for c in cfg.commands.values() if c.module == name]
+    out = [f'{name} -- {cfg.modules[name].description}']
+    out += _listing([(c.usage, c.summary) for c in cmds])
+    n = sum(q.source == name for q in cfg.sequences.values())
+    if n:
+        out += ['', f'{_plural(n, "sequence")}: `help {name} sequence`.']
+    return '\n'.join(out)
+
+
+def render_help(cfg, topic=None, sub=None):
+    """The text `help` prints.
+
+        help                    the general commands, and the modules loaded
+        help MODULE             that module's commands
+        help COMMAND            one command in full
+        help sequence           every sequence, grouped by the file it comes from
+        help MODULE sequence    that module's sequences"""
+    if sub is not None:
+        if topic not in cfg.modules:
+            raise ToolChangerError(f'`help {topic} sequence` needs a module name: '
+                                   f'{", ".join(cfg.modules)}')
+        return _sequences_help(cfg, [topic])
+    if topic == 'sequence':
+        return _sequences_help(cfg)
+    if topic in cfg.commands:
+        return _command_help(cfg, cfg.commands[topic])
+    if topic in cfg.modules:
+        return _module_help(cfg, topic)
+
+    general = [c for c in cfg.commands.values() if c.module == 'general']
+    out = ['general commands']
+    out += _listing([(c.usage, c.summary) for c in general])
+    rows = []
+    for name, module in cfg.modules.items():
+        if name == 'general':
+            continue
+        n_cmd = sum(c.module == name for c in cfg.commands.values())
+        n_seq = sum(q.source == name for q in cfg.sequences.values())
+        counts = _plural(n_cmd, 'command') + (f', {_plural(n_seq, "sequence")}' if n_seq else '')
+        rows.append((name, counts, module.description))
+    out += ['', 'modules']
+    if rows:
+        width = max(len(counts) for _, counts, _ in rows) + 3
+        out += _listing([(name, f'{counts:<{width}}{desc}') for name, counts, desc in rows])
+    else:
+        out.append('  (none loaded)')
+    out += ['',
+            '`help MODULE` lists its commands; `help COMMAND` shows one in full.',
+            '`help sequence` lists every sequence; `help MODULE sequence` one module\'s.',
+            'Tab completes; q stops a timed command or a sequence.']
+    return '\n'.join(out)
 
 
 #  =====   Tab completion   =====

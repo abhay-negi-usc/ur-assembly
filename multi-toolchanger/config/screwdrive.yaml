@@ -2,6 +2,12 @@
 # SCREWDRIVE -- the coupling lead screw's 12 V DC motor (mtc/modules/screwdrive.py)
 # ============================================================================
 
+# Pins on the Uno. build_flash.sh checks them against the board and the other modules being
+# built with this one, so a clash is refused before anything is compiled.
+pins:
+  pwm: 6        # MD10C PWM -- must be a PWM pin (D3 D5 D6 D9 D10 D11)
+  dir: 7        # MD10C DIR -- any pin
+
 settings:
   # No-load speed in rpm at full duty (12 V, 100% PWM). The open-loop `rpm` command scales
   # duty linearly from this: duty = rpm / max_rpm * 255. Under load the motor turns slower

@@ -2,11 +2,16 @@
 
 #include "relay.h"
 
+//  Pins come from config/relay.yaml via build_flash.sh (mtc/pins.py checks them).
+#ifndef PIN_RELAY_K1
+#error "PIN_RELAY_K1 is not defined -- build with build_flash.sh, which takes the pins from config/relay.yaml"
+#endif
+
 namespace relay
 {
 namespace
 {
-const int relayK1 = 3; // powers on motor
+const int relayK1 = PIN_RELAY_K1; // powers on motor
 bool motorActive = false;
 
 void toggleMotorPower()

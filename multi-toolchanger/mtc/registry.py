@@ -17,6 +17,7 @@ will not load. The config file lists which modules to load; only those modules' 
 """
 
 import inspect
+import os
 import types
 
 from .base import MAX_RUN_S, ToolChangerError, parse_ms
@@ -46,7 +47,7 @@ class Command:
         self.board = board              # needs an open connection
         self.in_sequence = in_sequence  # may be a sequence step
         self.timed = timed              # runs for a while: q stops it
-        self.runs_on = runs_on          # (args) -> True if it leaves something running
+        self.runs_on = runs_on          # (args, cfg) -> True if it leaves something running
 
     @property
     def usage(self):
@@ -78,6 +79,8 @@ class Module:
         self.commands = {}
         self.kinds = {}
         self._settings = {}         # name -> (default, check)
+        self.pins = {}              # role -> (default pin, what it needs) -- see mtc/pins.py
+        self.claims = []            # hardware it takes over whole, e.g. 'timer1' 
 
     def command(self, *params, board=True, in_sequence=True, timed=False, runs_on=None):
         """Register the decorated `cmd_<name>(session, *args)` as the command <name>.
@@ -88,7 +91,7 @@ class Module:
         board=False      runs without a connection
         in_sequence=False  not allowed as a sequence step
         timed=True       runs for a while; q stops it
-        runs_on=f        f(args) is True when the command leaves something running after it
+        runs_on=f        f(args, cfg) is True when the command leaves something running after it
                          returns -- the one-shot CLI then holds the connection open until q,
                          since closing it resets the board"""
         def register(func):
@@ -103,6 +106,34 @@ class Module:
     def kind(self, name, parse, describe, complete=None):
         """Register an argument kind this module's commands use, e.g. 'rpm'."""
         self.kinds[name] = Kind(parse, describe, complete)
+
+    def pin(self, role, default, needs='digital'):
+        """Declare a pin the firmware module uses. The config's `pins:` block may move it;
+        `needs` is what the pin must be able to do -- 'digital', 'pwm', 'analog' (an ADC input),
+        'interrupt' (INT0/INT1) or 'pcint' (a pin-change interrupt). build_flash.sh checks every
+        loaded module's pins against the board and each other, and compiles them in as
+        PIN_<MODULE>_<ROLE>."""
+        self.pins[role] = (default, needs)
+
+    def claim(self, resource):
+        """Declare hardware this module takes over entirely, e.g. 'timer1' (the Servo library,
+        or a control-loop interrupt). Two modules claiming one resource cannot share a board, and
+        PWM on a claimed timer's pins is refused."""
+        self.claims.append(resource)
+
+    def configure_pins(self, raw, where):
+        """{role: arduino pin number} from the config's `pins:` block, defaults filled in.
+        Fatal on an unknown role or a pin name the board does not have."""
+        from .pins import parse_pin       # pins imports this module
+        raw = raw or {}
+        if not isinstance(raw, dict):
+            raise ToolChangerError(f'{where}: pins must be a mapping of role -> pin')
+        unknown = sorted(set(raw) - set(self.pins))
+        if unknown:
+            raise ToolChangerError(f'{where}: unknown pin(s) {", ".join(map(str, unknown))} for '
+                                   f'{self.name} (it has: {", ".join(self.pins) or "none"})')
+        return {role: parse_pin(raw.get(role, default), f'{where}: {self.name} {role}')
+                for role, (default, _) in self.pins.items()}
 
     def setting(self, name, default, check=None):
         """Declare a setting read from the module's config file. `check(value)` returns an
@@ -129,6 +160,8 @@ class Module:
             if problem:
                 raise ToolChangerError(f'{where}: {self.name} {name} {problem}, got {value!r}')
             values[name] = value
+        #  where the module's config lives, for modules that keep measured state beside it
+        values['config_dir'] = os.path.dirname(os.path.abspath(where))
         return types.SimpleNamespace(**values)
 
 

@@ -154,6 +154,10 @@ class Coupler:
 
 MODULE = Module('coupler', 'servo lock + proximity sensor (firmware/coupler.cpp)',
                 device=Coupler)
+MODULE.pin('servo', 5)                    # any pin: the Servo library bit-bangs it from Timer1
+MODULE.pin('sensor', 'A3', needs='analog')
+MODULE.pin('led', 13)                     # lit while no tool is mounted
+MODULE.claim('timer1')                    # the Servo library takes it over
 
 
 @MODULE.command()

@@ -20,6 +20,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_YAML = os.environ.get(
     'MULTITOOLCHANGER_CONFIG', os.path.join(HERE, '..', 'config', 'multitoolchanger.yaml'))
 
+#  The wire protocol's version; must match PROTOCOL in firmware/main.cpp. The host refuses a
+#  board that reports a different one rather than send it commands it would misread.
+PROTOCOL = 5
+
 SEQUENCE_NAME = re.compile(r'[A-Za-z0-9_.-]+')
 MAIN = 'main'   # the `source` of a sequence from the main file
 
@@ -40,6 +44,7 @@ class Config:
         self.path = path
         self.modules = {}       # name -> Module
         self.settings = {}      # module name -> SimpleNamespace
+        self.pins = {}          # module name -> {role: arduino pin}; used by build_flash.sh
         self.commands = {}      # command name -> Command
         self.kinds = dict(CORE_KINDS)
         self.sequences = {}     # name -> Sequence
@@ -111,8 +116,12 @@ def _read_sequences(raw, source, path):
     return out
 
 
-def load_config(path=None):
+def load_config(path=None, modules=None):
     """Load the main config, the modules it names, and each module's own config.
+
+    `modules`, when given, REPLACES the main file's `modules:` list -- that is how the modules
+    the board reports are loaded (autodetect). Module configs are still read from beside the
+    main file, so settings and sequences come from the same place either way.
 
     FATAL: a missing or unreadable main file, an unknown module, two modules defining the same
     command, a bad setting. Falling back to defaults would quietly run with the wrong modules or
@@ -128,7 +137,7 @@ def load_config(path=None):
     if unknown:
         raise ToolChangerError(f'{path}: unknown key(s) {", ".join(unknown)} '
                                f'(expected modules, sequences)')
-    names = doc.get('modules') or []
+    names = list(modules) if modules is not None else (doc.get('modules') or [])
     if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
         raise ToolChangerError(f'{path}: modules must be a list of module names')
     if 'general' in names:
@@ -142,12 +151,13 @@ def load_config(path=None):
         module = _import_module(name)
         mod_path = os.path.join(os.path.dirname(path), f'{name}.yaml')
         mod_doc = _read_yaml(mod_path, required=False)
-        unknown = sorted(set(mod_doc) - {'settings', 'sequences'})
+        unknown = sorted(set(mod_doc) - {'settings', 'pins', 'sequences'})
         if unknown:
             raise ToolChangerError(f'{mod_path}: unknown key(s) {", ".join(unknown)} '
-                                   f'(expected settings, sequences)')
+                                   f'(expected settings, pins, sequences)')
         cfg.modules[name] = module
         cfg.settings[name] = module.configure(mod_doc.get('settings'), mod_path)
+        cfg.pins[name] = module.configure_pins(mod_doc.get('pins'), mod_path)
         for cmd_name, cmd in module.commands.items():
             if cmd_name in cfg.commands:
                 raise ToolChangerError(f'{name} and {cfg.commands[cmd_name].module} both define '

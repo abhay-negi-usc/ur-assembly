@@ -1,7 +1,8 @@
 # T74 motor: angle control with an AMT10E2-V encoder
 
 An Arduino Uno drives the T74 DC motor through an IBT-2 (BTS7960) H-bridge. An AMT10E2-V
-quadrature encoder on the drive shaft tells the board where the shaft really is. Moves are
+quadrature encoder on the **motor shaft, before the gearbox** (about 20.3 encoder turns per tile
+turn), tells the board where the shaft really is. Moves are
 **closed loop**: the board cuts power just before the target, early enough that the coast lands it
 there. It learns how far the motor coasts, and it makes up to 3 small corrections if a move still
 ends more than 0.5° off.
@@ -41,14 +42,15 @@ t74-motor/
 |---|---|---|
 | **A** | **D2** | INT0: a hardware interrupt, so no edge is missed |
 | **B** | **D3** | INT1: the Uno's only other hardware interrupt pin |
-| **X** (index) | **D4** | pin-change interrupt. One pulse per turn, used by `home` |
+| **X** (index) | **D4** | pin-change interrupt. One pulse per encoder turn, used by `home` |
 | **5V** | 5V | the encoder draws about 6 mA |
 | **G** | GND | |
 
 * **A and B must go to D2 and D3.** These are the only Uno pins with dedicated interrupts. The
   board counts every edge of both channels ("4x decoding"), so neither channel can be polled.
 * **X is optional.** Without it everything works except `home` and `goto`. D4 is free and on the
-  same port as A and B.
+  same port as A and B. On this motor-side mounting the index pulses about 20 times per tile turn,
+  so `home` finds a repeatable *motor* position, not a unique tile angle (see below).
 * **It doesn't matter which way round A and B go.** Calibration measures which way the count runs
   when the motor turns forward. If you swap A and B later, recalibrate (or the board stops with
   "counting the wrong way").
@@ -59,13 +61,22 @@ t74-motor/
 
 ### Encoder resolution (DIP switch on the encoder)
 
-The encoder ships set to 5120 PPR (all four switches off). That is 20480 counts per shaft turn,
-about 0.018° per count. The Uno can count roughly 50,000 edges per second, so this setting works
-up to about **150 RPM at the encoder**. The tile turns in a few seconds (about 15 RPM), so leave
-the switches as shipped. If the encoder is on a fast motor shaft before a gearbox, lower the PPR:
-for example 1000 PPR is switches `0 1 1 0` (see the datasheet table). Then set `ENC_PPR` at the
-top of `main.cpp` to match. `ENC_PPR` only affects the "shaft" angle printed by `watch`. Moves use
-the counts measured during calibration.
+**Set the switches to 500 PPR: `0 1 0 1` (1 = on).** The factory setting, 5120 PPR (all off), is
+too fine for this mounting. The Uno can count roughly 50,000 edges per second. With the encoder on
+the motor shaft, a tile turn of about 4 s means about 300 RPM at the encoder, which is about 100,000
+edges per second at 5120 PPR. The Uno then misses edges and the count comes out wrong. One full
+tile turn read about 415,871 counts at 5120 PPR, and that may already be an undercount.
+
+At 500 PPR (2000 counts per encoder turn), one tile turn is about 40,600 counts (about 0.009° per
+count), and the Uno sees about 10,000 edges per second. That leaves room for about 5× more speed.
+
+`ENC_PPR` at the top of `main.cpp` must match the switches (it is set to 500). It is used for the
+"encoder shaft" angle in `watch`, the turns-per-tile-turn figure printed at calibration, the homing guard,
+and to detect that the index is on the motor side. Moves use the counts measured during
+calibration.
+
+If calibration prints `WARNING: ... missed encoder edges`, the encoder is still too fast. Lower the
+PPR further (e.g. 250 PPR = `0 1 1 1`, then `ENC_PPR = 250`) or lower the speed.
 
 ### Other notes
 
@@ -89,6 +100,12 @@ PORT=/dev/ttyACMx ./build_flash.sh upload        # flash it (PORT is required)
 cd ..                                            # back to t74-motor/ for the t74.py commands
 ```
 
+From /ur-assembly/:
+
+```bash
+PORT=/dev/ttyACM3 ./t74-motor/firmware/build_flash.sh upload
+```
+
 If `t74.py list` shows more than one board, pass `--port /dev/ttyACMx` to every `t74.py`
 command below. Close the Arduino IDE serial monitor first, because only one program can hold the
 port.
@@ -104,7 +121,7 @@ Turn the shaft slowly by hand. You should see:
 * the **count** change smoothly, in opposite directions for the two ways you turn it
 * **missed edges** stay at 0. If it climbs, check the wiring and keep the cable away from the motor
   leads
-* **index pulses** go up by one per full shaft turn. If it stays at 0, check X on D4
+* **index pulses** go up by one per full encoder shaft turn. If it stays at 0, check X on D4
 
 Ctrl-C stops it.
 
@@ -116,39 +133,43 @@ Ctrl-C stops it.
 3. **Power on the motor supply.** Keep a hand near the keyboard: `s` + Enter or Ctrl-C stops it.
    If the motor only hums and doesn't turn, the speed is too low to get it started. Raise it, e.g.
    `./t74.py speed 80`, then try again.
-4. **Calibrate:**
+4. **Calibrate over several turns:**
    ```bash
-   ./t74.py calibrate
+   ./t74.py calibrate --turns 5
    ```
-   Press Enter to start. The motor turns forward slowly. Press Enter again **the moment the mark
-   comes back to the reference**, after exactly one turn. The board saves the turn time and the
-   encoder counts, then measures how far the motor coasts.
-5. **If the encoder is on the tile's shaft 1:1, set the exact count.** Your Enter press is a few
-   percent early or late. The true value is 4 × PPR, which is 20480 at the factory setting (keep the
-   minus sign if calibration gave a negative number):
+   Press Enter to start. The motor turns forward slowly. Count the mark passing the reference, and
+   press Enter again **the moment it comes back the 5th time**. The script divides by 5, so the
+   error of your Enter press is 5× smaller than with one turn. The board saves the turn time and
+   the encoder counts per tile turn, then measures how far the motor coasts. It also prints the
+   encoder turns per tile turn, which is the gear ratio (expect about 20.3). The whole run must
+   fit in 60 s. If it doesn't, use fewer turns or a higher speed.
+5. **Optional, if you know the gear ratio exactly:** set the count directly to 4 × PPR × ratio.
+   At 500 PPR that is 2000 × ratio, and keep the minus sign if calibration gave a negative number.
    ```bash
-   ./t74.py counts 20480
+   ./t74.py counts 40500       # e.g. a 20.25:1 gearbox
    ```
-   If there is a gearbox between the encoder and the tile, skip this step and keep the measured
-   value. Or set `counts` to 4 × PPR × gear ratio if you know the ratio exactly.
 6. **Check it:** `./t74.py move 90` four times should bring the mark back to the reference. Each
    move prints its own error, for example `error 0.07 deg`.
 7. **Use it:**
    ```bash
    ./t74.py move 60      # +60 deg (forward), relative to where the tile is now
    ./t74.py move -30     # 30 deg back
-   ./t74.py home         # run forward to the encoder index pulse, call that 0 deg
-   ./t74.py goto 90      # home, then go to 90 deg from the index
    ```
    `move` takes 1 to 360 degrees, positive or negative.
 
 The saved calibration and speed stay until you change them, so after a reboot or re-plug you can go
 straight to step 7 **with the same tile**. With a new tile, start again at step 1.
 
-**Opening the port resets the board, so it forgets home and the learned coast.** That is why
-`./t74.py goto` homes first every time. The first move of each run may also need one correction,
-which you will see as a "Correcting" line. For several moves in a row, use the interactive session:
-it keeps one connection, so it homes once and keeps the learned coast.
+**Opening the port resets the board, so it forgets the learned coast.** The first move of each
+run may need one correction, which you will see as a "Correcting" line. For several moves in a row,
+use the interactive session: it keeps one connection, so it keeps the learned coast.
+
+**`home` and `goto` with the encoder on the motor side.** The index pulses once per *encoder*
+turn, about 20 times per tile turn, so `home` stops at whichever of those comes first. That is a
+repeatable motor position, not a unique tile angle, and the board says so after homing.
+`./t74.py goto` therefore refuses, because each run would home to a different tile angle. Inside
+one interactive session, `h` then `g 90` still works, with angles measured from where that session
+homed. A unique tile zero needs a sensor on the tile side, such as a limit switch or a second index.
 
 ## Interactive session
 
@@ -156,7 +177,7 @@ it keeps one connection, so it homes once and keeps the learned coast.
 $ ./t74.py
 t74> c          start calibration (motor runs forward)
 t74> m          mark is back at the reference: stop and save the turn time and counts
-t74> k 20480    set encoder counts per tile turn
+t74> k 40500    set encoder counts per tile turn
 t74> h          home to the index pulse (0 deg)
 t74> g 90       go to 90 deg from home
 t74> 60         move +60 deg
@@ -187,8 +208,8 @@ You can also type these straight into the Arduino IDE serial monitor. Any line e
 | `60`, `-30`, `15.5` | relative move, 1 to 360 degrees, negative = reverse |
 | `H` | home: run forward to the index pulse, which becomes 0 deg |
 | `G<deg>` | go to an absolute angle from home, e.g. `G90` (encoder only) |
-| `E` | encoder count, shaft and tile angle, homed, index pulses, missed edges |
-| `K<counts>` | load encoder counts per tile turn, signed, e.g. `K20480` |
+| `E` | encoder count, encoder shaft angle, output shaft revolutions and angle, homed, index pulses, missed edges |
+| `K<counts>` | load encoder counts per tile turn, signed, e.g. `K40500` |
 | `T<ms>` | load a known turn time, e.g. `T4200` (500 to 60000 ms) |
 | `P<pwm>` | set the run speed, e.g. `P80` (1 to 255). A different speed clears the turn time |
 | `?` | print turn time, counts, speed and mode |

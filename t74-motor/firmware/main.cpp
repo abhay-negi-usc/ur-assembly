@@ -4,13 +4,14 @@
 // T74 + IBT-2 + Elegoo Uno R3, with an optional AMT10E2-V quadrature encoder on the drive shaft.
 // IBT-2: RPWM D5, LPWM D6, R_EN D7, L_EN D8.
 // AMT10E2-V: A D2 (INT0), B D3 (INT1), X/index D4 (pin-change interrupt), 5V, GND.
+//   The encoder is on the MOTOR shaft, before the gearbox (~20.3 encoder turns per tile turn).
 // C = start one-full-tile-turn calibration at a physical mark.
 // M = stop at the mark and save the measured turn time AND encoder counts (until reset/power-off).
 // Then type a relative angle such as 60, 15.5, or -30. S = stop.
 //   With an encoder (calibration saw counts): closed loop, the motor stops on the encoder count.
 //   Without one (no counts during calibration): timed estimate, as before.
 // T<ms> = load a turn time measured earlier (e.g. T4200), so a reset does not force a recal.
-// K<counts> = load encoder counts per tile turn measured earlier (signed, e.g. K20480).
+// K<counts> = load encoder counts per tile turn measured earlier (signed, e.g. K40640).
 // P<pwm> = set the run speed, 1..255 (e.g. P80). A new speed clears the turn time (not the counts).
 // H = home: run forward to the encoder index pulse and call that 0 deg.
 // G<deg> = go to an absolute angle from home (or from where the board started, if not homed).
@@ -20,7 +21,9 @@
 // t74.py saves the first three to a file and sends them back after every reset.
 const byte RPWM = 5, LPWM = 6, REN = 7, LEN = 8;
 const byte ENC_A = 2, ENC_B = 3, ENC_X = 4;  // A/B must be D2/D3: the Uno's only INT0/INT1 pins.
-const unsigned int ENC_PPR = 5120;           // AMT10E DIP switch (factory, all off = 5120 PPR).
+// AMT10E DIP switch setting. MUST MATCH THE SWITCHES. 500 PPR = switches 0 1 0 1 (factory is
+// 5120 = 0 0 0 0, too fast for the Uno on the motor shaft: ~100k edges/s at ~300 motor RPM).
+const unsigned int ENC_PPR = 500;
 const byte DEFAULT_PWM = 45;               // Run speed after a reset, until a P<pwm> arrives.
 const unsigned long MIN_CAL_MS = 500UL;
 const unsigned long MAX_CAL_MS = 60000UL; // Stops unattended calibration.
@@ -66,6 +69,7 @@ unsigned long lastMotionMs = 0;
 char settleFor = 0;           // 'M' move, 'H' home, 'C' calibration: what to do once coasting ends.
 byte corrections = 0;
 unsigned int homeStartPulses = 0;
+unsigned int calMissedStart = 0;
 
 void encoderEdge() {
   // Index = previous state * 4 + new state, state = A + 2*B. +1/-1 per valid step, 0 otherwise.
@@ -142,6 +146,9 @@ void startCalibration() {
   coastTau = 0;
   setpointValid = false;
   calStartCount = readCount();
+  noInterrupts();
+  calMissedStart = missedEdges;
+  interrupts();
   mode = CALIBRATING;
   motorOn(true);
   Serial.println(F("Calibration running. Send M when your tile mark returns once."));
@@ -174,7 +181,21 @@ void finishCalibration() {
   Serial.print(F(", encoder: "));
   Serial.print(turnCounts);
   Serial.println(F(" counts. Now type an angle such as 60."));
-  if (turnCounts == 0) Serial.println(F("No encoder counts seen: moves will be timed estimates."));
+  if (turnCounts == 0) {
+    Serial.println(F("No encoder counts seen: moves will be timed estimates."));
+    return;
+  }
+  Serial.print(F("That is "));
+  Serial.print(fabs((float)turnCounts / (4.0f * ENC_PPR)), 2);
+  Serial.println(F(" encoder turns per tile turn (if ENC_PPR matches the DIP switch)."));
+  noInterrupts();
+  unsigned int missed = missedEdges - calMissedStart;
+  interrupts();
+  if (missed) {
+    Serial.print(F("WARNING: "));
+    Serial.print(missed);
+    Serial.println(F(" missed encoder edges: too fast for the Uno. Lower the PPR (DIP switch, ENC_PPR) or the speed."));
+  }
 }
 void setTurnTime(unsigned long ms) {
   if (!requireIdle()) return;
@@ -236,10 +257,13 @@ void printEncoder() {
   interrupts();
   Serial.print(F("Encoder: count "));
   Serial.print(count);
-  Serial.print(F(", shaft "));
+  Serial.print(F(", encoder shaft "));
   Serial.print((float)count * 360.0f / (4.0f * ENC_PPR), 2);
-  Serial.print(F(" deg, tile "));
+  Serial.print(F(" deg, output shaft "));
   if (turnCounts) {
+    // Revolutions and degrees from 0 (home, or where the board started), not wrapped at 360.
+    Serial.print((float)(count - zeroCount) / (float)turnCounts, 4);
+    Serial.print(F(" rev = "));
     Serial.print(countsToDeg(count - zeroCount), 2);
     Serial.print(F(" deg"));
   } else {
@@ -338,6 +362,9 @@ void finishSettle() {
     Serial.print(F("Homed at the index pulse. Coasted "));
     Serial.print(turnCounts ? countsToDeg(count - zeroCount) : 0.0f, 2);
     Serial.println(F(" deg past it."));
+    // More than 1.5 encoder turns per tile turn: the index repeats several times per tile turn.
+    if (labs(turnCounts) > 6L * ENC_PPR)
+      Serial.println(F("Note: the index is on the motor side, so home is a repeatable motor position, not a unique tile angle."));
     return;
   }
   long progress = (count - moveStartCount) * moveDir;
@@ -374,7 +401,7 @@ void finishSettle() {
 }
 void printPendingHelp() {
   if (pending == 'T') Serial.println(F("Type T followed by milliseconds, such as T4200."));
-  else if (pending == 'K') Serial.println(F("Type K followed by counts, such as K20480."));
+  else if (pending == 'K') Serial.println(F("Type K followed by counts, such as K40640."));
   else if (pending == 'G') Serial.println(F("Type G followed by degrees, such as G90."));
   else Serial.println(F("Type P followed by a PWM from 1 to 255, such as P80."));
 }
@@ -519,8 +546,8 @@ void loop() {
     interrupts();
     if (found) stopAndSettle('H', 0);
     else if (stalled) fault(F("no counts for 1 s while homing. Check encoder wiring and that the motor turns."));
-    else if (turnCounts && labs(count - calStartCount) > labs(turnCounts) * 5 / 4)
-      fault(F("no index pulse in a full turn. Check the X wire on D4."));
+    else if (labs(count - calStartCount) > 5L * ENC_PPR)   // 1.25 encoder turns
+      fault(F("no index pulse in an encoder turn. Check the X wire on D4, and ENC_PPR."));
     else if (elapsed >= MAX_CAL_MS) fault(F("homing took over 60 s."));
   } else if (mode == SETTLING && (now - lastMotionMs >= SETTLE_MS || elapsed >= MAX_SETTLE_MS)) {
     finishSettle();

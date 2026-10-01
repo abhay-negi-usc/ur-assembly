@@ -224,11 +224,35 @@ def _object_block(name, entry):
             out += [f'      {a_name}:',
                     '        xyz_mm:  [%s]' % ', '.join('%+.2f' % (v * 1000.0) for v in xyz),
                     '        rpy_deg: [%s]' % ', '.join('%+.2f' % np.degrees(v) for v in rpy)]
+            out += _approach_path_block(a.get('approach_path') or [])
             out += _fmt_meta('        ', dict(a.get('meta') or {}),
                              ('approaches', 'residual_mm', 'residual_deg', 'measured', 'note'))
     out += _fmt_meta('    ', dict(entry.get('meta') or {}),
                      ('mates', 'measured', 'note'))
     return '\n'.join(out)
+
+
+def _approach_path_block(path):
+    """An assembly's approach waypoints, re-emitted verbatim.
+
+    CARRIED THROUGH, NOT OWNED, for the same reason the assembly poses above are. This writer
+    rewrites the WHOLE catalogue, so anything it cannot emit is deleted the next time any object
+    is recalibrated -- and an approach path is hand-written, which makes it exactly the kind of
+    thing nobody would think to back up before re-teaching a marker. It is emitted whether or not
+    this app has ever heard of the station it threads into."""
+    if not path:
+        return []
+    out = ['        approach_path:']
+    for wp in path:
+        out.append("          - name: '%s'" % str(wp['name']).replace("'", "''"))
+        out.append('            xyz_mm:  [%s]'
+                   % ', '.join('%+.1f' % (v * 1000.0) for v in wp['xyz']))
+        # rpy is omitted when it is zero: the default already means "the attitude the object is
+        # assembled in", and writing three zeros on every waypoint buries the ones that differ.
+        if float(np.linalg.norm(wp.get('rpy', [0.0, 0.0, 0.0]))) > 1e-9:
+            out.append('            rpy_deg: [%s]'
+                       % ', '.join('%+.2f' % np.degrees(v) for v in wp['rpy']))
+    return out
 
 
 def merge_catalogue(path, name, entry):

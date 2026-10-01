@@ -1,0 +1,14 @@
+# ============================================================================
+# COUPLER -- servo lock + proximity sensor (mtc/modules/coupler.py)
+#
+# No settings yet: the servo angles and sensor threshold live in firmware/coupler.cpp.
+# ============================================================================
+
+# Names must start with coupler_, and steps may only use coupler commands plus `wait`.
+sequences:
+  coupler_tool_cycle:
+    description: Lock onto the tool, hold it for 2 s, release.
+    steps:
+      - hold
+      - wait 2
+      - release

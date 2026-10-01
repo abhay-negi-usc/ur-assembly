@@ -1,0 +1,46 @@
+# ============================================================================
+# COUPLERS -- which Arduino is which.
+#
+# This cell has two toolchanger boards running the SAME sketch
+# (toolchanger/firmware/main.cpp). They answer identically over the wire, so nothing in a reply
+# says which mechanism moved: the only thing that tells them apart is the USB serial number
+# burned into the Arduino. This file maps that serial to a name, and everything else -- the
+# configs, the CLI, the apps -- refers to the name.
+#
+#     ./toolchanger.py hold --port end_effector
+#     ./toolchanger.py hold --port cleat
+#
+# WHY A NAME AND NOT THE SERIAL EVERYWHERE. `port: end_effector` says what it does;
+# `port: 14531303334351412270` says nothing to whoever reads it next. Swapping a board is then
+# one edit here rather than a search across configs/.
+#
+# WHY NOT /dev/ttyACM0. That number is an ENUMERATION ORDER, not an identity -- unplug both
+# boards and plug them back in the other way round and it swaps, silently pointing a run at the
+# wrong coupler. The serial follows the board. (The driver resolves a serial to the stable
+# /dev/serial/by-id/ path for the same reason.)
+#
+# TO FIND THE SERIALS:  ./toolchanger.py list
+# It prints every board it can see, with a ready-to-paste block.
+#
+# A PARTIAL SERIAL IS ENOUGH as long as it is unambiguous -- the driver substring-matches and
+# refuses rather than guessing if more than one board matches. A device path works too, for a
+# board with no serial or a simulated one.
+# ============================================================================
+
+couplers:
+  # NO /dev/ttyACM NUMBERS ARE RECORDED HERE, deliberately -- and not as a matter of taste.
+  # Between two `list` runs minutes apart on this very cell, the end-effector board moved from
+  # ttyACM1 to ttyACM3. A number written down here would have been stale before anyone read it,
+  # and stale in the one way that matters: pointing a run at the other coupler. Run
+  # `./toolchanger.py list` when you want to know where a board currently sits.
+
+  # The coupler on the robot's END EFFECTOR -- the one every app in urlab/apps/ actuates.
+  end_effector: '75031303431351605161'
+
+  # The coupler on the CLEAT the ORU mounts to. No app drives this one yet; it is named here so
+  # the CLI can reach it, and so an end-effector lookup cannot accidentally land on it.
+  cleat: '14531303334351412270'
+
+  # The board driving the 12 V DC motor through the Cytron MD10C (multi-toolchanger/ firmware).
+  # Not a coupler, but listed here so `--port dc_motor` works with multitoolchanger.py.
+  dc_motor: '75735303631351419251'

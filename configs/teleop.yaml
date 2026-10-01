@@ -1,0 +1,58 @@
+# KEYBOARD TELEOP -- jog the end effector from the terminal, rigid or compliant.
+# See urlab/apps/teleop.py; press h in the running app for the key map.
+#
+#   python -m urlab.apps.teleop [--set teleop.control_frame=tool0] [--dry-run]
+
+robot_config: robot.yaml            # the machine (see configs/robot.yaml)
+camera_config: camera.yaml          # the sensor  (see configs/camera.yaml)
+
+teleop:
+  # The frame being jogged, from configs/frames.yaml. Rotations pivot on its ORIGIN and TOOL-frame
+  # jogs follow ITS axes -- coupler_mate turns about the coupler tip, tool0 about the flange.
+  control_frame: coupler_mate
+  start_frame: base               # base | tool -- the jog frame at startup (f toggles it)
+  step_mm: 5.0                    # one key press (- / = halve / double it, with the angle)
+  step_deg: 2.0
+  # How far the goal may run ahead of the arm, in steps. Holding a key then moves at the speed
+  # cap, and releasing it stops within this lead instead of working off a queue of repeats.
+  max_lead_steps: 2
+  # A fraction of robot.yaml's speed caps (max_cartesian_translation / rotation). , / . adjust.
+  speed_fraction: 1.0
+  check_ik: true                  # refuse a step with no IK solution, rather than fault mid-servo
+  # Tare when compliance is switched on. Only right with the tool touching NOTHING: taring
+  # against a real contact declares that force zero, and the spring yields to its ghost when it
+  # goes away. Turn off to tare by hand with t.
+  tare_on_compliance: true
+
+# The admittance law compliance mode runs (robot/admittance.py). [ ] and { } scale the
+# translational and rotational stiffness by stiffness_factor within [min, max]; the damping is
+# re-derived each time from damping_ratio, so the feel stays critically-damped-or-over while the
+# stiffness moves. A static push F deflects F / stiffness: 20 N at 1000 N/m is 20 mm.
+compliance:
+  mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+  stiffness:     [1000.0, 1000.0, 1000.0, 10.0, 10.0, 10.0]
+  damping_ratio: [1.6, 1.6, 1.6, 1.6, 1.6, 1.6]
+  selected_axes: [1, 1, 1, 1, 1, 1]
+  # The law's bandwidth is sqrt(stiffness / mass); past ~5 Hz on this arm it starts to ring,
+  # which is where the translational ceiling sits for mass 5.
+  min_stiffness: [100.0, 100.0, 100.0, 1.0, 1.0, 1.0]
+  max_stiffness: [4000.0, 4000.0, 4000.0, 50.0, 50.0, 50.0]
+  stiffness_factor: 1.5
+  reference_rate_hz: 125.0
+  lookahead_time_s: 0.1
+  servo_gain: 300.0
+  max_delta_mm: 40.0              # runaway clamp on the deflection, not a working range
+  max_delta_deg: 15.0
+  warmup_s: 0.5                   # servoL engaging reads as phantom force; let it decay
+
+# Cancels queued motion on a trip; never locks you out of jogging away again.
+force_guard:
+  enabled: true
+  max_force_n: 60.0
+  max_torque_nm: 8.0
+  persistence_s: 0.05
+
+move_timeout_s: 30.0
+settle_s: 0.2
+confirm_each_step: false
+debug: false

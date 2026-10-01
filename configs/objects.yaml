@@ -34,7 +34,7 @@
 # the marker.
 # ============================================================================
 
-# Last written 2026-09-25.
+# Last written 2026-09-27.
 
 objects:
   ORU:
@@ -173,3 +173,37 @@ objects:
     held_mass_kg: 3.300
     mates: 1
     measured: 2026-09-25
+  mini_ORU:
+    markers:
+      30:
+        size_mm: 40.30
+        xyz_mm:  [+59.82, -59.06, +1.86]
+        rpy_deg: [+179.53, +1.86, +45.42]
+        mates: 1
+        residual_mm: 0.00
+        residual_deg: 0.00
+        residual_axis_deg: 0.00
+    held_mass_kg: 1.500
+    assemblies:
+      cleat:
+        xyz_mm:  [-1069.05, +366.99, +321.91]
+        rpy_deg: [-179.72, -0.88, +43.27]
+        approach_path:
+        #   - name: 'above deck'
+        #     xyz_mm:  [450.0, +0.0, +225.0]
+        #   - name: 'past cleat bracket'
+        #     xyz_mm:  [-50.0, +0.0, +225.0]
+        #   - name: 'axially aligned standoff'
+        #     xyz_mm:  [-50.0, +0.0, +0.0]
+          - name: 'above deck'
+            xyz_mm:  [+550.0, -300.0, 0.0]
+          - name: 'past cleat bracket side'
+            xyz_mm:  [-50.0, -300.0, 0.0]
+          - name: 'axially aligned standoff'
+            xyz_mm:  [-50.0, +0.0, +0.0]
+        approaches: 3
+        residual_mm: 2.32
+        residual_deg: 2.08
+        measured: 2026-09-27
+    mates: 1
+    measured: 2026-09-27

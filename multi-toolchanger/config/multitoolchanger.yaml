@@ -1,0 +1,26 @@
+# ============================================================================
+# MULTI-TOOLCHANGER -- which modules this toolchanger has.
+#
+# Each module listed here loads mtc/modules/<name>.py (its commands) and, if present,
+# config/<name>.yaml next to this file (its settings and its own sequences). A module left out
+# does not exist for the script: its commands are not in `help`, Tab completion or the CLI.
+# `general` (help, sequence, wait, list, monitor, quit) is always loaded and is not listed.
+#
+# For a different toolchanger, copy this directory and point the script at it:
+#     ./multitoolchanger.py --config path/to/multitoolchanger.yaml
+# or set $MULTITOOLCHANGER_CONFIG.
+# ============================================================================
+
+modules:
+  - coupler
+  - relay
+  - screwdrive
+
+# ----------------------------------------------------------------------------
+# SEQUENCES THAT SPAN MODULES -- run one with `sequence NAME`.
+#
+# A sequence that only uses one module belongs in that module's file, named <module>_<name>.
+# Sequences here may use the commands of any loaded module. Each step is a command written
+# exactly as you would type it at the prompt.
+# ----------------------------------------------------------------------------
+sequences: {}

@@ -275,6 +275,66 @@ def coupler_mate(cfg=None):
     return frames[COUPLER_FRAME]
 
 
+# An assembly's approach path: the waypoints to thread on the way in, as BASE-FRAME offsets from
+# the assembled pose.
+APPROACH_KEYS = {'name', 'xyz_mm', 'rpy_deg'}
+
+
+def _approach_path(raw, where):
+    """[{name, xyz (m), rpy (rad)}] -- how to get TO an assembly, not just where it is.
+
+    WHY THE PATH BELONGS TO THE ASSEMBLY AND NOT TO THE APP. A fixture is surrounded by its own
+    obstacles -- a bracket to clear, a deck to come in over -- and which way round them is a
+    property of THAT station, not of the cycle that visits it. Two assemblies on the same bench
+    need two different paths from the same app, so the path is catalogued beside the pose it
+    approaches.
+
+    OFFSETS FROM THE ASSEMBLED POSE, IN BASE AXES, so the numbers are readable off the same
+    monitor reading that taught the pose ("250 mm up and 250 mm back") and stay right if the
+    fixture is re-taught a few millimetres away. `rpy_deg` re-orients the tool AT the waypoint
+    and defaults to zero, which means "carry the object at the attitude it will be assembled in"
+    -- the attitude you want while threading past a bracket, because it is the one that was
+    proven to fit.
+
+    THE LAST WAYPOINT IS THE INSERTION STANDOFF. It is where the compliant insertion begins, and
+    the vector from it to the assembled pose IS the insertion axis -- so a zero final offset is
+    refused: it would leave the insertion no length and no direction. See
+    apps/coupler_pick_assemble, which derives motion.assembly_standoff from it rather than
+    letting a second setting disagree with it."""
+    if raw is None:
+        return []
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(f'{where} approach_path must be a LIST of waypoints, got '
+                         f'{type(raw).__name__}')
+    path = []
+    for i, item in enumerate(raw, start=1):
+        w_where = f'{where} approach_path[{i}]'
+        if not isinstance(item, dict):
+            raise ValueError(f'{w_where} must be a mapping with xyz_mm')
+        w = dict(item)
+        unknown = set(w) - APPROACH_KEYS
+        if unknown:
+            raise ValueError(f'{w_where} has unknown key(s) {sorted(unknown)} -- allowed: '
+                             f'{sorted(APPROACH_KEYS)}')
+        if 'xyz_mm' not in w:
+            raise ValueError(f'{w_where} has no xyz_mm -- a waypoint with no offset is the '
+                             'assembled pose itself, which is where the path ENDS, not a step '
+                             'on the way to it')
+        xyz = np.asarray(w['xyz_mm'], dtype=float)
+        rpy = np.asarray(w.get('rpy_deg', [0.0, 0.0, 0.0]), dtype=float)
+        for label, v in (('xyz_mm', xyz), ('rpy_deg', rpy)):
+            if v.shape != (3,):
+                raise ValueError(f'{w_where}.{label} must be three numbers, got {v.tolist()}')
+        path.append({'name': str(w.get('name') or f'waypoint {i}'),
+                     'xyz': xyz / 1000.0, 'rpy': np.radians(rpy)})
+    if path and float(np.linalg.norm(path[-1]['xyz'])) < 1e-6:
+        raise ValueError(f'{where} approach_path ends AT the assembled pose. The last waypoint '
+                         'is the insertion standoff, and the vector from it to the assembly is '
+                         'the insertion axis -- a zero one leaves the insertion no direction to '
+                         'travel along and no distance to travel')
+    return path
+
+
 def load_objects(cfg=None, path=None):
     """{name: object} from the objects catalogue -- what the coupler can pick, and how to find
     each one by sight.
@@ -360,7 +420,9 @@ def load_objects(cfg=None, path=None):
             a = dict(a_entry or {})
             a_where = f'{where} assembly {a_name!r}'
             a_meta = {k: a.pop(k) for k in list(a) if k in OBJECT_META_KEYS}
-            assemblies[str(a_name)] = {'T_base_assembly': _pose(a, a_where), 'meta': a_meta}
+            a_path = _approach_path(a.pop('approach_path', None), a_where)
+            assemblies[str(a_name)] = {'T_base_assembly': _pose(a, a_where),
+                                       'approach_path': a_path, 'meta': a_meta}
 
         meta = {k: e.pop(k) for k in list(e) if k in OBJECT_META_KEYS}
         if e:

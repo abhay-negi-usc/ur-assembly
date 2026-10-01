@@ -28,13 +28,42 @@ require_driver: true
 # the whole value of this app is that it tests what the pick will use.
 toolchanger:
   enabled: true
-  port: null                      # null = autodetect
+  # WHICH COUPLER. This cell has two boards running the same firmware -- the one on the END
+  # EFFECTOR and the one on the cleat the ORU mounts to -- and they are indistinguishable over
+  # the wire, so a run that guessed would work the wrong mechanism and get a perfectly normal
+  # confirmation back from it. This app actuates the END-EFFECTOR coupler.
+  #
+  # The name is mapped to a USB serial in COUPLERS at the top of toolchanger/toolchanger.py:
+  #
+  #     COUPLERS = {'end_effector': '<serial>', 'cleat': '<serial>'}
+  #
+  # `./toolchanger.py list` prints the serials and a line to paste. Keeping the role here and
+  # the serial there means swapping a board is one edit, and this file stays readable.
+  #
+  # A raw serial or a device path also works, but names survive a replug renumbering ttyACM*.
+  port: end_effector
   baud: 9600
   # Relay K1 POWERS THE ACTUATION, and the board comes up with it OFF after every connect
   # (setup() drives it LOW, and opening the port resets the board). Without it the servo swings
   # and nothing happens. The wire command is a TOGGLE, so the driver here drives it to a state
   # rather than pulsing it. false leaves the relay alone, for a mechanism wired without it.
   motor: true
+  # BYPASS THE PROXIMITY SENSOR. false = the board checks every hold and release against the
+  # probe, and a disagreement stops the run. true = it confirms whatever it is told.
+  #
+  # THIS IS FOR WHEN THE PROBE ITSELF IS THE BROKEN THING -- disconnected or shorted, it reads a
+  # hard rail and then agrees with every command, confirming grips that are not happening.
+  # Bypassing at least stops the board claiming to have checked. It is NOT a way past a grip
+  # that keeps being refused for real: that refusal is the mechanism telling you it is holding
+  # nothing.
+  #
+  # IT COSTS THE WHOLE INTERLOCK. hold() confirms blindly, so `verified` stays false for the
+  # session and every app that reports a grip says out loud that nothing checked it. A lift, a
+  # payload change and a carry all go ahead on trust.
+  #
+  # It clears whenever the connection closes -- opening the port resets the board -- so it can
+  # never outlive the run that asked for it.
+  bypass: false
   # Opening the port pulls DTR and RESETS the Arduino. setup() must clear the bootloader,
   # average the sensor and swing the servo before it prints its banner; the driver floors this
   # at 2.5 s. If a run reports no banner, this is the first thing to raise.

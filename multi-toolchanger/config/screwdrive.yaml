@@ -1,0 +1,58 @@
+# ============================================================================
+# SCREWDRIVE -- the coupling lead screw's 12 V DC motor (mtc/modules/screwdrive.py)
+# ============================================================================
+
+settings:
+  # No-load speed in rpm at full duty (12 V, 100% PWM). The open-loop `rpm` command scales
+  # duty linearly from this: duty = rpm / max_rpm * 255. Under load the motor turns slower
+  # than asked -- nothing measures the real speed.
+  max_rpm: 500
+
+# ----------------------------------------------------------------------------
+# SEQUENCES -- run one with `sequence NAME`.
+#
+# Names must start with screwdrive_, and steps may only use screwdrive commands plus `wait`.
+# A sequence that also uses the coupler belongs in multitoolchanger.yaml.
+#
+# - Press q at any time to stop. The motor stops and the prompt carries on as normal.
+# - A step that fails aborts the rest and stops the motor.
+# - `drive` and `ramp` leave the motor running into the next step. Use `wait` and `stop` (or a
+#   ramp down to 0) to finish, or use `run` / `rpm` / `pwm`, which stop on their own.
+# ----------------------------------------------------------------------------
+sequences:
+  screwdrive_test_spin_slow:
+    description: Short open-loop spin each way at low speed.
+    steps:
+      - run 20 2
+      - wait 0.5
+      - run -20 2
+
+  screwdrive_test_spin_fast:
+    description: Short open-loop spin each way at high speed.
+    steps:
+      - run 100 2
+      - wait 0.5
+      - run -100 2
+
+  screwdrive_test_ramp:
+    description: Step the speed up and back down, then stop.
+    steps:
+      - ramp 0 100 2
+      - ramp 100 -100 2
+      - ramp -100 0 2
+
+  screwdrive_attach:
+    description: Assuming a fully backed out position, drive the coupling screw of a hex panel into another panel until bottomed out
+    steps:
+      - ramp 0 100 1
+      - run 100 18
+      - wait 1
+      - run 15 20
+
+  screwdrive_detach:
+    description: Assuming a fully bottomed out position, reverse coupling screw fully out of hex panel until reverse bottomed out
+    steps:
+      - ramp 0 -100 1
+      - run -100 18
+      - wait 1
+      - run -15 20

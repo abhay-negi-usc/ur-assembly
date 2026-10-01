@@ -723,6 +723,11 @@ def _preload_job(arm, **over):
     class _Adm:
         S = np.array([1000.0] * 3 + [8.0] * 3)
 
+        def hold(self, T, seconds, guard=None, on_step=None):
+            # the reference stands still; this stub's force does not decay, so it persists
+            if on_step:
+                on_step()
+
         def ramp(self, a, b, *args, **kw):
             # HOW FAR the reference advanced, whatever axis it went along -- the mate and the
             # placement travel on different legs, so a z-only stub would silently measure
@@ -782,13 +787,19 @@ def test_the_side_load_of_a_jammed_entry_does_not_count_as_preload():
 # ---------------------------------------------------------------------------- loaded compliance
 def test_the_payload_mass_reaches_the_controller():
     """The catalogue mass must actually be applied, or every wrench after the pick carries the
-    object's weight as external force and the guard and the law both act on a wrong number."""
+    object's weight as external force and the guard and the law both act on a wrong number.
+
+    The VALUE is a property of whichever object is configured today, so only its presence and
+    its arrival at the controller are pinned."""
     cfg = C.load('coupler_pick_place')
     obj = tool_frames.load_objects(cfg)[cfg.get('object_name')]
-    assert obj['held_mass_kg'] == pytest.approx(3.3), 'the ORU mass is not in the catalogue'
+    held = obj['held_mass_kg']
+    assert held and held > 0.0, (
+        f'{cfg.get("object_name")!r} has no held_mass_kg -- every wrench after the pick will '
+        'read its weight as external force')
     tool = cfg.section('robot').get('payload', {})
-    out = combined_payload(tool, obj['held_mass_kg'], tool_frames.coupler_mate(cfg)[:3, 3])
-    assert out['mass_kg'] == pytest.approx(tool['mass_kg'] + 3.3)
+    out = combined_payload(tool, held, tool_frames.coupler_mate(cfg)[:3, 3])
+    assert out['mass_kg'] == pytest.approx(tool['mass_kg'] + held)
 
 
 def test_the_loaded_law_is_slower_than_the_free_one():
@@ -975,10 +986,11 @@ def test_the_legs_that_start_in_contact_skip_their_tare():
     from urlab.apps import coupler_pick_place as cpp
     for meth in ('lift', 'withdraw'):
         src = inspect.getsource(getattr(cpp.CouplerCycle, meth))
-        assert 'tare=False' in src, f'{meth} still tares against a force that is already there'
+        assert 'in_contact=True' in src, (
+            f'{meth} still tares against a force that is already there')
     for meth in ('descend_and_mate', 'set_down'):
         src = inspect.getsource(getattr(cpp.CouplerCycle, meth))
-        assert 'tare=False' not in src, f'{meth} must tare -- it starts clear of contact'
+        assert 'in_contact' not in src, f'{meth} must tare -- it starts clear of contact'
 
 
 def test_the_tare_runs_between_the_lift_and_the_carry():
@@ -986,3 +998,345 @@ def test_the_tare_runs_between_the_lift_and_the_carry():
     from urlab.apps import coupler_pick_place as cpp
     src = inspect.getsource(cpp.build_and_run)
     assert src.index('job.lift') < src.index('job.settle_after_lift') < src.index('job.carry')
+
+
+# ---------------------------------------------------------------------------- sensor bypass
+class _BypassBoard(_FakeBoard):
+    """Shaped like the real board: `bypass` TOGGLES and reports the state it ended in, and a
+    bypassed board confirms every hold regardless of what the probe sees."""
+
+    port = '/dev/fake'
+    booted = True
+
+    def __init__(self, tool_present=True, refuse_bypass=False):
+        super().__init__()
+        self.bypassed = False
+        self.tool_present = tool_present
+        self.refuse_bypass = refuse_bypass
+
+    def bypass(self):
+        self.calls.append('bypass')
+        if not self.refuse_bypass:
+            self.bypassed = not self.bypassed
+        return self.bypassed
+
+    def hold(self):
+        self.calls.append('hold')
+        return True if self.bypassed else self.tool_present
+
+    def status(self):
+        self.calls.append('status')
+        return self.tool_present
+
+
+def _bypass_coupler(board, on):
+    from urlab.robot.coupler import Coupler
+    cfg = C.load('coupler_pick_place', ['toolchanger.enabled=false'])
+    c = Coupler(cfg)
+    c.device = board
+    c.bypass_requested = on
+    if on:
+        c._enable_bypass()
+    return c
+
+
+def test_the_bypass_is_off_unless_asked_for():
+    """OPT-IN: a config with no `bypass` key leaves the interlock live. Whether a given config
+    has it switched ON today is a decision about that cell's probe, not something to pin here --
+    what must hold is that silence means off."""
+    from urlab.robot.coupler import Coupler
+    cfg = C.load('coupler_pick_place', ['toolchanger.enabled=false'])
+    cfg.section('toolchanger').pop('bypass', None)
+    assert Coupler(cfg).bypass_requested is False, 'bypass must be opt-in'
+    board = _BypassBoard()
+    c = _bypass_coupler(board, on=False)
+    assert c.bypassed is False
+    assert 'bypass' not in board.calls, 'it toggled the bypass without being asked'
+
+
+def test_enabling_the_bypass_confirms_it_actually_engaged():
+    """The wire command is a toggle, so the answer is checked rather than assumed -- a bypass
+    that silently failed would leave the run believing the probe is being ignored while it is
+    not."""
+    board = _BypassBoard()
+    c = _bypass_coupler(board, on=True)
+    assert c.bypassed is True and board.bypassed is True
+
+
+def test_a_board_that_refuses_the_bypass_says_so_and_stays_honest():
+    board = _BypassBoard(refuse_bypass=True)
+    c = _bypass_coupler(board, on=True)
+    assert c.bypassed is False, 'it claimed a bypass the board never engaged'
+
+
+def test_a_bypassed_hold_is_never_reported_as_verified():
+    """THE POINT. A bypassed board confirms whatever it is told, so a confirm proves nothing.
+    Anything downstream that reads `verified` must see that."""
+    board = _BypassBoard(tool_present=False)          # nothing there at all
+    c = _bypass_coupler(board, on=True)
+    assert c.hold() is True, 'a bypassed board confirms -- that is what bypass means'
+    assert c.verified is False, 'a bypassed confirm was reported as verified'
+
+
+def test_a_bypassed_verify_says_nobody_checked_rather_than_asking_the_probe():
+    """The FIRMWARE would still answer `status` from the probe -- only changeStatus is bypassed
+    -- but that is the reading the bypass exists to stop believing. None puts callers on the
+    same warning path they take with no board at all."""
+    board = _BypassBoard(tool_present=True)
+    c = _bypass_coupler(board, on=True)
+    assert c.verify() is None
+    assert 'status' not in board.calls, 'it consulted the probe it was told to ignore'
+
+
+def test_the_pick_still_proceeds_under_bypass_but_warns():
+    """With the probe ignored, lock() takes the 'nothing verified' path -- a warning, not a
+    refusal. Refusing would make the bypass useless; silently proceeding would make it
+    dangerous."""
+    from urlab.apps import coupler_pick_place as cpp
+    board = _BypassBoard(tool_present=False)
+    job = cpp.CouplerCycle.__new__(cpp.CouplerCycle)
+    job.coupler = _bypass_coupler(board, on=True)
+    assert job.lock() is True
+    assert job.coupler.verified is False
+
+
+def test_an_unbypassed_refused_hold_still_stops_the_run():
+    """The bypass must not weaken the normal path."""
+    from urlab.apps import coupler_pick_place as cpp
+    board = _BypassBoard(tool_present=False)
+    job = cpp.CouplerCycle.__new__(cpp.CouplerCycle)
+    job.coupler = _bypass_coupler(board, on=False)
+    assert job.lock() is False
+
+
+# ---------------------------------------------------------------------------- preload persistence
+def test_every_preload_threshold_has_a_persistence_and_it_defaults_to_half_a_second():
+    from urlab.apps.coupler_pick_place import parse_preload
+    assert parse_preload(None)['persistence_s'] == pytest.approx(0.5)
+    for app, blocks in (('coupler_pick_place', ('mate_preload', 'place_preload')),
+                        ('coupler_pick_assemble', ('mate_preload', 'assembly_preload'))):
+        cfg = C.load(app)
+        for b in blocks:
+            assert parse_preload(cfg.section(b), b)['persistence_s'] > 0.0, f'{app}.{b}'
+
+
+def test_the_guard_persistence_stays_much_shorter_than_the_preloads():
+    """Different jobs. The guard rides out noise before STOPPING the arm, and every millisecond
+    of it is time spent over the limit. A preload rides out noise before BELIEVING a reading,
+    where waiting costs only time. Making them equal would be wrong in one direction or the
+    other."""
+    from urlab.apps.coupler_pick_place import parse_preload
+    for app in ('coupler_pick_place', 'coupler_pick_assemble'):
+        cfg = C.load(app)
+        guard = cfg.get_path('force_guard.persistence_s')
+        preload = parse_preload(cfg.section('mate_preload'), 'x')['persistence_s']
+        assert 0.0 < guard <= preload / 4.0, (
+            f'{app}: the guard waits {guard} s before stopping -- that is time spent over the '
+            f'force limit, and it should be far shorter than the {preload} s spent confirming')
+
+
+def test_a_negative_persistence_is_refused():
+    from urlab.apps.coupler_pick_place import parse_preload
+    with pytest.raises(ValueError, match='persistence_s'):
+        parse_preload({'persistence_s': -0.1})
+
+
+class _DecayArm(_PreloadArm):
+    """Crosses the threshold on a step, then decays -- a chamfer slip, or a compliant overshoot
+    ringing past the limit on its way to settling."""
+
+    def __init__(self, hold_after_mm):
+        super().__init__(newtons_per_mm=1.0)
+        self.hold_after_mm = hold_after_mm
+        self.holding_now = False
+
+    def read(self):
+        if self.holding_now and self.pushed_mm < self.hold_after_mm:
+            return 0.0                       # it slipped; the reading collapses
+        return self.pushed_mm
+
+
+def _decay_job(arm, **over):
+    job = _preload_job(arm, **over)
+    arm.wrench = lambda: np.array([0.0, 0.0, -arm.read(), 0.0, 0.0, 0.0])
+
+    class _HoldingAdm:
+        S = np.array([1000.0] * 3 + [8.0] * 3)
+
+        def ramp(self, a, b, *args, **kw):
+            arm.holding_now = False
+            arm.pushed_mm += abs(float(b[2, 3] - a[2, 3])) * 1000.0
+            return 'done'
+
+        def hold(self, T, seconds, guard=None, on_step=None):
+            arm.holding_now = True           # the reference stands still while we watch
+            if on_step:
+                on_step()
+
+    job.adm = job.adm_loaded = job.adm_insert = _HoldingAdm()
+    return job
+
+
+def test_a_transient_crossing_does_not_count_as_a_seat():
+    """It touched something for an instant. The push must carry on rather than declaring the
+    part seated and going on to lock, lift and carry it."""
+    arm = _DecayArm(hold_after_mm=4.0)       # anything under 4 mm slips away when held
+    job = _decay_job(arm)
+    assert job._push_to_preload(np.eye(4), lambda: None, job.preload_mate,
+                                'mate_standoff', 'mate') is True
+    assert arm.pushed_mm >= 4.0, (
+        f'it accepted a transient at {arm.pushed_mm} mm instead of pushing on to real contact')
+
+
+def test_a_force_that_holds_is_accepted_immediately():
+    arm = _DecayArm(hold_after_mm=0.0)       # never slips
+    job = _decay_job(arm)
+    assert job._push_to_preload(np.eye(4), lambda: None, job.preload_mate,
+                                'mate_standoff', 'mate') is True
+    assert arm.pushed_mm == pytest.approx(1.0, abs=0.51), arm.pushed_mm
+
+
+def test_zero_persistence_restores_the_old_first_sample_behaviour():
+    arm = _DecayArm(hold_after_mm=4.0)
+    job = _decay_job(arm, persistence_s=0.0)
+    assert job._push_to_preload(np.eye(4), lambda: None, job.preload_mate,
+                                'mate_standoff', 'mate') is True
+    assert arm.pushed_mm == pytest.approx(1.0, abs=0.51), 'it waited despite persistence 0'
+
+
+# ---------------------------------------------------------------------------- coupler mapping
+def test_the_coupler_map_names_both_boards():
+    """Two boards run the same sketch and answer identically, so the serial is the only thing
+    telling them apart. configs/couplers.yaml is where that lives."""
+    import toolchanger.toolchanger as T
+    got = T.load_couplers()
+    assert set(got) >= {'end_effector', 'cleat'}, got
+    assert got['end_effector'] != got['cleat'], 'both names point at the same board'
+    for name, serial in got.items():
+        assert serial and not serial.isspace(), f'{name} has no serial'
+
+
+def test_the_serials_are_strings_not_numbers():
+    """They look numeric and YAML would hand back an int, which loses a leading zero and then
+    substring-matches nothing."""
+    import toolchanger.toolchanger as T
+    for serial in T.load_couplers().values():
+        assert isinstance(serial, str)
+
+
+def test_every_coupler_app_asks_for_the_end_effector_board_by_name():
+    """The role belongs in the config and the serial in couplers.yaml -- one edit to swap a
+    board, and configs that read as English rather than as twenty digits."""
+    import toolchanger.toolchanger as T
+    named = T.load_couplers()
+    for app in ('coupler_pick_place', 'coupler_pick_assemble', 'coupler_actuate',
+                'coupler_assembly_calibration', 'object_calibration'):
+        port = C.load(app).get_path('toolchanger.port')
+        assert port == 'end_effector', f'{app} drives {port!r}, not the end-effector coupler'
+        assert port in named, f'{app} asks for {port!r}, which couplers.yaml does not name'
+
+
+def test_a_missing_map_costs_names_and_nothing_else():
+    """The driver's one hard dependency is pyserial. A missing or broken map must lose the NAMES
+    and keep --port <serial> working, not take the whole script down."""
+    import toolchanger.toolchanger as T
+    assert T.load_couplers('/nonexistent/couplers.yaml') == {}
+
+
+# ------------------------------------------------------------------ no push on the way out
+class _SurfaceArm:
+    """A rigid surface that holds the tool SHORT of the pose that was commanded -- the normal
+    case whenever the surface sits higher than the camera-derived estimate."""
+
+    dry_run = False
+
+    def __init__(self, short_mm=2.0):
+        self.short_mm = short_mm
+        self.z_mm = -short_mm
+        self.commanded = []
+
+    def tcp_pose(self):
+        T = np.eye(4)
+        T[2, 3] = self.z_mm / 1000.0
+        return T
+
+    def wrench(self):
+        return np.array([0.0, 0.0, -3.0, 0.0, 0.0, 0.0])      # still pressed into it
+
+    def zero_ft(self, settle=True):
+        pass
+
+    def servo_stop(self):
+        pass
+
+    def servo_l(self, T, *a, **k):
+        self.commanded.append(float(T[2, 3]) * 1000.0)
+        self.z_mm = float(T[2, 3]) * 1000.0
+
+
+class _OpenGuard:
+    max_force, max_torque = 60.0, 8.0
+
+    def reset(self):
+        pass
+
+    def check(self):
+        return False
+
+    def __call__(self):
+        return False
+
+
+def _withdraw_job(arm):
+    from urlab.apps import coupler_pick_place as cpp
+    from urlab.robot.admittance import AdmittanceController
+    cfg = C.load('coupler_pick_place')
+    job = cpp.CouplerCycle.__new__(cpp.CouplerCycle)
+    job.cfg = cfg
+    job.robot = type('R', (), {'arm': arm})()
+    law = AdmittanceController(arm, cpp.compliance_blocks(cfg)[2])
+    job.adm = job.adm_loaded = job.adm_insert = law
+    job._active_law, job.holding, job.tare_before = None, True, True
+    job.T_tool0_coupler = np.eye(4)
+    job.settle_s, job.obj, job.guard = 0.05, {'held_mass_kg': 1.5}, _OpenGuard()
+    job.legs = {n: parse_offset(cfg.section('motion')[n], n, DEFAULT_LEG_MM[n])
+                for n in cpp.LEGS}
+    return job
+
+
+def _deepest(in_contact, short_mm=2.0):
+    from urlab.apps import coupler_pick_place as cpp
+    arm = _SurfaceArm(short_mm)
+    job = _withdraw_job(arm)
+    T_place = np.eye(4)
+    job._compliant(T_place, cpp.offset_pose(T_place, job.legs['final_retract']),
+                   'withdraw', in_contact=in_contact)
+    return max(arm.commanded) if arm.commanded else -short_mm
+
+
+def test_a_retreat_from_contact_does_not_push_in_first():
+    """REGRESSION -- the place retreat visibly shoved before it pulled away. A contact leg ends
+    with the tool held SHORT of its reference (that is what contact means), and the preload push
+    leaves the reference further past it still. Starting the next leg at that stale COMMANDED
+    pose makes warmup stream plain servoL at it for half a second with the compliance integrator
+    zeroed: a stiff shove into the surface before the compliant retreat begins."""
+    short = 2.0
+    assert _deepest(in_contact=True, short_mm=short) <= -short + 1e-6, (
+        'the retreat still drove back to the commanded pose before pulling away')
+    # ... and the bug is real: starting from the commanded pose does push in.
+    assert _deepest(in_contact=False, short_mm=short) > -short + 1e-6
+
+
+def test_in_contact_means_both_things_together():
+    """One fact -- this leg begins touching -- with two consequences that must not drift apart:
+    no tare against a real force, and no ramp from a pose the arm is not at."""
+    import inspect
+    from urlab.apps import coupler_pick_place as cpp
+    src = inspect.getsource(cpp.CouplerCycle._compliant)
+    assert 'not in_contact and self.tare_before' in src, 'in_contact no longer suppresses the tare'
+    assert 'adm.rebase(here)' in src, 'in_contact no longer starts from the measured pose'
+    for leg in ('lift', 'withdraw'):
+        assert 'in_contact=True' in inspect.getsource(getattr(cpp.CouplerCycle, leg)), leg
+    for leg in ('descend_and_mate', 'set_down'):
+        assert 'in_contact' not in inspect.getsource(getattr(cpp.CouplerCycle, leg)), (
+            f'{leg} begins clear of contact -- it must tare and use its commanded standoff')

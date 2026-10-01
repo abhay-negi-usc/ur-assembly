@@ -23,8 +23,8 @@ camera_config: camera.yaml          # the sensor  (unused here; the rule is ever
 # WHICH OBJECT, and WHAT TO CALL THIS ASSEMBLY. Neither has a default: the object must already be
 # in the catalogue (its held_mass_kg is what makes freedrive behave), and the assembly name is
 # the key this run writes -- one that guessed would overwrite a different station.
-object_name: null
-assembly_name: null
+object_name: mini_ORU
+assembly_name: cleat
 
 # ---- How many times to seat it ----
 # EACH APPROACH IS: freedrive, the operator seats the part in its fixture, Enter, read forward
@@ -40,9 +40,9 @@ approaches: 3
 # the assembly axis by default -- any other direction levers the part against the fixture it is
 # still inside. Same shape as coupler_pick_place's motion legs.
 retreat:
-  distance_mm: 100.0
-  axis: [0.0, 0.0, -1.0]
-  frame: coupler
+  distance_mm: 50.0
+  axis: [+1.0, 0.0, 0.0]
+  frame: base
 
 # ---- Gates ----
 # Warnings, not limits, until there is a real number to put here. The honest threshold is what
@@ -62,15 +62,67 @@ held_cog_mm: null
 # taught, and the board's sensor is what confirms it rather than assuming.
 toolchanger:
   enabled: true
-  port: null                      # null = autodetect
+  # WHICH COUPLER. This cell has two boards running the same firmware -- the one on the END
+  # EFFECTOR and the one on the cleat the ORU mounts to -- and they are indistinguishable over
+  # the wire, so a run that guessed would work the wrong mechanism and get a perfectly normal
+  # confirmation back from it. This app actuates the END-EFFECTOR coupler.
+  #
+  # The name is mapped to a USB serial in COUPLERS at the top of toolchanger/toolchanger.py:
+  #
+  #     COUPLERS = {'end_effector': '<serial>', 'cleat': '<serial>'}
+  #
+  # `./toolchanger.py list` prints the serials and a line to paste. Keeping the role here and
+  # the serial there means swapping a board is one edit, and this file stays readable.
+  #
+  # A raw serial or a device path also works, but names survive a replug renumbering ttyACM*.
+  port: end_effector
   baud: 9600
   motor: true
+  # LATCHED ON FOR THIS APP, and this is the setting that stops the part being dropped.
+  #
+  # Closing the serial port normally hangs up DTR, which RESETS the board -- and setup() ends
+  # with `status = checkTool() ? 1 : 0; changeServo(status > 0);`, so the board re-decides
+  # whether to clamp from ONE sensor reading taken microseconds after power-on. If the probe says
+  # "absent" then, the servo swings open and whatever was held falls. That is most likely in
+  # exactly the case `bypass` exists for: a probe untrustworthy enough to ignore during the run
+  # can be wrong at reset too, and the reset clears the bypass before the reading is taken.
+  #
+  # Latching clears HUPCL so the port closes without dropping DTR: no reset, no re-decision, the
+  # servo stays where it is. THE COST IS THE DEAD-MAN SWITCH -- a crashed or killed process no
+  # longer switches the motor off by dying, so the relay stays powered until something turns it
+  # off or the board loses power. For a run that spends its whole length holding a part in a
+  # fixture, that is the right way round.
+  latch: true
+  # BYPASS THE PROXIMITY SENSOR. false = the board checks every hold and release against the
+  # probe, and a disagreement stops the run. true = it confirms whatever it is told.
+  #
+  # THIS IS FOR WHEN THE PROBE ITSELF IS THE BROKEN THING -- disconnected or shorted, it reads a
+  # hard rail and then agrees with every command, confirming grips that are not happening.
+  # Bypassing at least stops the board claiming to have checked. It is NOT a way past a grip
+  # that keeps being refused for real: that refusal is the mechanism telling you it is holding
+  # nothing.
+  #
+  # IT COSTS THE WHOLE INTERLOCK. hold() confirms blindly, so `verified` stays false for the
+  # session and every app that reports a grip says out loud that nothing checked it. A lift, a
+  # payload change and a carry all go ahead on trust.
+  #
+  # It clears whenever the connection closes -- opening the port resets the board -- so it can
+  # never outlive the run that asked for it.
+  bypass: true
   settle_s: 3.0
   timeout_s: 5.0
+
+# ---- Letting go ----
+# false = the object stays ON the coupler when the run ends, which is right when the next thing
+# is another calibration or a pick. true = it is handed back, but only after the operator has
+# confirmed they are holding it. NOTHING ELSE in this app ever releases: every failure path, a
+# declined prompt and Ctrl-C all leave the part attached rather than dropping it from wherever
+# the arm happened to be.
+release_after: false
 
 write_catalogue: true             # false = report the entry and leave objects.yaml alone
 
 move_timeout_s: 60.0
 settle_s: 0.3
-confirm_each_step: false
+confirm_each_step: true
 debug: false

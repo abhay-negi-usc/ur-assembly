@@ -27,7 +27,8 @@ CONFIG_DIR = os.path.join(os.path.dirname(__file__), '..', 'configs')
 # apply_cable_profile); it never goes through config.load, so it has no machine to declare and a
 # `robot_config:` line in one is inert. objects.yaml is MACHINE-WRITTEN besides, so it could not
 # carry one even if it wanted to.
-NOT_DEMO_CONFIGS = {'robot.yaml', 'camera.yaml', 'frames.yaml', 'cables.yaml', 'objects.yaml'}
+NOT_DEMO_CONFIGS = {'robot.yaml', 'camera.yaml', 'frames.yaml', 'cables.yaml',
+                    'objects.yaml', 'couplers.yaml'}
 
 
 def test_every_config_declares_its_machine():

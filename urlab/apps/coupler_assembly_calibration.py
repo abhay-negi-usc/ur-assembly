@@ -126,10 +126,31 @@ class _AssemblyCalibration:
         self.robot.arm.set_payload(payload)
         return True
 
-    def release_object(self):
+    def hand_back(self):
+        """Give the object back, ON PURPOSE and with the operator holding it.
+
+        THIS IS THE ONLY PLACE IN THE RUN THAT LETS GO, and it is gated on somebody having hold
+        of the part first. `release_after: false` keeps it on the coupler instead, which is the
+        right answer when the next thing to happen is another calibration or a pick.
+
+        The payload goes back to tool-only only AFTER the release, not before: between the two
+        the arm is still carrying the object, and telling the controller otherwise would have it
+        under-compensating for a real mass."""
+        if not bool(self.cfg.get('release_after', False)):
+            log.info('Leaving %r ON the coupler (release_after is false). Nothing has let go.',
+                     self.name)
+            return True
+        if not self.robot.arm.dry_run and not prompts_off(self.cfg):
+            if not ask('TAKE HOLD OF THE OBJECT. It will be released when you press Enter '
+                       '(q to leave it attached): '):
+                log.info('Left %r on the coupler, as asked.', self.name)
+                return True
+        if not self.coupler.release():
+            log.error('The coupler did not release -- %r is still attached.', self.name)
+            return False
         payload = dict(self.cfg.section('robot').get('payload', {}) or {})
         self.robot.arm.set_payload(payload)
-        log.info('Payload -> %.2f kg (tool alone). Release the object by hand when ready.',
+        log.info('Released. Payload -> %.2f kg (tool alone).',
                  float(payload.get('mass_kg', 0.0)))
         return True
 
@@ -141,6 +162,8 @@ class _AssemblyCalibration:
                     'Seat the OBJECT in its assembled position, then press Enter '
                     '(q to abort): '):
                 return False
+            if not self._still_held(k):
+                return False
             T = self.robot.arm.tcp_pose() @ self.T_tool0_coupler
             self.poses.append(T)
             xyz, rpy = matrix_to_xyzrpy(T)
@@ -150,6 +173,24 @@ class _AssemblyCalibration:
             if k + 1 < self.repeats and not self._retreat(T):
                 return False
         return bool(self.poses)
+
+    def _still_held(self, k):
+        """Confirm the part is on the coupler BEFORE its pose is written down.
+
+        A pose recorded off an empty coupler is not a near-miss, it is a plausible number for the
+        wrong thing -- it would be averaged in with the good approaches and quietly drag the
+        taught assembly. The check costs one serial round trip per approach and runs where it can
+        still be fixed."""
+        held = self.coupler.verify()
+        if held is False:
+            log.error('The coupler is NOT holding %r at approach %d. Whatever pose is under the '
+                      'arm right now is not this object\'s -- refusing to record it.',
+                      self.name, k + 1)
+            return False
+        if held is None and k == 0:
+            log.warning('Nothing can confirm the object is held (no board, or the sensor is '
+                        'bypassed). Every pose recorded from here is on trust.')
+        return True
 
     def _retreat(self, T_at):
         """Back the object out along the configured axis so the next approach starts clear.
@@ -297,11 +338,29 @@ def build_and_run(cfg, robot, camera, args):
         bt.Action('teach the assembled position', cal.collect),
         bt.Action('fuse the approaches', cal.fuse),
         bt.Action('write objects.yaml', cal.write_outputs),
-        bt.Action('hand the object back', cal.release_object))
+        bt.Action('hand the object back', cal.hand_back))
+    ok = False
     try:
-        return bt.run_tree(root, log)
+        ok = bool(bt.run_tree(root, log))
+        return ok
     finally:
+        # NOTHING HERE RELEASES. Every exit from this app -- a failed step, a declined prompt,
+        # Ctrl-C -- can happen with the part on the coupler, and a teardown that let go would
+        # drop it from wherever the arm was left.
+        #
+        # Closing the port is the subtle half of that. Without `latch` it drops DTR, which resets
+        # the board, and setup() re-decides whether to clamp from one sensor reading taken
+        # microseconds after power-on -- so an untrustworthy probe can open the coupler on the way
+        # out. `toolchanger.latch` is what stops that, and this app defaults it on.
+        if not coupler.latched and not coupler.manual:
+            log.warning('The toolchanger is NOT latched, so closing the port resets the board -- '
+                        'and the board re-decides whether to clamp from a single sensor reading. '
+                        'Support %r before this exits, or set toolchanger.latch: true.', name)
         coupler.close()
+        if not ok:
+            log.warning('THE RUN DID NOT COMPLETE, and nothing released %r -- assume it is still '
+                        'on the coupler. Support it before unplugging or power-cycling the '
+                        'board: a reset re-decides the clamp from the sensor.', name)
 
 
 def main():

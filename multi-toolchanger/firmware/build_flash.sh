@@ -7,6 +7,8 @@
 #   ./build_flash.sh --modules screwdrive     build just these (comma-separated), ignoring the config
 #   ./build_flash.sh upload --config PATH     take the module list from another deployment's config
 #   ./build_flash.sh upload --port /dev/ttyACM2   (or PORT=/dev/ttyACM2 ./build_flash.sh upload)
+#   ./build_flash.sh upload --name cleat      name the board: the prompt shows `cleat>` instead of
+#                                             `mtc(coupler,screwdrive)>` (letters, digits, _ - .)
 #
 # The module list comes from `modules:` in ../config/multitoolchanger.yaml unless --modules is
 # given -- the same list the script loads, so the board and the script agree. The board
@@ -19,6 +21,7 @@ set -euo pipefail
 SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CONFIG=${MULTITOOLCHANGER_CONFIG:-$SRC/../config/multitoolchanger.yaml}
 MODULES=
+NAME=
 UPLOAD=
 PORT=${PORT:-/dev/ttyACM1}
 
@@ -28,7 +31,8 @@ while [ $# -gt 0 ]; do
     --modules)  MODULES=${2:?--modules needs a comma-separated list}; shift ;;
     --config)   CONFIG=${2:?--config needs a path}; shift ;;
     --port)     PORT=${2:?--port needs a device}; shift ;;
-    -h|--help)  sed -n '2,16p' "$0"; exit 0 ;;
+    --name)     NAME=${2:?--name needs a name}; shift ;;
+    -h|--help)  sed -n '2,18p' "$0"; exit 0 ;;
     *)          echo "unknown argument: $1 (see --help)" >&2; exit 2 ;;
   esac
   shift
@@ -49,6 +53,16 @@ for m in $SELECTED; do
 done
 if [ -n "$MODULES" ]; then FROM="from --modules"; else FROM="from $CONFIG"; fi
 
+# The name goes in the boot banner as name=..., one space-separated field, so keep it to
+# characters that cannot break the banner or the C string it is compiled into.
+if [ -n "$NAME" ]; then
+  if ! [[ $NAME =~ ^[A-Za-z0-9_.-]{1,24}$ ]]; then
+    echo "--name '$NAME': use 1-24 letters, digits, _ - or ." >&2
+    exit 2
+  fi
+  DEFINES="$DEFINES -DBOARD_NAME=\"$NAME\""
+fi
+
 A=~/.arduino15/packages/arduino
 AVRBIN=$A/tools/avr-gcc/7.3.0-atmel3.6.1-arduino7/bin
 DUDE=$A/tools/avrdude/6.3.0-arduino17
@@ -64,6 +78,7 @@ CF="-std=gnu11 -flto -fno-fat-lto-objects -w"
 CXF="-std=gnu++11 -fpermissive -fno-exceptions -fno-threadsafe-statics -flto"
 
 echo "==> modules: ${SELECTED// /, } ($FROM)"
+echo "==> name: ${NAME:-none (the prompt shows mtc(${SELECTED// /,}))}"
 
 echo "==> compiling core"
 for f in "$CORE"/*.c;   do $AVRBIN/avr-gcc -c $COMMON $CF "$f" -o "$B/c_$(basename "$f").o"; done
@@ -89,7 +104,7 @@ $AVRBIN/avr-objcopy -O ihex -R .eeprom "$B/fw.elf" "$B/fw.hex"
 $AVRBIN/avr-size --mcu=atmega328p -C "$B/fw.elf"
 
 if [ -n "$UPLOAD" ]; then
-  echo "==> flashing $PORT with ${SELECTED// /, } (a coupler's servo WILL move on reset)"
+  echo "==> flashing $PORT with ${SELECTED// /, }${NAME:+ as $NAME} (a coupler's servo WILL move on reset)"
   "$DUDE/bin/avrdude" -C "$DUDE/etc/avrdude.conf" -patmega328p -carduino \
     -P"$PORT" -b115200 -D -Uflash:w:"$B/fw.hex":i
   echo "==> done"

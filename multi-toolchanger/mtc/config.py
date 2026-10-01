@@ -129,7 +129,7 @@ def load_config(path=None, modules=None):
 
     NOT FATAL: a bad sequence. It is kept and marked with what is wrong, `help` shows it as
     unable to run, and everything else carries on."""
-    from .session import validate_steps            # session imports this module
+    from .session import check_nesting, validate_steps   # session imports this module
 
     path = os.path.abspath(path or CONFIG_YAML)
     doc = _read_yaml(path, required=True)
@@ -179,4 +179,5 @@ def load_config(path=None, modules=None):
     for seq in cfg.sequences.values():
         if not seq.errors:
             seq.errors += validate_steps(seq, cfg)
+    check_nesting(cfg)
     return cfg

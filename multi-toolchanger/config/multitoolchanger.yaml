@@ -19,6 +19,7 @@ modules:
   - coupler
   - relay
   - screwdrive
+#  - t74
 
 # ----------------------------------------------------------------------------
 # SEQUENCES THAT SPAN MODULES -- run one with `sequence NAME`.

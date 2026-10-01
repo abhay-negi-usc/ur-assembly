@@ -230,10 +230,11 @@ class FakeT74:
 T74S = []   # the FakeT74 of each simulated t74 board, for the tests to inspect
 
 
-def board(fd, tool_present, modules=ALL, proto=PROTOCOL):
+def board(fd, tool_present, modules=ALL, proto=PROTOCOL, name=None):
     """Mimic firmware/ built with `modules`: one ASCII byte in (plus numbers after the
     screwdrive's), lines out. Bytes for a module that is not built in are ignored, as on the
-    board. modules=None mimics firmware from before protocol 2, which cannot say what it has."""
+    board. modules=None mimics firmware from before protocol 2, which cannot say what it has;
+    `name` mimics build_flash.sh --name."""
     status = 1 if tool_present[0] else 0     # setup(): status = checkTool() ? 1 : 0
     relay = False
     bypassed = False
@@ -243,6 +244,9 @@ def board(fd, tool_present, modules=ALL, proto=PROTOCOL):
     #  before it is listening is a banner it never sees
     time.sleep(0.2)
     identity = f"modules={','.join(modules)} proto={proto}" if modules is not None else None
+    if identity and name:
+        identity = f'name={name} {identity}'
+
     os.write(fd, f"toolchanger ready {identity or ''}".strip().encode() + b"\r\n")
     has = set(modules if modules is not None else ALL)
     t74 = FakeT74(lambda text: os.write(fd, text.encode() + b"\r\n"))
@@ -353,6 +357,8 @@ sequences:
     steps: [hold, run 40 0.2, release]
   grip_then_spin:
     steps: [hold, run 40 5]
+  tool_then_spin: [sequence coupler_cycle, sequence screwdrive_good]
+  nested_grip: [stop, sequence grip_then_spin, stop]
 """,
     'screwdrive.yaml': """
 settings:
@@ -363,7 +369,15 @@ sequences:
     steps: [rpm 200 0.2, wait 0.1, ramp 0 30 0.2, stop]
   screwdrive_list_form: [stop]
   screwdrive_slow: [run 50 5, stop]
-  screwdrive_broken: [spin 3, rpm 900 1, run 40, sequence screwdrive_good, hold, stop]
+  screwdrive_broken: [spin 3, rpm 900 1, run 40, sequence coupler_cycle, hold, stop]
+  screwdrive_twice: [sequence screwdrive_good, sequence screwdrive_list_form]
+  screwdrive_deep: [stop, sequence screwdrive_twice, sequence screwdrive_slow]
+  screwdrive_loop_a: [stop, sequence screwdrive_loop_b]
+  screwdrive_loop_b: [sequence screwdrive_loop_a]
+  screwdrive_self: [sequence screwdrive_self]
+  screwdrive_into_loop: [sequence screwdrive_loop_a]
+  screwdrive_nests_broken: [stop, sequence screwdrive_broken]
+  screwdrive_nests_missing: [sequence screwdrive_nope]
   unprefixed: [stop]
 """,
     'coupler.yaml': """
@@ -439,10 +453,26 @@ def check_config_loading(tmp):
     assert seqs['coupler_cycle'].source == 'coupler' and seqs['grab_and_spin'].source == 'main'
     errors = '\n'.join(seqs['screwdrive_broken'].errors)
     for problem in ("unknown command 'spin'", 'RPM 900 is out of range -400..400',
-                    'usage: run PCT SECONDS', 'sequence cannot be used in a sequence',
+                    'usage: run PCT SECONDS', 'coupler_cycle is a coupler sequence',
                     'hold is a coupler command'):
         assert problem in errors, (problem, errors)
     assert len(seqs['screwdrive_broken'].errors) == 5, 'the last step (stop) is fine'
+
+    #  nesting: allowed, two levels deep, and across modules only from the main file
+    for good in ('screwdrive_twice', 'screwdrive_deep', 'tool_then_spin', 'nested_grip'):
+        assert not seqs[good].errors, (good, seqs[good].errors)
+    #  loops are refused -- every member names the loop -- and so is whatever runs into one
+    assert 'runs itself: screwdrive_loop_a -> screwdrive_loop_b -> screwdrive_loop_a' in \
+        seqs['screwdrive_loop_a'].errors[0], seqs['screwdrive_loop_a'].errors
+    assert 'runs itself' in seqs['screwdrive_loop_b'].errors[0]
+    assert 'runs itself: screwdrive_self -> screwdrive_self' in seqs['screwdrive_self'].errors[0]
+    assert seqs['screwdrive_into_loop'].errors == [
+        'step 1 (sequence screwdrive_loop_a): screwdrive_loop_a cannot run '
+        '(`sequence screwdrive_loop_a` says why)'], seqs['screwdrive_into_loop'].errors
+    #  a broken or missing nested sequence makes its caller unable to run too
+    assert 'step 2 (sequence screwdrive_broken): screwdrive_broken cannot run' in \
+        seqs['screwdrive_nests_broken'].errors[0]
+    assert "no sequence called 'screwdrive_nope'" in seqs['screwdrive_nests_missing'].errors[0]
     assert 'must be named screwdrive_' in seqs['unprefixed'].errors[0]
 
     #  only what is listed exists
@@ -485,12 +515,34 @@ def check_session(tc, cfg, tool_present):
     assert s.execute(['sequence', 'screwdrive_good']) is True and BOARD['dc'] == 0
     assert s.execute(['sequence', 'coupler_cycle']) is True
     assert s.execute(['sequence', 'grab_and_spin']) is True
+    #  nested ones run in full, the progress lines showing the path
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert s.execute(['sequence', 'tool_then_spin']) is True
+    text = out.getvalue()
+    for line in ('[tool_then_spin 1/2] sequence coupler_cycle',
+                 '  [tool_then_spin 1/2 > coupler_cycle 3/3] release',
+                 '[tool_then_spin 2/2] sequence screwdrive_good',
+                 '  [tool_then_spin 2/2 > screwdrive_good 4/4] stop',
+                 '  sequence screwdrive_good: done', 'sequence tool_then_spin: done'):
+        assert line in text, (line, text)
+    assert s._running == []
 
     #  a failing step aborts the rest, and the screwdrive is stopped
     tool_present[0] = False
     tc.coupler.release()
-    expect_error(s.execute, ['sequence', 'grip_then_spin'], contains='aborted at step 1/2')
+    expect_error(s.execute, ['sequence', 'grip_then_spin'],
+                 contains='aborted at grip_then_spin 1/2')
     assert BOARD['dc'] == 0, 'the run step never started'
+    #  ... also deep inside a nested one: the whole path, reported once, nothing after it runs
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        exc = expect_error(s.execute, ['sequence', 'nested_grip'],
+                           contains='sequence nested_grip aborted at nested_grip 2/3 > '
+                                    'grip_then_spin 1/2 (hold)')
+    assert str(exc).count('aborted') == 1, str(exc)
+    assert '[nested_grip 3/3]' not in out.getvalue(), 'the step after the failure never runs'
+    assert s._running == [], 'the nesting is unwound after a failure'
     tool_present[0] = True
     tc.coupler.release()
 
@@ -509,8 +561,15 @@ def check_session(tc, cfg, tool_present):
     FakeWatcher.after = 0.3
     expect_error(s.execute, ['ramp', '0', '80', '5'], contains='interrupted')
     assert BOARD['dc'] == 0
-    exc = expect_error(s.execute, ['sequence', 'screwdrive_slow'], contains='at step 1/2')
+    exc = expect_error(s.execute, ['sequence', 'screwdrive_slow'],
+                       contains='at screwdrive_slow 1/2: run 50 5')
     assert isinstance(exc, Interrupted) and BOARD['dc'] == 0
+    #  q two levels down ends every sequence around it
+    exc = expect_error(s.execute, ['sequence', 'screwdrive_deep'],
+                       contains='sequence screwdrive_deep: interrupted')
+    assert isinstance(exc, Interrupted) and BOARD['dc'] == 0
+    assert re.search(r'\(at screwdrive_deep [23]/3 > screwdrive_\w+ \d/\d', str(exc)), str(exc)
+    assert s._running == []
     FakeWatcher.after = 0.2
     expect_error(s.execute, ['wait', '5'], contains='interrupted')
     FakeWatcher.after = None
@@ -524,7 +583,7 @@ def check_session(tc, cfg, tool_present):
         assert listed(cmd.usage, text) == (cmd.module == 'general'), name
     for name in cfg.modules:
         assert name == 'general' or f'  {name} ' in text, name
-    assert '3 commands' not in text and '6 commands, 5 sequences' in text, text
+    assert '3 commands' not in text and '6 commands, 13 sequences' in text, text
     assert 'sequences from' not in text
     for name in cfg.modules:
         part = render_help(cfg, name)
@@ -587,6 +646,30 @@ def check_detection(cfg):
         assert complete_line('ho', tc.config) == []
         assert 'coupler --' not in render_help(tc.config)
         assert Session(tc.config, tc).execute(['sequence', 'screwdrive_good']) is True
+    finally:
+        tc.close()
+
+    #  the prompt: the flashed name, or mtc(modules) so unnamed boards still differ
+    import multitoolchanger
+    for kwargs, want in ((dict(modules=['relay', 'screwdrive']), 'mtc(relay,screwdrive)'),
+                         (dict(modules=['screwdrive'], name='cleat'), 'cleat')):
+        tc, warned = open_quietly(fake_port(**kwargs), config_path=cfg.path)
+        try:
+            got = multitoolchanger.prompt_name(Session(tc.config, tc))
+            assert got == want and not warned, (got, want, warned)
+        finally:
+            tc.close()
+    tc, _ = open_quietly(fake_port(modules=['relay']), config_path=cfg.path, detect=False)
+    try:
+        assert multitoolchanger.prompt_name(Session(tc.config, tc)).startswith('mtc(coupler'), \
+            'without detect, the modules shown are the ones loaded'
+    finally:
+        tc.close()
+    tc, _ = open_quietly(fake_port(modules=['relay'], name='flashed'), config_path=cfg.path,
+                         name='end_effector')    # as --port end_effector from couplers.yaml
+    try:
+        assert multitoolchanger.prompt_name(Session(tc.config, tc)) == 'end_effector', \
+            'a couplers.yaml name picked with --port wins over the flashed name'
     finally:
         tc.close()
 
@@ -775,8 +858,17 @@ def check_t74(tmp):
         FakeWatcher.after = None
         dev.stop()
         assert fake.mode == 'off'
+
+        #  Ctrl-C and leaving let go: the motor is released, not left holding
+        dev.goto(0)
+        assert fake.mode == 'hold'
+        assert tc.let_go() == ['t74'] and fake.mode == 'off'
+        dev.goto(10)
+        assert fake.mode == 'hold'
     finally:
         tc.close()
+    assert fake.mode == 'off' and fake.commands[-1] == 'X', 'closing releases the motor'
+    tc.close()                                  # twice is harmless: the port is already shut
 
     tc, _ = open_quietly(fake_port(modules=['t74']),
                          config_path=os.path.join(d, 'multitoolchanger.yaml'))

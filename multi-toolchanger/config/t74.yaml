@@ -98,3 +98,20 @@ sequences:
     description: Turn the tile to leaf 5 (300 deg from the zero).
     steps:
       - t74_goto 300
+
+  t74_cycleAll:
+    description: Cycle through all positions from 0 - 5 and return to 0
+    steps:
+    - sequence t74_leaf_0
+    - wait 2
+    - sequence t74_leaf_1
+    - wait 2
+    - sequence t74_leaf_2
+    - wait 2
+    - sequence t74_leaf_3
+    - wait 2
+    - sequence t74_leaf_4
+    - wait 2
+    - sequence t74_leaf_5
+    - wait 2
+    - sequence t74_leaf_0

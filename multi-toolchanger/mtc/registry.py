@@ -68,8 +68,9 @@ class Module:
 
     `device` is a class built once per connection as device(board, settings). It may define
     `safe_stop()` -- called when q is pressed or a sequence fails, to stop anything moving --
-    and `check_line(line)`, which raises on a message the board sends unasked that should fail
-    a wait (the coupler watchdog's emergency stop)."""
+    `let_go()` -- called on Ctrl-C and whenever the connection closes, to stop HOLDING anything
+    (the t74 releases its motor) -- and `check_line(line)`, which raises on a message the board
+    sends unasked that should fail a wait (the coupler watchdog's emergency stop)."""
 
     def __init__(self, name, description, device=None, always=False):
         self.name = name

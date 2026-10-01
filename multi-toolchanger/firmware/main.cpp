@@ -49,11 +49,15 @@
 //  rather than sending it commands it would misread.
 const int PROTOCOL = 5;
 
-//  "modules=coupler,screwdrive proto=2" -- what this build has. The host parses it from the
-//  boot banner, or asks again with '?'.
+//  "name=cleat modules=coupler,screwdrive proto=5" -- what this build has. The host parses it
+//  from the boot banner, or asks again with '?'. The name is optional: build_flash.sh --name
+//  compiles it in, and the prompt shows it.
 void printIdentity()
 {
     bool first = true;
+#ifdef BOARD_NAME
+    Serial.print("name=" BOARD_NAME " ");
+#endif
     Serial.print("modules=");
 #ifdef MODULE_COUPLER
     Serial.print(first ? "" : ",");

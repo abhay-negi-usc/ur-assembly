@@ -43,4 +43,9 @@ couplers:
 
   # The board driving the 12 V DC motor through the Cytron MD10C (multi-toolchanger/ firmware).
   # Not a coupler, but listed here so `--port dc_motor` works with multitoolchanger.py.
+  # connect from /ur-assembly with ./multi-toolchanger/multitoolchanger.py --port dc_motor
   dc_motor: '75735303631351419251'
+
+  # The board driving the 24V dc motor connected to the hub. Connect with
+  # connect from /ur-assembly with ./multi-toolchanger/multitoolchanger.py --port hub_motor
+  hub_motor: '5038303331351702161'

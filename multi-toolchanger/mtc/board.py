@@ -21,10 +21,11 @@ IDENTIFY = '?'                 #  asks the board to print its identity line agai
 
 
 def parse_identity(line):
-    """(modules, proto) from "... modules=coupler,screwdrive proto=2"; None for what is absent.
+    """(modules, proto, name) from "... name=cleat modules=coupler,screwdrive proto=5"; None
+    for what is absent. The name is optional: only a board flashed with --name has one.
 
     Firmware from before the modules were selectable prints a bare "toolchanger ready", which
-    gives (None, None): the board cannot say what it has."""
+    gives (None, None, None): the board cannot say what it has."""
     fields = dict(part.split('=', 1) for part in (line or '').split() if '=' in part)
     modules = fields.get('modules')
     modules = [m for m in modules.split(',') if m] if modules is not None else None
@@ -32,7 +33,7 @@ def parse_identity(line):
         proto = int(fields['proto'])
     except (KeyError, ValueError):
         proto = None
-    return modules, proto
+    return modules, proto, fields.get('name') or None
 
 
 #  =====   which board   =====
@@ -256,18 +257,18 @@ class Board:
         self.ser.reset_input_buffer()
 
     def identify(self):
-        """(modules, proto) the firmware was built with, or (None, None) if it cannot say.
+        """(modules, proto, name) the firmware was built with; None for what it cannot say.
 
         Read from the boot banner when it carried them; otherwise asked for with '?', which
         old firmware ignores -- hence the short timeout rather than the full one."""
-        modules, proto = parse_identity(self.banner)
-        if modules is not None:
-            return modules, proto
+        identity = parse_identity(self.banner)
+        if identity[0] is not None:
+            return identity
         self.send(IDENTIFY)
         try:
             line, _ = self.collect(IDENTIFY, lambda ln: 'modules=' in ln, min(self.timeout, 1.0))
         except ToolChangerError:
-            return None, None
+            return None, None, None
         return parse_identity(line)
 
     def _clear_hupcl(self):

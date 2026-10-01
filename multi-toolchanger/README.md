@@ -83,7 +83,9 @@ At the prompt:
 * **q** stops a timed command (`run`, `pwm`, `rpm`, `ramp`, `wait`) or a sequence at any point.
   It stops anything moving (each module decides what that means; for the screwdrive it is the
   motor) and abandons the command. The prompt then carries on as normal; it is not an emergency
-  state. Ctrl-C does the same.
+  state. Ctrl-C does the same, and also makes every device let go of anything it is holding
+  (the t74 releases its motor). Leaving (`quit`, Ctrl-D, the end of a one-shot command) lets go
+  too.
 * Commands must be typed in full. There are no shorthands; use Tab instead.
 
 `--port` takes the names in `configs/couplers.yaml`, a USB serial, or a device path.
@@ -112,6 +114,12 @@ with ToolChanger('dc_motor') as tc:   # loads config/multitoolchanger.yaml
    - A command for a module the board lacks is refused before anything is sent:
      `hold is a coupler command, and this board's firmware has no coupler`.
    - A cross-module sequence that needs an absent module shows as `CANNOT RUN`.
+4. **The prompt says which board it is.** Opened by a `couplers.yaml` name (`--port cleat`),
+   the prompt is that name: `cleat>`. Otherwise it is the name the board was flashed with
+   (`build_flash.sh --name cleat`, which the banner carries as `name=cleat`). With neither it
+   is `mtc` plus the modules, `mtc(coupler,screwdrive)>`, so two unnamed boards still differ. A name is
+   1–24 letters, digits, `_`, `-` or `.`, and lives in the firmware, so reflashing without
+   `--name` drops it.
 
 **`--no-detect`** uses the config's `modules:` list instead. If the board disagrees, it warns
 with the exact difference and carries on; commands for a module the firmware lacks will time out.
@@ -231,7 +239,25 @@ Falling back to defaults could quietly run with the wrong modules or numbers.
   `wait`.
 * **Motor left running:** `drive` and `ramp` leave the motor running into the next step. Finish
   with `stop`, or a ramp down to 0.
-* **Not allowed in a sequence:** another sequence, `calibrate`, or other interactive commands.
+* **Nesting:** a step can be `sequence OTHER`, which runs OTHER in full as that one step.
+  * A module's sequence may nest only that module's sequences. The main file's may nest any, so
+    `t74_leaf_2` and `coupler_tool_cycle` can be combined there.
+  * A sequence that ends up running itself, directly or through others, is a loop and shows as
+    `CANNOT RUN`. So does anything that nests a sequence that can't run.
+  * Progress lines show the path, `[outer 2/3 > inner 1/2] step`. A failure or q at any depth
+    stops the devices once and ends every sequence around it, naming where it happened.
+
+  ```yaml
+  sequences:
+    t74_tour:
+      description: Visit leaves 1 and 2, then back to 0.
+      steps:
+        - sequence t74_leaf_1
+        - wait 1
+        - sequence t74_advance
+        - sequence t74_leaf_0
+  ```
+* **Not allowed in a sequence:** `calibrate`, or other interactive commands.
 
 ## Adding a module
 
@@ -279,6 +305,7 @@ def cmd_motor(s):
 * **A handler returns False to report failure.** That aborts a sequence.
 * **Optional device hooks:**
   * `safe_stop()`: called on q or a failed sequence.
+  * `let_go()`: called on Ctrl-C and when the connection closes, to stop holding anything.
   * `check_line(line)`: raises on a message the board sends unprompted that should fail a
     wait.
 
@@ -393,11 +420,12 @@ opening the port resets it.
   which means less heat, but the load can drift. A relative move still counts from the last
   target. With holding off, a one-shot CLI move just exits rather than holding the connection
   open.
-* **q halts and holds; `t74_stop` releases.** An unbalanced load is never dropped because
-  someone pressed q.
-* **Closing the port releases the motor**, because the reset is a dead-man switch. So a one-shot
-  `./multitoolchanger.py t74_move 90` keeps the connection open, holding, until q or Ctrl-C.
-  `--latch` leaves the board running.
+* **q halts and holds; `t74_stop` and Ctrl-C release.** An unbalanced load is never dropped
+  because someone pressed q; Ctrl-C is the "let go of everything" key.
+* **Leaving always releases the motor.** `quit`, Ctrl-D, Ctrl-C and the end of a one-shot
+  command send a release before the port closes, even with `--latch`; the reset on closing is
+  a second, dead-man layer. So a one-shot `./multitoolchanger.py t74_move 90` keeps the
+  connection open, holding, until q or Ctrl-C.
 * **The board cuts the motor and reports a FAULT** if:
   * the following error exceeds `max_error_deg` (jammed, overloaded, or a wrong-sign model)
   * it gets no encoder counts for 1 s at full PWM
@@ -486,13 +514,14 @@ cd firmware
 ./build_flash.sh                                    # build the config's modules; touches no hardware
 ./build_flash.sh upload --port /dev/ttyACM2         # build and flash them
 ./build_flash.sh upload --modules screwdrive --port /dev/ttyACM2   # just these, ignoring the config
+./build_flash.sh upload --name cleat --port /dev/ttyACM2           # name it: the prompt is `cleat>`
 ./build_flash.sh --config path/to/multitoolchanger.yaml            # another deployment's list
 cd .. && ./fake_board.py                            # driver vs. a simulated board
 ```
 
 From /ur-assembly/:
 ```bash
-./multi-toolchanger/firmware/build_flash.sh upload --modules <module> --port /dev/ttyACMX
+./multi-toolchanger/firmware/build_flash.sh upload --modules <module> --name <name> --port /dev/ttyACMX
 ```
 
 

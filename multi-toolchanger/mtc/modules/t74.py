@@ -353,6 +353,12 @@ class T74:
         dropped because someone pressed q."""
         self.halt()
 
+    def let_go(self):
+        """What Ctrl-C and leaving (quit, Ctrl-D, the end of a one-shot command) call: release
+        the motor, so it is not left holding -- and heating -- with nobody connected."""
+        self._ask('X', r't74 off pos (-?\d+)')
+        print(f'{self.tag}t74: motor released')
+
     def check_line(self, line):
         if line.startswith(FAULT):
             raise ToolChangerError(line)
@@ -543,9 +549,10 @@ MODULE.kind('step_seconds', lambda t, cfg, n: _number(t, 0.1, 10, n, 'seconds'),
             lambda cfg: 'seconds per identification step, 0.1..10')
 
 
-#  With hold_after_move on, moves end HOLDING, and closing the port resets the board, which
-#  releases the motor. So from the one-shot CLI they keep the connection open until q or Ctrl-C
-#  (runs_on), like `drive`. With it off the move ends released anyway, and the CLI just exits.
+#  With hold_after_move on, moves end HOLDING, and leaving releases the motor (let_go, and the
+#  reset when the port closes). So from the one-shot CLI they keep the connection open until q
+#  or Ctrl-C (runs_on), like `drive`. With it off the move ends released anyway, and the CLI
+#  just exits.
 HOLDS = dict(timed=True, runs_on=lambda args, cfg: cfg.settings['t74'].hold_after_move)
 
 

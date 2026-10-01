@@ -45,15 +45,19 @@ def cmd_list(s):
     return describe_ports()
 
 
-@MODULE.command(Param('NAME', 'sequence'), in_sequence=False, timed=True)
+@MODULE.command(Param('NAME', 'sequence'), timed=True)
 def cmd_sequence(s, name):
     """Run a named sequence of commands from the config, start to finish.
 
     A module's sequences live in config/<module>.yaml and are named <module>_<something>;
-    sequences spanning modules live in config/multitoolchanger.yaml. Every step is checked
-    before anything runs. A step that fails -- a hold that grips nothing, an emergency stop --
-    aborts the rest and stops anything moving. Press q at any point to stop: moving devices
-    stop and the prompt carries on as normal."""
+    sequences spanning modules live in config/multitoolchanger.yaml. A step may itself be
+    `sequence OTHER`, which runs OTHER in full: a module's sequence may nest that module's
+    sequences, the main config's may nest any, and none may end up running itself.
+
+    Every step -- nested ones too -- is checked before anything runs. A step that fails -- a
+    hold that grips nothing, an emergency stop -- aborts the rest, nested or not, and stops
+    anything moving. Press q at any point to stop: moving devices stop and the prompt carries
+    on as normal."""
     run_sequence(s, name)
 
 

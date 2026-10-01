@@ -34,12 +34,15 @@ class ToolChanger:
     falls back to the config list either way.
 
     `config` is a loaded Config, or None to load `config_path` (default: the usual one). Board
-    options (baud, timeout, settle, verbose, latch, name) pass straight to Board."""
+    options (baud, timeout, settle, verbose, latch, name) pass straight to Board.
+
+    `board_name` is the name the board was flashed with (build_flash.sh --name), or None."""
 
     def __init__(self, port=None, config=None, detect=True, config_path=None, **board_options):
         self.board = Board(port, **board_options)
         try:
-            self.detected, proto = self.board.identify()   # the board's modules, or None
+            #  the board's modules (or None), protocol, and the name it was flashed with
+            self.detected, proto, self.board_name = self.board.identify()
             if proto is not None and proto != PROTOCOL:
                 raise ToolChangerError(
                     f'the board speaks protocol {proto} and this script speaks {PROTOCOL} -- '
@@ -91,7 +94,29 @@ class ToolChanger:
         raise AttributeError(f'{name!r} -- not a loaded module or a ToolChanger attribute '
                              f'(loaded: {", ".join(devices) or "none"})')
 
+    def let_go(self):
+        """Ctrl-C or leaving: every device stops holding anything (the t74 releases its motor).
+        Best effort -- a device that does not answer is warned about, not fatal, so the rest
+        still let go and the port still closes. Returns the devices that let go."""
+        done = []
+        hook, self.board.poll_hook = self.board.poll_hook, None   # q must not interrupt it
+        try:
+            for name, dev in self.__dict__.get('devices', {}).items():
+                if hasattr(dev, 'let_go'):
+                    try:
+                        dev.let_go()
+                        done.append(name)
+                    except Exception as exc:             # serial errors too: closing anyway
+                        print(f'  WARNING: {name} did not let go: {exc}')
+        finally:
+            self.board.poll_hook = hook
+        return done
+
     def close(self):
+        """Let go of everything, then close the port. Even with --latch (which leaves the
+        board running), nothing is left holding."""
+        if self.board.ser.is_open:
+            self.let_go()
         self.board.close()
 
     def __enter__(self):
@@ -180,6 +205,7 @@ class Session:
         self.tc = tc
         self.watcher_factory = watcher
         self._watcher = None
+        self._running = []      # [name, step, steps] of each sequence running, outermost first
 
     def dev(self, module):
         """The connected device for `module`."""
@@ -263,10 +289,12 @@ class Session:
 
 #  =====   sequences   =====
 def validate_steps(seq, cfg):
-    """Every problem with a sequence's steps, as strings. Empty means it can run.
+    """Every problem with a sequence's own steps, as strings. Empty means they are all valid
+    (whether the sequences it nests can run is check_nesting's job, once all are validated).
 
     A module's own sequence may only use that module's commands (and general ones such as
-    wait); anything spanning modules belongs in the main config."""
+    wait), and only nest that module's sequences; anything spanning modules belongs in the
+    main config, which may nest any sequence."""
     errors = []
     for i, step in enumerate(seq.steps, 1):
         words = step.split()
@@ -279,34 +307,123 @@ def validate_steps(seq, cfg):
             if seq.source != MAIN and cmd.module not in (seq.source, 'general'):
                 raise ToolChangerError(f'{cmd.name} is a {cmd.module} command; a sequence using '
                                        f'more than one module belongs in the main config')
-            parse_args(cmd, words[1:], cfg)
+            if cmd.name == 'sequence':
+                _check_nested(seq, words[1:], cfg)
+            else:
+                parse_args(cmd, words[1:], cfg)
         except ToolChangerError as exc:
             errors.append(f'step {i} ({step!r}): {exc}')
     return errors
 
 
+def _check_nested(seq, args, cfg):
+    """A `sequence NAME` step: NAME exists, and is in reach of `seq`. Not whether NAME can run
+    -- that depends on sequences not validated yet, and check_nesting settles it after."""
+    if len(args) != 1:
+        raise ToolChangerError('usage: sequence NAME')
+    inner = cfg.sequences.get(args[0])
+    if inner is None:
+        raise ToolChangerError(f'no sequence called {args[0]!r}')
+    if seq.source != MAIN and inner.source != seq.source:
+        raise ToolChangerError(f'{inner.name} is a {inner.source} sequence; a sequence using more '
+                               f'than one module belongs in the main config')
+
+
+def nested_names(seq):
+    """The sequences `seq` runs as steps, in order: [(step number, name)]."""
+    return [(i, words[1]) for i, words in enumerate((s.split() for s in seq.steps), 1)
+            if len(words) == 2 and words[0] == 'sequence']
+
+
+def check_nesting(cfg):
+    """After every sequence's own steps are validated: refuse loops (a sequence that ends up
+    running itself would never finish), and mark a sequence that nests one that cannot run as
+    unable to run too -- so `help` says so, and nothing starts only to fail halfway."""
+    calls = {name: [n for _, n in nested_names(q) if n in cfg.sequences]
+             for name, q in cfg.sequences.items() if not q.errors}
+    looped = set()
+    state = {}                                  # name -> 'open' while on the path, then 'done'
+
+    def visit(name, path):
+        state[name] = 'open'
+        for nxt in calls.get(name, []):
+            if state.get(nxt) == 'open':
+                loop = path[path.index(nxt):] + [nxt]
+                for member in loop[:-1]:
+                    if member not in looped:
+                        looped.add(member)
+                        cfg.sequences[member].errors.append(
+                            f'it runs itself: {" -> ".join(loop)}')
+            elif nxt not in state:
+                visit(nxt, path + [nxt])
+        state[name] = 'done'
+
+    for name in calls:
+        if name not in state:
+            visit(name, [name])
+
+    changed = True
+    while changed:                              # broken-ness climbs to whatever nests it
+        changed = False
+        for name, q in cfg.sequences.items():
+            if q.errors:
+                continue
+            for i, inner in nested_names(q):
+                if cfg.sequences[inner].errors:
+                    q.errors.append(f'step {i} (sequence {inner}): {inner} cannot run '
+                                    f'(`sequence {inner}` says why)')
+                    changed = True
+                    break
+
+
+#  A sequence's failure or q, already given its place in the nesting and acted on (devices
+#  stopped), so the sequences around it pass it up unchanged.
+class SequenceAborted(ToolChangerError):
+    pass
+
+
+class SequenceInterrupted(Interrupted):
+    pass
+
+
 def run_sequence(s, name):
-    """Run every step of sequence `name` in order; stop everything if any of it fails."""
+    """Run every step of sequence `name` in order; stop everything if any of it fails.
+
+    A step may be `sequence OTHER`: it runs here, in full, as one step. The progress lines show
+    the path -- [outer 2/3 > inner 1/2] -- and a failure or q deep inside stops the devices
+    once and ends every sequence around it, saying where it happened."""
     seq = s.cfg.sequences[name]
     if seq.errors:
         raise ToolChangerError(f'sequence {name} cannot run ({seq.path}):\n'
                                + '\n'.join(f'    {e}' for e in seq.errors))
-    print(f'sequence {name}: {len(seq.steps)} steps'
-          + (f' -- {seq.description}' if seq.description else ''))
-    for i, step in enumerate(seq.steps, 1):
-        where = f'step {i}/{len(seq.steps)} ({step})'
-        print(f'[{name} {i}/{len(seq.steps)}] {step}')
-        try:
-            ok, why = s.execute(step.split()), 'it reported a failure'
-        except Interrupted as exc:
-            raise Interrupted(f'sequence {name}: {exc} (at {where})')
-        except ToolChangerError as exc:
-            ok, why = False, str(exc)
-        if not ok:
-            stopped = s.safe_stop()
-            raise ToolChangerError(f'sequence {name} aborted at {where}: {why}.'
-                                   + (f' Stopped: {", ".join(stopped)}.' if stopped else ''))
-    print(f'sequence {name}: done')
+    if any(level[0] == name for level in s._running):     # check_nesting refuses loops
+        raise ToolChangerError(f'sequence {name} is already running (it nests itself)')
+    level = [name, 0, len(seq.steps)]
+    s._running.append(level)
+    indent = '  ' * (len(s._running) - 1)
+    try:
+        print(f'{indent}sequence {name}: {len(seq.steps)} steps'
+              + (f' -- {seq.description}' if seq.description else ''))
+        for i, step in enumerate(seq.steps, 1):
+            level[1] = i
+            path = ' > '.join(f'{n} {k}/{m}' for n, k, m in s._running)
+            outer = s._running[0][0]
+            print(f'{indent}[{path}] {step}')
+            try:
+                ok, why = s.execute(step.split()), 'it reported a failure'
+            except (SequenceAborted, SequenceInterrupted):
+                raise                       # a nested sequence's: reported and stopped already
+            except Interrupted as exc:
+                raise SequenceInterrupted(f'sequence {outer}: {exc} (at {path}: {step})')
+            except ToolChangerError as exc:
+                ok, why = False, str(exc)
+            if not ok:
+                stopped = s.safe_stop()
+                raise SequenceAborted(f'sequence {outer} aborted at {path} ({step}): {why}.'
+                                      + (f' Stopped: {", ".join(stopped)}.' if stopped else ''))
+        print(f'{indent}sequence {name}: done')
+    finally:
+        s._running.pop()
 
 
 #  =====   help   =====

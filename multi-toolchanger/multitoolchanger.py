@@ -84,17 +84,31 @@ def _enable_readline(cfg):
         readline.parse_and_bind('tab: complete')
 
 
+def prompt_name(session):
+    """What the prompt shows, first that applies: the couplers.yaml name it was opened by
+    (--port cleat), the name it was flashed with (build_flash.sh --name), or `mtc` with its
+    modules -- `mtc(coupler,screwdrive)` -- so two unnamed boards still differ."""
+    if session.tc.board.name:
+        return session.tc.board.name
+    if session.tc.board_name:
+        return session.tc.board_name
+    return f"mtc({','.join(m for m in session.cfg.modules if m != 'general')})"
+
+
 def repl(session):
     """The interactive prompt. Runs commands through the same Session as the CLI."""
     _enable_readline(session.cfg)
     board = session.tc.board
-    print(f"Connected to {board.name or board.port} -- "
+    where = board.name or board.port
+    if session.tc.board_name and session.tc.board_name != board.name:
+        where = f'{session.tc.board_name} on {where}'
+    print(f"Connected to {where} -- "
           f"{', '.join(m for m in session.cfg.modules if m != 'general') or 'no modules'} "
           f"({'detected on the board' if session.tc.source == 'detected' else 'from the config'})."
           f" `help` lists commands; Tab completes; `quit` or Ctrl-D leaves.")
     while True:
         try:
-            line = input(f'{board.name or "multitoolchanger"}> ').strip()
+            line = input(f'{prompt_name(session)}> ').strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return
@@ -109,8 +123,9 @@ def repl(session):
         except ToolChangerError as exc:          # includes Interrupted: report, carry on
             print(f"  {exc}")
         except KeyboardInterrupt:
-            print('\n  Ctrl-C -- stopping')
+            print('\n  Ctrl-C -- stopping and letting go')
             session.safe_stop()
+            session.tc.let_go()                  # unlike q: nothing is left holding
 
 
 def main():

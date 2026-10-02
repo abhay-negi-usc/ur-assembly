@@ -13,7 +13,7 @@ CORE=$A/hardware/avr/1.8.6/cores/arduino
 VAR=$A/hardware/avr/1.8.6/variants/standard
 SERVO=~/.arduino15/libraries/Servo/src
 SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-PORT=${PORT:-/dev/ttyACM1}
+PORT=${PORT:-/dev/ttyACM2}
 B=$(mktemp -d)
 trap 'rm -rf "$B"' EXIT
 

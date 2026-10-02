@@ -301,6 +301,18 @@ class _ObjectCalibration:
 
     # ---- collect -----------------------------------------------------------------------------
     def collect(self):
+        # The image index is written however the collection ends -- a run that stopped because
+        # nothing was detected is the one whose pictures most need explaining.
+        try:
+            return self._collect()
+        finally:
+            self.images.finish(
+                [f'object {self.name}, markers {sorted(self.sizes)}',
+                 f'{len(self.scans)} of {self.repeats} mate scan(s) fused something']
+                + ['mate %d: fused marker(s) %s' % (k + 1, sorted(scan))
+                   for k, scan in enumerate(self.scans)])
+
+    def _collect(self):
         for k in range(self.repeats):
             log.info('---- MATE %d of %d ----', k + 1, self.repeats)
             if not self._to_view(k):
@@ -409,6 +421,8 @@ class _ObjectCalibration:
             self.robot, self.camera, self.detector, self.plan, seen,
             T_overview=self.T_overview,
             on_view=lambda mid, j, f, p: self.images.servo_view(mid, k * 100 + j, f, p),
+            on_iteration=lambda mid, it, f, p: self.images.servo_iteration_view(
+                mid, k * 100 + it, f, p),
             corner_log=None)
         mloc.merge_refined(seen, refined)
         if not refined:

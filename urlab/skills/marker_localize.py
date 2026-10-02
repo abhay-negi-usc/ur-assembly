@@ -24,7 +24,9 @@ only up to the nearest 90 deg about the view axis: pose estimation is invariant 
 rotation, so the closest quarter turn is commanded and the wrist never winds further for
 nothing. Servoing to one marker takes the others out
 of frame by design: the routine returns to the OVERVIEW pose (where the sweep started, all
-markers in frame) between markers to reset the view.
+markers in frame) between markers to reset the view. An optional `servo.view_offset` replaces
+the canonical vantage with a camera pose in the marker's frame: xyz alone moves only the
+position and holds the overview orientation; xyz + rpy sets the whole pose.
 
 CERTAINTY-WEIGHTED FUSION. Every view is stored with its camera-to-marker distance and fused
 with weight d^-view_weight_power (closer views are more accurate: PnP translation error grows
@@ -89,6 +91,78 @@ class ServoPlan:
         self.ang_tol_deg = float(b.get('ang_tol_deg', 0.5))
         self.ring_mm = float(b.get('ring_mm', 25.0))
         self.ring_views = max(0, int(b.get('ring_views', 4)))
+        # ONE VIEW PER MARKER: move to the centred, square-on vantage of the sweep's estimate,
+        # re-centre on the close detection while the marker is more than pos_tol_mm off the
+        # optical axis (up to max_iterations moves), and keep only the final capture -- no
+        # parallax ring (overrides ring_views).
+        self.single_view = bool(b.get('single_view', False))
+        # OPTIONAL VIEW OFFSET -- the camera's pose in the MARKER's own frame (x, y in its plane,
+        # +z out of its face), replacing the centred, square-on vantage at distance_m. xyz alone
+        # servos the POSITION only: the camera keeps the orientation it had at the overview.
+        # xyz + rpy sets the whole pose, exactly as given (no quarter-turn snapping).
+        self.view_xyz, self.view_rpy = _view_offset(b.get('view_offset'))
+        if self.view_xyz is not None:
+            if 'distance_m' in b or 'distance_mm' in b:
+                log.info('marker_views.servo: view_offset is set, so distance_mm is not used -- '
+                         'the servo range is |xyz| = %.0f mm.',
+                         np.linalg.norm(self.view_xyz) * 1000.0)
+            self.distance_m = float(np.linalg.norm(self.view_xyz))
+
+    def vantage(self, T_base_marker, roll, R_hold):
+        """The camera pose the servo drives to for one marker.
+
+        No view_offset: on the marker's normal at distance_m, square-on, spun `roll` about the
+        view axis. xyz only: at that point in the marker frame, with orientation R_hold (the
+        camera's attitude at the overview) kept as is. xyz + rpy: exactly that pose in the
+        marker frame."""
+        if self.view_xyz is None:
+            return camera_on_marker(T_base_marker, self.distance_m, [np.pi, 0.0, roll])
+        if self.view_rpy is not None:
+            return T_base_marker @ xyzrpy_to_matrix(self.view_xyz, self.view_rpy)
+        T = np.eye(4)
+        T[:3, :3] = R_hold
+        T[:3, 3] = T_base_marker[:3, :3] @ self.view_xyz + T_base_marker[:3, 3]
+        return T
+
+    def where(self):
+        """The vantage in words, for ViewPlan.describe."""
+        if self.view_xyz is None:
+            return 'centred, square-on at %.0f mm' % (self.distance_m * 1000.0)
+        xyz = ', '.join('%.0f' % (v * 1000.0) for v in self.view_xyz)
+        if self.view_rpy is None:
+            return 'at [%s] mm in the marker frame, overview orientation held' % xyz
+        return 'at [%s] mm, [%s] deg in the marker frame' % (
+            xyz, ', '.join('%.1f' % np.degrees(v) for v in self.view_rpy))
+
+
+def _view_offset(block):
+    """`servo.view_offset` -> (xyz m, rpy rad or None), or (None, None) when unset."""
+    from ..config import _pose_si
+
+    if block is None:
+        return None, None
+    d = dict(block)
+    unknown = set(d) - {'xyz', 'rpy', 'xyz_mm', 'rpy_deg'}
+    if unknown:
+        raise ValueError(f'marker_views.servo.view_offset has unknown key(s) {sorted(unknown)}')
+    p = _pose_si(d)
+    if p.get('xyz') is None:
+        raise ValueError('marker_views.servo.view_offset needs xyz_mm (rpy_deg is optional)')
+    xyz = np.asarray(p['xyz'], dtype=float)
+    if xyz.shape != (3,) or xyz[2] <= 0.0:
+        raise ValueError(f'marker_views.servo.view_offset.xyz must be 3 values with +z > 0 (the '
+                         f'camera in front of the marker face), got {xyz.tolist()} m')
+    rpy = p.get('rpy')
+    if rpy is None:
+        return xyz, None
+    rpy = np.asarray(rpy, dtype=float)
+    if rpy.shape != (3,):
+        raise ValueError('marker_views.servo.view_offset.rpy must be 3 values')
+    if inverse(xyzrpy_to_matrix(xyz, rpy))[2, 3] <= 0.0:
+        raise ValueError('marker_views.servo.view_offset: with that rpy the marker is BEHIND the '
+                         'camera -- rpy is the camera optical frame (z forward) in the marker '
+                         'frame; [180, 0, 0] deg looks straight back down the normal')
+    return xyz, rpy
 
 
 class ViewPlan:
@@ -171,9 +245,11 @@ class ViewPlan:
                 % (len(self.offsets), '' if len(self.offsets) == 1 else 's',
                    self.frames_per_view, '' if self.frames_per_view == 1 else 's',
                    'aimed at the markers' if self.aim_at_markers else 'orientation held'))
-        if self.servo.enabled:
-            base += (', then servo-refined per marker at %.0f mm (+%d-view ring)'
-                     % (self.servo.distance_m * 1000.0, self.servo.ring_views))
+        if self.servo.enabled and self.servo.single_view:
+            base += ', then one servo view per marker, %s' % self.servo.where()
+        elif self.servo.enabled:
+            base += (', then servo-refined per marker, %s (+%d-view ring)'
+                     % (self.servo.where(), self.servo.ring_views))
         if self.joint_pnp:
             base += ', joint-PnP estimate'
         if self.max_camera_distance_m is not None:
@@ -213,9 +289,9 @@ def sweep(robot, camera, detector, plan, wanted=None, on_view=None, corner_log=N
     """Drive the configured views and detect at each.
     Returns {marker_id: [(T_base_marker, camera_distance_m), ...]}.
 
-    `on_view(index, frame, poses_in_camera)` is called once per view that captured anything --
-    the calibration app uses it to save an annotated image, which is the only artefact that
-    shows WHY a marker was missed rather than that it was.
+    `on_view(index, frame, poses_in_camera)` is called once per view that was captured, whether
+    or not anything was detected in it -- the calibration app uses it to save an annotated image,
+    which is the only artefact that shows WHY a marker was missed rather than that it was.
 
     The camera pose is sampled AT CAPTURE (see perception/camera.Frame), so a detection can
     never be credited to the wrong viewpoint -- which is what makes fusing across a moving
@@ -341,7 +417,7 @@ def _reach_vantage(robot, T_cam, T_overview, label, via_overview_ok):
 
 
 def servo_refine(robot, camera, detector, plan, seen, T_overview=None, on_view=None,
-                 corner_log=None):
+                 corner_log=None, on_iteration=None):
     """Per-marker VISUAL SERVOING refinement (ViewPlan.servo). One marker at a time:
 
         servo onto the marker's normal at distance_m (re-detect + re-centre until two
@@ -363,10 +439,13 @@ def servo_refine(robot, camera, detector, plan, seen, T_overview=None, on_view=N
     closeness weighting makes them dominate; replacing outright would let a small ring fall
     under min_views and silently discard the marker). A marker that will not detect from its
     vantage is left out and its sweep views stand alone.
-    `on_view(marker_id, stop_index, frame, poses_in_camera)` is called per capture."""
+    `on_view(marker_id, stop_index, frame, poses_in_camera)` is called per refinement capture,
+    and `on_iteration(marker_id, iteration, frame, poses_in_camera)` per re-centring capture --
+    INCLUDING the one that lost the marker, which is the picture that says why."""
     sv = plan.servo
     if T_overview is None:
         T_overview = robot.camera()
+    R_hold = T_overview[:3, :3].copy()    # the orientation a position-only view_offset keeps
     refined = {}
     for order, (mid, obs) in enumerate(sorted(seen.items())):
         T_est = average_pose([T for T, _d in obs])[0]
@@ -375,12 +454,24 @@ def servo_refine(robot, camera, detector, plan, seen, T_overview=None, on_view=N
         # views stay mutually consistent and the wrist never unwinds mid-marker. Coming
         # straight from the previous vantage rather than from the overview, "current" is now
         # the pose next door, so the choice also minimises the wrist travel between markers.
-        roll = _quarter_roll(T_est, sv.distance_m, robot.camera())
+        # (Only the square-on default has a roll to choose; a view_offset fixes it.)
+        roll = (_quarter_roll(T_est, sv.distance_m, robot.camera())
+                if sv.view_xyz is None else 0.0)
+
+        if sv.single_view:
+            view = _single_servo_view(robot, camera, detector, plan, mid, T_est, roll, R_hold,
+                                      T_overview, order > 0, on_view, corner_log, on_iteration)
+            if view is not None:
+                refined[mid] = [view]
+                log.info('  marker %d: REFINED -- one square-on servo view at %.0f mm joins its '
+                         '%d sweep view%s.', mid, view[1] * 1000.0, len(obs),
+                         '' if len(obs) == 1 else 's')
+            continue
 
         # ---- servo: centre + square + fix the distance until the detection stops moving ----
         detected = False
         for it in range(1, sv.max_iterations + 1):
-            T_cam = camera_on_marker(T_est, sv.distance_m, [np.pi, 0.0, roll])
+            T_cam = sv.vantage(T_est, roll, R_hold)
             # Only the FIRST move of each marker is a long hop worth a recovery detour, and
             # only when there is a previous vantage to have come from. The later iterations
             # are small corrections already at the vantage, where a trip via the overview
@@ -394,7 +485,10 @@ def servo_refine(robot, camera, detector, plan, seen, T_overview=None, on_view=N
                 break
             if plan.settle_s > 0:
                 time.sleep(plan.settle_s)
-            T_obs = _capture_stop(camera, detector, plan.frames_per_view)[0].get(int(mid))
+            poses, _corners, frame = _capture_stop(camera, detector, plan.frames_per_view)
+            if on_iteration is not None and frame is not None:
+                on_iteration(mid, it, frame, detector.detect(frame))
+            T_obs = poses.get(int(mid))
             if T_obs is None:
                 log.warning('  marker %d: not detected from the servo vantage -- keeping the '
                             'sweep views.', mid)
@@ -415,14 +509,20 @@ def servo_refine(robot, camera, detector, plan, seen, T_overview=None, on_view=N
 
         # ---- refinement views: the vantage + an aimed ring around it. The centred vantage
         # kills the lateral perspective bias; the ring restores the parallax that
-        # disambiguates the planar-pose tilt a centred view alone cannot. ----
-        vantage = camera_on_marker(T_est, sv.distance_m, [np.pi, 0.0, roll])
+        # disambiguates the planar-pose tilt a centred view alone cannot. A view_offset owns
+        # the orientation, so its ring only TRANSLATES. ----
+        vantage = sv.vantage(T_est, roll, R_hold)
         stops = [vantage]
         for j in range(sv.ring_views):
             a = 2.0 * np.pi * j / sv.ring_views
             p = vantage[:3, 3] + vantage[:3, :3] @ np.array(
                 [sv.ring_mm / 1000.0 * np.cos(a), sv.ring_mm / 1000.0 * np.sin(a), 0.0])
-            stops.append(look_at(p, T_est[:3, 3], vantage))
+            if sv.view_xyz is None:
+                stops.append(look_at(p, T_est[:3, 3], vantage))
+            else:
+                T_stop = vantage.copy()
+                T_stop[:3, 3] = p
+                stops.append(T_stop)
         views = []
         for j, T_stop in enumerate(stops):
             if j > 0:                   # already AT the vantage from the servo loop
@@ -450,6 +550,83 @@ def servo_refine(robot, camera, detector, plan, seen, T_overview=None, on_view=N
     # Leave the arm at the overview, ready for whatever comes next.
     robot.arm.move_frame_to(T_overview, robot.T_tool0_cam, 'overview (refinement done)')
     return refined
+
+
+def _off_vantage_mm(T_base_marker, frame, robot, T_vantage):
+    """How far the marker centre sits, across the image plane, from where it would sit seen
+    from T_vantage (the vantage solved from this same detection) -- the lateral part of the
+    camera-frame difference, in mm. For the square-on default the marker sits on the optical
+    axis there, so this is its distance off the axis (0 = on the principal point)."""
+    T = getattr(frame, 'T_base_cam', None)
+    p_now = (inverse(T if T is not None else robot.camera()) @ T_base_marker)[:3, 3]
+    p_want = (inverse(T_vantage) @ T_base_marker)[:3, 3]
+    return float(np.hypot(*(p_now - p_want)[:2])) * 1000.0
+
+
+def _single_servo_view(robot, camera, detector, plan, mid, T_est, roll, R_hold, T_overview,
+                       via_overview_ok, on_view, corner_log, on_iteration=None):
+    """servo.single_view: ONE view per marker, captured CENTRED and square-on.
+
+    WHY IT CANNOT BE ONE OPEN-LOOP MOVE. The first vantage comes from the sweep's estimate, and
+    that is only as good as the far, re-aimed sweep views -- which have been seen to disagree
+    with each other by tens of mm on a marker that never moved. At the servo standoff that puts
+    the marker well off the optical axis, or out of frame altogether. So the move is closed on
+    what the camera sees from up close: while the marker centre sits more than pos_tol_mm off
+    the axis (off where the view_offset puts it, when one is set), the vantage is re-solved from THAT detection and the camera hops again, up to
+    max_iterations moves in all. The close detection sets the correction relative to where the
+    camera actually is, so it converges even when the sweep's base-frame estimate was poor. A
+    good sweep estimate still costs exactly one move.
+
+    Only the LAST capture is kept -- one view per marker, as before (no ring); the superseded
+    ones go to on_iteration so the images still show how far off each attempt was.
+    (T_base_marker, distance_m), or None when the first move or its detection failed -- the
+    marker then keeps its sweep views alone."""
+    sv = plan.servo
+    kept, kept_it, off_mm = None, 0, None
+    for it in range(1, sv.max_iterations + 1):
+        T_cam = sv.vantage(T_est, roll, R_hold)
+        label = (f'servo marker {mid} (single view)' if it == 1
+                 else f'servo marker {mid} (single view, re-centre {it - 1})')
+        # Only the first hop is long enough to be worth the overview detour; a re-centring
+        # correction is a short move from right beside the vantage.
+        if not _reach_vantage(robot, T_cam, T_overview, label,
+                              via_overview_ok=via_overview_ok and it == 1):
+            log.warning('  marker %d: servo move did not finish -- keeping %s.', mid,
+                        'the previous servo view' if kept else 'the sweep views')
+            break
+        if plan.settle_s > 0:
+            time.sleep(plan.settle_s)
+        poses, corners, frame = _capture_stop(camera, detector, plan.frames_per_view)
+        T_obs = poses.get(int(mid))
+        if T_obs is None:
+            if on_iteration is not None and frame is not None:
+                on_iteration(mid, it, frame, detector.detect(frame))
+            log.warning('  marker %d: not detected from the servo view -- keeping %s.', mid,
+                        'the previous servo view' if kept else 'the sweep views')
+            break
+        if kept is not None and on_iteration is not None:
+            on_iteration(mid, kept_it, kept[2], detector.detect(kept[2]))
+        kept, kept_it = (T_obs, corners, frame), it
+        off_mm = _off_vantage_mm(T_obs, frame, robot, sv.vantage(T_obs, roll, R_hold))
+        if off_mm <= sv.pos_tol_mm:
+            break
+        if it < sv.max_iterations:
+            log.info('  marker %d: %.1f mm off its vantage -- re-centring on the close '
+                     'detection.', mid, off_mm)
+        T_est = T_obs
+    else:
+        log.warning('  marker %d: still %.1f mm off its vantage after %d moves -- keeping '
+                    'the last view anyway.', mid, off_mm, sv.max_iterations)
+    if kept is None:
+        return None
+    T_obs, corners, frame = kept
+    if on_view is not None and frame is not None:
+        on_view(mid, 0, frame, detector.detect(frame))
+    _log_corner_view(corner_log, corners, frame, robot)
+    log.info('  marker %d: servo view %.1f mm off its vantage after %d move%s.', mid,
+             _off_vantage_mm(T_obs, frame, robot, sv.vantage(T_obs, roll, R_hold)), kept_it,
+             '' if kept_it == 1 else 's')
+    return T_obs, float(np.linalg.norm(T_obs[:3, 3] - _cam_position(frame, robot)))
 
 
 # =================================================================================================
@@ -554,6 +731,12 @@ class MarkerImageWriter:
         kind = 'vantage' if j == 0 else 'ring %d' % j
         self._write('servo_m%02d_%02d.jpg' % (int(mid), j), 'servo', j, frame, poses,
                     'SERVO marker %d -- %s -- %d marker(s)' % (int(mid), kind, len(poses)))
+
+    def servo_iteration_view(self, mid, it, frame, poses):
+        """on_iteration for servo_refine(): the re-centring captures, hit or miss."""
+        hit = 'detected' if int(mid) in poses else 'NOT DETECTED'
+        self._write('servo_m%02d_it%02d.jpg' % (int(mid), it), 'servo_iter', it, frame, poses,
+                    'SERVO marker %d -- iteration %d -- %s' % (int(mid), it, hit))
 
     def finish(self, summary=()):
         """Write index.csv (+ summary.txt when the caller has final estimates) and report
@@ -916,7 +1099,18 @@ def locate(robot, camera, detector, rig, plan, wanted=None, on_view=None,
         merge_refined(seen, servo_refine(robot, camera, detector, plan, seen,
                                          T_overview=T_overview, on_view=on_servo_view,
                                          corner_log=corner_views))
-    T_vote, _votes = vote_target(rig, fuse_markers(seen, plan), plan)
+    return estimate_target(rig, fuse_markers(seen, plan), corner_views, plan)
+
+
+def estimate_target(rig, fused, corner_views, plan):
+    """locate()'s estimate from what a sweep already gathered: the per-marker vote as the
+    consistency GATE, then the joint-PnP solve over every view's corners as the answer.
+
+    Split out so a caller that swept for SEVERAL rigs at once (apps/marker_assembly_calibration
+    sees the fixed and the held object in the same views) can run the same estimate per rig.
+    Pass only this rig's markers in `fused` -- any other is logged as a stray before being
+    ignored; joint PnP skips corners the rig does not declare on its own."""
+    T_vote, _votes = vote_target(rig, fused, plan)
     if T_vote is None:
         return None                       # the gate refused -- nothing overrides that
     if not getattr(plan, 'joint_pnp', True) or not corner_views:

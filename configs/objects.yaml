@@ -34,7 +34,7 @@
 # the marker.
 # ============================================================================
 
-# Last written 2026-09-27.
+# Last written 2026-10-01.
 
 objects:
   ORU:
@@ -189,16 +189,10 @@ objects:
         xyz_mm:  [-1069.05, +366.99, +321.91]
         rpy_deg: [-179.72, -0.88, +43.27]
         approach_path:
-        #   - name: 'above deck'
-        #     xyz_mm:  [450.0, +0.0, +225.0]
-        #   - name: 'past cleat bracket'
-        #     xyz_mm:  [-50.0, +0.0, +225.0]
-        #   - name: 'axially aligned standoff'
-        #     xyz_mm:  [-50.0, +0.0, +0.0]
           - name: 'above deck'
-            xyz_mm:  [+550.0, -300.0, 0.0]
+            xyz_mm:  [+550.0, -300.0, +0.0]
           - name: 'past cleat bracket side'
-            xyz_mm:  [-50.0, -300.0, 0.0]
+            xyz_mm:  [-50.0, -300.0, +0.0]
           - name: 'axially aligned standoff'
             xyz_mm:  [-50.0, +0.0, +0.0]
         approaches: 3
@@ -207,3 +201,90 @@ objects:
         measured: 2026-09-27
     mates: 1
     measured: 2026-09-27
+  tile_1:
+    markers:
+      3:
+        size_mm: 45.25
+        xyz_mm:  [-56.65, +119.14, -2.93]
+        rpy_deg: [+176.54, +4.11, +32.75]
+        mates: 1
+        residual_mm: 0.00
+        residual_deg: 0.00
+        residual_axis_deg: 0.00
+      4:
+        size_mm: 45.25
+        xyz_mm:  [-67.16, +118.76, +2.46]
+        rpy_deg: [-177.01, -0.68, +153.53]
+        mates: 1
+        residual_mm: 0.00
+        residual_deg: 0.00
+        residual_axis_deg: 0.00
+      5:
+        size_mm: 45.25
+        xyz_mm:  [-52.69, +120.54, +2.15]
+        rpy_deg: [-176.63, -1.06, -85.83]
+        mates: 1
+        residual_mm: 0.00
+        residual_deg: 0.00
+        residual_axis_deg: 0.00
+    held_mass_kg: 0.797
+    mates: 1
+    measured: 2026-10-01
+  tile_2:
+    markers:
+      6:
+        size_mm: 45.25
+        xyz_mm:  [-54.22, +120.28, +13.56]
+        rpy_deg: [-176.79, +1.37, +30.53]
+        mates: 1
+        residual_mm: 0.00
+        residual_deg: 0.00
+        residual_axis_deg: 0.00
+      7:
+        size_mm: 45.25
+        xyz_mm:  [-65.79, +115.17, +13.69]
+        rpy_deg: [+179.40, -3.03, +152.41]
+        mates: 1
+        residual_mm: 0.00
+        residual_deg: 0.00
+        residual_axis_deg: 0.00
+      8:
+        size_mm: 45.25
+        xyz_mm:  [-51.35, +123.24, +9.66]
+        rpy_deg: [+179.77, +0.53, -87.62]
+        mates: 1
+        residual_mm: 0.00
+        residual_deg: 0.00
+        residual_axis_deg: 0.00
+    held_mass_kg: 0.797
+    mates: 1
+    measured: 2026-10-01
+  tile_3:
+    markers:
+      9:
+        size_mm: 45.25
+        xyz_mm:  [-54.06, +121.17, +12.84]
+        rpy_deg: [-178.59, +1.44, +29.14]
+        mates: 1
+        residual_mm: 0.00
+        residual_deg: 0.00
+        residual_axis_deg: 0.00
+      10:
+        size_mm: 45.25
+        xyz_mm:  [-66.10, +117.89, +13.04]
+        rpy_deg: [+178.81, -1.30, +150.52]
+        mates: 1
+        residual_mm: 0.00
+        residual_deg: 0.00
+        residual_axis_deg: 0.00
+      11:
+        size_mm: 45.25
+        xyz_mm:  [-47.77, +124.39, +10.40]
+        rpy_deg: [+178.97, +0.30, -89.69]
+        mates: 1
+        residual_mm: 0.00
+        residual_deg: 0.00
+        residual_axis_deg: 0.00
+    held_mass_kg: 0.797
+    mates: 1
+    measured: 2026-10-01

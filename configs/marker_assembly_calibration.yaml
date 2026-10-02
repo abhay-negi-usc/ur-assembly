@@ -1,0 +1,92 @@
+# MARKER ASSEMBLY CALIBRATION -- measure where a held object sits on a fixed one, by sight, and
+# write it into configs/marker_assemblies.yaml. See urlab/apps/marker_assembly_calibration.py.
+#
+#   python -m urlab.apps.marker_assembly_calibration --set marker_assembly=tile_on_plate
+#
+# ASSEMBLE THE TWO OBJECTS BY HAND FIRST. Nothing is held: the robot only carries the camera,
+# which sweeps both objects' markers in the same views.
+
+robot_config: robot.yaml            # the machine (see configs/robot.yaml)
+camera_config: camera.yaml          # the sensor  (see configs/camera.yaml)
+
+# ---- What is being calibrated ----
+# The key written into marker_assemblies.yaml, and what coupler_marker_assemble is run with.
+# No default: a run that guessed would overwrite somebody else's assembly.
+marker_assembly: central_fixture_tile_1_v2
+
+# The object that gets PICKED and assembled -- an objects.yaml entry. Its markers find it, and
+# its calibrated grasp offsets turn them into its mating frame. Re-run object_calibration first
+# if its markers have moved: an error there is baked into this measurement.
+held_object: tile_1
+
+# THE FIXED OBJECT'S MARKERS, as `id: printed size in mm` (the BLACK SQUARE, edge to edge).
+# Several is better than one: at run time each votes for the goal and a knocked one is outvoted.
+# Their ids must not repeat any of the held object's.
+fixed_markers:
+  # 42: 40.0
+  41: 40.0
+  46: 40.0
+  # 45: 40.0
+
+aruco:
+  dictionary: DICT_4X4_50
+
+# ---- How many captures ----
+# Each capture returns to the view pose and sweeps again; between captures you are asked to
+# RE-SEAT the held object, so the spread is how repeatably the assembly seats plus marker noise.
+# One capture has zero residual by construction.
+captures: 1
+
+# ---- Where to begin ----
+# A joint pose moved to ONCE at the start, before anything else -- e.g. a known place near the
+# scene to hand-guide from. null = begin wherever the arm is.
+# start_joints_deg: null
+start_joints_deg: [-127, -95, -107, -164, -124, -2]   # shoulder_pan .. wrist_3
+
+# ---- Where to look from ----
+# null = hand-guide the camera until BOTH objects' markers are in view on the first capture; the
+# pose is remembered and returned to. With record_view_joints, that pose is written with the
+# entry and coupler_marker_assemble looks at the fixed object from the same place.
+view_joints_deg: null
+record_view_joints: true
+
+marker_views:
+  settle_s: 0.4
+  frames_per_view: 3
+  min_views: 1
+  max_camera_distance_mm: 500.0
+  multiview_refine: true
+  joint_pnp: true                 # the held object's markers solved as one rigid body
+  save_images: true
+  servo:
+    enabled: false
+    distance_mm: 300.0            # camera-to-marker standoff for the close look
+    max_iterations: 4
+    pos_tol_mm: 0.5
+    ang_tol_deg: 0.5
+    ring_mm: 25.0
+    ring_views: 4
+    single_view: true             # one centred, square-on view per marker
+    # OPTIONAL VIEW OFFSET -- where the camera sits in each MARKER's own frame (x, y in the
+    # marker plane, +z out of its face), replacing the square-on vantage at distance_mm (which
+    # is then unused). xyz_mm alone servos the POSITION only: the camera keeps the orientation
+    # it had at the view pose. Add rpy_deg -- the camera optical frame (z forward) in the marker
+    # frame; [180, 0, 0] looks straight back down the normal -- to set the orientation too.
+    # null = the centred, square-on default.
+    view_offset: 
+    view_offset: {xyz_mm: [0.0, -200.0, 300.0]}
+    # view_offset: {xyz_mm: [0.0, -60.0, 280.0]}
+    # view_offset: {xyz_mm: [0.0, -60.0, 280.0], rpy_deg: [168.0, 0.0, 0.0]}
+  max_disagreement_mm: 10.0        # the held object's markers must agree on its mating frame
+  max_disagreement_deg: 10.0
+  ransac: true
+
+# ---- Gates ----
+# Spread across captures, per fixed marker. null = printed, not enforced. The honest limit is
+# what the insertion can absorb (chamfer, compliance), which this run cannot know.
+max_residual_mm: null
+max_residual_deg: null
+
+write_catalogue: true             # false = write only the run directory, leave the catalogue
+
+debug: false

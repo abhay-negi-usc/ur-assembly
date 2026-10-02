@@ -193,12 +193,13 @@ class Robot:
             T = self.pose(reference) @ T
         return T @ inverse(self._tool_offset(frame))
 
-    def move_joints(self, q, label='move joints', guard=None):
-        """Joint move, optionally with the force guard armed as a canceller."""
+    def move_joints(self, q, label='move joints', guard=None, caps=None):
+        """Joint move, optionally with the force guard armed as a canceller. `caps` replaces the
+        speed limits for this one move (see URArm._limits)."""
         if guard is None:
-            return self.arm.move_j(list(q), label=label)
+            return self.arm.move_j(list(q), label=label, caps=caps)
         from .guard import guarded_move
-        return guarded_move(self, guard, lambda: self.arm.move_j(list(q), label=label))
+        return guarded_move(self, guard, lambda: self.arm.move_j(list(q), label=label, caps=caps))
 
     def move_cartesian(self, target, frame=None, reference=None, interpolation='ptp',
                       label='move', seed=None, guard=None):

@@ -18,7 +18,7 @@ camera_config: camera.yaml          # the sensor  (see configs/camera.yaml)
 
 # Which catalogued object to pick. No default: a run that guessed would drive at whatever
 # happened to be first in the file.
-object_name: mini_ORU
+object_name: tile_3
 
 aruco:
   dictionary: DICT_4X4_50
@@ -37,7 +37,7 @@ aruco:
 # Which one is meant can never be inferred from the numbers, so it is named rather than guessed.
 place:
   relative_to: base
-  xyz_mm: [100.0, 0.0, 0.0]
+  xyz_mm: [50.0, 0.0, 0.0]
   rpy_deg: [0.0, 0.0, 0.0]
 
 # ---- THE FOUR MOTION LEGS ----
@@ -69,7 +69,7 @@ motion:
     axis: [0.0, 0.0, -1.0]
     frame: coupler
   final_retract:                  # back off after demating
-    distance_mm: 100.0
+    distance_mm: 400.0
     axis: [0.0, 0.0, -1.0]
     frame: coupler
 
@@ -99,7 +99,7 @@ compliance:
   # once the object is genuinely hanging free, right after the lift.
   tare_before: true
   mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
-  stiffness:     [1000.0, 1000.0, 1000.0, 5.0, 5.0, 5.0]
+  stiffness:     [2000.0, 2000.0, 2000.0, 15.0, 15.0, 15.0]
   damping_ratio: [1.6, 1.6, 1.6, 1.6, 1.6, 1.6]
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0
@@ -135,7 +135,7 @@ compliance_loaded:
   enabled: true
   tare_before: true
   mass:          [20.0, 20.0, 20.0, 1.5, 1.5, 1.5]
-  stiffness:     [1000.0, 1000.0, 1000.0, 8.0, 8.0, 8.0]
+  stiffness:     [2000.0, 2000.0, 2000.0, 15.0, 15.0, 15.0]
   damping_ratio: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0
@@ -175,8 +175,8 @@ compliant_rot_speed_deg_s: 15.0
 # stops rather than lifting air.
 mate_preload:
   enabled: true
-  force_n: 1.0                    # the contact force the push stops at
-  max_travel_mm: 8.0              # reference travel past the target before giving up
+  force_n: 3.0                    # the contact force the push stops at
+  max_travel_mm: 15.0              # reference travel past the target before giving up
   step_mm: 0.5                    # advance this far, then re-read the force
   settle_s: 0.2                   # let each step settle before believing the reading
   # THE FORCE MUST HOLD, not just be touched. After a reference step the compliant law rings:
@@ -214,7 +214,7 @@ mate_preload:
 # tells you what fraction you are getting either way.
 place_preload:
   enabled: true
-  force_n: 3.0                    # touchdown detection; see the note above before trusting it
+  force_n: 5.0                    # touchdown detection; see the note above before trusting it
   max_travel_mm: 8.0              # reference travel past the target before giving up
   step_mm: 0.5
   settle_s: 0.2
@@ -263,15 +263,35 @@ marker_views:
   settle_s: 0.4
   frames_per_view: 3
   min_views: 1                    # views per MARKER before it is allowed to vote
-  # The camera never plans a view further out than this. Raise it if the markers are spread far
-  # enough apart that they cannot all be in one frame from here -- a view beyond the cap is
-  # pulled IN along its ray, which on a large object can crop the outer markers out of shot.
-  max_camera_distance_mm: 400.0
+  # ---- THE SWEEP ----
+  # Starts from wherever the camera is when the run begins -- the markers must already be in view
+  # there -- and visits each of `offsets` in turn. Each offset is a camera move RELATIVE TO THAT
+  # START POSE, in the camera's OPTICAL frame: x right, y down, z forward along the view ray. So a
+  # NEGATIVE z backs the camera away from the object and widens what is in frame.
+  #
+  # aim_at_markers re-points every later view at the centroid of the markers found so far, so a
+  # wide ring still looks at the object instead of past it. That is why the step-back view comes
+  # SECOND: once it has seen every marker, the ring that follows aims at the centre of all of
+  # them, not of whichever happened to be in the first frame.
+  aim_at_markers: true
+  offsets:
+    - {xyz_mm: [0.0, 0.0, 0.0]}           # the start pose itself
+    - {xyz_mm: [0.0, 0.0, -125.0]}        # step BACK -- the widest view, to catch every marker
+    - {xyz_mm: [100.0, 0.0, 0.0]}          # a ring of camera TRANSLATIONS around the start (the
+    - {xyz_mm: [0.0, 100.0, 0.0]}          # direction PnP is weakest in), each re-aimed at the
+    - {xyz_mm: [-100.0, 0.0, 0.0]}         # markers. Wider = more parallax; the built-in
+    - {xyz_mm: [0.0, -100.0, 0.0]}         # default is 40 mm.
+  # THE STANDOFF CAP does TWO things: (1) once the markers are located, a view planned further
+  # than this from them is PULLED IN along its ray -- which on a spread-out object crops the
+  # outer markers out of shot; and (2) a detection made from further than this is DROPPED from
+  # the fusion. So it must sit beyond the sweep's own range (start distance + the step back), or
+  # the sweep is thrown away and only the close servo views are left to vote.
+  max_camera_distance_mm: 500.0
   # Solves every view's corners of ALL markers as ONE rigid body. This is where several markers
   # really pay: a wide baseline across the object constrains the pose far better than any single
   # marker's four corners can.
   joint_pnp: true
-  save_images: false              # a production pick, not a calibration -- do not fill the disk
+  save_images: true               # true -> annotated views + index.csv in data/experiments/<app>_<stamp>/marker_images/ (--set marker_views.save_images=true)
   # ---- THE CLOSE LOOK ----
   # After the sweep, visit each marker in turn and servo the camera onto its face at
   # `distance_mm`, then pool those views with the sweep's.
@@ -298,7 +318,12 @@ marker_views:
     pos_tol_mm: 0.5               # ... to within this
     ang_tol_deg: 0.5
     ring_mm: 25.0                 # a small parallax ring around the vantage, aimed at the marker
-    ring_views: 1                 # 0 = the centred vantage only
+    ring_views: 0                 # 0 = the centred vantage only
+    # ONE centred, square-on view per marker: move to the vantage of the sweep's estimate, then
+    # re-centre on the close detection while the marker is more than pos_tol_mm off the optical
+    # axis (up to max_iterations moves); only the final capture is kept, no ring (overrides
+    # ring_views).
+    single_view: true
 
   # ---- HOW MANY MARKERS MUST VOTE ----
   # 1 keeps single-marker objects working, and all of the catalogue is single-marker today. The
@@ -325,8 +350,16 @@ marker_views:
   #
   # The honest number is the coupler's CAPTURE RANGE -- an error the mechanism can absorb does
   # not need refusing. Re-set both from it once it is measured.
-  max_disagreement_mm: 3.0
-  max_disagreement_deg: 3.0
+  #
+  # RAISED FROM 3 mm / 3 deg FOR THE TILES. Their markers sit ~130 mm from the grasp point, so
+  # each marker's ORIENTATION error reaches its vote multiplied by that lever arm -- 1 deg is
+  # 2.3 mm -- and 45 mm markers seen from ~550 mm were measured disagreeing by up to 5.5 mm /
+  # 4.2 deg pairwise without having moved. The price: a knock smaller than this gets through.
+  #3.
+  # THESE ALSO SET THE RANSAC INLIER BAND below (ransac_inlier_mm / ransac_inlier_deg default to
+  # them), and THAT one is tested PAIRWISE -- marker against marker, not against the mean.
+  max_disagreement_mm: 15.0
+  max_disagreement_deg: 15.0
 
   # ---- OUTVOTING A BAD MARKER ----
   # With THREE or more, the majority can reject the odd one out and the run carries on instead of
@@ -366,7 +399,7 @@ toolchanger:
   # and nothing happens. The wire command is a TOGGLE, so the driver here drives it to a state
   # rather than pulsing it. false leaves the relay alone, for a mechanism wired without it.
   motor: true
-  # BYPASS THE PROXIMITY SENSOR. false = the board checks every hold and release against the
+  # BYPASS THE PROXIMITY SENSOR. false = the board checks every hold a mm of travel. Either nothing is being touched (the located pose is off, or the object moved), or the compliance is soft enough that this much reference travel cannd release against the
   # probe, and a disagreement stops the run. true = it confirms whatever it is told.
   #
   # THIS IS FOR WHEN THE PROBE ITSELF IS THE BROKEN THING -- disconnected or shorted, it reads a

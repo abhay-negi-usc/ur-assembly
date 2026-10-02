@@ -35,5 +35,5 @@ tip_frame: tool0                 # the pendant all-zeros TCP; NOT `flange` (that
 speed:
   max_joint_velocity_deg_s: 30.0
   max_joint_acceleration_deg_s2: 30.0
-  max_cartesian_translation_mm_s: 25.0
+  max_cartesian_translation_mm_s: 100.0
   max_cartesian_rotation_deg_s: 30.0

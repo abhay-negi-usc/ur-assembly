@@ -57,6 +57,11 @@ OBJECTS_FILE = 'objects.yaml'
 OBJECT_META_KEYS = {'mates', 'views', 'approaches', 'residual_mm', 'residual_deg',
                     'residual_axis_deg', 'measured', 'note'}
 
+# Marker-relative assemblies: the HELD object's assembled pose in the FIXED object's markers.
+MARKER_ASSEMBLIES_FILE = 'marker_assemblies.yaml'
+MARKER_ASSEMBLY_META_KEYS = {'captures', 'views', 'residual_mm', 'residual_deg', 'measured',
+                             'note'}
+
 # frames.yaml name -> the legacy per-config section that still feeds the Robot facade.
 # NOTE 'camera' is deliberately absent: the hand-eye calibration has no per-config section any
 # more (see hand_eye()), so there is no second value for check_drift to disagree with.
@@ -430,6 +435,101 @@ def load_objects(cfg=None, path=None):
         objects[name] = {'markers': markers, 'held_mass_kg': mass, 'assemblies': assemblies,
                          'meta': meta}
     return objects
+
+
+def marker_assemblies_path(cfg=None):
+    """The marker-assembly catalogue: a config's `marker_assemblies_file` (resolved beside that
+    config) when set, else the shared configs/marker_assemblies.yaml."""
+    if cfg is not None and cfg.get('marker_assemblies_file'):
+        return resolve(cfg, cfg['marker_assemblies_file'])
+    return os.path.join(CONFIG_DIR, MARKER_ASSEMBLIES_FILE)
+
+
+def _sized_marker(raw_id, m_entry, where, meta_keys):
+    """(id, size_m, 4x4 pose, meta) for one catalogued marker -- the shared marker rules: an
+    integer id, exactly one positive size, a validated pose, and provenance carried through."""
+    try:
+        mid = int(raw_id)
+    except (TypeError, ValueError):
+        raise ValueError(f'{where} has non-integer marker id {raw_id!r}') from None
+    m = dict(m_entry or {})
+    m_where = f'{where} marker {mid}'
+    sizes = MARKER_SIZE_KEYS & set(m)
+    if not sizes:
+        raise ValueError(f'{m_where} has no size_mm -- solvePnP scales the marker\'s distance '
+                         'linearly with the side length, so an undeclared size is a silent '
+                         'depth error, not a missing default')
+    if len(sizes) > 1:
+        raise ValueError(f'{m_where} sets both size_mm and size_m; use one unit')
+    size_m = float(m.pop('size_m')) if 'size_m' in m else float(m.pop('size_mm')) / 1000.0
+    if not size_m > 0.0:
+        raise ValueError(f'{m_where} has a non-positive size')
+    meta = {k: m.pop(k) for k in list(m) if k in meta_keys}
+    return mid, size_m, _pose(m, m_where), meta
+
+
+def load_marker_assemblies(cfg=None, path=None):
+    """{name: assembly} -- where a HELD object goes, relative to the markers on a FIXED one.
+
+    Each fixed marker stores the held object's MATING FRAME at its assembled position, in that
+    marker's own frame (marker <- held mating frame). The held mating frame is what the coupler
+    seats into, so once the object is picked it IS `coupler_mate`, and at run time
+
+        T_base_coupler_goal = T_base_fixed_marker @ T_marker_goal
+
+    -- one multiply per fixed marker, every one an independent vote, exactly like a marker rig.
+    The held object's own markers do not appear: they find the object for the pick, and the
+    coupler closes the rest of the chain mechanically.
+
+    Shape (urlab.apps.marker_assembly_calibration writes it):
+
+        marker_assemblies:
+          tile_on_plate:
+            held_object: tile_1           # an objects.yaml entry -- what gets picked
+            dictionary: DICT_4X4_50       # optional; absent = the app's aruco.dictionary
+            view_joints_deg: [...]        # optional; where the fixed markers are seen from
+            markers:                      # the FIXED object's markers
+              10:
+                size_mm: 45.25
+                xyz_mm:  [...]            # the held mating frame, assembled, in marker 10
+                rpy_deg: [...]
+
+    Returns {name: {'held_object': str, 'dictionary': str|None, 'view_joints': (6,) rad|None,
+                    'markers': {id: {'size_m', 'T_marker_goal', 'meta'}}, 'meta': {...}}}.
+    An absent file is an empty catalogue; anything malformed in a present one is an error."""
+    p = path or marker_assemblies_path(cfg)
+    if not os.path.isfile(p):
+        return {}
+    out = {}
+    for name, entry in (_read(p).get('marker_assemblies') or {}).items():
+        e = dict(entry or {})
+        where = f'{p}: marker assembly {name!r}'
+        held = e.pop('held_object', None)
+        if not held:
+            raise ValueError(f'{where} has no held_object -- the objects.yaml entry that is '
+                             'picked and assembled')
+        dictionary = e.pop('dictionary', None)
+        q = e.pop('view_joints_deg', None)
+        if q is not None:
+            q = np.asarray(q, dtype=float)
+            if q.shape != (6,):
+                raise ValueError(f'{where}.view_joints_deg must be six angles, got {q.tolist()}')
+            q = np.radians(q)
+        raw_markers = e.pop('markers', None)
+        if not raw_markers:
+            raise ValueError(f'{where} declares no markers: -- the fixed object is found by '
+                             'sight, so it needs at least one')
+        markers = {}
+        for raw_id, m_entry in raw_markers.items():
+            mid, size_m, T, meta = _sized_marker(raw_id, m_entry, where,
+                                                 MARKER_ASSEMBLY_META_KEYS)
+            markers[mid] = {'size_m': size_m, 'T_marker_goal': T, 'meta': meta}
+        meta = {k: e.pop(k) for k in list(e) if k in MARKER_ASSEMBLY_META_KEYS}
+        if e:
+            raise ValueError(f'{where} has unknown key(s) {sorted(e)}')
+        out[str(name)] = {'held_object': str(held), 'dictionary': dictionary,
+                          'view_joints': q, 'markers': markers, 'meta': meta}
+    return out
 
 
 def check_drift(frames, cfg, tol_mm=0.5, tol_deg=0.2):

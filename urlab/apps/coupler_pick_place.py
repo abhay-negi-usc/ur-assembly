@@ -70,7 +70,7 @@ import numpy as np
 from .. import behaviors as bt
 from .. import log as urlog
 from .. import tool_frames
-from ..apps._common import ask, prompts_off, seg_time
+from ..apps._common import ask, experiment_dir, prompts_off, seg_time
 from ..robot.admittance import AdmittanceController
 from ..robot.coupler import Coupler
 from ..robot.guard import ForceGuard
@@ -423,6 +423,7 @@ class CouplerCycle:
     TARGET_STANDOFF = 'place_standoff'
     TARGET_PRELOAD = 'place_preload'
     TARGET_WORD = 'place'
+    RUN_NAME = 'coupler_pick_place'   # names the data/experiments/ folder when saving images
     # WHETHER THE DESTINATION HOLDS ON TO THE OBJECT. A bench does not: the object is set down,
     # the coupler lets go, and gravity does the rest. A fixture with its own clamp does, and then
     # the handover has an ORDER that must not be got wrong -- the destination takes hold BEFORE
@@ -458,9 +459,7 @@ class CouplerCycle:
         # around it only have to clear the part. Tying them together would make either the mate
         # cramped or the cycle slow.
         motion = cfg.section('motion')
-        self.legs = {name: parse_offset(motion.get(name), f'motion.{name}',
-                                        DEFAULT_LEG_MM.get(name, 100.0))
-                     for name in self.LEGS}
+        self.legs = {name: self._parse_leg(name, motion.get(name)) for name in self.LEGS}
         self.preload_mate = parse_preload(cfg.section('mate_preload'), 'mate_preload')
         self.preload_place = parse_preload(cfg.section(self.TARGET_PRELOAD),
                                            self.TARGET_PRELOAD)
@@ -473,17 +472,52 @@ class CouplerCycle:
         self.settle_s = float(cfg.get('settle_s', 0.3))
         self.T_pick = None
         self.T_place = None
+        # OFF BY DEFAULT (`marker_views.save_images`): a production pick, not a calibration, so
+        # the disk is not filled unless asked. On, every view the pick was located from is
+        # written annotated, with an index.csv, so a bad pick can be traced to its picture.
+        self.out_dir = self.images = None
+        if bool(cfg.get_path('marker_views.save_images', False)):
+            self.out_dir = experiment_dir(cfg, self.RUN_NAME)
+            self.images = mloc.MarkerImageWriter(self.out_dir, detector)
+            log.info('Saving the localization images under %s', self.out_dir)
+
+    def _parse_leg(self, name, block):
+        """One `motion:` leg, parsed. A hook: apps/coupler_marker_assemble also accepts its
+        destination legs written in the fixed object's marker frame."""
+        return parse_offset(block, f'motion.{name}', DEFAULT_LEG_MM.get(name, 100.0))
+
+    def preamble(self, confirm):
+        """Steps to run BEFORE the object is located -- none for a pick-and-place. A hook:
+        apps/coupler_marker_assemble localizes the fixed object here, while the arm is empty."""
+        return []
+
+    def steps_after_lift(self, confirm):
+        """Steps with the object lifted clear, before the tare and the carry -- none here. A
+        hook: apps/coupler_marker_assemble predrives a fastening screw here."""
+        return []
+
+    def steps_after_insertion(self, confirm):
+        """Steps once the object is inserted and preloaded, before any clamp or release -- none
+        here. A hook: apps/coupler_marker_assemble drives the fastening screw home here."""
+        return []
 
     # ---- locate ------------------------------------------------------------------------------
     def locate(self):
         """Where the coupler has to end up, straight out of the catalogue and the camera."""
         if self.plan.servo.enabled:
-            log.info('Locating %r: sweep, then a close servo onto each of %d marker%s at '
-                     '%.0f mm.', self.name, len(self.obj['markers']),
-                     '' if len(self.obj['markers']) == 1 else 's',
+            log.info('Locating %r: sweep, then %s onto each of %d marker%s at %.0f mm.',
+                     self.name,
+                     'ONE square-on view' if self.plan.servo.single_view else 'a close servo',
+                     len(self.obj['markers']), '' if len(self.obj['markers']) == 1 else 's',
                      self.plan.servo.distance_m * 1000.0)
+        imgs = self.images
         T = mloc.locate(self.robot, self.camera, self.detector, object_rig(
-            self.obj, self.cfg.get_path('aruco.dictionary')), self.plan)
+            self.obj, self.cfg.get_path('aruco.dictionary')), self.plan,
+            on_view=imgs.sweep_view if imgs else None,
+            on_servo_view=imgs.servo_view if imgs else None)
+        if imgs:
+            imgs.finish([f'object {self.name}',
+                         'PICK ' + (fmt_pose(T) if T is not None else 'not located')])
         if T is None:
             log.error('Could not locate %r -- marker(s) %s were not seen well enough, or '
                       'disagreed past the gate, to place the coupler. Nothing has moved.',
@@ -1073,7 +1107,7 @@ def build_and_run(cfg, robot, camera, args, cycle=None):
     # THE DESTINATION'S OWN CLAMP IS SPLICED IN, not always present. A cycle whose destination
     # is a bench has nothing to open and nothing to hand over to, and a no-op step that still
     # asks for a confirmation is exactly the noise that trains people to hit Enter unread.
-    steps = [
+    steps = list(job.preamble(step)) + [
         bt.Action('locate the object', job.locate, confirm=step),
         bt.Action('power and open the coupler', job.prepare_coupler, confirm=step)]
     if job.secures_target:
@@ -1086,11 +1120,14 @@ def build_and_run(cfg, robot, camera, args, cycle=None):
         bt.Action('mate with the coupling feature', job.descend_and_mate, confirm=step),
         bt.Action('lock the coupler', job.lock, confirm=step),
         bt.Action('take the payload', job.take_payload),
-        bt.Action('retract with the object', job.lift, confirm=step),
+        bt.Action('retract with the object', job.lift, confirm=step)]
+    steps += list(job.steps_after_lift(step))
+    steps += [
         bt.Action('tare with the object clear', job.settle_after_lift),
         bt.Action(f'carry to the {job.TARGET_WORD} standoff', job.carry,
                   confirm=step),
         bt.Action(f'{job.TARGET_WORD} the object', job.set_down, confirm=step)]
+    steps += list(job.steps_after_insertion(step))
     # BEFORE the release, never after: between the destination taking hold and the coupler
     # letting go the object is held twice, which is harmless. The other order holds it none.
     if job.secures_target:

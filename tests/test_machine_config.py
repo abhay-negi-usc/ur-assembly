@@ -28,7 +28,7 @@ CONFIG_DIR = os.path.join(os.path.dirname(__file__), '..', 'configs')
 # `robot_config:` line in one is inert. objects.yaml is MACHINE-WRITTEN besides, so it could not
 # carry one even if it wanted to.
 NOT_DEMO_CONFIGS = {'robot.yaml', 'camera.yaml', 'frames.yaml', 'cables.yaml',
-                    'objects.yaml', 'couplers.yaml'}
+                    'objects.yaml', 'couplers.yaml', 'marker_assemblies.yaml'}
 
 
 def test_every_config_declares_its_machine():

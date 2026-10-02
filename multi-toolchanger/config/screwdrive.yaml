@@ -48,7 +48,7 @@ sequences:
       - ramp -100 0 2
 
   screwdrive_attach:
-    description: Assuming a fully backed out position, drive the coupling screw of a hex panel into another panel until bottomed out
+    description: Assuming a fully backed in position, drive the coupling screw of a hex panel into another panel until bottomed out
     steps:
       - ramp 0 100 1
       - run 100 18
@@ -62,3 +62,21 @@ sequences:
       - run -100 18
       - wait 1
       - run -15 20
+
+  screwdrive_predrive: 
+    description: Assuming a fully backed in position, drive the coupling screw about 80% out such that there is bolt sticking out for tile alignment 
+    steps: 
+      - ramp 0 100 1
+      - run 100 8 
+
+  screwdrive_predrive_to_bolt: 
+    description: Assuming a predriven bolt (see above), drive the coupling screw at low speed until fully bolted 
+    steps: 
+      - run 20 60
+
+  screwdrive_undo_predrive: 
+    description: Assuming a fully backed in position, drive the coupling screw about 80% out such that there is bolt sticking out for tile alignment 
+    steps: 
+      - run -100 4
+      - run -50 4 
+      - run -20 20 

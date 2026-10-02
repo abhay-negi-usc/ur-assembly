@@ -119,6 +119,7 @@ class AssembleCycle(CouplerCycle):
     TARGET_STANDOFF = 'assembly_standoff'
     TARGET_PRELOAD = 'assembly_preload'
     TARGET_WORD = 'assemble'
+    RUN_NAME = 'coupler_pick_assemble'
     PREPARE_TARGET_LABEL = 'power and OPEN the cleat coupler'
     SECURE_LABEL = 'CLAMP the cleat onto the assembled object'
 
@@ -132,7 +133,10 @@ class AssembleCycle(CouplerCycle):
         # The tool's attitude at the destination. Known here because a taught assembly pose
         # carries it, and the shared startup check needs it to read a base-frame insertion axis
         # against tool-frame stiffnesses. See insertion_axis_is_stiff.
-        self.target_rotation = np.asarray(self.entry['T_base_assembly'], dtype=float)[:3, :3]
+        # None when the destination is only known once the camera has looked (a marker-relative
+        # assembly, apps/coupler_marker_assemble).
+        T_asm = self.entry.get('T_base_assembly')
+        self.target_rotation = None if T_asm is None else np.asarray(T_asm, dtype=float)[:3, :3]
         derived = standoff_from_path(self.approach_path)
         if derived is not None:
             self.legs[self.TARGET_STANDOFF] = derived

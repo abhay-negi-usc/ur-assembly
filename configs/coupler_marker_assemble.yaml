@@ -1,25 +1,193 @@
-# COUPLER PICK AND ASSEMBLE -- find a catalogued object, pick it, drive it into its assembly.
-# See urlab/apps/coupler_pick_assemble.py.
+# COUPLER MARKER ASSEMBLE -- locate a FIXED object by its markers, pick a catalogued object, and
+# assemble it onto the fixed one. See urlab/apps/coupler_marker_assemble.py.
 #
-#   python -m urlab.apps.coupler_pick_assemble --set object_name=ORU_v7 \
-#                                              --set assembly_name=rack_slot_1
+#   python -m urlab.apps.coupler_marker_assemble --set marker_assembly=tile_on_plate
 #
-# THE ONLY REAL DIFFERENCE FROM coupler_pick_place IS WHERE THE OBJECT ENDS UP. Placing puts it
-# somewhere relative to where it was FOUND, so that config carries a `place:` delta. An assembly
-# is an ABSOLUTE pose -- the fixture does not move with the part -- so there is no delta here at
-# all: the target is taught once by urlab.apps.coupler_assembly_calibration and read out of
-# configs/objects.yaml under the object's `assemblies:`.
+# THE SAME CYCLE AS coupler_pick_assemble, except where the object ends up: not a taught base_link
+# pose but one measured every run from the fixed object's markers, through the calibration in
+# configs/marker_assemblies.yaml (urlab.apps.marker_assembly_calibration writes it). The fixed
+# object can move between runs and the assembly follows it.
 #
-# WHICH ASSEMBLY. It names an entry under the object's `assemblies:` in configs/objects.yaml,
-# and that entry carries BOTH the taught pose and the approach path into it.
-assembly_name: cleat
+# Everything below `motion:` -- compliance, preloads, guard, the coupler boards -- is the same
+# tuning as coupler_pick_assemble.yaml and means the same thing.
+
+# WHICH ASSEMBLY -- an entry in configs/marker_assemblies.yaml. No default.
+marker_assembly: central_fixture_tile_1_v2
 
 robot_config: robot.yaml            # the machine (see configs/robot.yaml)
 camera_config: camera.yaml          # the sensor  (see configs/camera.yaml)
 
-# Which catalogued object to pick. No default: a run that guessed would drive at whatever
-# happened to be first in the file.
-object_name: mini_ORU
+# Which catalogued object to pick. null = the assembly's `held_object`, which is what it was
+# calibrated with; naming a different one is refused.
+object_name: tile_1
+
+# ---- Where to look from ----
+# THE FIXED OBJECT IS SEEN FIRST, WITH THE ARM EMPTY. Once the held object is on the coupler it
+# occludes the camera, so the order is fixed:
+#
+#   1. drive to fixed_view_joints_deg, locate the fixed object from its markers
+#   2. drive to pick_view_joints_deg, locate the held object, mate, lock, lift
+#   3. carry to the assembly standoff and insert -- the camera is not needed again
+#
+#   fixed_view_joints_deg  where the fixed object's markers are in view. null = the joints the
+#                          calibration saw them from (written with the assembly); set it to
+#                          override that, e.g. if the calibration view is now blocked.
+#   pick_view_joints_deg   where the held object's markers are in view. null = go back to
+#                          wherever the run was started.
+#
+# Read the values off urlab.apps.monitor (`joints (deg): [...]`) with the arm hand-guided to each
+# view. With both set, the run can be started from any pose that can joint-move to them. If
+# there is no fixed view at all, both objects are located from the start pose.
+fixed_view_joints_deg: [-127, -95, -107, -164, -124, -2]
+pick_view_joints_deg: [11, -80, -98, -268, -91, -76]
+
+# ---- The way in, with the object in hand ----
+# assembly_joints_deg  a joint pose to go to after the pick, BEFORE the approach -- e.g. to swing
+#                      round to the fixed object's side. null = go straight to the approach.
+# approach_path        waypoints visited in order, each an OFFSET FROM THE FINAL ASSEMBLY POSE IN
+#                      ITS COUPLER FRAME (xyz_mm, optional rpy_deg about the waypoint's own axes).
+#                      So [0, 0, -250] is 250 mm back along the assembled object's mating axis;
+#                      the whole path travels with the fixed object.
+#
+# THE LAST WAYPOINT IS THE INSERTION STANDOFF: the compliant insertion runs from it straight to
+# the goal, and motion.assembly_standoff below is derived from it (and ignored) whenever a path is
+# given. It must therefore have no rpy_deg. Moves between waypoints are IK + joint moves, so the
+# path between two waypoints is not a straight line -- add waypoints where clearance matters.
+# confirm_approach_steps  pause before EVERY move above (the assembly joints and each waypoint):
+#                         the current and next step are printed and nothing moves until Enter
+#                         (q stops the run where it is, object still held). Off in a dry run and
+#                         under --no-prompts.
+confirm_approach_steps: true
+# approach_speed_scale    the approach_path waypoint moves run at this fraction of the global speed
+#                         limits (configs/robot.yaml: 30 deg/s joints, 25 mm/s Cartesian), so
+#                         0.25 = a quarter speed. The assembly joints and transitions run at the
+#                         normal speed; the previous scale is restored after the path.
+approach_speed_scale: 0.25
+assembly_joints_deg: [-128, -91, -97, -182, -125, -93]
+approach_path: 
+  - name: 'behind fixture approach'
+    xyz_mm: [-200.0, 0.0, -100.0]
+  - name: 'approach'
+    xyz_mm: [-100.0, 0.0, 0.0]
+  - name: 'pre_contact'           # LAST: the compliant insertion runs from here to the goal
+    xyz_mm: [-10.0, 0.0, 0.0]
+
+# ---- Offsetting the target ----
+# An optional correction to where the held object is assembled, applied to the goal the fixed
+# object's markers give: T_goal = T_located @ offset. In the GOAL'S OWN COUPLER FRAME -- the
+# assembled held object's mating frame, which is attached to the fixed object -- so the offset
+# travels with the fixed object wherever it is found. rpy_deg turns about the offset point's own
+# axes. The approach path, insertion, fastening and retract all follow the offset goal.
+# Zeros (or removing the block) = exactly as calibrated.
+goal_offset:
+  xyz_mm: [0.0, 0.0, -10.0]
+  rpy_deg: [0.0, 0.0, 0.0]
+
+# ---- How fast the named joint moves run ----
+# The moves to fixed_view_joints_deg, pick_view_joints_deg, assembly_joints_deg and through
+# transition_joints_deg use THESE limits instead of configs/robot.yaml's speed: block. Same keys.
+#
+# WHY THEY WERE SLOW: a joint move honours every cap, and robot.yaml's Cartesian ones are
+# converted into a joint-speed limit -- so on a big swing, where the tool travels half a metre,
+# its 25 mm/s TCP cap binds long before the 30 deg/s joint cap (500 mm = 20 s). Each move logs
+# which cap bound it: `moveJ ... (..., cartesian-translation cap)`.
+#
+# Everything else -- the approach path, the mate, the insertion -- keeps robot.yaml's limits.
+# The controller accepts at most 180 deg/s per joint; anything above is clamped. Remove the
+# block to go back to the global limits.
+joint_move_speed:
+  max_joint_velocity_deg_s: 60.0
+  max_joint_acceleration_deg_s2: 60.0
+  max_cartesian_translation_mm_s: 250.0
+  max_cartesian_rotation_deg_s: 60.0
+
+# ---- Transitions between the joint poses ----
+# Intermediate joint poses for the moves BETWEEN fixed_view_joints_deg, pick_view_joints_deg and
+# assembly_joints_deg -- e.g. to swing round an obstacle instead of taking the joint-space
+# straight line. Keyed <from>_to_<to> over: start (wherever the run began), fixed_view,
+# pick_view, assembly. Each is a list of six-angle poses (degrees), visited in order.
+#
+# The run moves start -> fixed_view -> pick_view (-> start when pick_view is null), then, with
+# the object in hand, pick_view -> assembly. Only those transitions are used; a key the run never
+# makes is warned about at startup. The pick_view_to_assembly ones pause with
+# confirm_approach_steps like the rest of the approach.
+transition_joints_deg: 
+# transition_joints_deg:
+  fixed_view_to_pick_view:
+    - [-58, -64, -113, -214, -69, -124]
+  pick_view_to_assembly:
+    - [-58, -64, -113, -214, -69, -124]
+
+# ---- Fastening (the screwdriver on the multi-toolchanger board) ----
+# When enabled:
+#   * after the pick, with the object lifted clear:  predrive_sequence (the bolt ~80% out, so it
+#     sticks out for alignment)
+#   * after the insertion has preloaded, BEFORE any release:  fasten_sequence (home at low speed)
+#   * then the coupler releases and the end effector retracts by `retract` below
+# Sequences are names from multi-toolchanger/config/screwdrive.yaml, checked at startup.
+#
+# compliant: true holds the insertion compliance law while the screw turns, so the arm yields as
+# the screw draws the parts together, and a force-guard trip stops the screwdriver. false holds
+# the arm rigid -- any gap left after the insertion then becomes force on the arm.
+fastening:
+  enabled: true
+  port: dc_motor                  # the multi-toolchanger board, by its configs/couplers.yaml name
+  baud: 115200
+  settle_s: 3.0
+  timeout_s: 5.0
+  predrive_sequence: screwdrive_predrive
+  fasten_sequence: screwdrive_predrive_to_bolt
+  compliant: true
+  # standard           predrive after the pick; compliant insertion; fasten_sequence; release.
+  # bolt_localization  (testing) attach after the pick; at the end of the approach path, press
+  #                    and SEARCH for the hole with the bolt, then detach + attach there under
+  #                    the same compliance -- see bolt_localization: below. Replaces the
+  #                    insertion and fasten_sequence; release and retract follow as usual.
+  mode: standard
+  # AFTER FASTENING the coupler releases and the end effector backs off by this leg, which
+  # REPLACES motion.final_retract when fastening is on: 200 mm along its own -z, the way it came
+  # in. Same keys as a motion leg (frame coupler | base | fixed_marker).
+  retract:
+    distance_mm: 200.0
+    axis: [0.0, 0.0, -1.0]
+    frame: coupler
+
+# ---- Bolt localization (fastening.mode: bolt_localization) ----
+# After the pick: attach_sequence (the bolt FULLY out). At the end of the approach path, under
+# bolt_localization_compliance:
+#   1. PRESS along drop_axis (the bolt's direction, in the coupler frame) in press_step_mm steps
+#      until press_force_n is felt -- the bolt tip resting on the fixed object.
+#   2. SEARCH: oscillate along search_axis (tool x) as a sine at frequency_hz, its amplitude
+#      starting at amplitude_start_mm and growing amplitude_growth_mm per cycle up to
+#      amplitude_max_mm, until the tool ADVANCES along drop_axis by drop_mm -- the bolt falling
+#      into the hole. Gives up after max_time_s.
+#   3. Hold that pose under the same law while the screwdriver runs detach_sequence then
+#      attach_sequence.
+# The drop is the press spring letting go, so it can be at most press_force_n / stiffness along
+# drop_axis (5 N / 2000 N/m = 2.5 mm): keep drop_mm below that. Every press step and search cycle
+# is written to bolt_localization.csv in the run's data/experiments/ folder.
+bolt_localization:
+  attach_sequence: screwdrive_attach
+  detach_sequence: screwdrive_detach
+  drop_axis: [0.0, 0.0, 1.0]
+  press_force_n: 5.0
+  press_step_mm: 0.5
+  press_max_mm: 30.0
+  settle_s: 0.2
+  search_axis: [1.0, 0.0, 0.0]
+  frequency_hz: 0.2
+  amplitude_start_mm: 0.5
+  amplitude_growth_mm: 0.5
+  amplitude_max_mm: 10.0
+  max_time_s: 120.0
+  drop_mm: 1.0
+  save_trace: true
+
+# The fixed object's localization uses marker_views: below unless this block is given, in which
+# case it replaces it whole (e.g. a wider sweep for a fixed object with markers far apart).
+# fixed_marker_views:
+#   settle_s: 0.4
+#   ...
 
 aruco:
   dictionary: DICT_4X4_50
@@ -43,33 +211,33 @@ aruco:
 #          base_link instead, for when "straight up" is meant literally.
 motion:
   mate_standoff:                  # where the compliant mate begins, off the pick pose
-    distance_mm: 100.0
+    distance_mm: 200.0
     axis: [0.0, 0.0, -1.0]
     frame: coupler
   pick_retract:                   # lift the grasped object clear
     distance_mm: 100.0
     axis: [0.0, 0.0, -1.0]
     frame: coupler
-  # DERIVED, NOT READ, whenever the assembly has an `approach_path` in configs/objects.yaml.
-  # The last waypoint of that path is where the compliant insertion begins, and so is this -- one
-  # fact written down twice. Because the standoff also fixes the insertion AXIS (it is this leg
-  # reversed; see mating_direction), two settings that disagreed would have the arm thread its
-  # taught path, hop somewhere else entirely, and then press home along a line it never
-  # approached on. The app logs which one it used.
+  # THE INSERTION. The object is carried to this standoff off the goal, then driven home under
+  # admittance along the same line reversed -- so `axis` points from the goal BACK OUT to where
+  # the insertion starts.
   #
-  # For mini_ORU / cleat the path ends 50 mm out along base +x, so the insertion is 50 mm along
-  # base -x: the part is carried in hanging from the coupler and slid SIDEWAYS into the cleat.
-  # The value below is the fallback for an assembly with no path -- a straight-down insertion.
-  assembly_standoff:              # where the compliant insertion begins, off the assembly
+  #   frame: coupler        the axis in the coupler frame AT THE GOAL (= the held object's
+  #                         mating frame, assembled). [0, 0, -1] is back out along its mating
+  #                         axis.
+  #   frame: fixed_marker   the axis in one FIXED marker's own frame; `marker: <id>` picks which
+  #                         (default the lowest id). [0, 0, 1] = insertion straight down onto
+  #                         that marker's face, coming in along its normal.
+  #   frame: base           base_link axes -- only sensible if the fixed object never tilts.
+  #
+  # Both coupler and fixed_marker frames are attached to the fixed object, so the insertion
+  # follows it wherever the camera finds it.
+  assembly_standoff:              # where the compliant insertion begins, off the goal
     distance_mm: 100.0
-    axis: [0.0, 0.0, -1.0]
+    axis: [-1.0, 0.0, 0.0]
     frame: coupler
-  # BACK OFF ALONG THE PICK AXIS, which is what [0, 0, -1] in the coupler frame means: straight
-  # back out the way the coupler came down onto the object, away from the mating feature and the
-  # marker. For mini_ORU at the cleat the taught attitude has the coupler's +z pointing at base
-  # -z to within 0.9 deg, so this retreat is base +Z to the same accuracy -- straight up, off the
-  # top of a part the cleat is now holding. Read in the COUPLER frame and not in base on purpose:
-  # it stays the pick axis if the assembly is ever re-taught at a different attitude.
+  # BACK OFF ALONG THE PICK AXIS: straight back out the way the coupler came down onto the
+  # object. `frame: fixed_marker` is accepted here too.
   final_retract:                  # back off after demating
     distance_mm: 100.0
     axis: [0.0, 0.0, -1.0]
@@ -101,7 +269,7 @@ compliance:
   # once the object is genuinely hanging free, right after the lift.
   tare_before: true
   mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
-  stiffness:     [2500.0, 2500.0, 2500.0, 5.0, 5.0, 5.0]
+  stiffness:     [2000.0, 2000.0, 2000.0, 20.0, 20.0, 20.0]
   damping_ratio: [1.6, 1.6, 1.6, 1.6, 1.6, 1.6]
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0
@@ -136,9 +304,9 @@ compliance:
 compliance_loaded:
   enabled: true
   tare_before: true
-  mass:          [20.0, 20.0, 20.0, 1.5, 1.5, 1.5]
-  stiffness:     [2500.0, 2500.0, 2500.0, 8.0, 8.0, 8.0]
-  damping_ratio: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+  mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+  stiffness:     [2000.0, 2000.0, 2000.0, 20.0, 20.0, 20.0]
+  damping_ratio: [1.6, 1.6, 1.6, 1.6, 1.6, 1.6]
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0
   lookahead_time_s: 0.15
@@ -177,8 +345,8 @@ compliant_rot_speed_deg_s: 15.0
 # stops rather than lifting air.
 mate_preload:
   enabled: true
-  force_n: 10.0                    # the contact force the push stops at
-  max_travel_mm: 8.0              # reference travel past the target before giving up
+  force_n: 5.0                    # the contact force the push stops at
+  max_travel_mm: 10.0              # reference travel past the target before giving up
   step_mm: 0.5                    # advance this far, then re-read the force
   settle_s: 0.2                   # let each step settle before believing the reading
   # THE FORCE MUST HOLD, not just be touched. After a reference step the compliant law rings:
@@ -268,12 +436,29 @@ assembly_preload:
 compliance_insert:
   enabled: true
   tare_before: true
-  mass:          [20.0, 20.0, 20.0, 1.5, 1.5, 1.5]
   # x, y: the plane the part slides in -- firm enough that the preload is reached in a few mm.
   # z:    straight down. SOFT, so the part can settle into the cleat instead of being held off
   #       it by the arm, and so the arm does not drive the part's weight into the bracket.
-  stiffness:     [3000.0, 3000.0, 3000.0, 4.0, 4.0, 4.0]
-  damping_ratio: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+  mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+  stiffness:     [2000.0, 2000.0, 2000.0, 20.0, 20.0, 20.0]
+  damping_ratio: [1.6, 1.6, 1.6, 1.6, 1.6, 1.6]
+  selected_axes: [1, 1, 1, 1, 1, 1]
+  reference_rate_hz: 125.0
+  lookahead_time_s: 0.15
+  servo_gain: 150.0
+  max_delta_mm: 40.0
+  max_delta_deg: 15.0
+  warmup_s: 0.5
+
+# THE BOLT SEARCH'S OWN LAW (fastening.mode: bolt_localization): the press, the search and the
+# detach + attach at the found pose all run under it. A copy of compliance_insert for now, so it
+# can be retuned without touching the insertion.
+bolt_localization_compliance:
+  enabled: true
+  tare_before: true
+  mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+  stiffness:     [2000.0, 2000.0, 2000.0, 20.0, 20.0, 20.0]
+  damping_ratio: [1.6, 1.6, 1.6, 1.6, 1.6, 1.6]
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0
   lookahead_time_s: 0.15
@@ -288,7 +473,7 @@ compliance_insert:
 # payload update accounts for but only as well as the CoG assumption below allows.
 force_guard:
   enabled: true
-  max_force_n: 60.0
+  max_force_n: 25.0
   max_torque_nm: 8.0
   persistence_s: 0.05             # ride out a single noisy sample; trip on real contact
 
@@ -319,12 +504,12 @@ marker_views:
   # The camera never plans a view further out than this. Raise it if the markers are spread far
   # enough apart that they cannot all be in one frame from here -- a view beyond the cap is
   # pulled IN along its ray, which on a large object can crop the outer markers out of shot.
-  max_camera_distance_mm: 400.0
+  max_camera_distance_mm: 750.0
   # Solves every view's corners of ALL markers as ONE rigid body. This is where several markers
   # really pay: a wide baseline across the object constrains the pose far better than any single
   # marker's four corners can.
   joint_pnp: true
-  save_images: false              # true -> annotated views + index.csv in data/experiments/<app>_<stamp>/marker_images/ (--set marker_views.save_images=true)
+  save_images: true              # true -> annotated views + index.csv in data/experiments/<app>_<stamp>/marker_images/ (--set marker_views.save_images=true)
   # ---- THE CLOSE LOOK ----
   # After the sweep, visit each marker in turn and servo the camera onto its face at
   # `distance_mm`, then pool those views with the sweep's.
@@ -345,13 +530,14 @@ marker_views:
   # makes them dominate anyway, and replacing outright could drop a marker whose servo produced
   # few views below min_views.
   servo:
-    enabled: true
-    distance_mm: 200.0            # camera-to-marker standoff for the close look
+    enabled: false
+    distance_mm: 500.0            # camera-to-marker standoff for the close look
     max_iterations: 1             # re-detect and re-centre until two readings agree
     pos_tol_mm: 0.5               # ... to within this
     ang_tol_deg: 0.5
     ring_mm: 25.0                 # a small parallax ring around the vantage, aimed at the marker
     ring_views: 0                 # 0 = the centred vantage only
+    single_view: true 
 
   # ---- HOW MANY MARKERS MUST VOTE ----
   # 1 keeps single-marker objects working, and all of the catalogue is single-marker today. The
@@ -378,8 +564,8 @@ marker_views:
   #
   # The honest number is the coupler's CAPTURE RANGE -- an error the mechanism can absorb does
   # not need refusing. Re-set both from it once it is measured.
-  max_disagreement_mm: 3.0
-  max_disagreement_deg: 3.0
+  max_disagreement_mm: 15.0
+  max_disagreement_deg: 15.0
 
   # ---- OUTVOTING A BAD MARKER ----
   # With THREE or more, the majority can reject the odd one out and the run carries on instead of
@@ -464,7 +650,10 @@ toolchanger:
 # and the coupler simply lets go of it. That is right for a fixture that retains the part on its
 # own and wrong for one that does not.
 cleat_toolchanger:
-  enabled: true
+  # OFF BY DEFAULT HERE: a fixed object with no clamp of its own just receives the part. Turn it
+  # on when the destination does have one (e.g. the cleat), and the run hands over -- the clamp
+  # closes BEFORE the end-effector coupler lets go.
+  enabled: false
   # THE OTHER BOARD. Both couplers run the same sketch and answer identically over the wire, so
   # the only thing that tells them apart is the USB serial -- mapped to a name in
   # configs/couplers.yaml. Getting this wrong would work the END-EFFECTOR coupler twice: the
@@ -496,7 +685,7 @@ cleat_toolchanger:
   settle_s: 3.0
   timeout_s: 5.0
 
-move_timeout_s: 60.0
+move_timeout_s: 600.0
 settle_s: 0.3
 
 # ---- Stepping through the run ----

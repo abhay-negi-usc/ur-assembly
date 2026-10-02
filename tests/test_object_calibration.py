@@ -456,7 +456,7 @@ class _RoutingCam:
         return type('F', (), {'K': None, 'D': None, 'T_base_cam': np.eye(4)})()
 
 
-def _routing_run(fail=(), ids=(0, 1, 2)):
+def _routing_run(fail=(), ids=(0, 1, 2), single_view=False):
     from urlab.skills import marker_localize as mloc
     markers = {i: _pose([400.0 + 60 * i, 20.0 * i, 50.0], [0.0, 0.0, 15.0 * i]) for i in ids}
 
@@ -469,6 +469,7 @@ def _routing_run(fail=(), ids=(0, 1, 2)):
 
     robot = _RoutingRobot(fail)
     plan = mloc.ViewPlan(C.load('object_calibration').section('marker_views'))
+    plan.servo.single_view = single_view      # pinned: the failure labels name the mode
     seen = {m: [(T, 0.35)] * 4 for m, T in markers.items()}
     out = mloc.servo_refine(robot, _RoutingCam(), Det(), plan, seen,
                             T_overview=robot.camera())
@@ -499,6 +500,12 @@ def test_a_failed_direct_hop_recovers_through_the_overview():
     moves, out = _routing_run(fail=('servo marker 1 (1/4)',))
     assert any('recovery' in m for m in moves), 'the overview recovery never fired'
     assert set(out) == {0, 1, 2}, f'a marker was lost to a reachable-by-detour vantage: {out}'
+
+
+def test_a_failed_single_view_hop_recovers_through_the_overview_too():
+    moves, out = _routing_run(fail=('servo marker 1 (single view)',), single_view=True)
+    assert any('recovery' in m for m in moves), 'the overview recovery never fired'
+    assert set(out) == {0, 1, 2}, out
 
 
 def test_the_first_marker_has_no_previous_vantage_to_recover_from():

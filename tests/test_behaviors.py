@@ -394,6 +394,184 @@ def test_servo_refine_centres_each_marker_and_parks_at_the_overview():
     assert all('marker 5' in l for l in labels[:first_six]), labels
 
 
+_SV_TRUTH = {5: xyzrpy_to_matrix([0.6, 0.0, 0.2], [0.0, np.pi / 2, 0.0]),
+             6: xyzrpy_to_matrix([0.6, 0.1, 0.2], [0.0, np.pi / 2, 0.0])}
+
+
+def _single_view_run(seen, detect_in_base, max_iterations=4, **servo):
+    """servo_refine in single_view mode against an arm that goes exactly where it is told.
+    `detect_in_base(T_base_cam)` is what the camera sees from there; `servo` adds keys to the
+    servo block. Returns (servo moves as (label, T_cam), on_view shots, on_iteration shots,
+    refined)."""
+    from urlab.skills import marker_localize as mloc
+
+    T_overview = xyzrpy_to_matrix([0.3, 0.05, 0.2], [0.0, np.pi / 2, 0.0])
+    moves, shots, iters = [], [], []
+
+    class FakeArm:
+        T_cam = np.array(T_overview)
+
+        def move_frame_to(self, T, T_tool0_frame, label):
+            self.T_cam = np.array(T)
+            moves.append((label, np.array(T)))
+            return True
+
+    arm = FakeArm()
+
+    class FakeRobot:
+        T_tool0_cam = np.eye(4)
+
+        def __init__(self):
+            self.arm = arm
+
+        def camera(self):
+            return arm.T_cam
+
+    class FakeCamera:
+        def capture(self):
+            return type('F', (), {'T_base_cam': np.array(arm.T_cam)})()
+
+    class FakeDetector:
+        def detect_in_base(self, frame):
+            return detect_in_base(frame.T_base_cam)
+
+        def detect(self, frame):
+            return {}
+
+    plan = _MarkerPlan()
+    plan.servo = mloc.ServoPlan({'enabled': True, 'distance_m': 0.15, 'pos_tol_mm': 0.5,
+                                 'max_iterations': max_iterations, 'ring_views': 4,
+                                 'single_view': True, **servo})
+    refined = mloc.servo_refine(FakeRobot(), FakeCamera(), FakeDetector(), plan, seen,
+                                T_overview=T_overview,
+                                on_view=lambda mid, j, f, p: shots.append((mid, j)),
+                                on_iteration=lambda mid, it, f, p: iters.append((mid, it)))
+    return [(l, T) for l, T in moves if not l.startswith('overview')], shots, iters, refined
+
+
+def _vantage(T_marker, d=0.15):
+    return T_marker[:3, 3] + d * T_marker[:3, 2]
+
+
+def test_servo_single_view_recentres_on_the_close_detection():
+    """servo.single_view: the first move comes off the sweep's estimate, which is a few mm out,
+    so the marker lands off the optical axis. It re-centres on what it sees from up close and
+    keeps ONE view per marker -- the centred one -- with no ring, whatever ring_views says."""
+    seen = {mid: [(Tm @ translation_matrix([0.002, 0.001, 0.0]), 0.35)]
+            for mid, Tm in _SV_TRUTH.items()}
+    moves, shots, iters, refined = _single_view_run(seen, lambda T_cam: dict(_SV_TRUTH))
+
+    assert [l for l, _T in moves] == [
+        'servo marker 5 (single view)', 'servo marker 5 (single view, re-centre 1)',
+        'servo marker 6 (single view)', 'servo marker 6 (single view, re-centre 1)']
+    for mid, (first, second) in zip((5, 6), (moves[0:2], moves[2:4])):
+        T_est = seen[mid][0][0]
+        # SQUARE-ON off the sweep's (slightly wrong) estimate first ...
+        assert np.allclose(first[1][:3, 2], -T_est[:3, 2], atol=1e-9)
+        assert np.allclose(first[1][:3, 3], _vantage(T_est), atol=1e-9)
+        # ... then CENTRED on the marker as the close view saw it
+        assert np.allclose(second[1][:3, 3], _vantage(_SV_TRUTH[mid]), atol=1e-9)
+        (T_v, d), = refined[mid]
+        assert np.allclose(T_v, _SV_TRUTH[mid])
+        assert abs(d - 0.15) < 1e-9
+    # one KEPT view per marker; the superseded off-centre capture is still reported
+    assert shots == [(5, 0), (6, 0)]
+    assert iters == [(5, 1), (6, 1)]
+
+
+def test_servo_single_view_costs_one_move_when_the_sweep_was_already_right():
+    seen = {mid: [(Tm, 0.35)] for mid, Tm in _SV_TRUTH.items()}
+    moves, shots, iters, refined = _single_view_run(seen, lambda T_cam: dict(_SV_TRUTH))
+    assert [l for l, _T in moves] == ['servo marker 5 (single view)',
+                                      'servo marker 6 (single view)']
+    assert shots == [(5, 0), (6, 0)] and iters == []
+    assert set(refined) == {5, 6}
+
+
+def test_servo_single_view_stops_at_max_iterations_and_keeps_the_last_view():
+    """A marker that will not centre -- here one that reads 10 mm off the optical axis wherever
+    the camera goes -- costs max_iterations moves, not a loop forever, and still contributes its
+    last close view rather than being thrown away."""
+    in_cam = translation_matrix([0.010, 0.0, 0.15]) @ xyzrpy_to_matrix([0, 0, 0], [np.pi, 0, 0])
+    moves, shots, iters, refined = _single_view_run({5: [(_SV_TRUTH[5], 0.35)]},
+                                                    lambda T_cam: {5: T_cam @ in_cam},
+                                                    max_iterations=3)
+    assert len(moves) == 3
+    assert shots == [(5, 0)] and iters == [(5, 1), (5, 2)]
+    assert len(refined[5]) == 1
+
+
+def test_servo_view_offset_without_angles_moves_only_the_position():
+    """servo.view_offset with xyz alone: the camera goes to that point IN THE MARKER FRAME and
+    keeps the orientation it had at the overview -- every servo move, the re-centring included.
+    Re-centring then converges on where the offset puts the marker, not on the optical axis."""
+    import pytest
+
+    T_overview_R = xyzrpy_to_matrix([0, 0, 0], [0.0, np.pi / 2, 0.0])[:3, :3]
+    xyz = np.array([0.0, -0.04, 0.14])
+    seen = {mid: [(Tm @ translation_matrix([0.002, 0.001, 0.0]), 0.35)]
+            for mid, Tm in _SV_TRUTH.items()}
+    moves, shots, iters, refined = _single_view_run(
+        seen, lambda T_cam: dict(_SV_TRUTH), view_offset={'xyz_mm': (xyz * 1000.0).tolist()})
+
+    assert [l for l, _T in moves] == [
+        'servo marker 5 (single view)', 'servo marker 5 (single view, re-centre 1)',
+        'servo marker 6 (single view)', 'servo marker 6 (single view, re-centre 1)']
+    for _l, T in moves:
+        assert np.allclose(T[:3, :3], T_overview_R, atol=1e-9), 'orientation changed'
+    for mid, (first, second) in zip((5, 6), (moves[0:2], moves[2:4])):
+        assert np.allclose(first[1][:3, 3], (seen[mid][0][0] @ np.append(xyz, 1.0))[:3])
+        assert np.allclose(second[1][:3, 3], (_SV_TRUTH[mid] @ np.append(xyz, 1.0))[:3])
+        (_T_v, d), = refined[mid]
+        assert d == pytest.approx(np.linalg.norm(xyz))
+    assert shots == [(5, 0), (6, 0)]
+
+
+def test_servo_view_offset_with_angles_sets_the_whole_pose():
+    """xyz + rpy: the camera pose in the marker frame, exactly as given -- no quarter-turn
+    snapping, no overview orientation."""
+    xyz, rpy_deg = [0.0, -40.0, 140.0], [165.0, 0.0, 30.0]
+    T_marker_cam = xyzrpy_to_matrix(np.array(xyz) / 1000.0, np.radians(rpy_deg))
+    seen = {mid: [(Tm, 0.35)] for mid, Tm in _SV_TRUTH.items()}
+    moves, _shots, iters, refined = _single_view_run(
+        seen, lambda T_cam: dict(_SV_TRUTH), view_offset={'xyz_mm': xyz, 'rpy_deg': rpy_deg})
+
+    assert [l for l, _T in moves] == ['servo marker 5 (single view)',
+                                      'servo marker 6 (single view)']
+    for (_l, T), mid in zip(moves, (5, 6)):
+        assert np.allclose(T, _SV_TRUTH[mid] @ T_marker_cam, atol=1e-9)
+    assert iters == [] and set(refined) == {5, 6}
+
+
+def test_servo_view_offset_parsing():
+    """Unset keeps the square-on default; set, |xyz| becomes the servo range (so the standoff
+    cap still checks it); a camera behind the marker face, or one facing away, is refused."""
+    import pytest
+
+    from urlab import config as C
+    from urlab.skills.marker_localize import ServoPlan, ViewPlan
+
+    assert ServoPlan({'enabled': True}).view_xyz is None
+    assert ServoPlan({'view_offset': None}).view_xyz is None
+    sp = ServoPlan({'distance_mm': 300.0, 'view_offset': {'xyz_mm': [0.0, 30.0, 40.0]}})
+    assert sp.distance_m == pytest.approx(0.05) and sp.view_rpy is None
+    # a block as the config loader hands it over (SI siblings already derived)
+    block = {'view_offset': {'xyz_mm': [0.0, -60.0, 280.0], 'rpy_deg': [170.0, 0.0, 0.0]}}
+    C._normalise_units(block)
+    sp = ServoPlan(block)
+    assert np.allclose(sp.view_xyz, [0.0, -0.06, 0.28])
+    assert np.allclose(np.degrees(sp.view_rpy), [170.0, 0.0, 0.0])
+    for bad, match in (({'rpy_deg': [180, 0, 0]}, 'needs xyz_mm'),
+                       ({'xyz_mm': [0, 0, -100]}, r'\+z > 0'),
+                       ({'xyz_mm': [0, 0, 100], 'rpy_deg': [0, 0, 0]}, 'BEHIND'),
+                       ({'xyz_mm': [0, 0, 100], 'distance_mm': 5}, 'unknown key')):
+        with pytest.raises(ValueError, match=match):
+            ServoPlan({'view_offset': bad})
+    with pytest.raises(ValueError, match='standoff cap'):
+        ViewPlan({'max_camera_distance_mm': 200.0,
+                  'servo': {'enabled': True, 'view_offset': {'xyz_mm': [0, 0, 250]}}})
+
+
 def test_servo_vantage_roll_snaps_to_the_nearest_quarter_turn():
     """Pose estimation is invariant to rotation about the view axis, so the servo aligns the
     camera to the marker only up to the nearest 90 deg -- never winding the wrist further."""

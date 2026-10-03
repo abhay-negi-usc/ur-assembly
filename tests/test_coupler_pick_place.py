@@ -1340,3 +1340,85 @@ def test_in_contact_means_both_things_together():
     for leg in ('descend_and_mate', 'set_down'):
         assert 'in_contact' not in inspect.getsource(getattr(cpp.CouplerCycle, leg)), (
             f'{leg} begins clear of contact -- it must tare and use its commanded standoff')
+
+
+# ---------------------------------------------------------------------------- the mate wiggle
+_MW = {'enabled': True, 'amplitude': {'x_mm': 5.0, 'y_mm': 5.0},
+       'frequency_hz': {'x_mm': 0.5, 'y_mm': 0.7}, 'phase_deg': {'y_mm': 90.0},
+       'taper_s': 1.0, 'dwell_s': 3.0}
+
+
+def test_the_mate_wiggle_is_off_unless_enabled():
+    from urlab.apps.coupler_pick_place import parse_mate_wiggle
+    assert parse_mate_wiggle(None, 125.0, 40.0) is None
+    assert parse_mate_wiggle(dict(_MW, enabled=False), 125.0, 40.0) is None
+    for app in ('coupler_pick_place', 'coupler_pick_assemble', 'coupler_marker_assemble'):
+        assert parse_mate_wiggle(C.load(app).section('mate_wiggle'), 125.0, 40.0) is None, app
+
+
+@pytest.mark.parametrize('over, match', [
+    ({'amplitude': {}}, 'every amplitude is 0'),
+    ({'taper_s': 0.0}, 'taper_s must be positive'),
+    ({'dwell_s': -1.0}, 'negative'),
+    ({'amplitud': {'x_mm': 5.0}}, 'unknown key'),
+    ({'frequency_hz': {'x_mm': 0.5, 'y_mm': 1.0}}, 'LINE'),      # 1:2 retraces one curve
+    ({'max_speed_mm_s': 10.0}, 'exceeds'),                       # 5 mm at 0.7 Hz peaks at 22
+    ({'frequency_hz': {'x_mm': 40.0, 'y_mm': 0.7}}, 'ALIASES'),  # > a quarter of 125 Hz
+])
+def test_a_mate_wiggle_that_would_not_do_what_it_says_is_refused(over, match):
+    from urlab.apps.coupler_pick_place import parse_mate_wiggle
+    with pytest.raises(ValueError, match=match):
+        parse_mate_wiggle(dict(_MW, **over), 125.0, 40.0)
+
+
+class _WiggleLaw:
+    """A law that records every reference it is stepped to (tool0 = coupler here). Dry, so
+    skills/wiggle runs it on a virtual clock."""
+    rate = 125.0
+    arm = type('A', (), {'dry_run': True})()
+
+    def __init__(self, trip_after=None):
+        self.refs, self.trip_after = [], trip_after
+
+    def ramp(self, a, b, duration, guard=None, on_step=None):
+        self.refs.append(np.array(b))
+        return 'seated' if self.trip_after and len(self.refs) >= self.trip_after else 'done'
+
+
+def _wiggled_mate(trip_after=None):
+    from urlab.apps import coupler_pick_place as cpp
+    job = cpp.CouplerCycle.__new__(cpp.CouplerCycle)
+    job.guard = object()
+    law = _WiggleLaw(trip_after)
+    mw = cpp.parse_mate_wiggle(_MW, 125.0, 40.0)
+    T_from = xyzrpy_to_matrix([0.0, 0.0, -0.2], [0.0, 0.0, 0.0])      # 200 mm back along -z
+    status = job._wiggle_ramp(law, lambda T: T, T_from, np.eye(4), 40.0, mw, lambda: None)
+    return status, np.array([R[:3, 3] for R in law.refs]) * 1000.0      # mm
+
+
+def test_the_mate_wiggle_rocks_across_the_axis_and_lands_on_the_target():
+    status, p = _wiggled_mate()
+    assert status == 'done'
+    lateral = np.abs(p[:, :2])
+    assert 4.5 < lateral.max() <= 5.0 + 1e-9, 'the 5 mm amplitude, and no more'
+    assert p[0, 2] == pytest.approx(-200.0, abs=0.5) and np.all(np.diff(p[:, 2]) >= -1e-9), (
+        'the approach still runs standoff -> target, never backwards')
+    dwell = p[-int(3.0 * 125.0) + 2:]
+    assert np.allclose(dwell[:, 2], 0.0), 'the dwell wiggles AT the target'
+    assert np.abs(p[-1, :2]).max() < 0.05, 'tapered out, so the preload push starts un-wiggled'
+
+
+def test_a_guard_trip_during_the_wiggle_reports_contact():
+    status, p = _wiggled_mate(trip_after=100)
+    assert status == 'seated' and len(p) == 100
+
+
+def test_the_mate_hands_its_wiggle_to_the_compliant_leg():
+    from urlab.apps import coupler_pick_place as cpp
+    job = cpp.CouplerCycle.__new__(cpp.CouplerCycle)
+    job.T_pick, job.mate_wiggle = np.eye(4), {'wiggle': 'sentinel', 'dwell_s': 0.0}
+    job.legs = {'mate_standoff': cpp.parse_offset(None, 'mate_standoff', 100.0)}
+    seen = {}
+    job._compliant = lambda T_from, T_to, what, **kw: seen.update(kw) or True
+    assert job.descend_and_mate()
+    assert seen['wiggle'] is job.mate_wiggle

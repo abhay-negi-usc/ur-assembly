@@ -12,7 +12,7 @@ camera_config: camera.yaml          # the sensor  (see configs/camera.yaml)
 # ---- What is being calibrated ----
 # object_name is the key written into objects.yaml. There is no default: a run that guessed
 # would silently overwrite somebody else's object.
-object_name: tile_3 
+object_name: tile_6 
 
 # THE OBJECT'S MARKERS, as `id: printed size in mm`. One is fine; several is better, and is
 # what makes a pick survive one of them being occluded -- at run time each marker votes for the
@@ -24,9 +24,9 @@ object_name: tile_3
 # size lands at the wrong depth with a perfect reprojection behind it and nothing in the image to
 # catch it. The white quiet zone is not part of the marker.
 markers:
-  9: 45.25
-  10: 45.25
-  11: 45.25
+  18: 45.25
+  19: 45.25
+  20: 45.25
 
 # The mass the coupler ends up carrying, written straight through into objects.yaml. Leave null
 # until it is weighed -- robot.payload is sized for the EMPTY tool, so until this is set and
@@ -46,7 +46,7 @@ aruco:
 # spread. Read it as an order of magnitude; raise this to 8-10 when the number itself has to
 # carry weight (accepting a new object, or chasing a pick that sometimes misses).
 mates: 1
-retreat_mm: 400.0                  # back out along the coupler's own -z after each mate
+retreat_mm: 300.0                  # back out along the coupler's own -z after each mate
 mate_settle_s: 0.5                # let the lock finish pulling the object in before reading FK
 
 # ---- Where to look from ----

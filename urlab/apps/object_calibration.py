@@ -86,6 +86,25 @@ _CSV_HEADER = ['mate', 'marker_id', 'marker_views', 'marker_spread_mm',
                'grasp_in_marker_yaw_deg', 'axis_dev_deg', 'rot_dev_deg',
                'point_dev_mm']
 
+# ---------------------------------------------------------------------------- the sweep
+# THE VIEWS THE MARKERS ARE FUSED FROM, one stop per entry. Written out here rather than left to
+# marker_localize.ViewPlan's built-in default, so the geometry the catalogue is measured under is
+# visible in the app that produces it. These are that default's values, so nothing changes by
+# naming them; `marker_views.offsets` in the config still wins when it is set.
+#
+# Each offset is a camera move RELATIVE TO THE POSE THE SWEEP STARTS FROM, in the camera's
+# OPTICAL frame: x right, y down, z forward along the view ray -- so a NEGATIVE z backs the
+# camera away from the object. With aim_at_markers on (the default) every stop after the first is
+# re-pointed at the markers found so far, so the ring looks at the object rather than past it.
+SWEEP_OFFSETS = [
+    {'xyz_mm': [0.0, 0.0, 0.0]},          # the start pose itself
+    {'xyz_mm': [40.0, 0.0, 0.0]},         # a ring of camera TRANSLATIONS around the start --
+    {'xyz_mm': [0.0, 40.0, 0.0]},         # the direction PnP is weakest in, so the parallax is
+    {'xyz_mm': [-40.0, 0.0, 0.0]},        # what adds information, not the re-captures
+    {'xyz_mm': [0.0, -40.0, 0.0]},
+    {'xyz_mm': [0.0, 0.0, -25.0]},        # step BACK 25 mm
+]
+
 # ---------------------------------------------------------------------------- pure geometry
 def fuse_mates(offsets):
     """(T_marker_grasp, residual_mm, residual_deg, residual_axis_deg) over the mates a marker saw.
@@ -659,10 +678,14 @@ def build_and_run(cfg, robot, camera, args):
                   'schema change.', cfg.get_path('marker.id', 0),
                   cfg.get_path('marker.size_mm', 40.0))
         return False
+    views = dict(cfg.section('marker_views'))
+    from_config = views.get('offsets') is not None
+    if not from_config:
+        views['offsets'] = SWEEP_OFFSETS
     try:
         sizes = parse_markers(cfg.get('markers'))
         T_tool0_coupler = tool_frames.coupler_mate(cfg)
-        plan = mloc.ViewPlan(cfg.section('marker_views'))
+        plan = mloc.ViewPlan(views)
     except ValueError as exc:
         log.error('%s', exc)
         return False
@@ -680,6 +703,9 @@ def build_and_run(cfg, robot, camera, args):
              int(cfg.get('mates', 3)), '' if int(cfg.get('mates', 3)) == 1 else 's')
     log.info('Coupler mate at %s mm along tool0.',
              np.round(T_tool0_coupler[:3, 3] * 1000.0, 2).tolist())
+    log.info('Sweep (offsets from %s): %s.',
+             'marker_views.offsets' if from_config else 'SWEEP_OFFSETS in this app',
+             plan.describe())
 
     coupler = Coupler(cfg)
     cal = _ObjectCalibration(cfg, robot, camera, detector, plan, name, sizes,

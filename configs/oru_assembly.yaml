@@ -1,44 +1,31 @@
-# COUPLER PICK AND PLACE -- find a catalogued object by its markers, mate, carry, set it down.
-# See urlab/apps/coupler_pick_place.py.
+# ORU ASSEMBLY -- pick the ORU with the coupler, then follow a CSV trajectory to the mate.
+# See urlab/apps/oru_assembly.py.
 #
-#   python -m urlab.apps.coupler_pick_place --set object_name=ORU
+#   python -m urlab.apps.oru_assembly            # mini_ORU into its taught `cleat` assembly
 #
-# NOTHING ABOUT THE OBJECT IS IN THIS FILE. Its markers and their printed sizes, where the mating
-# feature sits in each marker's frame, and the mass it adds are all in configs/objects.yaml under
-# `object_name`, put there by urlab.apps.object_calibration. Adding a second object -- or a
-# second marker to an existing one -- is a calibration run, not an edit here.
+# TWO HALVES, each a copy of an existing app's settings:
+#   * THE PICK (object_name .. toolchanger) -- coupler_pick_place's locate / mate / lock / lift,
+#     with that config's tuning as of 2026-10-02.
+#   * THE ASSEMBLY (assembly_name .. admittance) -- kinematic_assembly's flow: stand-off -> CSV
+#     trajectory -> mate -> disassemble / return home, anchored on the object's taught assembly
+#     in configs/objects.yaml. Its trajectory is its own copy, oru_assembly_trajectory.csv.
 #
-# AN OBJECT MAY CARRY ANY NUMBER OF MARKERS. They all store the SAME grasp frame in their own
-# coordinates, so each one votes for where the coupler should go and the votes are averaged. The
-# `marker_views:` block below is where that voting is tuned, and it is the one section whose
-# right settings depend on how many markers the object has.
+# NOTHING RELEASES THE ORU: like kinematic_assembly, the run ends with the part still held, which
+# is why toolchanger.latch is on below.
+#
+# SPEED: kinematic_assembly.yaml carries its own speed: block; this config does NOT, so both
+# halves use configs/robot.yaml's limits, as the pick app does. (That block would have raised the
+# Cartesian cap to 250 mm/s for the pick's moves too.)
 
 robot_config: robot.yaml            # the machine (see configs/robot.yaml)
 camera_config: camera.yaml          # the sensor  (see configs/camera.yaml)
 
-# Which catalogued object to pick. No default: a run that guessed would drive at whatever
-# happened to be first in the file.
-object_name: tile_6
-
+# ==== THE PICK =================================================================================
+# Which catalogued object (configs/objects.yaml) to pick. It must have the assembly named by
+# assembly_name below taught -- mini_ORU has `cleat`; the ORU entries have none yet.
+object_name: mini_ORU 
 aruco:
   dictionary: DICT_4X4_50
-
-# ---- WHERE TO PUT IT ----
-# A DELTA FROM WHERE IT WAS PICKED UP, not an absolute pose. The pick pose is not known until the
-# camera has looked, so an absolute set-down would have to be re-taught every time the object
-# starts somewhere new; a delta keeps meaning the same thing.
-#
-#   relative_to: base    -- read in base_link axes. xyz is a displacement along the ROBOT's
-#                           x/y/z and rpy a rotation about them. "300 mm to the left."
-#   relative_to: object  -- read in the object's own mating frame. +z is along its mating axis,
-#                           and yaw is a spin about that axis. "Turn it a quarter turn and put
-#                           it back in the same hole."
-#
-# Which one is meant can never be inferred from the numbers, so it is named rather than guessed.
-place:
-  relative_to: base
-  xyz_mm: [50.0, 0.0, 0.0]
-  rpy_deg: [0.0, 0.0, 0.0]
 
 # ---- THE FOUR MOTION LEGS ----
 # The cycle is: align at mate_standoff -> mate (compliant) -> grasp -> pick_retract (compliant)
@@ -99,8 +86,8 @@ compliance:
   # once the object is genuinely hanging free, right after the lift.
   tare_before: true
   mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
-  stiffness:     [3000.0, 3000.0, 3000.0, 30.0, 30.0, 30.0]
-  damping_ratio: [1.2, 1.2, 1.2, 1.2, 1.2, 1.2]
+  stiffness:     [2000.0, 2000.0, 2000.0, 15.0, 15.0, 15.0]
+  damping_ratio: [1.6, 1.6, 1.6, 1.6, 1.6, 1.6]
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0
   lookahead_time_s: 0.1
@@ -135,8 +122,8 @@ compliance_loaded:
   enabled: true
   tare_before: true
   mass:          [20.0, 20.0, 20.0, 1.5, 1.5, 1.5]
-  stiffness:     [3000.0, 3000.0, 3000.0, 30.0, 30.0, 30.0]
-  damping_ratio: [1.2, 1.2, 1.2, 1.2, 1.2, 1.2]
+  stiffness:     [2000.0, 2000.0, 2000.0, 15.0, 15.0, 15.0]
+  damping_ratio: [2.5, 2.5, 2.5, 2.5, 2.5, 2.5]
   selected_axes: [1, 1, 1, 1, 1, 1]
   reference_rate_hz: 125.0
   lookahead_time_s: 0.15
@@ -146,6 +133,7 @@ compliance_loaded:
   warmup_s: 0.5
 
 compliant_speed_mm_s: 10.0        # paces every compliant leg
+
 compliant_rot_speed_deg_s: 15.0
 
 # ---- MATING PRELOAD ----
@@ -192,6 +180,7 @@ mate_preload:
   # 0 accepts the first sample over the threshold -- the old behaviour.
   persistence_s: 0.5
 
+# (copied from coupler_pick_place.yaml: the PLACE-BACK at the pick position uses it.)
 # ---- PLACEMENT PRELOAD ----
 # The same manoeuvre as the mate, on the other end of the cycle: the place pose is a DELTA from a
 # camera-found pick, so arriving at it proves the arm got where it believed the surface was, not
@@ -280,7 +269,7 @@ marker_views:
     - {xyz_mm: [100.0, 0.0, 0.0]}          # a ring of camera TRANSLATIONS around the start (the
     - {xyz_mm: [0.0, 100.0, 0.0]}          # direction PnP is weakest in), each re-aimed at the
     - {xyz_mm: [-100.0, 0.0, 0.0]}         # markers. Wider = more parallax; the built-in
-    - {xyz_mm: [0.0, -100.0, 0.0]}         # default is 40 mm.
+    # - {xyz_mm: [0.0, -100.0, 0.0]}         # default is 40 mm.
   # THE STANDOFF CAP does TWO things: (1) once the markers are located, a view planned further
   # than this from them is PULLED IN along its ray -- which on a spread-out object crops the
   # outer markers out of shot; and (2) a detection made from further than this is DROPPED from
@@ -312,7 +301,7 @@ marker_views:
   # makes them dominate anyway, and replacing outright could drop a marker whose servo produced
   # few views below min_views.
   servo:
-    enabled: true
+    enabled: false 
     distance_mm: 200.0            # camera-to-marker standoff for the close look
     max_iterations: 4             # re-detect and re-centre until two readings agree
     pos_tol_mm: 0.5               # ... to within this
@@ -379,6 +368,11 @@ marker_views:
 # reset clears the bypass, so a run always starts with the interlock live.
 toolchanger:
   enabled: true
+  # LATCHED, because this run ENDS WITH THE ORU STILL ON THE COUPLER. Closing an unlatched
+  # port resets the board, and setup() re-decides the clamp from one sensor reading taken
+  # just after power-on -- which can open the coupler under the part. Latched, the board
+  # keeps running and keeps holding when this process exits.
+  latch: true
   # WHICH COUPLER. This cell has two boards running the same firmware -- the one on the END
   # EFFECTOR and the one on the cleat the ORU mounts to -- and they are indistinguishable over
   # the wire, so a run that guessed would work the wrong mechanism and get a perfectly normal
@@ -423,23 +417,157 @@ toolchanger:
   # 500 ms servo move, a 10-sample sensor average), so the reply budget is not tight.
   timeout_s: 5.0
 
-move_timeout_s: 60.0
-settle_s: 0.3
+# ==== THE CLEAT (copied from coupler_pick_assemble.yaml) ==========================
+# ENABLED = MOUNT THE PART: the cleat is OPENED right before the trajectory's last waypoint (the
+# final move into the seat); after the assembly preload it CLAMPS (and is re-checked),
+# THEN the end-effector coupler releases, the payload drops and the arm retracts by
+# motion.final_retract -- the part is left mounted, so there is no disassembly or put-back.
+# false = the run disassembles and puts the part back (disassemble_after / return_to_pick).
+# ---- THE CLEAT'S OWN COUPLER ----
+# The destination clamps too. The mini_ORU is slid into a cleat that carries a SECOND board
+# running the same firmware, and when this block is present the run HANDS THE OBJECT OVER
+# instead of just letting go of it:
+#
+#   before the pick   the cleat is powered and its jaws forced OPEN -- a cleat that booted with
+#                     anything in front of its probe comes up clamped, and a part cannot be slid
+#                     into a clamp that is already shut. Doing it here, not later, means that is
+#                     discovered before a 1.5 kg part is hanging over the fixture.
+#   after the preload the cleat CLAMPS, and is re-checked against its sensor.
+#   then, and only then, the end-effector coupler releases and withdraws.
+#
+# THE ORDER IS THE WHOLE POINT. Between the cleat taking hold and the coupler letting go the
+# object is held by BOTH, which is harmless. The other order holds it by NEITHER. A refused clamp
+# therefore stops the run with the object still on the coupler at the assembled pose -- the one
+# state it can be backed out of.
+#
+# DELETE THIS BLOCK (or set enabled: false) and the run is what it was: the object is driven home
+# and the coupler simply lets go of it. That is right for a fixture that retains the part on its
+# own and wrong for one that does not.
+cleat_toolchanger:
+  enabled: true
+  # THE OTHER BOARD. Both couplers run the same sketch and answer identically over the wire, so
+  # the only thing that tells them apart is the USB serial -- mapped to a name in
+  # configs/couplers.yaml. Getting this wrong would work the END-EFFECTOR coupler twice: the
+  # "cleat" would confirm a clamp it never made, and the release that follows would drop the part.
+  port: cleat
+  baud: 9600
+  motor: true
+  # LATCHED, AND THIS IS THE SETTING THAT KEEPS THE PART MOUNTED. Closing the serial port normally
+  # hangs up DTR, which resets the board -- and setup() ends with
+  #
+  #     status = checkTool() ? 1 : 0; changeServo(status > 0);
+  #
+  # so the board re-decides whether to clamp from ONE sensor reading taken microseconds after
+  # power-on. On the cleat that reset happens at the END of a successful run, with the assembled
+  # object hanging in it and the arm already withdrawn: if the probe says "absent" at that
+  # instant, the cleat opens and the part falls with nothing there to catch it.
+  #
+  # Latching clears HUPCL so the port closes without dropping DTR. The cost is the dead-man
+  # switch -- nothing switches the cleat's relay off when this process dies -- which for a
+  # mechanism whose entire job is to go on holding something after the run is the right way
+  # round. Release it deliberately (./toolchanger.py release --port cleat) or power the board
+  # down.
+  latch: true
+  # The cleat's own probe is the only thing that can say the part actually reached its seat, so
+  # this run wants it live. Bypassing it here would make the clamp confirm blindly and turn the
+  # handover into an assumption -- which is the one step in the cycle where the object is between
+  # two mechanisms.
+  bypass: true
+  settle_s: 3.0
+  timeout_s: 5.0
 
-# ---- Stepping through the run ----
-# true  = PAUSE before every step that moves the arm or works the coupler, naming what is about
-#         to happen. Declining STOPS the run where it stands -- it does not skip the leg and
-#         carry on, which for a pick-and-place would mean releasing an object the arm never
-#         carried anywhere. This is the right setting while bringing the cell up.
-# false = run straight through. `--yes` sets this from the command line without editing here.
+
+
+# ==== THE ASSEMBLY (kinematic_assembly's flow) ===================================
+# WHERE IT GOES: the object's taught assembly in configs/objects.yaml -- `assemblies:` under
+# object_name, written by urlab.apps.coupler_assembly_calibration. That pose is the ORU's MATING
+# FRAME in base_link at the assembled position, and once the ORU is locked on its mating frame IS
+# frames.yaml's `coupler_mate` -- so neither the assembled pose nor the held pose is entered here.
 #
-# The steps that move nothing (the two payload updates, the final report) are NOT gated: a
-# prompt there is noise, and noise is what trains people to hit Enter without reading.
+#   python -m urlab.apps.coupler_assembly_calibration --set object_name=ORU_v8 \
+#                                                     --set assembly_name=<name>
 #
-# A dry run and `--no-prompts` both ignore this, so unattended and simulated runs never hang.
-# Independently of it, ONE unconditional gate stands before the first motion toward the object;
-# --yes does not silence that, because "run the steps without asking" is not the same request as
-# "drive at the part without telling me".
+# THE CSV ROWS AND standoff_axis are therefore in that assembled mating frame -- the coupler
+# frame at the mate (tool0's axes): +z is the mating axis, so [0, 0, -1] backs straight out.
+assembly_name: cleat
+
+# THE STAND-OFF is kinematic_assembly's: the LAST row moved by standoff_axis x distance -- right
+# beside the mate. auto = only when the trajectory is the mate alone (one row); a CSV that is a
+# real route says how to come in, and is entered at its first row and left the same way.
+# true / false force it. With no stand-off and disassemble_after: false the run stops AT the mate.
+use_standoff: false
+standoff_distance_mm: 200.0
+standoff_axis: [0.0, 0.0, -1.0]  # assembled mating (coupler) frame: back out along the mating axis
+
+trajectory_csv: oru_assembly_trajectory.csv
+trajectory_angles_deg: true
+
+control_mode: position           # position | admittance (forceMode)
+
+# THE PRELOAD AT THE MATE. After the last waypoint, under the compliance law (compliance_loaded),
+# push along the insertion direction -- the CSV's last segment, second-last row -> last row --
+# until force_n is measured along it and holds for persistence_s. Reaching the last waypoint only
+# proves the arm got where the taught pose says; the force proves the part is seated. It runs
+# before the disassembly; not reached = the run stops at the mate with the part held.
+# (mate_preload above is the PICK's: the coupler mating with the part.)
+assembly_preload:
+  enabled: false
+  force_n: 1.0
+  max_travel_mm: 10.0              # reference travel past the seat before giving up
+  step_mm: 0.5
+  settle_s: 0.2
+  persistence_s: 0.5
+
+# THE TORQUE PRELOAD, SIMULTANEOUS WITH THE FORCE PRELOAD ABOVE: every step moves the reference along
+# the insertion AND turns it about `axis` -- in the TOOL / COUPLER frame (coupler_mate = tool0's
+# axes, 144 mm out; the taught assembl[13:39:37] INFO    oru-assembly: ASSEMBLY PRELOAD, simultaneous: 1.0 N along [1.0, -0.0, -0.0] (up to 10.0 mm) + 0.50 Nm about [0.0, 1.0, 0.0] (up to 10.0 deg).y pose IS that frame at the mate), through the mating point;
+# the sign is the direction of the twist. Each advances (step_mm / step_deg) only while it is below
+# its own target, and the run goes on only when force_n AND torque_nm hold together for the longer
+# persistence_s. The torque is read AT the mating point, so the push adds no
+# lever-arm moment. Under compliance_loaded's 15 Nm/rad, 0.5 Nm is ~2 deg of reference rotation.
+# Not reached within max_rotation_deg = the run stops at the mate with the part held.
+assembly_torque_preload:
+  enabled: false
+  torque_nm: 0.5
+  axis: [0.0, 1.0, 0.0]           # +Y of the tool/coupler frame (base_link ~-y at the cleat)
+  max_rotation_deg: 10.0
+  step_deg: 0.5
+  settle_s: 0.2
+  persistence_s: 0.5
+
+# THE RETRACT OFF THE CLEAT after the coupler releases -- and the lift of the way out below.
+# Separate from motion.final_retract (400 mm, the put-back's withdraw) because the cleat sits far
+# out: tool0 at the seat is ~1.14 m from the shoulder, and 400 mm up puts it at ~1.30 m -- the
+# UR10e's reach -- which the controller rejected ("outside the robot safety limits"). 100 mm is
+# ~1.18 m. The coupler only has to clear the part's mating feature; the exit route does the rest.
+mount_retract:
+  distance_mm: 100.0
+  axis: [0.0, 0.0, -1.0]          # coupler frame: straight back off the mating feature (up)
+  frame: coupler
+
+# AFTER A CLEAT MOUNT, LEAVE THE WAY IT CAME IN: once released, retracted and the motor is off, the
+# empty coupler retraces the approach route in REVERSE, every waypoint raised by mount_retract
+# (the retract pose is the raised seat), then goes home. Solved before the pick, so an unreachable
+# exit stops the run before anything is picked up. false = straight home from the retract.
+exit_along_route: false
+
+# HOME: where the run ends (after the coupler motor is switched off) and where kinematic_assembly's
+# "return home" goes. null = the joints the run was STARTED from (in practice the pick view);
+# six angles in degrees pin it. Logged at startup as `HOME: [...] deg`.
+home_joints_deg: null
+
+disassemble_after: true
+# AFTER THE DISASSEMBLY, PUT IT BACK where it was picked instead of going home --
+# coupler_pick_place's place half: carry to motion.place_standoff off the pick pose, compliant
+# set-down pushing to place_preload, release, drop the payload, withdraw by motion.final_retract.
+# Needs disassemble_after (the part has to be out of the fixture first). false = go home holding it.
+return_to_pick: true
+
+admittance:                      # used only when control_mode == admittance
+  max_force_n: 50.0
+  max_torque_nm: 8.0
+
+move_timeout_s: 120.0
+settle_s: 0.5
 confirm_each_step: true
-
 debug: false

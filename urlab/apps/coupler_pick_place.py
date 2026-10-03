@@ -71,12 +71,14 @@ from .. import behaviors as bt
 from .. import log as urlog
 from .. import tool_frames
 from ..apps._common import ask, experiment_dir, prompts_off, seg_time
+from ..config import _is_derived
 from ..robot.admittance import AdmittanceController
 from ..robot.coupler import Coupler
 from ..robot.guard import ForceGuard
 from ..skills import marker_localize as mloc
-from ..transforms import (fmt_pose, inverse, matrix_to_xyzrpy, pose_error, translation_matrix,
-                          xyzrpy_to_matrix)
+from ..skills import wiggle as wg
+from ..transforms import (fmt_pose, inverse, matrix_to_xyzrpy, pose_error, slerp_matrix,
+                          translation_matrix, xyzrpy_to_matrix)
 from ._runner import run_app
 
 log = urlog.get('coupler-pnp')
@@ -197,6 +199,60 @@ def parse_preload(block, where='mate_preload'):
         raise ValueError(f'{where}.persistence_s must not be negative -- 0 accepts the first '
                          'sample over the threshold, which is the old behaviour')
     return out
+
+
+MATE_WIGGLE_KEYS = ('enabled', 'amplitude', 'frequency_hz', 'phase_deg', 'taper_s', 'dwell_s',
+                    'max_speed_mm_s', 'max_rotation_deg_s')
+
+
+def parse_mate_wiggle(block, rate_hz, approach_s):
+    """The `mate_wiggle:` block -> {'wiggle': skills/wiggle.Wiggle, 'dwell_s'}, or None when off.
+
+    A small multisine superimposed on the compliant mate, in the COUPLER's own frame
+    (right-multiplied, as skills/wiggle does it), so x/y are across the mating axis whichever way
+    the coupler points -- to work the coupler into the feature instead of stopping on its lip. It
+    rides the whole approach and then `dwell_s` more at the target, still wiggling: the seat is
+    where it helps, and the taper-out happens there rather than on the way in.
+
+    Validated like every wiggle (no aliasing at the law's rate, no degenerate frequency ratio,
+    under its speed caps) plus one rule of its own: it MUST taper. The preload push that follows
+    starts from the un-wiggled target, so a wiggle cut off at full amplitude would step the
+    reference by up to that amplitude into the contact.
+
+    ITS OWN NUMBERS, NOT wiggle_sampling.yaml's (skills/wiggle.from_shared). The tuned excitation
+    is shared so that OBSERVATIONS stay comparable between apps; this is an assembly aid that
+    measures nothing, and wants a small lateral rock, not the tuned 6-axis probe.
+
+    THE SIBLINGS THE LOADER DERIVES ARE DROPPED FIRST. `{x_mm: 5.0}` alone is not a per-axis map
+    to config._normalise_units (that needs a length and an angle key), so it arrives with an `x_m`
+    beside it, which skills/wiggle would refuse as an unknown axis. Pure."""
+    def written(d):
+        return {k: v for k, v in dict(d or {}).items() if not _is_derived(v)}
+
+    b = written(block)
+    if not bool(b.get('enabled', False)):
+        return None
+    unknown = sorted(set(b) - set(MATE_WIGGLE_KEYS))
+    if unknown:
+        raise ValueError(f'mate_wiggle has unknown key(s) {unknown} -- allowed: '
+                         f'{", ".join(MATE_WIGGLE_KEYS)}')
+    for key in ('amplitude', 'frequency_hz', 'phase_deg'):
+        if key in b:
+            b[key] = written(b[key])
+    wig = wg.Wiggle.from_cfg(b, 'mate')
+    if wig is None:
+        raise ValueError('mate_wiggle is enabled but every amplitude is 0 -- set e.g. '
+                         'amplitude: {x_mm: 5.0, y_mm: 5.0}, or enabled: false')
+    if wig.taper_s <= 0.0:
+        raise ValueError('mate_wiggle.taper_s must be positive -- the preload push starts from '
+                         'the un-wiggled target, so an untapered wiggle would step the reference '
+                         'by up to its amplitude when it stops')
+    dwell_s = float(b.get('dwell_s', 0.0))
+    if dwell_s < 0.0:
+        raise ValueError('mate_wiggle.dwell_s must not be negative')
+    wig.validate(rate_hz=rate_hz, cap_v=b.get('max_speed_mm_s'),
+                 cap_w=b.get('max_rotation_deg_s'), duration_s=approach_s + dwell_s)
+    return {'wiggle': wig, 'dwell_s': dwell_s}
 
 
 def law_bandwidth_hz(mass, stiffness):
@@ -470,6 +526,17 @@ class CouplerCycle:
                         'measured against the tare, so without a fresh zero at the standoff it '
                         'is being compared to whatever offset the sensor was last left with.')
         self.settle_s = float(cfg.get('settle_s', 0.3))
+        # OPTIONAL WIGGLE ON THE MATE, off unless `mate_wiggle.enabled` -- see parse_mate_wiggle.
+        # Validated against the approach's own duration, the same seg_time _compliant paces it by.
+        approach_s = seg_time(np.eye(4), offset_pose(np.eye(4), self.legs['mate_standoff']),
+                              float(cfg.get('compliant_speed_mm_s', 20.0)),
+                              float(cfg.get('compliant_rot_speed_deg_s', 15.0)), min_s=0.5)
+        self.mate_wiggle = parse_mate_wiggle(cfg.section('mate_wiggle'), self.adm.rate,
+                                             approach_s)
+        if self.mate_wiggle:
+            log.info('mate_wiggle ON (coupler frame): %s -- over the %.0f s approach, then %.1f s '
+                     'more at the target.', self.mate_wiggle['wiggle'].describe(), approach_s,
+                     self.mate_wiggle['dwell_s'])
         self.T_pick = None
         self.T_place = None
         # OFF BY DEFAULT (`marker_views.save_images`): a production pick, not a calibration, so
@@ -591,7 +658,8 @@ class CouplerCycle:
         return self._compliant(offset_pose(self.T_pick, self.legs['mate_standoff']), self.T_pick,
                                'mate with the coupling feature',
                                after=lambda T, w: self._push_to_preload(
-                                   T, w, self.preload_mate, 'mate_standoff', 'mate'))
+                                   T, w, self.preload_mate, 'mate_standoff', 'mate'),
+                               wiggle=self.mate_wiggle)
 
     def _push_to_preload(self, T_at, watch, preload, leg, what):
         """Advance the compliant reference along `leg` reversed until the preload is met.
@@ -865,12 +933,16 @@ class CouplerCycle:
         """The law for the current payload state."""
         return self.adm_loaded if self.holding else self.adm
 
-    def _compliant(self, T_from, T_to, what, after=None, in_contact=False, law=None):
+    def _compliant(self, T_from, T_to, what, after=None, in_contact=False, law=None,
+                   wiggle=None):
         """Ramp the COUPLER frame T_from -> T_to under the admittance law.
 
         Mirrors skills/pick._compliant_move, which does the same for the gripper's fingertip;
         the difference is only which tool frame the reference is built from. Leaves the arm OUT
-        of the servo loop whatever happens, because the next step is an ordinary move."""
+        of the servo loop whatever happens, because the next step is an ordinary move.
+
+        `wiggle` (a parse_mate_wiggle result) superimposes that wiggle on the ramp; see
+        _wiggle_ramp."""
         ref = lambda T: T @ inverse(self.T_tool0_coupler)          # noqa: E731 -- one expression
         duration = seg_time(T_from, T_to,
                             float(self.cfg.get('compliant_speed_mm_s', 20.0)),
@@ -937,8 +1009,14 @@ class CouplerCycle:
             peak['f'] = max(peak['f'], float(np.linalg.norm(w[:3])))
             peak['tau'] = max(peak['tau'], float(np.linalg.norm(w[3:])))
 
+        if wiggle is not None:
+            log.info('  ... with the wiggle: %s, then %.1f s at the target.',
+                     wiggle['wiggle'].describe(), wiggle['dwell_s'])
         try:
-            status = adm.ramp(ref(T_from), ref(T_to), duration, self.guard, on_step=watch)
+            if wiggle is None:
+                status = adm.ramp(ref(T_from), ref(T_to), duration, self.guard, on_step=watch)
+            else:
+                status = self._wiggle_ramp(adm, ref, T_from, T_to, duration, wiggle, watch)
             if status == 'seated':
                 # A trip is a NORMAL outcome for a contact phase -- the coupler has met the
                 # feature, or the object has met the bench -- and the compliant hold that
@@ -959,6 +1037,18 @@ class CouplerCycle:
         finally:
             self._active_law = None
             self.robot.arm.servo_stop()
+
+    def _wiggle_ramp(self, adm, ref, T_from, T_to, duration, wiggle, watch):
+        """The ramp T_from -> T_to with the wiggle riding on it, then `dwell_s` at T_to still
+        wiggling. skills/wiggle drives the servo loop on real elapsed time; the anchor is the
+        un-wiggled ramp at that time, so the approach keeps the pace seg_time set. Returns
+        'seated' | 'done', as adm.ramp does."""
+        def anchor(delta, t):
+            return ref(slerp_matrix(T_from, T_to, min(1.0, t / duration)) @ delta)
+
+        status, _last = wg.run(adm, wiggle['wiggle'], anchor, duration + wiggle['dwell_s'],
+                               1.0 / adm.rate, guard=self.guard, on_step=watch, moving=True)
+        return status
 
     # ---- the destination's own mechanism -------------------------------------------------------
     def prepare_target(self):

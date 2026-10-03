@@ -29,9 +29,9 @@ sequences:
   screwdrive_test_spin_slow:
     description: Short open-loop spin each way at low speed.
     steps:
-      - run 20 2
+      - run 18 2
       - wait 0.5
-      - run -20 2
+      - run -18 2
 
   screwdrive_test_spin_fast:
     description: Short open-loop spin each way at high speed.
@@ -53,7 +53,7 @@ sequences:
       - ramp 0 100 1
       - run 100 18
       - wait 1
-      - run 15 20
+      - run 18 20
 
   screwdrive_detach:
     description: Assuming a fully bottomed out position, reverse coupling screw fully out of hex panel until reverse bottomed out
@@ -61,7 +61,7 @@ sequences:
       - ramp 0 -100 1
       - run -100 18
       - wait 1
-      - run -15 20
+      - run -18 20
 
   screwdrive_predrive: 
     description: Assuming a fully backed in position, drive the coupling screw about 80% out such that there is bolt sticking out for tile alignment 
@@ -72,11 +72,11 @@ sequences:
   screwdrive_predrive_to_bolt: 
     description: Assuming a predriven bolt (see above), drive the coupling screw at low speed until fully bolted 
     steps: 
-      - run 20 60
+      - run 18 60
 
   screwdrive_undo_predrive: 
     description: Assuming a fully backed in position, drive the coupling screw about 80% out such that there is bolt sticking out for tile alignment 
     steps: 
       - run -100 4
       - run -50 4 
-      - run -20 20 
+      - run -18 20 

@@ -1,0 +1,178 @@
+# DISASSEMBLE TILE -- grasp an assembled, cantilevered tile, unscrew it, pull it off.
+# See urlab/apps/disassemble_tile.py.
+#
+#   python -m urlab.apps.disassemble_tile --set object_name=tile_1
+#
+# locate (from where the run starts -- put the tile's markers in view) -> align -> compliant mate
+# + preload -> lock -> take payload -> unscrew (screwdrive_detach) -> compliant pull along
+# motion.disassemble. The run ENDS HOLDING THE TILE at the pulled-off pose.
+
+robot_config: robot.yaml            # the machine (see configs/robot.yaml)
+camera_config: camera.yaml          # the sensor  (see configs/camera.yaml)
+
+# The catalogued object to disassemble (configs/objects.yaml): its markers find it, and its
+# calibrated grasp offsets put the coupler on its mating feature.
+object_name: tile_1
+
+aruco:
+  dictionary: DICT_4X4_50
+
+# ---- Motion legs ----
+# Same keys as coupler_pick_place's legs: distance_mm, axis (a direction), frame (coupler | base).
+# `coupler` axes are the end effector's own -- coupler_mate is a pure translation from tool0.
+motion:
+  mate_standoff:                  # where the compliant mate begins, off the grasp pose
+    distance_mm: 50.0
+    axis: [0.0, 0.0, -1.0]
+    frame: coupler
+  disassemble:                    # the pull, once unscrewed: 100 mm along the end effector's -X
+    distance_mm: 100.0
+    axis: [-1.0, 0.0, 0.0]
+    frame: coupler
+
+# ---- The screwdriver (the multi-toolchanger board's screwdrive module) ----
+screwdriver:
+  port: dc_motor                  # the multi-toolchanger board, by its configs/couplers.yaml name
+  baud: 115200
+  settle_s: 3.0
+  timeout_s: 5.0
+  detach_sequence: screwdrive_detach
+  # true = the loaded law holds the tile compliantly while the screw backs out, and a force-guard
+  # trip stops the screwdriver. false = the arm is held rigid.
+  compliant: true
+
+# ---- CANTILEVERED: LOW FORCES ----
+# The tile hangs off the fixture, so anything the coupler pushes with bends its mount and the
+# tile deflects away instead of seating. Both thresholds are well under the assembly's
+# (coupler_marker_assemble: mate preload 5 N, guard 25 N). Tune them on the real tile.
+#
+# The mate preload is the push that proves contact. Under admittance, at 2000 N/m, 1 N is 0.5 mm
+# of reference travel past the target.
+mate_preload:
+  enabled: true
+  force_n: 2.0                    # the contact force the push stops at
+  max_travel_mm: 10.0             # reference travel past the target before giving up
+  step_mm: 0.5                    # advance this far, then re-read the force
+  settle_s: 0.2                   # let each step settle before believing the reading
+  persistence_s: 1.0              # the force must STAY over this long (rides out ringing)
+
+# ---- Wiggle during the mate (urlab/skills/wiggle.py) ----
+# A small multisine on the compliant mate, in the COUPLER's own frame: x/y are across the mating
+# axis, so it rocks the coupler sideways to work it into the feature instead of stopping on its
+# lip. It rides the whole approach, then `dwell_s` more at the target. The preload push after it
+# is NOT wiggled -- that is a force measurement. Same keys as any skills/wiggle block (axes
+# x_mm y_mm z_mm roll_deg pitch_deg yaw_deg), plus enabled and dwell_s.
+#
+# AT CONTACT IT PUSHES SIDEWAYS: once the feature holds the coupler laterally, the amplitude turns
+# into stiffness x amplitude of side force -- 2000 N/m x 5 mm = 10 N, two-thirds of the 15 N guard
+# below, on a cantilevered tile. Lower the amplitude if it trips the guard.
+mate_wiggle:
+  enabled: true
+  amplitude:    {x_mm: 7.0, y_mm: 5.0}
+  frequency_hz: {x_mm: 0.5, y_mm: 0.7}   # not a simple ratio, so the tip fills an area, not a line
+  phase_deg:    {x_mm: 0.0, y_mm: 90.0}
+  taper_s: 1.0                    # ramp in at the start, out at the end of the dwell (required)
+  dwell_s: 5.0                    # keep wiggling this long at the target before the preload push
+  max_speed_mm_s: 30.0            # refuse a setting faster than this (5 mm at 0.7 Hz peaks at 22)
+
+# The hard limit, for the WHOLE run: it caps the contact during the mate, the unscrewing hold and
+# the pull. During the pull a trip is a failure -- the tile did not come off -- and the run stops
+# holding it there. Too low and normal friction on the way off trips it; raise it if so.
+force_guard:
+  enabled: true
+  max_force_n: 15.0
+  max_torque_nm: 4.0
+  persistence_s: 0.05             # ride out a single noisy sample; trip on real contact
+
+# ---- Compliance ----
+# `compliance` runs the mate (nothing held); `compliance_loaded` runs the unscrewing and the pull
+# (tile locked on, payload set). Whole blocks, not merged -- see coupler_pick_place.yaml. Tare at
+# the start of a leg only when nothing is in contact (the mate); the unscrewing and the pull start
+# in contact and deliberately do not.
+compliance:
+  enabled: true
+  tare_before: true
+  mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+  stiffness:     [2000.0, 2000.0, 2000.0, 20.0, 20.0, 20.0]
+  damping_ratio: [1.6, 1.6, 1.6, 1.6, 1.6, 1.6]
+  selected_axes: [1, 1, 1, 1, 1, 1]
+  reference_rate_hz: 125.0
+  lookahead_time_s: 0.1
+  servo_gain: 300.0
+  max_delta_mm: 40.0
+  max_delta_deg: 15.0
+  warmup_s: 0.5                   # servoL engaging reads as tens of phantom N; let it decay
+
+compliance_loaded:
+  enabled: true
+  tare_before: true
+  mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+  stiffness:     [2000.0, 2000.0, 2000.0, 20.0, 20.0, 20.0]
+  damping_ratio: [1.6, 1.6, 1.6, 1.6, 1.6, 1.6]
+  selected_axes: [1, 1, 1, 1, 1, 1]
+  reference_rate_hz: 125.0
+  lookahead_time_s: 0.15
+  servo_gain: 150.0
+  max_delta_mm: 40.0
+  max_delta_deg: 15.0
+  warmup_s: 0.5
+
+compliant_speed_mm_s: 5.0         # paces every compliant leg (the 100 mm pull takes 20 s)
+compliant_rot_speed_deg_s: 15.0
+
+# ---- What the arm is carrying ----
+# held_mass_kg comes from objects.yaml; null puts its CoG at the coupler's engagement point.
+held_cog_mm: null
+
+# Refuse a grasp or pull-off pose below this base_link height (mm); null disables.
+min_grasp_z_mm: null
+
+# ---- Locating the tile ----
+marker_views:
+  settle_s: 0.4
+  frames_per_view: 3
+  offsets:
+    - {xyz_mm: [0.0, 0.0, 0.0]}   # one view, from where the run starts
+  min_views: 1
+  max_camera_distance_mm: 750.0
+  joint_pnp: true
+  save_images: true
+  servo:
+    enabled: false
+    distance_mm: 500.0
+    max_iterations: 1
+    pos_tol_mm: 0.5
+    ang_tol_deg: 0.5
+    ring_mm: 25.0
+    ring_views: 0
+    single_view: true
+  min_markers: 1
+  require_all_markers: false
+  max_disagreement_mm: 15.0
+  max_disagreement_deg: 15.0
+  ransac: true
+  ransac_min_inliers: 2
+
+# ---- The end-effector coupler ----
+toolchanger:
+  enabled: true
+  port: end_effector
+  baud: 9600
+  motor: true
+  bypass: true
+  # LATCHED, because the run ENDS HOLDING THE TILE. Without it, closing the port at exit resets
+  # the board, which re-decides the clamp from one sensor reading and can open it -- dropping the
+  # tile. The cost: nothing switches the coupler motor off when the process exits; release the
+  # tile deliberately (toolchanger/toolchanger.py) or power the board down.
+  latch: true
+  settle_s: 3.0
+  timeout_s: 5.0
+
+move_timeout_s: 60.0
+settle_s: 0.3
+
+# true = pause before every step that moves the arm, works the coupler or turns the screwdriver.
+# `--yes` runs straight through; a dry run and --no-prompts ignore it.
+confirm_each_step: true
+
+debug: false

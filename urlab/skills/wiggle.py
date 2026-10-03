@@ -237,12 +237,15 @@ class Wiggle:
 
 
 def run(adm, wig, anchor_fn, duration, dt, guard=None, on_step=None, scale=1.0,
-        on_ref=None, clock=None):
+        on_ref=None, clock=None, moving=False):
     """Drive `wig` for `duration` seconds, stepping the reference once per servo cycle.
 
     `anchor_fn(delta4x4) -> tool0 pose` is the caller's anchoring: a station for
     wiggle_sampling, a trajectory point for engage, the believed seat for estimator_eval. Keeping
     it a callback is what lets one waveform serve all three without any of them re-implementing it.
+
+    `moving=True` passes the elapsed time too, as anchor_fn(delta4x4, t), so the anchor itself can
+    travel under the wiggle -- coupler_pick_place's mate rides it on the compliant approach.
 
     `clock` (default time.monotonic) supplies REAL elapsed time, so the delivered frequency is the
     configured one even when the servo loop does not run at its nominal rate.
@@ -262,14 +265,15 @@ def run(adm, wig, anchor_fn, duration, dt, guard=None, on_step=None, scale=1.0,
                 return (_n[0] - 1) * dt
         else:
             clock = _t.monotonic
+    at = anchor_fn if moving else (lambda delta, _t: anchor_fn(delta))
     t0 = clock()
-    prev = anchor_fn(np.eye(4))
+    prev = at(np.eye(4), 0.0)
     last = prev
     while True:
         t = clock() - t0
         if t >= duration:
             break
-        cur = anchor_fn(wig.delta(t, duration, scale))
+        cur = at(wig.delta(t, duration, scale), t)
         if on_ref is not None:
             on_ref(cur, t, wig.tapered(t, duration))
         res = adm.ramp(prev, cur, dt, guard, on_step=on_step)

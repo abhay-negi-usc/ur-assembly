@@ -488,6 +488,10 @@ class CouplerCycle:
     # prompts for a mechanism it does not have.
     secures_target = False
     PREPARE_TARGET_LABEL = 'open the destination clamp'
+    # A per-servo-cycle hook, `on_servo_step(what, adm)`, called on every cycle of every compliant
+    # leg (the preload push and its hold included). None = nothing extra runs. apps/
+    # tile_grasp_experiment records through it.
+    on_servo_step = None
     SECURE_LABEL = 'clamp the destination onto the object'
 
     def __init__(self, cfg, robot, camera, detector, plan, name, obj, coupler):
@@ -1008,6 +1012,8 @@ class CouplerCycle:
             w = self.robot.arm.wrench()
             peak['f'] = max(peak['f'], float(np.linalg.norm(w[:3])))
             peak['tau'] = max(peak['tau'], float(np.linalg.norm(w[3:])))
+            if self.on_servo_step is not None:
+                self.on_servo_step(what, adm)
 
         if wiggle is not None:
             log.info('  ... with the wiggle: %s, then %.1f s at the target.',

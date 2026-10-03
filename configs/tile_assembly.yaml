@@ -1,0 +1,710 @@
+# TILE ASSEMBLY -- locate a FIXED tile by its markers, pick a catalogued tile, and assemble it
+# onto the fixed one. See urlab/apps/tile_assembly.py.
+#
+#   python -m urlab.apps.tile_assembly --set marker_assembly=tile_on_plate
+#
+# COPIED FROM configs/coupler_marker_assemble.yaml. Edit this one for the tile cycle; the two are
+# independent from here on.
+#
+# THE SAME CYCLE AS coupler_pick_assemble, except where the object ends up: not a taught base_link
+# pose but one measured every run from the fixed object's markers, through the calibration in
+# configs/marker_assemblies.yaml (urlab.apps.marker_assembly_calibration writes it). The fixed
+# object can move between runs and the assembly follows it.
+#
+# Everything below `motion:` -- compliance, preloads, guard, the coupler boards -- is the same
+# tuning as coupler_pick_assemble.yaml and means the same thing.
+
+# WHICH ASSEMBLY -- an entry in configs/marker_assemblies.yaml. No default.
+marker_assembly: central_fixture_tile_1_v2
+
+robot_config: robot.yaml            # the machine (see configs/robot.yaml)
+camera_config: camera.yaml          # the sensor  (see configs/camera.yaml)
+
+# Which catalogued object to pick. null = the assembly's `held_object`, which is what it was
+# calibrated with; naming a different one is refused.
+object_name: tile_1
+
+# ---- Where to look from ----
+# THE FIXED OBJECT IS SEEN FIRST, WITH THE ARM EMPTY. Once the held object is on the coupler it
+# occludes the camera, so the order is fixed:
+#
+#   1. drive to fixed_view_joints_deg, locate the fixed object from its markers
+#   2. drive to pick_view_joints_deg, locate the held object, mate, lock, lift
+#   3. carry to the assembly standoff and insert -- the camera is not needed again
+#
+#   fixed_view_joints_deg  where the fixed object's markers are in view. null = the joints the
+#                          calibration saw them from (written with the assembly); set it to
+#                          override that, e.g. if the calibration view is now blocked.
+#   pick_view_joints_deg   where the held object's markers are in view. null = go back to
+#                          wherever the run was started.
+#
+# Read the values off urlab.apps.monitor (`joints (deg): [...]`) with the arm hand-guided to each
+# view. With both set, the run can be started from any pose that can joint-move to them. If
+# there is no fixed view at all, both objects are located from the start pose.
+fixed_view_joints_deg: [-127, -95, -107, -164, -124, -2]
+pick_view_joints_deg: [11, -80, -98, -268, -91, -76]
+
+# ---- The way in, with the object in hand ----
+# assembly_joints_deg  a joint pose to go to after the pick, BEFORE the approach -- e.g. to swing
+#                      round to the fixed object's side. null = go straight to the approach.
+# approach_path        waypoints visited in order, each an OFFSET FROM THE FINAL ASSEMBLY POSE IN
+#                      ITS COUPLER FRAME (xyz_mm, optional rpy_deg about the waypoint's own axes).
+#                      So [0, 0, -250] is 250 mm back along the assembled object's mating axis;
+#                      the whole path travels with the fixed object.
+#
+# THE LAST WAYPOINT IS THE INSERTION STANDOFF: the compliant insertion runs from it straight to
+# the goal, and motion.assembly_standoff below is derived from it (and ignored) whenever a path is
+# given. It must therefore have no rpy_deg. Moves between waypoints are IK + joint moves, so the
+# path between two waypoints is not a straight line -- add waypoints where clearance matters.
+# confirm_approach_steps  pause before EVERY move above (the assembly joints and each waypoint):
+#                         the current and next step are printed and nothing moves until Enter
+#                         (q stops the run where it is, object still held). Off in a dry run and
+#                         under --no-prompts.
+confirm_approach_steps: true
+# approach_speed_scale    the approach_path waypoint moves run at this fraction of the global speed
+#                         limits (configs/robot.yaml: 30 deg/s joints, 25 mm/s Cartesian), so
+#                         0.25 = a quarter speed. The assembly joints and transitions run at the
+#                         normal speed; the previous scale is restored after the path.
+approach_speed_scale: 0.25
+assembly_joints_deg: [-128, -91, -97, -182, -125, -93]
+approach_path: 
+  - name: 'behind fixture approach'
+    xyz_mm: [-200.0, 0.0, -100.0]
+  - name: 'approach'
+    xyz_mm: [-100.0, 0.0, 0.0]
+  - name: 'pre_contact'           # LAST: the compliant insertion runs from here to the goal
+    xyz_mm: [-10.0, 0.0, 0.0]
+
+# ---- Offsetting the target ----
+# An optional correction to where the held object is assembled, applied to the goal the fixed
+# object's markers give: T_goal = T_located @ offset. In the GOAL'S OWN COUPLER FRAME -- the
+# assembled held object's mating frame, which is attached to the fixed object -- so the offset
+# travels with the fixed object wherever it is found. rpy_deg turns about the offset point's own
+# axes. The approach path, insertion, fastening and retract all follow the offset goal.
+# Zeros (or removing the block) = exactly as calibrated.
+goal_offset:
+  xyz_mm: [0.0, 0.0, -10.0]
+  rpy_deg: [0.0, 0.0, 0.0]
+
+# ---- How fast the named joint moves run ----
+# The moves to fixed_view_joints_deg, pick_view_joints_deg, assembly_joints_deg and through
+# transition_joints_deg use THESE limits instead of configs/robot.yaml's speed: block. Same keys.
+#
+# WHY THEY WERE SLOW: a joint move honours every cap, and robot.yaml's Cartesian ones are
+# converted into a joint-speed limit -- so on a big swing, where the tool travels half a metre,
+# its 25 mm/s TCP cap binds long before the 30 deg/s joint cap (500 mm = 20 s). Each move logs
+# which cap bound it: `moveJ ... (..., cartesian-translation cap)`.
+#
+# Everything else -- the approach path, the mate, the insertion -- keeps robot.yaml's limits.
+# The controller accepts at most 180 deg/s per joint; anything above is clamped. Remove the
+# block to go back to the global limits.
+joint_move_speed:
+  max_joint_velocity_deg_s: 60.0
+  max_joint_acceleration_deg_s2: 60.0
+  max_cartesian_translation_mm_s: 250.0
+  max_cartesian_rotation_deg_s: 60.0
+
+# ---- Transitions between the joint poses ----
+# Intermediate joint poses for the moves BETWEEN fixed_view_joints_deg, pick_view_joints_deg and
+# assembly_joints_deg -- e.g. to swing round an obstacle instead of taking the joint-space
+# straight line. Keyed <from>_to_<to> over: start (wherever the run began), fixed_view,
+# pick_view, assembly. Each is a list of six-angle poses (degrees), visited in order.
+#
+# The run moves start -> fixed_view -> pick_view (-> start when pick_view is null), then, with
+# the object in hand, pick_view -> assembly. Only those transitions are used; a key the run never
+# makes is warned about at startup. The pick_view_to_assembly ones pause with
+# confirm_approach_steps like the rest of the approach.
+transition_joints_deg: 
+# transition_joints_deg:
+  fixed_view_to_pick_view:
+    - [-58, -64, -113, -214, -69, -124]
+  pick_view_to_assembly:
+    - [-58, -64, -113, -214, -69, -124]
+
+# ---- Fastening (the screwdriver on the multi-toolchanger board) ----
+# When enabled:
+#   * after the pick, with the object lifted clear:  predrive_sequence (the bolt ~80% out, so it
+#     sticks out for alignment)
+#   * after the insertion has preloaded, BEFORE any release:  fasten_sequence (home at low speed)
+#   * then the coupler releases and the end effector retracts by `retract` below
+# Sequences are names from multi-toolchanger/config/screwdrive.yaml, checked at startup.
+#
+# compliant: true holds the insertion compliance law while the screw turns, so the arm yields as
+# the screw draws the parts together, and a force-guard trip stops the screwdriver. false holds
+# the arm rigid -- any gap left after the insertion then becomes force on the arm.
+fastening:
+  enabled: true
+  port: dc_motor                  # the multi-toolchanger board, by its configs/couplers.yaml name
+  baud: 115200
+  settle_s: 3.0
+  timeout_s: 5.0
+  predrive_sequence: screwdrive_predrive
+  fasten_sequence: screwdrive_predrive_to_bolt
+  compliant: true
+  # standard           predrive after the pick; compliant insertion; fasten_sequence; release.
+  # bolt_localization  (testing) attach after the pick; at the end of the approach path, press
+  #                    and SEARCH for the hole with the bolt, then detach + attach there under
+  #                    the same compliance -- see bolt_localization: below. Replaces the
+  #                    insertion and fasten_sequence; release and retract follow as usual.
+  mode: standard
+  # AFTER FASTENING the coupler releases and the end effector backs off by this leg, which
+  # REPLACES motion.final_retract when fastening is on: 200 mm along its own -z, the way it came
+  # in. Same keys as a motion leg (frame coupler | base | fixed_marker).
+  retract:
+    distance_mm: 200.0
+    axis: [0.0, 0.0, -1.0]
+    frame: coupler
+
+# ---- Bolt localization (fastening.mode: bolt_localization) ----
+# After the pick: attach_sequence (the bolt FULLY out). At the end of the approach path, under
+# bolt_localization_compliance:
+#   1. PRESS along drop_axis (the bolt's direction, in the coupler frame) in press_step_mm steps
+#      until press_force_n is felt -- the bolt tip resting on the fixed object.
+#   2. SEARCH: oscillate along search_axis (tool x) as a sine at frequency_hz, its amplitude
+#      starting at amplitude_start_mm and growing amplitude_growth_mm per cycle up to
+#      amplitude_max_mm, until the tool ADVANCES along drop_axis by drop_mm -- the bolt falling
+#      into the hole. Gives up after max_time_s.
+#   3. Hold that pose under the same law while the screwdriver runs detach_sequence then
+#      attach_sequence.
+# The drop is the press spring letting go, so it can be at most press_force_n / stiffness along
+# drop_axis (5 N / 2000 N/m = 2.5 mm): keep drop_mm below that. Every press step and search cycle
+# is written to bolt_localization.csv in the run's data/experiments/ folder.
+bolt_localization:
+  attach_sequence: screwdrive_attach
+  detach_sequence: screwdrive_detach
+  drop_axis: [0.0, 0.0, 1.0]
+  press_force_n: 5.0
+  press_step_mm: 0.5
+  press_max_mm: 30.0
+  settle_s: 0.2
+  search_axis: [1.0, 0.0, 0.0]
+  frequency_hz: 0.2
+  amplitude_start_mm: 0.5
+  amplitude_growth_mm: 0.5
+  amplitude_max_mm: 10.0
+  max_time_s: 120.0
+  drop_mm: 1.0
+  save_trace: true
+
+# The fixed object's localization uses marker_views: below unless this block is given, in which
+# case it replaces it whole (e.g. a wider sweep for a fixed object with markers far apart).
+# fixed_marker_views:
+#   settle_s: 0.4
+#   ...
+
+aruco:
+  dictionary: DICT_4X4_50
+
+# ---- THE FOUR MOTION LEGS ----
+# The cycle is: align at mate_standoff -> mate (compliant) -> grasp -> pick_retract (compliant)
+# -> carry to place_standoff -> place (compliant) -> demate -> final_retract (compliant).
+#
+# Each leg is its own distance, axis and frame, because they answer different questions. The
+# MATE standoff is long: the feature was found by a camera, so the compliant descent needs room
+# to correct before anything touches. The other three only have to clear the part, so they are
+# short -- tying all four to one number would make either the mate cramped or the cycle slow.
+#
+#   axis   a DIRECTION, normalised on load. [0, 0, -1] is straight back out along the mating
+#          axis, which is the only direction that never levers the coupler against a feature it
+#          is still inside. A zero axis is refused, not silently treated as no motion.
+#   frame  `coupler` reads the axis in the END EFFECTOR frame -- the coupler_mate frame, which
+#          is a pure translation from tool0 and therefore shares its axes exactly. So [0, 0, -1]
+#          is "back out along the tool's own z" wherever the tool is pointing, and the assembly
+#          axis is defined in end-effector terms rather than in the room's. `base` reads it in
+#          base_link instead, for when "straight up" is meant literally.
+motion:
+  mate_standoff:                  # where the compliant mate begins, off the pick pose
+    distance_mm: 200.0
+    axis: [0.0, 0.0, -1.0]
+    frame: coupler
+  pick_retract:                   # lift the grasped object clear
+    distance_mm: 100.0
+    axis: [0.0, 0.0, -1.0]
+    frame: coupler
+  # THE INSERTION. The object is carried to this standoff off the goal, then driven home under
+  # admittance along the same line reversed -- so `axis` points from the goal BACK OUT to where
+  # the insertion starts.
+  #
+  #   frame: coupler        the axis in the coupler frame AT THE GOAL (= the held object's
+  #                         mating frame, assembled). [0, 0, -1] is back out along its mating
+  #                         axis.
+  #   frame: fixed_marker   the axis in one FIXED marker's own frame; `marker: <id>` picks which
+  #                         (default the lowest id). [0, 0, 1] = insertion straight down onto
+  #                         that marker's face, coming in along its normal.
+  #   frame: base           base_link axes -- only sensible if the fixed object never tilts.
+  #
+  # Both coupler and fixed_marker frames are attached to the fixed object, so the insertion
+  # follows it wherever the camera finds it.
+  assembly_standoff:              # where the compliant insertion begins, off the goal
+    distance_mm: 100.0
+    axis: [-1.0, 0.0, 0.0]
+    frame: coupler
+  # BACK OFF ALONG THE PICK AXIS: straight back out the way the coupler came down onto the
+  # object. `frame: fixed_marker` is accepted here too.
+  final_retract:                  # back off after demating
+    distance_mm: 100.0
+    axis: [0.0, 0.0, -1.0]
+    frame: coupler
+
+# ---- Compliance (the default motion for anything that can touch) ----
+# SOFT TRANSLATIONAL STIFFNESS is the point. The mating feature is found by a camera, so the
+# coupler arrives with a real misalignment; a stiff arm levers against it and a compliant one
+# slides into it. With S = 300 N/m a 10 N side load yields 33 mm, which is far more than the
+# capture range needs and is deliberately generous -- raise it if the object gets pushed around
+# during the descent, lower it if the coupler ever jams on entry.
+#
+# ROTATIONAL stiffness is left comparatively higher (8 Nm/rad) because the mating AXIS is the
+# one thing the pose is confident about, and a floppy wrist lets a heavy object tip on the way
+# up rather than helping it seat.
+#
+# damping_ratio > 1 is over-damped ON PURPOSE: this carries a 3 kg object, and an underdamped
+# law with that much mass on the end oscillates where it should settle.
+compliance:
+  enabled: true
+  # Tare at the START of each compliant leg -- but ONLY on legs that begin with nothing in
+  # contact (the mate, the set-down). The legs that begin already touching -- the lift, which
+  # starts with the object still resting on the bench, and the withdrawal, which starts with the
+  # coupler still pressed into it -- deliberately skip it. Zeroing against a REAL force does not
+  # remove an offset; it declares that force to be nothing, and the instant it goes away the law
+  # sees its negative as a phantom and yields to it. For a 3.3 kg pick that phantom is 32 N,
+  # which at the loaded stiffness is 32 mm of deflection, applied in the tool frame while the
+  # phantom acts along gravity -- a lift that visibly slews sideways. The post-pick tare happens
+  # once the object is genuinely hanging free, right after the lift.
+  tare_before: true
+  mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+  stiffness:     [2000.0, 2000.0, 2000.0, 20.0, 20.0, 20.0]
+  damping_ratio: [1.6, 1.6, 1.6, 1.6, 1.6, 1.6]
+  selected_axes: [1, 1, 1, 1, 1, 1]
+  reference_rate_hz: 125.0
+  lookahead_time_s: 0.1
+  servo_gain: 300.0
+  # The runaway clamp, not a working range: a bad tare or an F/T fault would otherwise integrate
+  # without limit. Comfortably larger than any yield a good pick produces.
+  max_delta_mm: 40.0
+  max_delta_deg: 15.0
+  warmup_s: 0.5                   # servoL engaging reads as tens of phantom N; let it decay
+
+# ---- Compliance WHILE CARRYING THE OBJECT ----
+# THE VIRTUAL MASS ABOVE IS A DESIGN PARAMETER, NOT THE PAYLOAD. Nothing in the admittance law
+# changes when 3.3 kg is picked up -- but the plant it drives does, enormously: the mass at the
+# tool goes from 0.3 kg to 3.6 kg, TWELVEFOLD. A law tuned to move a bare coupler briskly then
+# commands reference accelerations the loaded arm cannot follow, the tracking lag feeds the F/T,
+# the F/T feeds the law, and it yields further. That loop is the oscillation that appears at
+# pickup and not before.
+#
+# RAISING THE VIRTUAL MASS IS THE DIRECT FIX: the law's bandwidth is sqrt(S/M), so 5 -> 20 kg
+# takes it from 2.25 Hz to 1.13 Hz and the reference stops outrunning the arm. Lowering the
+# stiffness would work too, but it costs preload resolution -- and the preload is measured while
+# still unloaded, so it is the wrong thing to trade.
+#
+# WHOLE BLOCK, NOT MERGED, the same rule the machine layers follow: D = zeta*2*sqrt(M*S) ties
+# the damping to the mass, so inheriting one while overriding the other silently mistunes both.
+# Delete this block and the loaded law is simply the free one -- the old behaviour, and fine for
+# a light object.
+#
+# IF IT STILL RINGS: raise mass further (40 kg -> 0.80 Hz), then lower servo_gain toward 100 and
+# raise lookahead_time_s toward 0.2 -- those are the UR's own tracking loop rather than the law.
+compliance_loaded:
+  enabled: true
+  tare_before: true
+  mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+  stiffness:     [2000.0, 2000.0, 2000.0, 20.0, 20.0, 20.0]
+  damping_ratio: [1.6, 1.6, 1.6, 1.6, 1.6, 1.6]
+  selected_axes: [1, 1, 1, 1, 1, 1]
+  reference_rate_hz: 125.0
+  lookahead_time_s: 0.15
+  servo_gain: 150.0
+  max_delta_mm: 40.0
+  max_delta_deg: 15.0
+  warmup_s: 0.5
+
+compliant_speed_mm_s: 5.0        # paces every compliant leg
+compliant_rot_speed_deg_s: 15.0
+
+# ---- MATING PRELOAD ----
+# Reaching the target pose is proof the arm got where it BELIEVED the feature was; it is not
+# proof the two are touching. The pose came from a camera, so it is right to within the
+# estimate's error. After the compliant mate arrives, the reference is walked further along the
+# mating axis until a contact force is actually measured -- so the coupler ends up seated and
+# lightly loaded rather than hovering at a computed pose.
+#
+# THE AXIS IS NOT CONFIGURED HERE. It is `motion.mate_standoff.axis` REVERSED, in the same
+# frame: the standoff is where the approach starts and the mate is the trip back along it, one
+# axis with two signs. Two independent settings could disagree, and the arm would approach along
+# one line and preload along another.
+#
+# THE FORCE IS PROJECTED ONTO THAT AXIS, not taken as a magnitude -- a magnitude counts a side
+# load from a misaligned entry as eagerly as real seating pressure, and would call the preload
+# met while the coupler is jammed on a lip instead of resting on the bottom of the feature.
+#
+# THE F/T IS TARED AT THE STANDOFF, with nothing touching, and NOT AGAIN before the push. The
+# push rides inside the same servo session as the mate for exactly that reason: run as its own
+# leg it would re-zero the sensor after contact and subtract the force it is trying to measure.
+#
+# max_travel_mm is how far past the target the REFERENCE may advance, not how far the tool moves.
+# Under admittance the contact force is the spring acting on the gap between reference and
+# measured pose (F = S * delta), so at the 1000 N/m above, 1 N is about 1 mm of travel. Running
+# out of travel without reaching the force means nothing was there to push against, and the run
+# stops rather than lifting air.
+mate_preload:
+  enabled: true
+  force_n: 5.0                    # the contact force the push stops at
+  max_travel_mm: 10.0              # reference travel past the target before giving up
+  step_mm: 0.5                    # advance this far, then re-read the force
+  settle_s: 0.2                   # let each step settle before believing the reading
+  # THE FORCE MUST HOLD, not just be touched. After a reference step the compliant law rings:
+  # the reading overshoots, settles, and can cross the threshold on the way past with nothing
+  # seated. A part sliding off a chamfer does the same -- a spike as it catches, nothing as it
+  # slips. The reference is HELD here (not advanced) and the force has to stay over for this
+  # long, so what is accepted is "resting on something" rather than "touched something once".
+  #
+  # NOT THE SAME KNOB AS force_guard.persistence_s, which is deliberately 20x shorter. That one
+  # rides out noise before STOPPING the arm, and every millisecond of it is time spent over the
+  # limit. This one rides out noise before BELIEVING a reading, where waiting costs only time.
+  #
+  # 0 accepts the first sample over the threshold -- the old behaviour.
+  persistence_s: 0.5
+
+# ---- ASSEMBLY PRELOAD ----
+# The insertion force. Same mechanism as the mate -- push along the travel axis until the fixture
+# pushes back -- but the NUMBER matters more here than at a set-down, and should be chosen rather
+# than inherited.
+#
+# WHY: a placement inherits the pick's error and adds nothing -- a 2 mm pick error just lands the
+# object 2 mm off on the bench. An assembly drives that same 2 mm into a fixture that does not
+# know about it, so it shows up as interference. The compliant insertion absorbs it; the preload
+# is what proves the part went HOME rather than stopping short against a chamfer.
+#
+# Set force_n to what a SEATED part actually reads, not to touchdown. The default below is the
+# same 1 N as the mate, which detects contact and nothing more.
+#
+# max_travel_mm is REFERENCE travel past the target: at the loaded stiffness, 1 N is about 1 mm,
+# so a part needing 10 N to seat needs ~10 mm allowed or the run gives up short.
+assembly_preload:
+  enabled: true
+  force_n: 1.0
+  max_travel_mm: 8.0
+  step_mm: 0.5
+  settle_s: 0.2
+  # THE FORCE MUST HOLD, not just be touched. After a reference step the compliant law rings:
+  # the reading overshoots, settles, and can cross the threshold on the way past with nothing
+  # seated. A part sliding off a chamfer does the same -- a spike as it catches, nothing as it
+  # slips. The reference is HELD here (not advanced) and the force has to stay over for this
+  # long, so what is accepted is "resting on something" rather than "touched something once".
+  #
+  # NOT THE SAME KNOB AS force_guard.persistence_s, which is deliberately 20x shorter. That one
+  # rides out noise before STOPPING the arm, and every millisecond of it is time spent over the
+  # limit. This one rides out noise before BELIEVING a reading, where waiting costs only time.
+  #
+  # 0 accepts the first sample over the threshold -- the old behaviour.
+  persistence_s: 0.5
+
+# ---- COMPLIANCE FOR THE INSERTION ITSELF ----
+# The assembly leg gets its own law, because an insertion wants a different SHAPE of compliance
+# and not just a different speed:
+#
+#   ACROSS the travel axis, SOFT -- so the fixture's own lead-in can pull the part into line
+#          instead of the arm grinding it against a chamfer. Every millimetre of pick error
+#          arrives here, and this is what absorbs it.
+#   ALONG the travel axis, STIFFER -- so the preload push reaches its force in a sane amount of
+#          reference travel. At 2000 N/m, 10 N is 5 mm; at the 400 N/m used laterally it would
+#          be 25 mm, which is most of the insertion.
+#
+# THE LAW RUNS IN THE tool0 FRAME, and coupler_mate is a pure translation from tool0, so these
+# three numbers are the coupler's own x, y, z -- in that order. POINT THE INSERTION DOWN A
+# DIFFERENT AXIS AND THE PROFILE IS BACKWARDS: compliant where the force is wanted and rigid
+# where the give is. The run checks that at startup and says so rather than leaving it to be
+# discovered on a part.
+#
+# THE mini_ORU / cleat INSERTION IS SIDEWAYS, NOT DOWN. The approach path ends 50 mm out along
+# base +x and the part slides in along base -x, while the coupler hangs it with +z pointing at
+# the floor. In the coupler's own axes that travel direction is roughly [-0.73, -0.69, -0.01] --
+# a DIAGONAL in the tool's x-y plane. The old profile here was [400, 400, 2000], stiff along
+# tool z: that is stiff straight DOWN, which is the one direction this insertion does not travel
+# in and the one it most wants to give in, since the part has to settle onto the cleat as it
+# enters. It is now the other way round.
+#
+# AN AXIS-ALIGNED STIFFNESS CANNOT FULLY SHAPE A DIAGONAL INSERTION, and the startup check says
+# so instead of asking for a reorder that would not help. Along a 45-degree axis in x-y the
+# effective gain is (Sx + Sy) / 2, and the perpendicular direction in that same plane gets the
+# identical number -- no choice of three values separates them. Shaping it properly needs the law
+# to run in a frame aligned with the insertion, which is a change to robot/admittance.py. Until
+# then the honest setting is: pick one gain for the PLANE the part slides in, and leave the third
+# axis soft.
+#
+# The virtual mass stays at the loaded value -- the object is on the coupler and the oscillation
+# it causes does not care which leg is running.
+#
+# Delete this block and the insertion simply uses compliance_loaded, as it did before.
+compliance_insert:
+  enabled: true
+  tare_before: true
+  # x, y: the plane the part slides in -- firm enough that the preload is reached in a few mm.
+  # z:    straight down. SOFT, so the part can settle into the cleat instead of being held off
+  #       it by the arm, and so the arm does not drive the part's weight into the bracket.
+  mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+  stiffness:     [2000.0, 2000.0, 2000.0, 20.0, 20.0, 20.0]
+  damping_ratio: [1.6, 1.6, 1.6, 1.6, 1.6, 1.6]
+  selected_axes: [1, 1, 1, 1, 1, 1]
+  reference_rate_hz: 125.0
+  lookahead_time_s: 0.15
+  servo_gain: 150.0
+  max_delta_mm: 40.0
+  max_delta_deg: 15.0
+  warmup_s: 0.5
+
+# THE BOLT SEARCH'S OWN LAW (fastening.mode: bolt_localization): the press, the search and the
+# detach + attach at the found pose all run under it. A copy of compliance_insert for now, so it
+# can be retuned without touching the insertion.
+bolt_localization_compliance:
+  enabled: true
+  tare_before: true
+  mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+  stiffness:     [2000.0, 2000.0, 2000.0, 20.0, 20.0, 20.0]
+  damping_ratio: [1.6, 1.6, 1.6, 1.6, 1.6, 1.6]
+  selected_axes: [1, 1, 1, 1, 1, 1]
+  reference_rate_hz: 125.0
+  lookahead_time_s: 0.15
+  servo_gain: 150.0
+  max_delta_mm: 40.0
+  max_delta_deg: 15.0
+  warmup_s: 0.5
+
+# ---- The hard limit on top of the compliance ----
+# The admittance law yields; the guard STOPS. It has to sit above the forces a normal mate and a
+# normal set-down produce -- a 3 kg object alone is ~32 N once it is on the coupler, which the
+# payload update accounts for but only as well as the CoG assumption below allows.
+force_guard:
+  enabled: true
+  max_force_n: 25.0
+  max_torque_nm: 8.0
+  persistence_s: 0.05             # ride out a single noisy sample; trip on real contact
+
+# ---- What the arm is carrying ----
+# held_mass_kg comes from objects.yaml. The CoG does NOT -- mass is easy to weigh and a CoG is
+# not, so this is where the assumption lives. null puts the object's mass at the coupler's
+# engagement point (frames.yaml `coupler_mate`), which is where it hangs from and the least
+# wrong single point available without a measurement. Set it in tool0 mm if the object is long
+# enough for that to matter: a wrong CoG does not fail, it biases every wrench reading by the
+# gravity-compensation residual, which looks like an admittance law that drifts one way and a
+# force guard whose margin depends on how the arm is oriented.
+held_cog_mm: null
+
+# ---- Sanity ----
+# Refuse a pick the geometry says is wrong BEFORE anything moves. A marker seen at a bad angle,
+# or one whose size_mm is mistyped, yields a well-formed pose that is simply somewhere else --
+# and the arm would drive at it confidently. A mating point below the bench is not one. Set to
+# the height of the lowest surface a real object can sit on, in base_link mm; null disables.
+min_grasp_z_mm: null
+
+# ---- Where to look from, and how the markers are made to agree ----
+marker_views:
+  settle_s: 0.4
+  frames_per_view: 3
+  offsets: 
+    - {xyz_mm: [0,0,0]}
+  min_views: 1                    # views per MARKER before it is allowed to vote
+  # The camera never plans a view further out than this. Raise it if the markers are spread far
+  # enough apart that they cannot all be in one frame from here -- a view beyond the cap is
+  # pulled IN along its ray, which on a large object can crop the outer markers out of shot.
+  max_camera_distance_mm: 750.0
+  # Solves every view's corners of ALL markers as ONE rigid body. This is where several markers
+  # really pay: a wide baseline across the object constrains the pose far better than any single
+  # marker's four corners can.
+  joint_pnp: true
+  save_images: true              # true -> annotated views + index.csv in data/experiments/<app>_<stamp>/marker_images/ (--set marker_views.save_images=true)
+  # ---- THE CLOSE LOOK ----
+  # After the sweep, visit each marker in turn and servo the camera onto its face at
+  # `distance_mm`, then pool those views with the sweep's.
+  #
+  # WHY IT EARNS ITS TIME. solvePnP's angular error falls roughly with the marker's apparent
+  # size, and the sweep has to fly far enough back to keep EVERY marker in one frame -- on an
+  # object with markers spread across it, a long way back. Servoing puts the camera the same
+  # short distance SQUARE ONTO each marker, so every one is measured under the geometry it is
+  # best estimated from instead of wherever in the frame it happened to land. It also fixes the
+  # weakest case for a top-down pick: a marker viewed head-on from far away is exactly where
+  # planar-pose tilt ambiguity is worst.
+  #
+  # THE COST IS TIME: an overview hop plus a servo plus a parallax ring, PER MARKER. A
+  # three-marker object is three of those. Set enabled: false for a fast cycle once the cell is
+  # trusted and the markers are big in frame from the sweep alone.
+  #
+  # The close views POOL with the sweep's rather than replacing them -- the closeness weighting
+  # makes them dominate anyway, and replacing outright could drop a marker whose servo produced
+  # few views below min_views.
+  servo:
+    enabled: false
+    distance_mm: 500.0            # camera-to-marker standoff for the close look
+    max_iterations: 1             # re-detect and re-centre until two readings agree
+    pos_tol_mm: 0.5               # ... to within this
+    ang_tol_deg: 0.5
+    ring_mm: 25.0                 # a small parallax ring around the vantage, aimed at the marker
+    ring_views: 0                 # 0 = the centred vantage only
+    single_view: true 
+
+  # ---- HOW MANY MARKERS MUST VOTE ----
+  # 1 keeps single-marker objects working, and all of the catalogue is single-marker today. The
+  # cost is that a lone marker carries no cross-check: if it has been knocked, the pick moves
+  # with it and nothing notices. Raise this to 2 once every object carries at least two, and a
+  # silently-moved marker becomes a refused run instead of a missed mate.
+  min_markers: 1
+  # false = a marker that is out of shot is not fatal. Occlusion is the normal reason to put
+  # several on an object, so demanding all of them would throw away the redundancy they exist
+  # for.
+  require_all_markers: false
+
+  # ---- THE DISAGREEMENT GATE ----
+  # Every marker should place the grasp frame in the same spot. Spread past this is not noise to
+  # average away -- it means one has been knocked, re-stuck, or reprinted at a size other than
+  # the one declared.
+  #
+  # IT IS MEASURED AS SPREAD ABOUT THE MEAN, NOT AS THE GAP BETWEEN MARKERS. With exactly TWO
+  # markers the mean sits halfway between them, so a knock of X mm shows up as only X/2 -- the
+  # gate therefore catches knocks of roughly TWICE its value. 5 mm (the library default, which
+  # this used to inherit silently) let an 8 mm knock through as a 4 mm error on a two-marker
+  # object. 3 mm is ~6x the marker-to-marker agreement a good calibration reports, so it has
+  # room, and it catches a 6 mm knock on two markers.
+  #
+  # The honest number is the coupler's CAPTURE RANGE -- an error the mechanism can absorb does
+  # not need refusing. Re-set both from it once it is measured.
+  max_disagreement_mm: 15.0
+  max_disagreement_deg: 15.0
+
+  # ---- OUTVOTING A BAD MARKER ----
+  # With THREE or more, the majority can reject the odd one out and the run carries on instead of
+  # failing the gate above. With two there is nothing to say WHICH of them moved, so the
+  # all-or-nothing gate is the honest answer and this does nothing.
+  ransac: true
+  ransac_min_inliers: 2
+
+# ---- The locking mechanism ----
+# The board CONFIRMS every hold and release against its proximity sensor and answers either
+# "confirmed!" or "emergency stop". A refused hold means the coupler is gripping NOTHING, and
+# this app stops there rather than setting a payload and lifting air. The lock is then re-checked
+# once more with `status` before the lift, because hold() only confirms at the instant the servo
+# finished and a part that was merely resting where the probe could see it can settle out after.
+#
+# Nothing here ever enables the board's sensor BYPASS. Opening the port resets the board and a
+# reset clears the bypass, so a run always starts with the interlock live.
+toolchanger:
+  enabled: true
+  # WHICH COUPLER. This cell has two boards running the same firmware -- the one on the END
+  # EFFECTOR and the one on the cleat the ORU mounts to -- and they are indistinguishable over
+  # the wire, so a run that guessed would work the wrong mechanism and get a perfectly normal
+  # confirmation back from it. This app actuates the END-EFFECTOR coupler.
+  #
+  # The name is mapped to a USB serial in COUPLERS at the top of toolchanger/toolchanger.py:
+  #
+  #     COUPLERS = {'end_effector': '<serial>', 'cleat': '<serial>'}
+  #
+  # `./toolchanger.py list` prints the serials and a line to paste. Keeping the role here and
+  # the serial there means swapping a board is one edit, and this file stays readable.
+  #
+  # A raw serial or a device path also works, but names survive a replug renumbering ttyACM*.
+  port: end_effector
+  baud: 9600
+  # Relay K1 POWERS THE ACTUATION, and the board comes up with it OFF after every connect
+  # (setup() drives it LOW, and opening the port resets the board). Without it the servo swings
+  # and nothing happens. The wire command is a TOGGLE, so the driver here drives it to a state
+  # rather than pulsing it. false leaves the relay alone, for a mechanism wired without it.
+  motor: true
+  # BYPASS THE PROXIMITY SENSOR. false = the board checks every hold and release against the
+  # probe, and a disagreement stops the run. true = it confirms whatever it is told.
+  #
+  # THIS IS FOR WHEN THE PROBE ITSELF IS THE BROKEN THING -- disconnected or shorted, it reads a
+  # hard rail and then agrees with every command, confirming grips that are not happening.
+  # Bypassing at least stops the board claiming to have checked. It is NOT a way past a grip
+  # that keeps being refused for real: that refusal is the mechanism telling you it is holding
+  # nothing.
+  #
+  # IT COSTS THE WHOLE INTERLOCK. hold() confirms blindly, so `verified` stays false for the
+  # session and every app that reports a grip says out loud that nothing checked it. A lift, a
+  # payload change and a carry all go ahead on trust.
+  #
+  # It clears whenever the connection closes -- opening the port resets the board -- so it can
+  # never outlive the run that asked for it.
+  bypass: true
+  # Opening the port pulls DTR and RESETS the Arduino. setup() must clear the bootloader,
+  # average the sensor and swing the servo before it prints its banner, so this start-up wait is
+  # unavoidable; the driver floors it at 2.5 s.
+  settle_s: 3.0
+  # One hold/release round trip is the better part of a second on the board (a 200 ms loop, a
+  # 500 ms servo move, a 10-sample sensor average), so the reply budget is not tight.
+  timeout_s: 5.0
+
+# ---- THE CLEAT'S OWN COUPLER ----
+# The destination clamps too. The mini_ORU is slid into a cleat that carries a SECOND board
+# running the same firmware, and when this block is present the run HANDS THE OBJECT OVER
+# instead of just letting go of it:
+#
+#   before the pick   the cleat is powered and its jaws forced OPEN -- a cleat that booted with
+#                     anything in front of its probe comes up clamped, and a part cannot be slid
+#                     into a clamp that is already shut. Doing it here, not later, means that is
+#                     discovered before a 1.5 kg part is hanging over the fixture.
+#   after the preload the cleat CLAMPS, and is re-checked against its sensor.
+#   then, and only then, the end-effector coupler releases and withdraws.
+#
+# THE ORDER IS THE WHOLE POINT. Between the cleat taking hold and the coupler letting go the
+# object is held by BOTH, which is harmless. The other order holds it by NEITHER. A refused clamp
+# therefore stops the run with the object still on the coupler at the assembled pose -- the one
+# state it can be backed out of.
+#
+# DELETE THIS BLOCK (or set enabled: false) and the run is what it was: the object is driven home
+# and the coupler simply lets go of it. That is right for a fixture that retains the part on its
+# own and wrong for one that does not.
+cleat_toolchanger:
+  # OFF BY DEFAULT HERE: a fixed object with no clamp of its own just receives the part. Turn it
+  # on when the destination does have one (e.g. the cleat), and the run hands over -- the clamp
+  # closes BEFORE the end-effector coupler lets go.
+  enabled: false
+  # THE OTHER BOARD. Both couplers run the same sketch and answer identically over the wire, so
+  # the only thing that tells them apart is the USB serial -- mapped to a name in
+  # configs/couplers.yaml. Getting this wrong would work the END-EFFECTOR coupler twice: the
+  # "cleat" would confirm a clamp it never made, and the release that follows would drop the part.
+  port: cleat
+  baud: 9600
+  motor: true
+  # LATCHED, AND THIS IS THE SETTING THAT KEEPS THE PART MOUNTED. Closing the serial port normally
+  # hangs up DTR, which resets the board -- and setup() ends with
+  #
+  #     status = checkTool() ? 1 : 0; changeServo(status > 0);
+  #
+  # so the board re-decides whether to clamp from ONE sensor reading taken microseconds after
+  # power-on. On the cleat that reset happens at the END of a successful run, with the assembled
+  # object hanging in it and the arm already withdrawn: if the probe says "absent" at that
+  # instant, the cleat opens and the part falls with nothing there to catch it.
+  #
+  # Latching clears HUPCL so the port closes without dropping DTR. The cost is the dead-man
+  # switch -- nothing switches the cleat's relay off when this process dies -- which for a
+  # mechanism whose entire job is to go on holding something after the run is the right way
+  # round. Release it deliberately (./toolchanger.py release --port cleat) or power the board
+  # down.
+  latch: true
+  # The cleat's own probe is the only thing that can say the part actually reached its seat, so
+  # this run wants it live. Bypassing it here would make the clamp confirm blindly and turn the
+  # handover into an assumption -- which is the one step in the cycle where the object is between
+  # two mechanisms.
+  bypass: true
+  settle_s: 3.0
+  timeout_s: 5.0
+
+move_timeout_s: 600.0
+settle_s: 0.3
+
+# ---- Stepping through the run ----
+# true  = PAUSE before every step that moves the arm or works the coupler, naming what is about
+#         to happen. Declining STOPS the run where it stands -- it does not skip the leg and
+#         carry on, which for a pick-and-place would mean releasing an object the arm never
+#         carried anywhere. This is the right setting while bringing the cell up.
+# false = run straight through. `--yes` sets this from the command line without editing here.
+#
+# The steps that move nothing (the two payload updates, the final report) are NOT gated: a
+# prompt there is noise, and noise is what trains people to hit Enter without reading.
+#
+# A dry run and `--no-prompts` both ignore this, so unattended and simulated runs never hang.
+# Independently of it, ONE unconditional gate stands before the first motion toward the object;
+# --yes does not silence that, because "run the steps without asking" is not the same request as
+# "drive at the part without telling me".
+confirm_each_step: true
+
+debug: false

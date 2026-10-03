@@ -940,10 +940,14 @@ class TileAssemblyCycle(AssembleCycle):
         worker = threading.Thread(target=lambda: result.__setitem__('ok', work()),
                                   name='screwdriver', daemon=True)
         tripped = False
+        # The cycle's per-servo-cycle hook (CouplerCycle.on_servo_step), so a recorder sees the
+        # hold too -- apps/tile_assembly_experiment records the fasten through it.
+        on_step = ((lambda: self.on_servo_step(what, adm)) if self.on_servo_step is not None
+                   else None)
         worker.start()
         try:
             while worker.is_alive():
-                status = adm.hold(T_ref_cmd, 0.1, None if tripped else self.guard)
+                status = adm.hold(T_ref_cmd, 0.1, None if tripped else self.guard, on_step=on_step)
                 if status == 'seated' and not tripped:
                     tripped = True
                     log.error('The force guard tripped during %s -- stopping the screwdriver; '

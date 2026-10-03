@@ -91,15 +91,30 @@ def relative_pose6(T_ref_frame, Ts):
 
 
 class TrialRecorder:
-    """Collects one attempt's servo-cycle samples and events, and writes them out."""
+    """Collects one attempt's servo-cycle samples and events, and writes them out.
 
-    def __init__(self, robot, T_tool0_coupler, clock=time.monotonic):
+    THE DEFAULTS ARE THE GRASP EXPERIMENT'S; apps/tile_assembly_experiment passes its own:
+        phase_of(what) -> phase name     (the cycle's leg label -> 'mate', 'insert', ...)
+        zero, zero_label                 which recorded pose the relative poses are zeroed on
+        pose_names                       the discrete poses saved as T_<name>
+        summarize(attempt, success, outcome, arrays, poses, recorder) -> row, and its header"""
+
+    def __init__(self, robot, T_tool0_coupler, clock=time.monotonic, phase_of=None, zero='grasp',
+                 zero_label='grasped', pose_names=('pick', 'grasp', 'place_target', 'placed'),
+                 summarize=None, header=None):
         self.robot, self.Tc, self.clock = robot, np.asarray(T_tool0_coupler, dtype=float), clock
+        self.phase_of = phase_of or (lambda what: PHASES.get(what, what))
+        self.zero, self.zero_label, self.pose_names = zero, zero_label, tuple(pose_names)
+        self.summarize = summarize or (lambda attempt, success, outcome, a, poses, rec:
+                                       summary_row(attempt, success, outcome, a, poses,
+                                                   rec.place_offset))
+        self.header = list(header or _TRIALS_HEADER)
         self.start(0)
 
     def start(self, attempt):
         self.attempt, self.t0 = attempt, self.clock()
         self.rows, self.events, self.poses = [], [], {}
+        self.extras = {}          # extra per-trial arrays, saved into the .npz as given
         self.place_offset = None
         self._phase = None
 
@@ -111,7 +126,7 @@ class TrialRecorder:
 
     def on_servo_step(self, what, adm):
         """CouplerCycle.on_servo_step: one row per servo cycle of a compliant leg."""
-        phase = PHASES.get(what, what)
+        phase = self.phase_of(what)
         if phase != self._phase:
             self._phase = phase
             self.event(f'{phase} start')
@@ -137,34 +152,35 @@ class TrialRecorder:
                 'wrench': np.stack(w)}
 
     def save(self, out_dir, success, outcome, meta):
-        """attempt_NN.npz -- raw poses, the grasp-relative ones, wrench, yield, events -- and a
+        """attempt_NN.npz -- raw poses, the zero-relative ones, wrench, yield, events -- and a
         row of trials.csv. Returns the summary row."""
         a = self.arrays()
-        T_grasp = self.poses.get('grasp')
-        if T_grasp is not None:
-            a['pose_rel'] = relative_pose6(T_grasp, a['T_meas'])
-            a['ref_rel'] = relative_pose6(T_grasp, a['T_ref'])
-            a['cmd_rel'] = relative_pose6(T_grasp, a['T_cmd'])
+        T_zero = self.poses.get(self.zero)
+        if T_zero is not None:
+            a['pose_rel'] = relative_pose6(T_zero, a['T_meas'])
+            a['ref_rel'] = relative_pose6(T_zero, a['T_ref'])
+            a['cmd_rel'] = relative_pose6(T_zero, a['T_cmd'])
         else:
             a['pose_rel'] = a['ref_rel'] = a['cmd_rel'] = np.full((len(a['t']), 6), np.nan)
         # The law's yield in mm / deg (tool0 axes = coupler axes: coupler_mate has no rotation).
         a['delta_mm_deg'] = np.concatenate([a['delta'][:, :3] * 1000.0,
                                             np.degrees(a['delta'][:, 3:])], axis=1)
-        for name in ('pick', 'grasp', 'place_target', 'placed'):
+        for name in self.pose_names:
             T = self.poses.get(name)
             a[f'T_{name}'] = T if T is not None else np.full((4, 4), np.nan)
+        a.update({k: np.asarray(v) for k, v in self.extras.items()})
         info = dict(meta, attempt=self.attempt, success=bool(success), outcome=outcome,
-                    events=self.events)
+                    events=self.events, zero=self.zero_label)
         path = os.path.join(out_dir, f'attempt_{self.attempt:02d}.npz')
         np.savez_compressed(path, meta=json.dumps(info, default=float), **a)
-        row = summary_row(self.attempt, success, outcome, a, self.poses, self.place_offset)
+        row = self.summarize(self.attempt, success, outcome, a, self.poses, self)
         csv_path = os.path.join(out_dir, 'trials.csv')
         new = not os.path.isfile(csv_path)
         with open(csv_path, 'a', newline='') as fh:
             w = _csv.writer(fh)
             if new:
-                w.writerow(_TRIALS_HEADER)
-            w.writerow([row[k] for k in _TRIALS_HEADER])
+                w.writerow(self.header)
+            w.writerow([row.get(k, '') for k in self.header])
         log.info('Attempt %d saved: %s (%d samples).', self.attempt, path, len(a['t']))
         return row
 

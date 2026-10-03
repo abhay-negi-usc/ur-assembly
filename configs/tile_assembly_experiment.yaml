@@ -1,20 +1,61 @@
-# TILE ASSEMBLY -- locate a FIXED tile by its markers, pick a catalogued tile, and assemble it
-# onto the fixed one. See urlab/apps/tile_assembly.py.
+# TILE ASSEMBLY EXPERIMENT -- the operator loads the tile into the coupler, the robot assembles it
+# onto the fixture (insert + preload + fasten), the operator labels it and unbolts it, repeat.
+# See urlab/apps/tile_assembly_experiment.py.
 #
-#   python -m urlab.apps.tile_assembly --set marker_assembly=tile_on_plate
+#   python -m urlab.apps.tile_assembly_experiment
+#   python -m urlab.apps.tile_grasp_plot data/experiments/tile_assembly_experiment_<stamp>
 #
-# COPIED FROM configs/coupler_marker_assemble.yaml. Edit this one for the tile cycle; the two are
-# independent from here on.
+# START FROM A SAFE POSE: it is "home" -- where every trial ends and the next one starts from.
 #
-# THE SAME CYCLE AS coupler_pick_assemble, except where the object ends up: not a taught base_link
-# pose but one measured every run from the fixed object's markers, through the calibration in
-# configs/marker_assemblies.yaml (urlab.apps.marker_assembly_calibration writes it). The fixed
-# object can move between runs and the assembly follows it.
-#
-# Everything below `motion:` -- compliance, preloads, guard, the coupler boards -- is the same
-# tuning as coupler_pick_assemble.yaml and means the same thing.
+# Everything below `experiment:` is a copy of tile_assembly.yaml as of 2026-10-02 -- the same
+# assembly and tuning -- except the prompts: confirm_each_step and confirm_approach_steps are off,
+# so the only questions are the load ("place the tile", "let go"), the assembly label and the
+# reset ("unbolt the tile").
 
-# WHICH ASSEMBLY -- an entry in configs/marker_assemblies.yaml. No default.
+experiment:
+  trials: 25                      # assemblies to run (each one labelled by you at the end)
+  # WHERE YOU LOAD THE TILE: the arm goes here, opens the coupler and waits for you to seat the
+  # tile. null = pick_view_joints_deg (and the start pose if that is null too). Choose a pose
+  # with the coupler easy to reach -- the run asks you to let go before anything moves.
+  load_joints_deg: null
+  # Multiplies configs/robot.yaml's speed limits for every move that does not set its own (the
+  # fixture sweep, the trips to the load pose / home). Not the compliant legs, and not the moves
+  # with their own limits (joint_move_speed, approach_speed_scale).
+  speed_scale: 1.0
+  plot_at_end: true               # draw the mean +-1 sigma plots (labelled-successful trials)
+  # THE INSPECTION -- after the withdraw, before home: look at the assembled tile and hub from
+  # several angles and measure the tile against the hub (the assembly error). Both parts come
+  # from the same images, so the arm's kinematics and the hand-eye cancel out of it.
+  inspection:
+    enabled: true
+    # Where to look from. null = the pose the marker assembly was CALIBRATED from (both parts
+    # were in frame there), then fixed_view_joints_deg.
+    joints_deg: null
+    # Joint poses visited on the way there from the withdrawn pose, in order -- six angles each,
+    # in DEGREES (no _deg suffix: the loader only unit-converts flat lists).
+    via_joints: []
+    save_images: true             # annotated views -> <run>/inspection_images/trial_NN/
+    # The views, as a marker_views block (replaces it whole for the inspection). Offsets are in
+    # the CAMERA frame from the inspection pose; every view after the first is re-aimed at the
+    # markers seen so far, so a ring of translations becomes a ring of viewing angles.
+    views:
+      settle_s: 0.4
+      frames_per_view: 3
+      offsets:
+        - {xyz_mm: [0, 0, 0]}
+        - {xyz_mm: [100, 0, 0]}
+        - {xyz_mm: [-100, 0, 0]}
+        - {xyz_mm: [0, 100, 0]}
+        - {xyz_mm: [0, -100, 0]}
+        - {xyz_mm: [0, 0, -100]}
+      aim_at_markers: true
+      min_views: 2                # views per MARKER before it is allowed to vote
+      max_camera_distance_mm: 750.0
+      joint_pnp: true
+      multiview_refine: true
+      servo:
+        enabled: false
+
 marker_assembly: central_fixture_tile_1_v2
 
 robot_config: robot.yaml            # the machine (see configs/robot.yaml)
@@ -43,7 +84,6 @@ object_name: tile_1
 # there is no fixed view at all, both objects are located from the start pose.
 fixed_view_joints_deg: [-127, -95, -107, -164, -124, -2]
 pick_view_joints_deg: [11, -80, -98, -268, -91, -76]
-# pick_view_joints_deg: [1, -90, -113, -249, -86, -105] # single tile on table, no stack, didn't work well for unknown reason 
 
 # ---- The way in, with the object in hand ----
 # assembly_joints_deg  a joint pose to go to after the pick, BEFORE the approach -- e.g. to swing
@@ -61,7 +101,7 @@ pick_view_joints_deg: [11, -80, -98, -268, -91, -76]
 #                         the current and next step are printed and nothing moves until Enter
 #                         (q stops the run where it is, object still held). Off in a dry run and
 #                         under --no-prompts.
-confirm_approach_steps: true
+confirm_approach_steps: false
 # approach_speed_scale    the approach_path waypoint moves run at this fraction of the global speed
 #                         limits (configs/robot.yaml: 30 deg/s joints, 25 mm/s Cartesian), so
 #                         0.25 = a quarter speed. The assembly joints and transitions run at the
@@ -502,8 +542,8 @@ min_grasp_z_mm: null
 marker_views:
   settle_s: 0.4
   frames_per_view: 3
-  offsets:
-    - {xyz_mm: [0.0, 0.0, 0.0]}           # the start pose itself
+  offsets: 
+    - {xyz_mm: [0,0,0]}
   min_views: 1                    # views per MARKER before it is allowed to vote
   # The camera never plans a view further out than this. Raise it if the markers are spread far
   # enough apart that they cannot all be in one frame from here -- a view beyond the cap is
@@ -535,7 +575,7 @@ marker_views:
   # few views below min_views.
   servo:
     enabled: false
-    distance_mm: 400.0            # camera-to-marker standoff for the close look
+    distance_mm: 500.0            # camera-to-marker standoff for the close look
     max_iterations: 1             # re-detect and re-centre until two readings agree
     pos_tol_mm: 0.5               # ... to within this
     ang_tol_deg: 0.5
@@ -706,6 +746,6 @@ settle_s: 0.3
 # Independently of it, ONE unconditional gate stands before the first motion toward the object;
 # --yes does not silence that, because "run the steps without asking" is not the same request as
 # "drive at the part without telling me".
-confirm_each_step: true
+confirm_each_step: false
 
 debug: false

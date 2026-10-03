@@ -14,7 +14,7 @@
 
 experiment:
   trials: 25                      # SUCCESSFUL pick-and-places to collect
-  max_attempts: 25     Y           # failed pickups count as attempts; stop after this many
+  max_attempts: 25                # failed pickups count as attempts; stop after this many
   # PROMPTS. With these two off and confirm_each_step: false (at the bottom), the only questions
   # are the pickup check after every lift -- plus, only when needed, "Enter to continue" after a
   # pickup you mark failed and "Enter to retry" if the tile is not found. Do NOT use --no-prompts:

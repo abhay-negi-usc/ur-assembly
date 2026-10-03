@@ -1,5 +1,8 @@
 """TILE GRASP PLOT -- every trial, the mean and a +-1 sigma band, per compliant phase.
 
+Plots apps/tile_assembly_experiment runs too: the phases are taken from the data (insert, fasten,
+withdraw there), and the pose figure names the pose the run zeroed on (grasped / seated).
+
     python -m urlab.apps.tile_grasp_plot data/experiments/tile_grasp_experiment_<stamp>
     python -m urlab.apps.tile_grasp_plot <run_dir> --align end --include-failed
 
@@ -11,6 +14,8 @@ Reads the attempt_NN.npz files apps/tile_grasp_experiment writes and draws, into
     compliance.png  the admittance law's yield (adm.delta): how far it moved the arm off its
                     reference, directly
     bands.npz       the grid, mean, std and count behind every panel, for re-plotting elsewhere
+    assembly_error.png  (tile assembly runs with the inspection) the tile's inspected pose in the
+                    calibrated goal frame, per trial, with the mean and the +-1 sigma band
 
 Columns are the phases (mate, lift, place, withdraw), rows the six components. Each phase is put on
 a common time axis -- seconds since the phase STARTED (`--align start`, the default) or until it
@@ -30,10 +35,10 @@ from .. import log as urlog
 
 log = urlog.get('tile-grasp-plot')
 
-PHASE_ORDER = ('mate', 'lift', 'place', 'withdraw')
+PHASE_ORDER = ('mate', 'lift', 'place', 'insert', 'fasten', 'withdraw')
 FIGURES = {
     'pose': ('pose_rel', ['x [mm]', 'y [mm]', 'z [mm]', 'roll [deg]', 'pitch [deg]', 'yaw [deg]'],
-             'Coupler pose relative to the grasped pose (dashed: admittance reference)'),
+             'Coupler pose relative to the {zero} pose (dashed: admittance reference)'),
     'wrench': ('wrench', ['Fx [N]', 'Fy [N]', 'Fz [N]', 'Tx [Nm]', 'Ty [Nm]', 'Tz [Nm]'],
                'Wrench at the mating point (coupler axes)'),
     'compliance': ('delta_mm_deg', ['x [mm]', 'y [mm]', 'z [mm]', 'rx [deg]', 'ry [deg]',
@@ -97,6 +102,52 @@ def band(trials, phase, key, align='start', dt=0.01):
     return grid, stack, mean, std, count
 
 
+ERROR_LABELS = ['x [mm]', 'y [mm]', 'z [mm]', 'roll [deg]', 'pitch [deg]', 'yaw [deg]']
+
+
+def plot_assembly_errors(trials, path):
+    """assembly_error.png: each component of the inspected assembly error (assy_err6) against the
+    trial number, with the mean and +-1 sigma over the trials that were measured. Returns the
+    path, or None when no trial carries a measurement."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker
+
+    rows = [(tr['attempt'], np.asarray(tr['assy_err6'], dtype=float)) for tr in trials
+            if 'assy_err6' in tr]
+    if not rows:
+        return None
+    n = np.array([r[0] for r in rows])
+    E = np.array([r[1] for r in rows]).reshape(-1, 6)
+    fig, axes = plt.subplots(6, 1, figsize=(7.5, 12.5), sharex=True)
+    for c, ax in enumerate(axes):
+        ok = np.isfinite(E[:, c])
+        if np.any(ok):
+            mean = float(np.mean(E[ok, c]))
+            std = float(np.std(E[ok, c], ddof=1)) if np.sum(ok) > 1 else float('nan')
+            if np.isfinite(std):
+                ax.axhspan(mean - std, mean + std, color='C0', alpha=0.2, lw=0,
+                           label='mean $\\pm$ 1$\\sigma$')
+            ax.axhline(mean, color='C0', lw=1.4,
+                       label=f'mean {mean:+.2f}' + (f', $\\sigma$ {std:.2f}'
+                                                    if np.isfinite(std) else ''))
+            ax.plot(n[ok], E[ok, c], 'o', color='k', ms=4)
+            ax.legend(loc='best', fontsize=7)
+        ax.axhline(0.0, color='k', lw=0.6, alpha=0.5)
+        ax.set_ylabel(ERROR_LABELS[c])
+        ax.grid(alpha=0.3)
+    axes[-1].set_xlabel('trial')
+    axes[-1].xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
+    measured = int(np.sum(np.all(np.isfinite(E), axis=1)))
+    fig.suptitle(f'Assembly error -- tile in the calibrated goal frame (zero = as calibrated); '
+                 f'{measured} of {len(rows)} trial(s) measured', fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.98))
+    fig.savefig(path, dpi=130)
+    plt.close(fig)
+    return path
+
+
 def plot_run(run_dir, align='start', include_failed=False, dt=0.01):
     """Draw pose / wrench / compliance figures and bands.npz into <run_dir>/plots. Returns the
     paths written."""
@@ -107,7 +158,15 @@ def plot_run(run_dir, align='start', include_failed=False, dt=0.01):
     trials = load_trials(run_dir, include_failed)
     if not trials:
         raise ValueError(f'no {"" if include_failed else "successful "}trials in {run_dir}')
-    phases = [ph for ph in PHASE_ORDER if any(np.any(tr['phase'] == ph) for tr in trials)]
+    # Known phases in their cycle order, then anything else in the order the data first shows it.
+    seen = []
+    for tr in trials:
+        for ph in dict.fromkeys(tr['phase'].tolist()):
+            if ph not in seen:
+                seen.append(ph)
+    phases = [ph for ph in PHASE_ORDER if ph in seen] + [ph for ph in seen
+                                                          if ph not in PHASE_ORDER]
+    zero = trials[0]['meta'].get('zero', 'grasped')
     out_dir = os.path.join(run_dir, 'plots')
     os.makedirs(out_dir, exist_ok=True)
     written, saved = [], {}
@@ -143,7 +202,7 @@ def plot_run(run_dir, align='start', include_failed=False, dt=0.01):
                     ax.set_xlabel(xlabel)
                 ax.grid(alpha=0.3)
         axes[0, 0].legend(loc='best', fontsize=7)
-        fig.suptitle(f'{title} -- {len(trials)} trial(s)', fontsize=11)
+        fig.suptitle(f'{title.format(zero=zero)} -- {len(trials)} trial(s)', fontsize=11)
         fig.tight_layout(rect=(0, 0, 1, 0.98))
         path = os.path.join(out_dir, f'{fig_name}.png')
         fig.savefig(path, dpi=130)
@@ -152,6 +211,9 @@ def plot_run(run_dir, align='start', include_failed=False, dt=0.01):
     bands = os.path.join(out_dir, 'bands.npz')
     np.savez_compressed(bands, align=align, attempts=[tr['attempt'] for tr in trials], **saved)
     written.append(bands)
+    err = plot_assembly_errors(trials, os.path.join(out_dir, 'assembly_error.png'))
+    if err:
+        written.append(err)
     return written
 
 

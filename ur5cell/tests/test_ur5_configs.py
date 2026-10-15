@@ -38,7 +38,7 @@ def test_every_ur5_config_file_is_prefixed():
 def test_a_ur5_config_resolves_to_the_ur5(path):
     cfg = C.load(path)
     assert cfg.get('robot_config') == 'ur5-robot.yaml'
-    assert cfg.get_path('robot.ip') == '192.168.10.127'
+    assert cfg.get_path('robot.ip') == '192.168.10.125'
     assert cfg.get_path('robot.series') == 'cb3'
     frames = os.path.realpath(tool_frames.frames_path(cfg))
     assert os.path.dirname(frames) == os.path.realpath(ur5cell.CONFIG_DIR), frames

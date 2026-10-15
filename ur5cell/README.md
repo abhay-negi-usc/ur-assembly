@@ -5,7 +5,7 @@ here is a copy of `urlab`: fixes to the core reach both cells.
 
 | | |
 |---|---|
-| Arm | UR5 **CB3.1**, serial 2016353713 (built 2016-11-30), at **192.168.10.127** |
+| Arm | UR5 **CB3.1**, serial 2016353713 (built 2016-11-30), at **192.168.10.125** (PolyScope 3.15.8) |
 | Connection | default mode — `ur_rtde` uploads its own script, like the UR10e. The External Control URCap (port 50002) must **not** be playing. `robot.use_ext_ur_cap: true` switches modes. |
 | Gripper / F/T sensor / camera | not mounted yet — `gripper.type: none`, `camera.type: unset` |
 

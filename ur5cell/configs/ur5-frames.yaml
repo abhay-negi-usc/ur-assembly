@@ -1,0 +1,22 @@
+# THE UR5 FRAMES -- this cell's counterpart of configs/frames.yaml, same schema and units
+# (monitor units: xyz_mm + rpy_deg, rpy EXTRINSIC XYZ), read by urlab/tool_frames.py. Every UR5
+# config reaches it through ur5-robot.yaml's `frames_file:`.
+
+frames:
+  # tool0 -> camera: THE HAND-EYE. A PLACEHOLDER, NOT A CALIBRATION.
+  # Robot refuses to start without this entry -- on purpose, since a silently-assumed identity is
+  # how detections end up off by the length of a bracket. No camera is mounted yet, so it is
+  # written out as identity; replace it (urlab.apps.marker_calibration) before ANY app uses the
+  # camera.
+  camera:
+    xyz_mm:  [0.0, 0.0, 0.0]
+    rpy_deg: [0.0, 0.0, 0.0]
+
+  # TO ADD as the hardware is mounted:
+  #   ft_sensor  tool0 -> the F/T sensor's measurement frame (datasheet + adapter plate)
+  #   fingertip  tool0 -> where the new gripper's fingers meet. ALSO add fingertip_grasp to
+  #              ur5-robot.yaml: the Robot facade still reads that section, and check_drift warns
+  #              if the two disagree. Until then fingertip == grasp == tool0.
+
+# Recorded base_link poses (monitor units). None yet -- this cell's tasks have not been taught.
+targets: {}

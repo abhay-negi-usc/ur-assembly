@@ -51,7 +51,8 @@ urlab-insertion-tester = "urlab.apps.insertion_tester:main"
 
 [tool.setuptools]
 packages = ["urlab", "urlab.robot", "urlab.perception", "urlab.skills", "urlab.apps",
-            "urlab.behaviors"]
+            "urlab.behaviors", "ur5cell", "ur5cell.apps"]
 
 [tool.setuptools.package-data]
 urlab = ["../configs/*.yaml", "../configs/*.csv"]
+ur5cell = ["configs/*.yaml"]

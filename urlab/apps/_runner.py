@@ -32,8 +32,8 @@ def run_app(description, default_config, build_and_run, with_gripper=True, needs
     try:
         robot = Robot(cfg, with_gripper=with_gripper)
         if needs_camera:
-            from ..perception import RealSenseCamera
-            camera = robot.register_camera(RealSenseCamera(cfg, pose_fn=robot.camera))
+            from ..perception import make_camera            # camera.type, default realsense
+            camera = robot.register_camera(make_camera(cfg, pose_fn=robot.camera))
         ok = bool(build_and_run(cfg, robot, camera, args))
     except KeyboardInterrupt:
         log.warning('Interrupted.')

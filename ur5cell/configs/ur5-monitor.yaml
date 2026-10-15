@@ -1,0 +1,7 @@
+# Live frame monitor on the UR5 -- read-only unless --freedrive:
+#
+#     python -m urlab.apps.monitor --config ur5cell/configs/ur5-monitor.yaml [--wrench]
+#
+# Everything comes from the machine files; this config only names them.
+robot_config: ur5-robot.yaml
+camera_config: ur5-camera.yaml

@@ -125,8 +125,10 @@ def main():
     gripper = None
     if args.gripper:
         try:
-            from ..robot.gripper import Robotiq2F85
-            gripper = Robotiq2F85(cfg)
+            from ..robot.gripper import make_gripper
+            gripper = make_gripper(cfg)            # gripper.type; None for 'none'
+            if gripper is None:
+                print('  (gripper.type is none -- no gripper to show)')
         except Exception as exc:                   # noqa: BLE001 -- gripper is optional
             print(f'  (gripper unavailable: {exc})')
             gripper = None

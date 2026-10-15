@@ -7,6 +7,7 @@ and tested -- without opencv or pyrealsense2 installed. `import urlab.perception
 
 _LAZY = {
     'RealSenseCamera': '.camera',
+    'make_camera': '.camera',
     'Frame': '.camera',
     'ArucoDetector': '.aruco',
     'MarkerTracker': '.aruco',

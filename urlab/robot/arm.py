@@ -1,4 +1,4 @@
-"""URArm -- the UR10e over RTDE.
+"""URArm -- a UR arm over RTDE: the UR10e by default, a CB3-series arm via `robot.series: cb3`.
 
 Replaces, in one class, what took four ROS mechanisms:
 
@@ -79,6 +79,34 @@ class ArmError(RuntimeError):
     pass
 
 
+SERIES = ('e_series', 'cb3')
+
+
+def connection_args(r, control_iface):
+    """Extra positional args for (RTDEControlInterface, RTDEReceiveInterface) from the `robot:`
+    block -- BOTH EMPTY when no connection key is set, so the default call stays exactly
+    RTDEControlInterface(ip) / RTDEReceiveInterface(ip), as it always was.
+
+        rtde_frequency_hz  pin the RTDE rate. Unset, ur_rtde picks the controller's maximum: 500 Hz
+                           on e-Series, 125 Hz on CB3.
+        use_ext_ur_cap     the robot PULLS the control script from this PC when a pendant program
+                           reaches its External Control node, instead of this PC PUSHING it -- so
+                           an operator must press Play, and the PC listens on ur_cap_port.
+        ur_cap_port        that listening port (ur_rtde's default, 50002); only read with
+                           use_ext_ur_cap, since nothing listens on it otherwise.
+
+    `control_iface` is the RTDEControlInterface class, passed in so the flag constant is read off
+    the installed ur_rtde rather than typed here."""
+    freq = r.get('rtde_frequency_hz')
+    ext = bool(r.get('use_ext_ur_cap', False))
+    hz = float(freq) if freq is not None else -1.0         # -1 = ur_rtde's "controller maximum"
+    recv = (hz,) if freq is not None else ()
+    if not ext:
+        return recv, recv
+    flag = int(getattr(control_iface, 'FLAG_USE_EXT_UR_CAP', 0x02))
+    return (hz, flag, int(r.get('ur_cap_port', 50002))), recv
+
+
 _DEFAULT_LIMITS = (1.05, 1.2, 0.25, 0.0)     # rad/s, rad/s^2, m/s, rad/s (0 = unbounded)
 
 
@@ -110,6 +138,11 @@ def parse_limits(spd, base=_DEFAULT_LIMITS):
 class URArm:
     """Blocking arm control. Every move returns True/False; nothing spins an executor."""
 
+    # The CB3 software tare (zero_ft), in UR base axes -- zero, so a no-op, on e-Series. A CLASS
+    # default so wrench() also works on an arm built without __init__ (the tests do); zero_ft only
+    # ever REBINDS it per instance, never mutates this array.
+    _ft_offset = np.zeros(6)
+
     def __init__(self, cfg, frames=None):
         r = cfg.section('robot')
         self.ip = r.get('ip', '192.168.125.2')
@@ -130,8 +163,15 @@ class URArm:
         self.settle_s = float(cfg.get('settle_s', 0.5))
         self.debug = bool(cfg.get('debug', False))
 
+        # CONTROLLER GENERATION. 'e_series' (the default, the UR10e) has a wrist F/T sensor and the
+        # zero_ftsensor / force_mode_set_gain_scaling script functions. 'cb3' has neither:
+        # getActualTCPForce() is an ESTIMATE from joint currents, and UR's script manual marks
+        # zero_ftsensor() "only applicable in G5" -- so a CB3 arm is tared in software (zero_ft).
+        self.series = str(r.get('series', 'e_series')).lower()
+        if self.series not in SERIES:
+            raise ArmError(f'robot.series must be one of {sorted(SERIES)}, got {self.series!r}')
+
         self._force_mode = False
-        self._ft_offset = np.zeros(6)
         self._guards = []
 
         if self.dry_run:
@@ -148,12 +188,14 @@ class URArm:
                     'ur_rtde is not installed. `pip install ur_rtde` (Linux wheels exist for '
                     'cp38-cp312). Use --dry-run to plan without a robot.') from exc
 
-            log.info('Connecting to the UR at %s ...', self.ip)
-            # RTDEControlInterface uploads its OWN control script to the robot. The External
-            # Control URCap program must NOT be playing -- if it is, the two fight over the
-            # controller and this constructor hangs or the arm refuses to move.
-            self.rtde_c = RTDEControlInterface(self.ip)
-            self.rtde_r = RTDEReceiveInterface(self.ip)
+            log.info('Connecting to the UR at %s (%s) ...', self.ip, self.series)
+            # By default RTDEControlInterface uploads its OWN control script to the robot. The
+            # External Control URCap program must NOT be playing -- if it is, the two fight over
+            # the controller and this constructor hangs or the arm refuses to move. With
+            # robot.use_ext_ur_cap the direction flips (see connection_args).
+            ctrl_args, recv_args = connection_args(r, RTDEControlInterface)
+            self.rtde_c = RTDEControlInterface(self.ip, *ctrl_args)
+            self.rtde_r = RTDEReceiveInterface(self.ip, *recv_args)
             log.info('Connected.')
             self.set_payload(r.get('payload', {}) or {})
             self._report_tcp_offset()
@@ -530,7 +572,14 @@ class URArm:
         taring INSIDE a servo loop (where blocking would drop servo mode)."""
         if self.dry_run:
             return True
-        ok = self.rtde_c.zeroFtSensor()
+        if self.series == 'cb3':
+            # No zero_ftsensor() on CB3. Same semantics in software: remember the current reading
+            # and subtract it from every later one (wrench() does). Just a read, so it never
+            # blocks -- safe inside a servo loop either way.
+            self._ft_offset = np.asarray(self.rtde_r.getActualTCPForce(), dtype=float)
+            ok = True
+        else:
+            ok = self.rtde_c.zeroFtSensor()
         if not settle:
             return ok
         time.sleep(0.3)                     # let a fresh tared sample arrive before anyone reads
@@ -565,7 +614,9 @@ class URArm:
         against the ROS stack needs re-checking. Use wrench_in() to get it in a tool frame."""
         if self.dry_run:
             return np.zeros(6)
-        w = np.asarray(self.rtde_r.getActualTCPForce(), dtype=float)
+        # _ft_offset is the CB3 software tare (zero on e-Series), in the same UR base axes as the
+        # raw reading -- so it comes off BEFORE the bridge, like the controller's own tare.
+        w = np.asarray(self.rtde_r.getActualTCPForce(), dtype=float) - self._ft_offset
         R = BASE_LINK_FROM_UR_BASE[:3, :3]                   # UR base -> ROS base_link
         return np.concatenate([R @ w[:3], R @ w[3:]])
 
@@ -626,7 +677,12 @@ class URArm:
             self._force_mode = True
             return True
         self.rtde_c.forceModeSetDamping(damping)
-        self.rtde_c.forceModeSetGainScaling(gain_scaling)
+        if self.series == 'cb3':
+            # force_mode_set_gain_scaling is e-Series-only; a CB3 runs force mode at its fixed
+            # gain. Note CB3 force mode regulates against the joint-current ESTIMATE, not a sensor.
+            log.debug('CB3: force-mode gain scaling unavailable, %.2f ignored.', gain_scaling)
+        else:
+            self.rtde_c.forceModeSetGainScaling(gain_scaling)
         self.rtde_c.forceMode(matrix_to_rtde(T_base_task), list(selection),
                               list(wrench), int(mode), list(limits))
         self._force_mode = True

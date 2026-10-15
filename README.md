@@ -192,6 +192,8 @@ urlab/
                      compose their run trees from
   apps/              one thin script per demo
 configs/             one yaml per demo (+ assembly_trajectory.csv)
+ur5cell/             the UR5 (CB3.1) cell: its ur5-*.yaml configs, apps and tests on the
+                     same urlab core -- see ur5cell/README.md
 tests/               offline math/geometry tests (no robot/camera/torch)
 ```
 

@@ -171,6 +171,15 @@ def main():
     if args.dry_run:
         cfg.set_path('robot.dry_run', True)
 
+    # A ROBOTIQ TOOL BY DESIGN -- it jogs in raw counts and reads force off the 2F-85 datasheet --
+    # so it does not go through make_gripper. Refuse a config naming another gripper rather than
+    # speak Robotiq Modbus to whatever is on that port.
+    kind = str(cfg.get_path('gripper.type', 'robotiq_2f85')).lower()
+    if kind != 'robotiq_2f85':
+        print(f'gripper_control drives a Robotiq 2F-85; this config has gripper.type {kind!r}.',
+              file=sys.stderr)
+        return 1
+
     try:
         gripper = Robotiq2F85(cfg)             # opens the port + activates the gripper
     except GripperError as exc:

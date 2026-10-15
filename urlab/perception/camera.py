@@ -269,3 +269,25 @@ class RealSenseCamera:
     def __exit__(self, *exc):
         self.close()
         return False
+
+
+# ---------------------------------------------------------------------------- selection
+# `camera.type` -> (module, class), imported only when chosen -- the same pattern as
+# robot.gripper.GRIPPERS. A new camera is one class plus one line here.
+CAMERAS = {
+    'realsense': ('urlab.perception.camera', 'RealSenseCamera'),
+}
+
+
+def make_camera(cfg, pose_fn=None):
+    """Construct the camera `camera.type` names (default realsense).
+
+    THE CONTRACT the scan / servo / marker skills use: `capture()` returning a Frame stamped with
+    `pose_fn()` at the moment of capture, the intrinsics `K` and distortion `D`, and `close()`.
+    `dry_run` (from robot.dry_run) should return a synthetic frame rather than open hardware."""
+    kind = str(cfg.get_path('camera.type', 'realsense')).lower()
+    if kind not in CAMERAS:
+        raise ValueError(f'camera.type {kind!r} is not one of {sorted(CAMERAS)}')
+    import importlib
+    module, name = CAMERAS[kind]
+    return getattr(importlib.import_module(module), name)(cfg, pose_fn=pose_fn)

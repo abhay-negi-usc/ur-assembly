@@ -321,3 +321,36 @@ class Robotiq2F85:
     def __exit__(self, *exc):
         self.disconnect()
         return False
+
+
+# ---------------------------------------------------------------------------- selection
+# `gripper.type` -> (module, class). A new gripper is one class honouring the CONTRACT below plus
+# one line here. The module is imported only when its type is chosen, so a driver's dependencies
+# (another vendor's SDK, another bus library) cost nothing to a cell that does not use it.
+GRIPPERS = {
+    'robotiq_2f85': ('urlab.robot.gripper', 'Robotiq2F85'),
+}
+
+
+def make_gripper(cfg):
+    """Construct the gripper `gripper.type` names (default robotiq_2f85), or None for 'none'.
+
+    THE CONTRACT -- all the generic layers (Robot, behaviors, reset, monitor) use, so all a new
+    gripper has to provide:
+
+        open(label=''), close(label='')   block until settled; True on success. A stall on an
+                                          object is SUCCESS, not an error (see go_to)
+        position()                        current opening, in the gripper's NATIVE units
+        fault(), clear_fault()            fault code, 0 = none; clear re-arms a latched fault
+        disconnect()                      release the port/bus
+
+    Everything else on Robotiq2F85 -- counts, go_to(), grasp_result(), held_width_m() -- is
+    Robotiq-specific, and only the cable skills use it; they stay Robotiq-only."""
+    kind = str(cfg.get_path('gripper.type', 'robotiq_2f85')).lower()
+    if kind == 'none':
+        return None
+    if kind not in GRIPPERS:
+        raise GripperError(f'gripper.type {kind!r} is not one of {sorted(GRIPPERS) + ["none"]}')
+    import importlib
+    module, name = GRIPPERS[kind]
+    return getattr(importlib.import_module(module), name)(cfg)

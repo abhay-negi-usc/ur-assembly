@@ -1,0 +1,51 @@
+# THE UR5 MACHINE FILE -- this cell's counterpart of configs/robot.yaml, referenced EXPLICITLY by
+# every UR5 config:
+#
+#     robot_config: ur5-robot.yaml
+#
+# Same fill rules (urlab/config.py _apply_machine_layers): every top-level block a config does not
+# define is copied from here. That is also how `frames_file` reaches every UR5 config -- so none of
+# them can silently fall back to the UR10e's configs/frames.yaml (ur5cell/tests checks it).
+
+robot:
+  ip: 192.168.10.127
+  # UR5 CB3.1 -- serial 2016353713, built 2016-11-30. CB3 means: no wrist F/T sensor
+  # (getActualTCPForce is a joint-current ESTIMATE), no zero_ftsensor (tared in software), no
+  # force-mode gain scaling, 125 Hz RTDE. urlab/robot/arm.py switches on this key.
+  series: cb3
+  model: ur5                     # read by nothing yet; the collision model will key on it
+  rtde_frequency_hz: 125.0       # the CB3 maximum, stated rather than left to ur_rtde
+  # CONNECTION MODE. false = ur_rtde uploads its own script, exactly as on the UR10e; the External
+  # Control URCap must NOT be playing. true = a pendant program's External Control node pulls the
+  # script from this PC on ur_cap_port, and an operator has to press Play.
+  use_ext_ur_cap: false
+  ur_cap_port: 50002
+  dry_run: false
+  # PAYLOAD -- 0 until the F/T sensor + gripper are mounted and weighed. At 0, URArm skips
+  # setPayload (it warns), so the controller keeps the payload set in the pendant installation.
+  payload:
+    mass_kg: 0.0
+    cog_mm: [0.0, 0.0, 0.0]
+
+# No gripper is mounted yet. Robot builds none; apps that need one will say so.
+gripper:
+  type: none
+
+compute:
+  device: auto
+
+base_frame: base_link            # ROS base_link; transforms.py bridges to the UR `base` frame
+tip_frame: tool0                 # the pendant all-zeros TCP
+
+frames_file: ur5-frames.yaml     # resolved beside the config, i.e. ur5cell/configs/
+
+# BRING-UP SPEEDS -- deliberately slow; raise them once the cell is known.
+speed:
+  max_joint_velocity_deg_s: 20.0
+  max_joint_acceleration_deg_s2: 30.0
+  max_cartesian_translation_mm_s: 50.0
+  max_cartesian_rotation_deg_s: 20.0
+
+# NOT SET HERE ON PURPOSE: reset.home_joints_deg. Teach it at bring-up (read the joints off
+# urlab.apps.monitor) and add it -- until then urlab.skills.reset falls back to a UR10e pose
+# that means nothing on this arm, so do not run a reset.

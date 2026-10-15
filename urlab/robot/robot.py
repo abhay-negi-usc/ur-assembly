@@ -41,7 +41,7 @@ from .. import log as urlog
 from ..frames import FrameGraph
 from ..transforms import from_cfg, inverse, xyzrpy_to_matrix
 from .arm import URArm
-from .gripper import Robotiq2F85
+from .gripper import make_gripper
 
 log = urlog.get('robot')
 
@@ -75,7 +75,9 @@ class Robot:
         self._targets = {}                     # name -> recorded base_link pose
 
         if with_gripper:
-            self.register_gripper(Robotiq2F85(cfg))
+            gripper = make_gripper(cfg)            # gripper.type; None for 'none'
+            if gripper is not None:
+                self.register_gripper(gripper)
 
         # Hand-eye: tool0 -> camera. Static, so it never expires -- this single edge replaces
         # the old static_transform_publisher. The calibration is configs/frames.yaml's `camera`

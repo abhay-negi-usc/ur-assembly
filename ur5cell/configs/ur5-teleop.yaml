@@ -1,0 +1,47 @@
+# Keyboard teleop on the UR5 (press h in the app for the key map):
+#
+#     python -m urlab.apps.teleop --config ur5cell/configs/ur5-teleop.yaml [--dry-run]
+#
+# RIGID JOGGING ONLY until the F/T sensor is mounted. Compliance mode servoes on the wrench, and on
+# this CB3 that is a joint-current estimate -- the law would chase its noise. The compliance block
+# below is the UR10e's tuning, kept only so the app loads; retune it on the sensor.
+robot_config: ur5-robot.yaml
+camera_config: ur5-camera.yaml
+
+teleop:
+  control_frame: tool0            # no tool mounted yet, so jog the flange
+  start_frame: base               # base | tool -- the jog frame at startup (f toggles it)
+  step_mm: 5.0
+  step_deg: 2.0
+  max_lead_steps: 2
+  speed_fraction: 1.0             # of ur5-robot.yaml's (slow) speed caps
+  check_ik: true
+  tare_on_compliance: true
+
+compliance:
+  mass:          [5.0, 5.0, 5.0, 0.5, 0.5, 0.5]
+  stiffness:     [1000.0, 1000.0, 1000.0, 10.0, 10.0, 10.0]
+  damping_ratio: [1.6, 1.6, 1.6, 1.6, 1.6, 1.6]
+  selected_axes: [1, 1, 1, 1, 1, 1]
+  min_stiffness: [100.0, 100.0, 100.0, 1.0, 1.0, 1.0]
+  max_stiffness: [4000.0, 4000.0, 4000.0, 50.0, 50.0, 50.0]
+  stiffness_factor: 1.5
+  reference_rate_hz: 125.0        # == the CB3 RTDE rate, so this one is honest here
+  lookahead_time_s: 0.1
+  servo_gain: 300.0
+  max_delta_mm: 40.0
+  max_delta_deg: 15.0
+  warmup_s: 0.5
+
+# A COLLISION BACKSTOP, not a contact sensor: on the joint-current estimate, only large forces
+# are trustworthy. Re-set it once the F/T sensor is in.
+force_guard:
+  enabled: true
+  max_force_n: 60.0
+  max_torque_nm: 8.0
+  persistence_s: 0.05
+
+move_timeout_s: 30.0
+settle_s: 0.2
+confirm_each_step: false
+debug: false

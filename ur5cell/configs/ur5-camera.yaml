@@ -1,0 +1,13 @@
+# THE UR5 CAMERA FILE -- this cell's counterpart of configs/camera.yaml:
+#
+#     camera_config: ur5-camera.yaml
+#
+# The camera MOUNT (hand-eye, tool0 -> camera) is not here: it is the `camera` entry of
+# ur5-frames.yaml.
+
+camera:
+  # Which driver (urlab/perception/camera.py CAMERAS). The UR5's camera is not chosen yet, so
+  # this names no driver: an app that needs a camera refuses to start until it does.
+  type: unset
+
+camera_frame: camera

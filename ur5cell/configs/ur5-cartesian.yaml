@@ -1,0 +1,17 @@
+# Cartesian jog on the UR5 -- nudge tool0 along/about each axis and back, confirming every move:
+#
+#     python -m urlab.apps.cartesian --config ur5cell/configs/ur5-cartesian.yaml --dry-run
+#     python -m urlab.apps.cartesian --config ur5cell/configs/ur5-cartesian.yaml
+#
+# Speeds are ur5-robot.yaml's bring-up caps (no speed: block here, so they are inherited).
+robot_config: ur5-robot.yaml
+camera_config: ur5-camera.yaml
+
+linear_step_mm: 20.0
+angular_step_deg: 10.0
+motion_frames: [world, tool0]    # world = base axes, tool0 = tool axes
+
+move_timeout_s: 60.0
+settle_s: 0.5
+confirm_each_step: true
+debug: false

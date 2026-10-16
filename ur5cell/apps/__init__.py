@@ -1,2 +1,10 @@
-"""UR5 task apps. Start from urlab/apps/behavior_demo.py, and pass run_app an absolute default
-config: `run_app('...', ur5cell.config_path('ur5-<app>'), build_and_run)`."""
+"""UR5 apps.
+
+    python -m ur5cell.apps.monitor | cartesian | teleop      urlab's generic apps, on the UR5
+
+Each calls ur5cell.use_ur5_configs() before urlab reads a config: $URLAB_CONFIG_DIR -> ur5cell/configs
+(so a bare --config can only name a UR5 config) and --config defaulting to the ur5-<app> one.
+
+A NEW UR5 app: start from urlab/apps/behavior_demo.py, call ur5cell.use_ur5_configs() at the top
+of main(), and give run_app a ur5- config name.
+"""

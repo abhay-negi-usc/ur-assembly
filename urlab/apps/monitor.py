@@ -79,7 +79,8 @@ def _fmt(T):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--config', default='cable_pick_assemble',
-                    help='config name in configs/ or a path (for robot.ip + the frame offsets)')
+                    help='a path, or a bare name looked up in $URLAB_CONFIG_DIR (else urlab\'s '
+                         'own configs/) -- for robot.ip + the frame offsets')
     ap.add_argument('--robot-ip', default=None, help='override robot.ip')
     ap.add_argument('--rate', type=float, default=10.0, help='refresh rate in Hz (default 10)')
     ap.add_argument('--freedrive', action='store_true',

@@ -36,11 +36,13 @@ import os
 import numpy as np
 
 from . import log as urlog
-from .config import CONFIG_DIR, _pose_si, resolve
+from .config import CONFIG_DIR, _pose_si, config_dir, resolve, warn_if_foreign
 from .transforms import from_cfg, inverse, matrix_to_xyzrpy
 
 log = urlog.get('tool-frames')
 
+# THIS repo's frames.yaml (the UR10e cell's). The lookup default is config_dir()'s frames.yaml --
+# the same file unless $URLAB_CONFIG_DIR points another project's configs folder in.
 DEFAULT_PATH = os.path.join(CONFIG_DIR, 'frames.yaml')
 ROOT = 'tool0'
 POSE_KEYS = {'xyz', 'rpy', 'xyz_mm', 'rpy_deg'}
@@ -68,12 +70,21 @@ MARKER_ASSEMBLY_META_KEYS = {'captures', 'views', 'residual_mm', 'residual_deg',
 LEGACY_SECTIONS = {'fingertip': 'fingertip_grasp', 'grasp': 'grasp_tcp_offset'}
 
 
+def _default_catalogue(filename):
+    """`filename` in the configs folder (config.config_dir(): $URLAB_CONFIG_DIR when set, else this
+    repo's configs/), warning once when another project is silently getting THIS repo's copy."""
+    folder = config_dir()
+    if folder == CONFIG_DIR:
+        warn_if_foreign(f'The default {filename}')
+    return os.path.join(folder, filename)
+
+
 def frames_path(cfg=None):
     """The frames yaml for this run: a config's `frames_file` (resolved beside that config) when
-    set, else the shared configs/frames.yaml."""
+    set, else frames.yaml in the configs folder ($URLAB_CONFIG_DIR, else this repo's configs/)."""
     if cfg is not None and cfg.get('frames_file'):
         return resolve(cfg, cfg['frames_file'])
-    return DEFAULT_PATH
+    return _default_catalogue('frames.yaml')
 
 
 def _read(p):
@@ -258,10 +269,11 @@ def resolve_held_and_target(frames, targets, held_name, target_name=None, path=N
 
 def objects_path(cfg=None):
     """The objects catalogue for this run: a config's `objects_file` (resolved beside that
-    config) when set, else the shared configs/objects.yaml."""
+    config) when set, else objects.yaml in the configs folder ($URLAB_CONFIG_DIR, else this repo's
+    configs/)."""
     if cfg is not None and cfg.get('objects_file'):
         return resolve(cfg, cfg['objects_file'])
-    return os.path.join(CONFIG_DIR, OBJECTS_FILE)
+    return _default_catalogue(OBJECTS_FILE)
 
 
 def coupler_mate(cfg=None):
@@ -439,10 +451,11 @@ def load_objects(cfg=None, path=None):
 
 def marker_assemblies_path(cfg=None):
     """The marker-assembly catalogue: a config's `marker_assemblies_file` (resolved beside that
-    config) when set, else the shared configs/marker_assemblies.yaml."""
+    config) when set, else marker_assemblies.yaml in the configs folder ($URLAB_CONFIG_DIR, else
+    this repo's configs/)."""
     if cfg is not None and cfg.get('marker_assemblies_file'):
         return resolve(cfg, cfg['marker_assemblies_file'])
-    return os.path.join(CONFIG_DIR, MARKER_ASSEMBLIES_FILE)
+    return _default_catalogue(MARKER_ASSEMBLIES_FILE)
 
 
 def _sized_marker(raw_id, m_entry, where, meta_keys):

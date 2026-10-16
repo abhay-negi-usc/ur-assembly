@@ -25,3 +25,15 @@ pip install -r $req
 Write-Host ""
 Write-Host "Done. Activate later with:  .\.venv\Scripts\Activate.ps1"
 Write-Host "Verify with:                python tests\test_smoke.py"
+
+# WHERE BARE CONFIG NAMES RESOLVE -- printed because nothing else at install time would say it.
+Write-Host ""
+if ($env:URLAB_CONFIG_DIR) {
+    Write-Host "Config folder: URLAB_CONFIG_DIR is set -> bare config names resolve in $env:URLAB_CONFIG_DIR"
+} else {
+    Write-Host "Config folder: bare config names (--config <name>) resolve in $((Get-Location).Path)\configs -- this repo's (UR10e) configs."
+}
+Write-Host "  Importing urlab from ANOTHER project? Point it at that project's configs folder:"
+Write-Host '      $env:URLAB_CONFIG_DIR = "C:\path\to\other-project\configs"'
+Write-Host "  Unset, that project would get THIS repo's configs (robot.ip = the UR10e)."
+Write-Host "  Details: README.md -> 'Using urlab from another project'."

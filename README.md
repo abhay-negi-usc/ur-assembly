@@ -147,6 +147,70 @@ python -m urlab.apps.cable_pick_place --set scan.min_good_views=6 --set robot.ip
 `--set key=value` overrides **any** config key, nested with dots (values parse as YAML). This
 replaces the ROS `-p name:=value`, which only reached a handful of hand-declared parameters.
 
+## Using urlab from another project
+
+Another repo (e.g. a UR5 policy-inference project) can **import** urlab instead of copying it. Two
+steps, and the second is not optional.
+
+**1. Install urlab from a checkout of its own.** An editable install does not copy urlab — it
+points at a folder, and runs whatever is *checked out* there. So don't point it at the
+`ur-assembly` you work in day to day: switching branches there would silently change the other
+project's arm code. Give it a second folder of this same repo with `git worktree` (same `.git`, same
+history, its own checked-out commit), pinned to a commit you choose:
+
+```bash
+cd ~/abhay_ws/ur-assembly && git fetch
+git worktree add --detach ~/abhay_ws/urlab-core origin/clean_refactor   # a 2nd folder of THIS repo
+cd ~/abhay_ws/<other-project> && source .venv/bin/activate
+uv pip install -e "$HOME/abhay_ws/urlab-core[robot,perception]"         # urlab into THAT project's venv
+```
+
+`--detach` pins the folder to a commit rather than a branch: nothing moves until you move it, and it
+never collides with the branch you have checked out in `ur-assembly` (git allows a branch in only one
+worktree at a time). To take new urlab changes, move the pin — nothing needs reinstalling, the
+editable install sees the new code immediately:
+
+```bash
+git -C ~/abhay_ws/urlab-core fetch
+git -C ~/abhay_ws/urlab-core checkout --detach origin/clean_refactor   # or any branch / commit
+git -C ~/abhay_ws/urlab-core log -1 --oneline                         # what the other project runs
+```
+
+Commits made in `ur-assembly` are visible in `urlab-core` at once (they share one `.git`), so an
+unpushed branch can be tried there with `checkout --detach <branch>` before it is merged.
+
+**2. Point urlab at that project's configs folder — `URLAB_CONFIG_DIR`.**
+
+```bash
+export URLAB_CONFIG_DIR=$HOME/abhay_ws/<other-project>/configs
+python -c "from urlab.config import config_dir; print(config_dir())"   # check: should print that folder
+```
+
+urlab resolves bare config names (`--config cartesian`, or an app run with no `--config`) and the
+default catalogues (`frames.yaml`, `objects.yaml`, `marker_assemblies.yaml`) in **one folder**.
+Unset, that is **this repo's** `configs/` — the UR10e cell's, whose `robot.ip` is the UR10e. So
+without it, `python -m urlab.apps.cartesian` from the other project loads this repo's
+`cartesian.yaml` and connects to the **UR10e**, and a config that forgets `frames_file:` silently
+gets the UR10e's hand-eye.
+
+- **Set:** bare names and catalogue defaults resolve in that folder. A name that isn't there is an
+  error saying where it looked — never a fallback to this repo. A set-but-missing folder is an error.
+- **Unset, outside this repo:** the first config or catalogue taken from this repo's `configs/`
+  prints a warning pointing here.
+- **Configs passed as a path** are unaffected: their `robot_config:`, `camera_config:`,
+  `frames_file:` etc. always resolve beside the file itself.
+
+Rather than relying on every shell having it exported, set it **in the other project's package
+`__init__.py`**, before anything loads a config:
+
+```python
+import os, pathlib
+os.environ.setdefault('URLAB_CONFIG_DIR', str(pathlib.Path(__file__).resolve().parents[1] / 'configs'))
+```
+
+and run urlab's generic apps through thin wrappers in that project (`python -m <pkg>.apps.monitor`)
+rather than `python -m urlab.apps.monitor`, so the variable is always set first.
+
 ## Demos
 
 Each demo has its own page in [`docs/`](docs/) — purpose, sequence, key config knobs, run command,

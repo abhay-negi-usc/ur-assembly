@@ -34,3 +34,15 @@ pip install -r "$req"
 echo
 echo "Done. Activate later with:  source .venv/bin/activate   (or .venv/Scripts/activate on Git Bash)"
 echo "Verify with:                python tests/test_smoke.py"
+
+# WHERE BARE CONFIG NAMES RESOLVE -- printed because nothing else at install time would say it.
+echo
+if [ -n "${URLAB_CONFIG_DIR:-}" ]; then
+    echo "Config folder: URLAB_CONFIG_DIR is set -> bare config names resolve in $URLAB_CONFIG_DIR"
+else
+    echo "Config folder: bare config names (--config <name>) resolve in $(pwd)/configs -- this repo's (UR10e) configs."
+fi
+echo "  Importing urlab from ANOTHER project? Point it at that project's configs folder:"
+echo "      export URLAB_CONFIG_DIR=/path/to/other-project/configs"
+echo "  Unset, that project would get THIS repo's configs (robot.ip = the UR10e)."
+echo "  Details: README.md -> 'Using urlab from another project'."

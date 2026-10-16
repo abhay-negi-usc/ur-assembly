@@ -27,7 +27,57 @@ import os
 
 import yaml
 
+from . import log as urlog
+
+log = urlog.get('config')
+
+# THIS repo's configs/ -- the UR10e cell's. The default config folder, and what anything inside
+# this repo means by "configs/". Use config_dir() for lookups: a project that imports urlab points
+# it elsewhere with $URLAB_CONFIG_DIR.
 CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'configs')
+REPO_ROOT = os.path.dirname(CONFIG_DIR)
+CONFIG_DIR_ENV = 'URLAB_CONFIG_DIR'
+_HOWTO = 'see "Using urlab from another project" in the urlab README'
+
+
+def config_dir():
+    """The folder that BARE config names (`--config cartesian`, or an app run with no --config) and
+    the default catalogues (frames.yaml, objects.yaml, marker_assemblies.yaml) resolve in:
+    $URLAB_CONFIG_DIR when set, else this repo's configs/.
+
+    READ ON EVERY CALL, not frozen at import, so a project may set it after importing urlab.
+    A set-but-missing folder RAISES: falling back would hand that project this repo's configs,
+    whose robot.ip is the UR10e's. Configs loaded by PATH never consult this for what they
+    reference -- robot_config:, frames_file: etc. resolve beside the file itself."""
+    env = os.environ.get(CONFIG_DIR_ENV, '').strip()
+    if not env:
+        return CONFIG_DIR
+    path = os.path.abspath(os.path.expanduser(env))
+    if not os.path.isdir(path):
+        raise FileNotFoundError(f'{CONFIG_DIR_ENV}={env!r} is not a directory. Point it at the '
+                                f"configs folder of the project using urlab ({_HOWTO}).")
+    return path
+
+
+_warned_foreign = False
+
+
+def warn_if_foreign(what):
+    """Say ONCE per process when `what` came from this repo's configs/ while running from OUTSIDE
+    this repo with $URLAB_CONFIG_DIR unset -- the signature of another project that has not set it
+    up. pip cannot print anything at install time, so this is that project's first notice."""
+    global _warned_foreign
+    if _warned_foreign or os.environ.get(CONFIG_DIR_ENV, '').strip():
+        return
+    cwd = os.path.realpath(os.getcwd())
+    root = os.path.realpath(REPO_ROOT)
+    if cwd == root or cwd.startswith(root + os.sep):
+        return
+    _warned_foreign = True
+    log.warning('%s came from urlab\'s OWN configs folder (%s -- the UR10e cell\'s, so its '
+                'robot.ip is the UR10e) because %s is not set and you are running outside the '
+                'urlab repo (%s). If this is another project, set %s to that project\'s configs '
+                'folder: %s.', what, CONFIG_DIR, CONFIG_DIR_ENV, cwd, CONFIG_DIR_ENV, _HOWTO)
 
 
 class Config(dict):
@@ -57,11 +107,20 @@ def load(name_or_path, overrides=()):
     """Load configs/<name>.yaml (or an explicit path) and apply `key=value` overrides."""
     path = name_or_path
     if not os.path.isfile(path):
-        path = os.path.join(CONFIG_DIR, name_or_path)
+        # A BARE NAME: looked up in the configs folder -- $URLAB_CONFIG_DIR when set (a project
+        # importing urlab), else this repo's configs/.
+        folder = config_dir()
+        path = os.path.join(folder, name_or_path)
         if not path.endswith(('.yaml', '.yml')):
             path += '.yaml'
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f'No config at {name_or_path!r} or {path!r}')
+        if not os.path.isfile(path):
+            where = (f'${CONFIG_DIR_ENV} ({folder})' if folder != CONFIG_DIR else
+                     f"urlab's own configs folder ({folder}), since ${CONFIG_DIR_ENV} is not set")
+            raise FileNotFoundError(
+                f'No config {name_or_path!r}: not a file, and not in {where}. Pass a path, or set '
+                f"${CONFIG_DIR_ENV} to your project's configs folder ({_HOWTO}).")
+        if folder == CONFIG_DIR:
+            warn_if_foreign(f'Config {name_or_path!r}')
 
     with open(path, 'r') as f:
         cfg = Config(yaml.safe_load(f) or {})
@@ -237,7 +296,7 @@ def _apply_machine_layers(cfg):
         name = cfg.get(key)
         if not name:
             continue
-        path = os.path.join(cfg.get('_config_dir', CONFIG_DIR), str(name))
+        path = os.path.join(cfg.get('_config_dir') or config_dir(), str(name))
         if os.path.abspath(path) == os.path.abspath(cfg.get('_config_path', '')):
             continue
         if not os.path.isfile(path):
@@ -266,7 +325,7 @@ def _apply_common(cfg):
     itself, or a config in a directory without one, is a no-op."""
     if os.path.basename(cfg.get('_config_path', '')) == COMMON_FILE:
         return cfg
-    path = os.path.join(cfg.get('_config_dir', CONFIG_DIR), COMMON_FILE)
+    path = os.path.join(cfg.get('_config_dir') or config_dir(), COMMON_FILE)
     if not os.path.isfile(path):
         return cfg
     with open(path, 'r') as f:
@@ -416,14 +475,15 @@ def resolve(cfg, path):
     so `trajectory_csv: assembly_trajectory.csv` finds the file sitting next to the yaml."""
     if os.path.isabs(path):
         return path
-    return os.path.join(cfg.get('_config_dir', CONFIG_DIR), path)
+    return os.path.join(cfg.get('_config_dir') or config_dir(), path)
 
 
 def arg_parser(description, default_config):
     """The CLI every app shares: --config, --set, --robot-ip, --dry-run, --yes, --debug."""
     p = argparse.ArgumentParser(description=description)
     p.add_argument('--config', default=default_config,
-                   help=f'config name in configs/ or a path (default: {default_config})')
+                   help=f'a path, or a bare name looked up in ${CONFIG_DIR_ENV} (else '
+                        f"urlab's own configs/) (default: {default_config})")
     p.add_argument('--set', dest='overrides', action='append', default=[], metavar='KEY=VALUE',
                    help='override any config key, nested with dots (repeatable)')
     p.add_argument('--robot-ip', default=None, help='overrides robot.ip')

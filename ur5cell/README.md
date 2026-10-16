@@ -37,12 +37,19 @@ machine **and** `frames_file: ur5-frames.yaml` — so it can never pick up the U
 ## Bring-up
 
 ```bash
-python -m urlab.apps.monitor   --config ur5cell/configs/ur5-monitor.yaml            # read-only
-python -m urlab.apps.cartesian --config ur5cell/configs/ur5-cartesian.yaml --dry-run
-python -m urlab.apps.cartesian --config ur5cell/configs/ur5-cartesian.yaml          # slow, confirms each move
-python -m urlab.apps.teleop    --config ur5cell/configs/ur5-teleop.yaml             # rigid jogging only
+python -m ur5cell.apps.monitor  [--wrench] [--csv f.csv]    # read-only
+python -m ur5cell.apps.cartesian --dry-run
+python -m ur5cell.apps.cartesian                             # slow, confirms each move
+python -m ur5cell.apps.teleop                                # rigid jogging only
 python -m pytest ur5cell/tests -q
 ```
+
+**Run UR5 programs through `ur5cell.apps.*`, not `urlab.apps.*`.** Each wrapper sets
+`$URLAB_CONFIG_DIR` to `ur5cell/configs` for that run and defaults `--config` to its `ur5-` config,
+so it **cannot** load a UR10e config: `--config cartesian` (the UR10e's) is an error, not a run
+against `robot.ip` .112. `python -m urlab.apps.cartesian` with no `--config` would load the UR10e's.
+The same works by hand for anything else — `export URLAB_CONFIG_DIR=$PWD/ur5cell/configs` — but
+unset it before UR10e work (`tests/` ignores it either way).
 
 Before the first real move: PolyScope ≥ 3.3 (`ur_rtde`'s CB3 minimum), and a safety plane above the
 bench on the pendant (Installation → Safety → Planes) — `urlab`'s ground-collision model is still
@@ -55,6 +62,6 @@ reset, which would fall back to a UR10e pose), `robot.payload`, the gripper and 
 
 ## New task apps
 
-Go in `ur5cell/apps/`. Start from `urlab/apps/behavior_demo.py`, and give `run_app` an absolute
-default config — `run_app('...', ur5cell.config_path('ur5-<app>'), build_and_run)` — since a bare
-config name is looked up in the UR10e's `configs/`.
+Go in `ur5cell/apps/`. Start from `urlab/apps/behavior_demo.py`, call `ur5cell.use_ur5_configs()`
+at the top of `main()`, and give `run_app` a `ur5-` config name — bare names then resolve in
+`ur5cell/configs` only.

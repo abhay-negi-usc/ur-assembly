@@ -44,6 +44,11 @@ python -m ur5cell.apps.teleop                                # rigid jogging onl
 python -m pytest ur5cell/tests -q
 ```
 
+`cartesian` jogs in `ur_base` (the pendant's Base axes) and `tool0` (its Tool axes), and teleop's
+BASE mode in `ur_base` (`teleop.base_jog_frame`). urlab's `world` is ROS `base_link`, whose x/y
+are the pendant's negated. Its R/P/Y moves turn about the
+frame's x/y/z (UR's RX/RY/RZ), and each prompt says which axis.
+
 **Run UR5 programs through `ur5cell.apps.*`, not `urlab.apps.*`.** Each wrapper sets
 `$URLAB_CONFIG_DIR` to `ur5cell/configs` for that run and defaults `--config` to its `ur5-` config,
 so it **cannot** load a UR10e config: `--config cartesian` (the UR10e's) is an error, not a run

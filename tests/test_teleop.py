@@ -5,9 +5,12 @@ base axes looks right whenever the tool happens to be square to the base.
 """
 
 import numpy as np
+import pytest
 
-from urlab.apps.teleop import jog, split_keys
-from urlab.transforms import xyzrpy_to_matrix
+from urlab import config as C
+from urlab.apps.teleop import Teleop, jog, split_keys
+from urlab.robot import Robot
+from urlab.transforms import BASE_LINK_FROM_UR_BASE, inverse, xyzrpy_to_matrix
 
 
 def _yawed():
@@ -48,6 +51,49 @@ def test_tool_z_rotation_keeps_the_tool_axis():
     T = _yawed()
     out = jog(T, 5, np.radians(30.0), 'tool')
     assert np.allclose(out[:3, 2], T[:3, 2])
+
+
+def _in_ur_base(T):
+    """A base_link pose as the pendant's Base view shows it."""
+    return inverse(BASE_LINK_FROM_UR_BASE) @ T
+
+
+def test_base_jog_in_ur_base_follows_the_pendant_axes():
+    T, R_ub = _yawed(), BASE_LINK_FROM_UR_BASE[:3, :3]
+    out = jog(T, 0, 0.01, 'base', R_ub)
+    assert np.allclose(_in_ur_base(out)[:3, 3] - _in_ur_base(T)[:3, 3], [0.01, 0.0, 0.0])
+    assert np.allclose(out[:3, 3] - T[:3, 3], [-0.01, 0.0, 0.0])    # backwards in base_link
+    a = np.radians(10.0)
+    Rx = xyzrpy_to_matrix([0, 0, 0], [a, 0, 0])[:3, :3]
+    out = jog(T, 3, a, 'base', R_ub)
+    assert np.allclose(_in_ur_base(out)[:3, :3], Rx @ _in_ur_base(T)[:3, :3])
+    assert np.allclose(out[:3, 3], T[:3, 3])
+
+
+def test_tool_jog_ignores_the_base_jog_frame():
+    T, R_ub = _yawed(), BASE_LINK_FROM_UR_BASE[:3, :3]
+    for axis in range(6):
+        assert np.allclose(jog(T, axis, 0.01, 'tool', R_ub), jog(T, axis, 0.01, 'tool'))
+
+
+@pytest.fixture
+def robot():
+    r = Robot(C.load('teleop', ['robot.dry_run=true']), with_gripper=False)
+    yield r
+    r.close()
+
+
+def test_the_base_jog_frame_defaults_to_base_link(robot):
+    teleop = Teleop(C.load('teleop', ['robot.dry_run=true']), robot)
+    assert teleop.base_name == 'base_link'
+    assert np.allclose(teleop.R_base, np.eye(3))
+
+
+@pytest.mark.parametrize('name, error', [('tool0', ValueError), ('ur_bsae', KeyError)])
+def test_a_base_jog_frame_on_the_arm_or_unknown_is_refused(robot, name, error):
+    cfg = C.load('teleop', ['robot.dry_run=true', f'teleop.base_jog_frame={name}'])
+    with pytest.raises(error, match=name):
+        Teleop(cfg, robot)
 
 
 def test_split_keys_drops_escape_sequences():

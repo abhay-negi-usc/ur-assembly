@@ -19,8 +19,10 @@ chases the goal at the capped speed. The goal is never allowed to run more than 
 ahead of the reference, so holding a key (the terminal's auto-repeat) gives smooth motion at the
 speed cap, and letting go stops within that lead rather than working off a queue of presses.
 
-THE FRAME the jogs are expressed in toggles between BASE (base_link axes) and TOOL (the control
-frame's own current axes). Either way rotations turn about the CONTROL FRAME'S ORIGIN, which is
+THE FRAME the jogs are expressed in toggles between BASE (the axes of `base_jog_frame`, a
+world-fixed frame: base_link by default, ur_base for the pendant's Base axes -- base_link's x/y
+negated) and TOOL (the control frame's own current axes). Either way rotations turn about the
+CONTROL FRAME'S ORIGIN, which is
 `control_frame` from configs/frames.yaml -- coupler_mate by default, so a rotation pivots on the
 coupler tip rather than swinging it around the flange. The compliance law itself still runs in
 tool0 (see AdmittanceController).
@@ -78,24 +80,28 @@ HELP = """
 """
 
 
-def jog(T_ctrl, axis, amount, frame):
+def jog(T_ctrl, axis, amount, frame, R_base=None):
     """The control-frame pose moved by `amount` along/about one axis of `frame`.
 
-    frame='base': the axis is a base_link axis. frame='tool': it is the control frame's own axis,
-    read from T_ctrl. A ROTATION PIVOTS ON THE CONTROL FRAME'S ORIGIN either way -- the position
-    is left alone and only the attitude turns, pre-multiplied for base axes and post-multiplied
-    for tool axes. Pure, so the convention is testable without a robot."""
+    frame='base': the axis is an axis of the world-fixed BASE jog frame, whose attitude in
+    base_link is `R_base` (None = base_link itself). frame='tool': it is the control frame's own
+    axis, read from T_ctrl. A ROTATION PIVOTS ON THE CONTROL FRAME'S ORIGIN either way -- the
+    position is left alone and only the attitude turns, pre-multiplied for base axes and
+    post-multiplied for tool axes. Pure, so the convention is testable without a robot."""
     T = np.array(T_ctrl, dtype=float)
     R = T[:3, :3]
+    B = np.eye(3) if R_base is None else np.asarray(R_base, dtype=float)
     if axis < 3:
         d = np.zeros(3)
         d[axis] = amount
-        T[:3, 3] = T[:3, 3] + (d if frame == 'base' else R @ d)
+        T[:3, 3] = T[:3, 3] + (B @ d if frame == 'base' else R @ d)
     else:
         rv = np.zeros(3)
         rv[axis - 3] = amount
-        R_step = Rotation.from_rotvec(rv).as_matrix()
-        T[:3, :3] = R_step @ R if frame == 'base' else R @ R_step
+        if frame == 'base':
+            T[:3, :3] = Rotation.from_rotvec(B @ rv).as_matrix() @ R    # that axis, in base_link
+        else:
+            T[:3, :3] = R @ Rotation.from_rotvec(rv).as_matrix()
     return T
 
 
@@ -166,6 +172,13 @@ class Teleop:
         self.check_ik = bool(t.get('check_ik', True))
         self.tare_on_enter = bool(t.get('tare_on_compliance', True))
         self.frame = 'tool' if t.get('start_frame', 'base') == 'tool' else 'base'
+        # BASE-mode axes, resolved once: they are world-fixed, so a frame riding on the arm would
+        # freeze whatever attitude it had at startup. An unknown name raises in robot.pose().
+        self.base_name = t.get('base_jog_frame', robot.base_frame)
+        if robot.is_tool_attached(self.base_name):
+            raise ValueError(f'base_jog_frame {self.base_name!r} rides on the arm -- name a '
+                             f'world-fixed frame (ur_base, {robot.base_frame})')
+        self.R_base = robot.pose(self.base_name)[:3, :3]
 
         comp = cfg.section('compliance')
         self.adm = AdmittanceController(self.arm, comp)
@@ -186,6 +199,11 @@ class Teleop:
     # ---- helpers -------------------------------------------------------------------------------
     def tool0(self, T_ctrl):
         return T_ctrl @ self.T_ctrl_tool0
+
+    def _jog_frame(self):
+        if self.frame == 'tool':
+            return f'TOOL ({self.frame_name} axes)'
+        return f'BASE ({self.base_name} axes)'
 
     def _reachable(self, T_ctrl):
         """Quiet IK check -- arm.ik() logs every refusal, and a held key would repeat it at the
@@ -223,7 +241,7 @@ class Teleop:
         lin, ang = self.speed_frac * self.cap_lin, self.speed_frac * self.cap_ang
         log.info('%s control, jog frame %s, control frame %r | step %.2f mm / %.2f deg | '
                  'speed %.1f mm/s / %.1f deg/s',
-                 'COMPLIANCE' if self.compliant else 'POSITION', self.frame.upper(),
+                 'COMPLIANCE' if self.compliant else 'POSITION', self._jog_frame(),
                  self.frame_name, self.step_lin * 1e3, np.degrees(self.step_ang),
                  lin * 1e3, np.degrees(ang))
         log.info('  %s  %s', self.frame_name, fmt_pose(self._commanded_ctrl()))
@@ -271,7 +289,7 @@ class Teleop:
         if k in JOG_KEYS:
             axis, sign = JOG_KEYS[k]
             amount = sign * (self.step_lin if axis < 3 else self.step_ang)
-            goal = jog(self.T_goal, axis, amount, self.frame)
+            goal = jog(self.T_goal, axis, amount, self.frame, self.R_base)
             lin, ang = pose_error(self.T_ref, goal)
             if (lin > self.lead_steps * self.step_lin * 1.001
                     or ang > self.lead_steps * self.step_ang * 1.001):
@@ -289,8 +307,7 @@ class Teleop:
             self.T_goal = self.T_ref.copy()
         elif k == 'f':
             self.frame = 'tool' if self.frame == 'base' else 'base'
-            log.info('Jog frame: %s', 'TOOL (%s axes)' % self.frame_name
-                     if self.frame == 'tool' else 'BASE (base_link axes)')
+            log.info('Jog frame: %s', self._jog_frame())
         elif k == 'c':
             if self.compliant:
                 self.leave_compliance()

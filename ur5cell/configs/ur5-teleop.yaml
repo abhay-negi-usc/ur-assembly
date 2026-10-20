@@ -11,6 +11,7 @@ camera_config: ur5-camera.yaml
 teleop:
   control_frame: tool0            # no tool mounted yet, so jog the flange
   start_frame: base               # base | tool -- the jog frame at startup (f toggles it)
+  base_jog_frame: ur_base         # BASE = the pendant's Base axes (base_link's x/y are negated)
   step_mm: 5.0
   step_deg: 2.0
   max_lead_steps: 2

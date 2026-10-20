@@ -10,6 +10,7 @@ hand-eye from configs/frames.yaml and run without complaint.
 import glob
 import os
 
+import numpy as np
 import pytest
 
 import ur5cell
@@ -50,6 +51,27 @@ def test_a_ur5_robot_builds_without_hardware(path):
     robot = Robot(C.load(path, ['robot.dry_run=true']))
     assert robot.arm.series == 'cb3'
     assert robot.gripper is None                   # gripper.type: none until one is mounted
+    robot.close()
+
+
+def test_the_cartesian_jog_frames_are_ones_the_ur5_robot_knows():
+    """ur5-cartesian names ur_base (the pendant's Base axes), not world (base_link, x/y negated)."""
+    from urlab.apps import cartesian
+    cfg = C.load(ur5cell.config_path('ur5-cartesian'), ['robot.dry_run=true'])
+    assert 'world' not in cfg['motion_frames']
+    robot = Robot(cfg, with_gripper=False)
+    for frame in cfg['motion_frames']:
+        cartesian._frame_axes(robot, frame)       # raises on a frame the robot does not know
+    robot.close()
+
+
+def test_teleop_base_jogs_in_the_pendant_base_axes():
+    from urlab.apps.teleop import Teleop
+    cfg = C.load(ur5cell.config_path('ur5-teleop'), ['robot.dry_run=true'])
+    robot = Robot(cfg, with_gripper=False)
+    teleop = Teleop(cfg, robot)
+    assert teleop.base_name == 'ur_base'
+    assert np.allclose(teleop.R_base, np.diag([-1.0, -1.0, 1.0]))
     robot.close()
 
 

@@ -9,7 +9,9 @@ camera_config: ur5-camera.yaml
 
 linear_step_mm: 20.0
 angular_step_deg: 10.0
-motion_frames: [world, tool0]    # world = base axes, tool0 = tool axes
+# ur_base = the pendant's Base axes, tool0 = its Tool axes. (world = ROS base_link, whose x/y are
+# the pendant's NEGATED -- the reason this file names ur_base.)
+motion_frames: [ur_base, tool0]
 
 move_timeout_s: 60.0
 settle_s: 0.5

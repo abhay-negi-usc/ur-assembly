@@ -1,8 +1,17 @@
 """Cartesian jog demo -- exercise each tool0 axis about a home pose.
 
-Port of ur_cartesian_demo. For each motion frame (world, then tool0), nudge the tool +/- along
-each of x/y/z and +/- about roll/pitch/yaw, returning to home between every nudge. Every target
-is relative to the captured HOME pose, never to the previous one, so errors do not accumulate.
+Port of ur_cartesian_demo. For each motion frame (say ur_base, then tool0), nudge the tool +/-
+along each of x/y/z and +/- about roll/pitch/yaw, returning to home between every nudge. Every
+target is relative to the captured HOME pose, never to the previous one, so errors do not
+accumulate.
+
+MOTION FRAMES are any frame the Robot knows, plus 'world' (= base_link, for older configs):
+  ur_base   the pendant's Base axes. NOT the same as world: base_link x/y are ur_base's negated
+  tool0     the flange's own axes -- the pendant's Tool axes
+A name the Robot does not know stops the run before the first move.
+
+R/P/Y here are rotations about the motion frame's x/y/z (UR's RX/RY/RZ), NOT roll about the
+tool's approach axis -- so every label says which axis it turns about.
 """
 
 import numpy as np
@@ -18,10 +27,28 @@ _MOVES = [(0, +1), (0, -1), (1, +1), (1, -1), (2, +1), (2, -1),
           (3, +1), (3, -1), (4, +1), (4, -1), (5, +1), (5, -1)]
 
 
+def _frame_axes(robot, frame):
+    """`frame`'s rotation in base_link, read NOW (call it at home): its columns are the axes the
+    jog moves along/about. 'world' is base_link itself; any other name goes through the Robot's
+    frame graph, which raises on a name it does not know."""
+    if frame == 'world':
+        return np.eye(3)
+    return robot.pose(frame)[:3, :3]
+
+
+def _label(frame, axis, sign):
+    """'tool0 x+' for a translation; 'tool0 R+ (about tool0 x)' for a rotation."""
+    label = f'{frame} {"xyzRPY"[axis]}{"+" if sign > 0 else "-"}'
+    if axis >= 3:
+        label += f' (about {frame} {"xyz"[axis - 3]})'
+    return label
+
+
 def _offset(T_home, frame_R, axis, sign, lin, ang):
     """Home pose nudged along/about `axis`, with the axis taken from `frame_R` (the motion frame's
-    rotation in base). Translation and rotation both use the same frame, so 'world' gives base-axis
-    motion and 'tool0' gives tool-axis motion."""
+    rotation in base). Translation and rotation both use the same frame, so 'ur_base' gives
+    pendant-Base-axis motion and 'tool0' gives tool-axis motion. The pivot is always tool0's
+    origin -- the frame only picks the axes."""
     delta = np.zeros(6)
     delta[axis] = sign * (lin if axis < 3 else ang)
     T_delta = xyzrpy_to_matrix(delta[:3], delta[3:])          # in the motion frame
@@ -47,15 +74,16 @@ def build_and_run(cfg, robot, camera, args):
 
     T_home = robot.tool0()
     q_home = robot.arm.q()
+    # Every frame's axes, read at home and BEFORE the first move, so a misspelt frame stops the
+    # run here instead of jogging in the wrong axes.
+    axes = {frame: _frame_axes(robot, frame) for frame in frames}
     log.info('Home captured. Jogging %d frame(s): %s', len(frames), frames)
 
     for frame in frames:
-        # 'world' == base axes here (identity); 'tool0' uses the home orientation.
-        frame_R = np.eye(3) if frame == 'world' else T_home[:3, :3]
+        frame_R = axes[frame]
         log.info('--- motion frame: %s ---', frame)
         for axis, sign in _MOVES:
-            comp = 'xyzRPY'[axis]
-            label = f'{frame} {comp}{"+" if sign > 0 else "-"}'
+            label = _label(frame, axis, sign)
             if confirm and not confirm(label):
                 log.info('Aborted by the user.')
                 return True

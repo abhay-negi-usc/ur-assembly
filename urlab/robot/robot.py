@@ -5,10 +5,12 @@ Composition, not inheritance.  A demo holds a Robot and calls skills/behaviors a
 functions; sharing happens because the skills are shared, not because demos are relatives.
 
 FRAME SYSTEM (mirrors the sunrise-wrapper KukaRobot).  Frames are named transforms with a
-declared parent.  Two frames exist without registration:
+declared parent.  Three frames exist without registration:
 
     base_link   the world/robot-base frame (identity)
     tool0       the flange, read live from RTDE on every resolve
+    ur_base     the UR controller's `base` -- the pendant's Base view and RTDE's frame. It is
+                base_link turned 180 deg about Z, so its x/y are base_link's NEGATED
 
 Everything else is registered:
 
@@ -39,11 +41,15 @@ import numpy as np
 
 from .. import log as urlog
 from ..frames import FrameGraph
-from ..transforms import from_cfg, inverse, xyzrpy_to_matrix
+from ..transforms import BASE_LINK_FROM_UR_BASE, from_cfg, inverse, xyzrpy_to_matrix
 from .arm import URArm
 from .gripper import make_gripper
 
 log = urlog.get('robot')
+
+# NOT plain 'base': across urlab a bare 'base' means base_link (insert.py retract.frame, teleop's
+# BASE jog, coupler_pick_place) -- see the warning in robot/admittance.py.
+UR_BASE_FRAME = 'ur_base'
 
 
 def _as_matrix(pose):
@@ -73,6 +79,11 @@ class Robot:
         self.camera_frame = cfg.get('camera_frame', 'camera1_color_optical_frame')
         self._parents = {}                     # name -> parent, for tool-attachment checks
         self._targets = {}                     # name -> recorded base_link pose
+
+        # The pendant's base axes, world-fixed. urlab stays in base_link (every config value was
+        # measured there); this frame is for showing or jogging in the axes an operator reads off
+        # the pendant -- urlab.apps.cartesian `motion_frames: [ur_base]`.
+        self.register_frame(UR_BASE_FRAME, BASE_LINK_FROM_UR_BASE, parent=self.base_frame)
 
         if with_gripper:
             gripper = make_gripper(cfg)            # gripper.type; None for 'none'

@@ -1,22 +1,64 @@
 # THE UR5 FRAMES -- this cell's counterpart of configs/frames.yaml, same schema and units
 # (monitor units: xyz_mm + rpy_deg, rpy EXTRINSIC XYZ), read by urlab/tool_frames.py. Every UR5
 # config reaches it through ur5-robot.yaml's `frames_file:`.
+#
+# THE STACK, flange outward -- each entry is measured from its `parent`, and the loader flattens
+# the chain to tool0, so changing one link moves everything mounted beyond it:
+#
+#     tool0 -> spacer -> camera
+#                     -> gripper -> fingertip
+#                                -> grasp
+#
+# ur5-robot.yaml's fingertip_grasp / grasp_tcp_offset NAME the frames below ({frame: ...}), so
+# this file is the only place their numbers live.
 
 frames:
-  # tool0 -> camera:
-  # Robot refuses to start without this entry -- on purpose, since a silently-assumed identity is
-  # how detections end up off by the length of a bracket. No camera is mounted yet, so it is
-  # written out as identity; replace it (urlab.apps.marker_calibration) before ANY app uses the
-  # camera.
+  # tool0 -> spacer: the spacer's FLANGE-SIDE face. Identity while the spacer bolts straight onto
+  # the flange. When something goes between them (a toolchanger, the F/T sensor), set THIS to that
+  # part's offset -- the camera and gripper are mounted on the spacer, so they follow.
+  spacer:
+    xyz_mm:  [0.0, 0.0, 0.0]
+    rpy_deg: [0.0, 0.0, 0.0]
+
+  # spacer -> camera: THE HAND-EYE (tool_frames.hand_eye reads this entry and nothing else). The
+  # camera is mounted on the spacer, so it is measured from the spacer's flange-side face -- the
+  # same numbers as from tool0 while the spacer sits on the flange. Verify it with
+  # urlab.apps.marker_calibration before trusting detections.
   camera:
+    parent: spacer
     xyz_mm:  [0.0, -68.79, 12.65]
-    rpy_deg: [-15, 0.0, 0.0]
+    rpy_deg: [-15.0, 0.0, 0.0]
+
+  # spacer -> gripper: the Robotiq 2F-85's MOUNTING FACE, where it bolts on.
+  #   z       the spacer's length (flange-side face to gripper face)       PLACEHOLDER: 0
+  #   rpy z   the gripper's clocking: turn this frame about z until its +x is the line the jaws
+  #           close along. The fingertip axes below assume that; with it wrong, every grasp is
+  #           turned by the same angle.                                    PLACEHOLDER: 0
+  # Until z is measured, fingertip and grasp sit short of the real pads by the spacer's length.
+  gripper:
+    parent: spacer
+    xyz_mm:  [0.0, 0.0, 0.0]
+    rpy_deg: [0.0, 0.0, 0.0]
+
+  # gripper -> fingertip: where the pads meet, 142.3 mm out from the mounting face (measured
+  # 2026-10-20). AXES are the UR10e cell's fingertip convention (configs/frames.yaml), which the
+  # shared grasp/insert skills are written against: +y along the jaw axis (= gripper -x), +z back
+  # toward the flange.
+  fingertip:
+    parent: gripper
+    xyz_mm:  [0.0, 0.0, 142.3]
+    rpy_deg: [180.0, 0.0, -90.0]
+
+  # gripper -> grasp: the SAME point with the gripper's own axes (+z out along the approach) -- a
+  # pendant-style TCP at the grasp point, for teleop and for grasp poses written in tool axes.
+  grasp:
+    parent: gripper
+    xyz_mm:  [0.0, 0.0, 142.3]
+    rpy_deg: [0.0, 0.0, 0.0]
 
   # TO ADD as the hardware is mounted:
-  #   ft_sensor  tool0 -> the F/T sensor's measurement frame (datasheet + adapter plate)
-  #   fingertip  tool0 -> where the new gripper's fingers meet. ALSO add fingertip_grasp to
-  #              ur5-robot.yaml: the Robot facade still reads that section, and check_drift warns
-  #              if the two disagree. Until then fingertip == grasp == tool0.
+  #   ft_sensor  -> the F/T sensor's measurement frame (datasheet + adapter plate). If it goes
+  #                 between flange and spacer, its thickness is ALSO the spacer offset above.
 
 # Recorded base_link poses (monitor units). None yet -- this cell's tasks have not been taught.
 targets: {}

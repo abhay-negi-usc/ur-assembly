@@ -41,7 +41,7 @@ import numpy as np
 
 from .. import log as urlog
 from ..frames import FrameGraph
-from ..transforms import BASE_LINK_FROM_UR_BASE, from_cfg, inverse, xyzrpy_to_matrix
+from ..transforms import BASE_LINK_FROM_UR_BASE, inverse, xyzrpy_to_matrix
 from .arm import URArm
 from .gripper import make_gripper
 
@@ -98,9 +98,10 @@ class Robot:
         self.register_frame(self.camera_frame, self.T_tool0_cam)
 
         # Frames rigidly attached to tool0. `grasp` is the TCP a grasp pose is expressed
-        # for; `fingertip` is where the fingers actually meet.
-        self.T_tool0_grasp = from_cfg(cfg.section('grasp_tcp_offset'))
-        self.T_tool0_fingertip = from_cfg(cfg.section('fingertip_grasp'))
+        # for; `fingertip` is where the fingers actually meet. Each section is a pose or
+        # {frame: <name>} in the frames yaml (tool_frames.section_pose).
+        self.T_tool0_grasp = tool_frames.section_pose(cfg, 'grasp_tcp_offset')
+        self.T_tool0_fingertip = tool_frames.section_pose(cfg, 'fingertip_grasp')
         self.register_frame('grasp', self.T_tool0_grasp)
         self.register_frame('fingertip', self.T_tool0_fingertip)
 

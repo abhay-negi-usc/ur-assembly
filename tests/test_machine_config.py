@@ -139,3 +139,46 @@ def test_compute_device_resolution_rules():
             resolve_device('cuda')
     with pytest.raises(ValueError, match="'auto', 'cpu' or 'cuda'"):
         resolve_device('gpu')
+
+
+# ---------------------------------------------------------------- legacy sections that NAME a frame
+_CHAIN = """frames:
+  spacer:  {xyz_mm: [0, 0, 20], rpy_deg: [0, 0, 0]}
+  gripper: {parent: spacer, xyz_mm: [0, 0, 30], rpy_deg: [0, 0, 90]}
+  fingertip: {parent: gripper, xyz_mm: [0, 0, 100], rpy_deg: [180, 0, -90]}
+"""
+
+
+def _cfg_with_chain(tmp, **sections):
+    frames = os.path.join(tmp, 'frames.yaml')
+    with open(frames, 'w') as fh:
+        fh.write(_CHAIN)
+    return C.Config({'frames_file': frames, '_config_dir': tmp,
+                     '_config_path': os.path.join(tmp, 'x.yaml'), **sections})
+
+
+def test_a_section_naming_a_frame_gets_the_flattened_chain():
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = _cfg_with_chain(tmp, fingertip_grasp={'frame': 'fingertip'})
+        T = tool_frames.section_pose(cfg, 'fingertip_grasp')
+        assert np.allclose(T, tool_frames.load_frames(cfg)['fingertip'])
+        assert np.allclose(T[:3, 3], [0.0, 0.0, 0.150])            # 20 + 30 + 100 mm
+        assert tool_frames.check_drift(tool_frames.load_frames(cfg), cfg) == []
+
+
+def test_a_section_holding_a_pose_reads_as_before():
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = _cfg_with_chain(tmp, fingertip_grasp={'xyz_mm': [0, 0, 182], 'rpy_deg': [0, 0, 0]})
+        assert np.allclose(tool_frames.section_pose(cfg, 'fingertip_grasp')[:3, 3], [0, 0, 0.182])
+        assert np.allclose(tool_frames.section_pose(cfg, 'grasp_tcp_offset'), np.eye(4))  # absent
+        assert tool_frames.check_drift(tool_frames.load_frames(cfg), cfg) == ['fingertip']
+
+
+def test_a_section_naming_an_unknown_frame_or_also_a_pose_is_refused():
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = _cfg_with_chain(tmp, fingertip_grasp={'frame': 'fingertpi'})
+        with pytest.raises(ValueError, match='fingertpi'):
+            tool_frames.section_pose(cfg, 'fingertip_grasp')
+        cfg = _cfg_with_chain(tmp, fingertip_grasp={'frame': 'fingertip', 'xyz_mm': [0, 0, 1]})
+        with pytest.raises(ValueError, match='not both'):
+            tool_frames.section_pose(cfg, 'fingertip_grasp')

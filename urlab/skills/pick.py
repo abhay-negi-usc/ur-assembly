@@ -11,6 +11,7 @@ me" -- is gone. `closed_counts: 228` is now compared against a number the grippe
 import numpy as np
 
 from .. import log as urlog
+from .. import tool_frames
 from ..transforms import UR_JOINTS, fmt_delta, inverse, pose_error, translation_matrix
 
 log = urlog.get('pick')
@@ -663,8 +664,11 @@ class GraspController:
         # construction would make it a hard dependency of every app that touches a gripper.
         self._collision_cfg = dict(p.get('collision', {}) or {})
         self._collision_ground_z = cfg.get_path('ground_plane.z_m')
-        self._collision_ftip_z = float(
-            (cfg.get_path('fingertip_grasp.xyz') or [0.0, 0.0, 0.183])[2])
+        # Through section_pose, so a `{frame: fingertip}` section is honoured rather than
+        # silently read as "no xyz" and given the UR10e's 183 mm.
+        self._collision_ftip_z = (
+            float(tool_frames.section_pose(cfg, 'fingertip_grasp')[2, 3])
+            if cfg.section('fingertip_grasp') else 0.183)
         self._collision = False        # False = not built yet, None = unavailable
         self.settle_s = float(p.get('settle_s', 0.5))
         self._guard_cfg = p.get('force_guard', {}) or {}

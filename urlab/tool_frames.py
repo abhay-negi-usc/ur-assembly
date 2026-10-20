@@ -28,7 +28,8 @@ tool; a FrameGraph consumer can register these as static edges under tool0.)
 
 The Robot facade still reads the legacy per-config sections; check_drift() warns when a loaded
 config's sections disagree with frames.yaml, so the duplication cannot rot silently while the
-facade migrates.
+facade migrates. A section may instead NAME a frame here (`fingertip_grasp: {frame: fingertip}`,
+see section_pose), which removes the duplication for that config outright.
 """
 
 import os
@@ -545,17 +546,45 @@ def load_marker_assemblies(cfg=None, path=None):
     return out
 
 
+def section_pose(cfg, section, frames=None):
+    """T_tool0_<frame> from one of a config's LEGACY sections (fingertip_grasp, grasp_tcp_offset).
+
+    The section is EITHER a pose block, as it always was (absent = identity, the old default), OR
+    a reference into the frames yaml:
+
+        fingertip_grasp: {frame: fingertip}
+
+    which resolves to that entry with its parent chain flattened -- so a spacer or adapter edited
+    there reaches the Robot facade with no second copy to keep in step. `frames` is load_frames()'s
+    result when the caller already has it. Fails LOUDLY on an unknown frame, and on a block that
+    gives `frame:` AND pose keys -- there is no right answer to which one wins."""
+    blk = dict(cfg.section(section)) if cfg is not None else {}
+    if 'frame' not in blk:
+        return from_cfg(_pose_si(blk))
+    extra = sorted(set(blk) - {'frame'})
+    if extra:
+        raise ValueError(f'config section {section!r} names frame {blk["frame"]!r} AND sets '
+                         f'{extra} -- give the frame or a pose, not both')
+    name = str(blk['frame'])
+    frames = load_frames(cfg) if frames is None else frames
+    if name not in frames:
+        raise ValueError(f'config section {section!r} names frame {name!r}, which is not in '
+                         f'{frames_path(cfg)}. Known: {", ".join(sorted(frames))}')
+    return frames[name]
+
+
 def check_drift(frames, cfg, tol_mm=0.5, tol_deg=0.2):
     """Warn for every frame where frames.yaml and the loaded config's LEGACY section disagree.
 
     The Robot facade still reads the sections, so silent drift would mean the monitor displays
-    one pose while the robot commands another. Returns the list of drifted frame names."""
+    one pose while the robot commands another. A section that names a frame is compared through
+    that name, so it only drifts if it names a DIFFERENT frame. Returns the drifted frame names."""
     drifted = []
     for name, section in LEGACY_SECTIONS.items():
         blk = cfg.section(section) if cfg is not None else {}
         if name not in frames or not blk:
             continue
-        d = inverse(from_cfg(_pose_si(dict(blk)))) @ frames[name]
+        d = inverse(section_pose(cfg, section, frames)) @ frames[name]
         xyz, rpy = matrix_to_xyzrpy(d)
         d_mm = float(np.linalg.norm(xyz)) * 1000.0
         d_deg = float(np.degrees(np.max(np.abs(rpy))))

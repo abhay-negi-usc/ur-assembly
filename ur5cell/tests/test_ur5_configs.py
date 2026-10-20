@@ -50,8 +50,31 @@ def test_a_ur5_config_resolves_to_the_ur5(path):
 def test_a_ur5_robot_builds_without_hardware(path):
     robot = Robot(C.load(path, ['robot.dry_run=true']))
     assert robot.arm.series == 'cb3'
-    assert robot.gripper is None                   # gripper.type: none until one is mounted
+    assert type(robot.gripper).__name__ == 'Robotiq2F85'
     robot.close()
+
+
+@pytest.mark.parametrize('path', _demo_configs(), ids=os.path.basename)
+def test_the_robot_fingertip_and_grasp_are_the_catalogue_frames(path):
+    """ur5-robot.yaml NAMES them, so the spacer -> gripper chain is the only copy of the numbers."""
+    cfg = C.load(path, ['robot.dry_run=true'])
+    assert cfg.section('fingertip_grasp') == {'frame': 'fingertip'}
+    assert cfg.section('grasp_tcp_offset') == {'frame': 'grasp'}
+    frames = tool_frames.load_frames(cfg)
+    robot = Robot(cfg, with_gripper=False)
+    assert np.allclose(robot.T_tool0_fingertip, frames['fingertip'])
+    assert np.allclose(robot.T_tool0_grasp, frames['grasp'])
+    robot.close()
+
+
+def test_the_camera_and_gripper_ride_on_the_spacer():
+    """Mounted TO the spacer: anything later fitted between flange and spacer moves both."""
+    import yaml
+    with open(os.path.join(ur5cell.CONFIG_DIR, 'ur5-frames.yaml')) as fh:
+        raw = yaml.safe_load(fh)['frames']
+    assert raw['camera']['parent'] == 'spacer'
+    assert raw['gripper']['parent'] == 'spacer'
+    assert raw['fingertip']['parent'] == raw['grasp']['parent'] == 'gripper'
 
 
 def test_the_cartesian_jog_frames_are_ones_the_ur5_robot_knows():

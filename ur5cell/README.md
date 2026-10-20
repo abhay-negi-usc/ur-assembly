@@ -7,7 +7,9 @@ here is a copy of `urlab`: fixes to the core reach both cells.
 |---|---|
 | Arm | UR5 **CB3.1**, serial 2016353713 (built 2016-11-30), at **192.168.10.125** (PolyScope 3.15.8) |
 | Connection | default mode — `ur_rtde` uploads its own script, like the UR10e. The External Control URCap (port 50002) must **not** be playing. `robot.use_ext_ur_cap: true` switches modes. |
-| Gripper / F/T sensor / camera | not mounted yet — `gripper.type: none`, `camera.type: unset` |
+| Gripper | Robotiq **2F-85** on a spacer, Modbus RTU from this PC over its USB-RS485 adapter (`gripper.type: robotiq_2f85`) |
+| Camera | mounted on the spacer; driver not chosen (`camera.type: unset`) |
+| F/T sensor | not mounted yet |
 
 ## What CB3 changes
 
@@ -31,7 +33,7 @@ machine **and** `frames_file: ur5-frames.yaml` — so it can never pick up the U
 |---|---|
 | `ur5-robot.yaml` | the machine: IP, series, connection mode, payload, bring-up speeds, frames file |
 | `ur5-camera.yaml` | the camera driver (`camera.type`) — unset until the camera is chosen |
-| `ur5-frames.yaml` | tool0-attached frames and taught targets — hand-eye is an identity **placeholder** |
+| `ur5-frames.yaml` | the tool stack as a chain (tool0 → spacer → camera / gripper → fingertip, grasp) and taught targets. `ur5-robot.yaml`'s `fingertip_grasp` / `grasp_tcp_offset` **name** these frames, so the numbers live here only |
 | `ur5-monitor.yaml`, `ur5-cartesian.yaml`, `ur5-teleop.yaml` | bring-up configs for the generic `urlab` apps |
 
 ## Bring-up
@@ -61,9 +63,10 @@ bench on the pendant (Installation → Safety → Planes) — `urlab`'s ground-c
 UR10e-only.
 
 **Still to set as hardware arrives:** `reset.home_joints_deg` (teach it — until then do not run a
-reset, which would fall back to a UR10e pose), `robot.payload`, the gripper and camera drivers
-(`urlab/robot/gripper.py` `GRIPPERS`, `urlab/perception/camera.py` `CAMERAS`), the `ft_sensor` and
-`fingertip` frames, and the external F/T sensor path in `URArm.wrench()`.
+reset, which would fall back to a UR10e pose), `robot.payload` (spacer + gripper + camera,
+unweighed), the spacer length and gripper clocking (`gripper` in `ur5-frames.yaml`, placeholders
+at 0), the camera driver (`urlab/perception/camera.py` `CAMERAS`), the `ft_sensor` frame, and the
+external F/T sensor path in `URArm.wrench()`.
 
 ## New task apps
 

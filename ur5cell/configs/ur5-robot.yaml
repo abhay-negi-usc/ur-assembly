@@ -25,15 +25,31 @@ robot:
   use_ext_ur_cap: false
   ur_cap_port: 50002
   dry_run: false
-  # PAYLOAD -- 0 until the F/T sensor + gripper are mounted and weighed. At 0, URArm skips
-  # setPayload (it warns), so the controller keeps the payload set in the pendant installation.
+  # PAYLOAD -- STILL 0: the spacer + 2F-85 + camera are mounted (2026-10-20) but not weighed. At 0,
+  # URArm skips setPayload (it warns), so the controller keeps the payload set in the pendant
+  # installation -- set it there or here, or every wrench reads the tool's weight as contact.
   payload:
-    mass_kg: 0.0
+    mass_kg: 1.09
     cog_mm: [0.0, 0.0, 0.0]
 
-# No gripper is mounted yet. Robot builds none; apps that need one will say so.
+# Robotiq 2F-85, Modbus RTU straight from this PC through its USB-RS485 adapter (not via the CB3
+# controller). The by-id path survives replugs; /dev/ttyUSB0 numbering does not. A read of the
+# status register answered here on 2026-10-20 (activated, fingers open). Building it activates the
+# gripper if it is not already -- a full finger stroke.
 gripper:
-  type: none
+  type: robotiq_2f85
+  port: /dev/serial/by-id/usb-FTDI_FT232R_USB_UART_BG01X8DU-if00-port0
+  baud: 115200
+  open_counts: 0
+  closed_counts: 255
+  speed_counts: 255
+  force_counts: 150
+  timeout_s: 5.0
+
+# The Robot facade's two tool0 frames, NAMED in ur5-frames.yaml rather than copied, so the
+# spacer -> gripper chain reaches them with nothing to keep in step (tool_frames.section_pose).
+fingertip_grasp:  {frame: fingertip}
+grasp_tcp_offset: {frame: grasp}
 
 compute:
   device: auto

@@ -40,7 +40,7 @@ import numpy as np
 from .. import config as urconfig
 from .. import log as urlog
 from .. import tool_frames
-from ..transforms import BASE_LINK_FROM_UR_BASE, from_cfg, matrix_to_xyzrpy, rtde_to_matrix
+from ..transforms import BASE_LINK_FROM_UR_BASE, matrix_to_xyzrpy, rtde_to_matrix
 
 log = urlog.get('monitor')
 
@@ -61,10 +61,11 @@ def _frames(cfg):
     except FileNotFoundError as exc:
         log.warning('%s -- falling back to the per-config frame sections, without the camera '
                     '(its calibration lives only in the frames yaml).', exc)
+        # A section that NAMES a frame needs the missing file too: section_pose raises for it.
         frames = {
             'tool0': np.eye(4),
-            'fingertip': from_cfg(cfg.section('fingertip_grasp')),
-            'grasp': from_cfg(cfg.section('grasp_tcp_offset')),
+            'fingertip': tool_frames.section_pose(cfg, 'fingertip_grasp'),
+            'grasp': tool_frames.section_pose(cfg, 'grasp_tcp_offset'),
         }
     return frames
 

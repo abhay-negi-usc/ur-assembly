@@ -63,8 +63,7 @@ bench on the pendant (Installation → Safety → Planes) — `urlab`'s ground-c
 UR10e-only.
 
 **Still to set as hardware arrives:** `reset.home_joints_deg` (teach it — until then do not run a
-reset, which would fall back to a UR10e pose), `robot.payload` (spacer + gripper + camera,
-unweighed), the spacer length and gripper clocking (`gripper` in `ur5-frames.yaml`, placeholders
+reset, which would fall back to a UR10e pose), the spacer length and gripper clocking (`gripper` in `ur5-frames.yaml`, placeholders
 at 0), the camera driver (`urlab/perception/camera.py` `CAMERAS`), the `ft_sensor` frame, and the
 external F/T sensor path in `URArm.wrench()`.
 
